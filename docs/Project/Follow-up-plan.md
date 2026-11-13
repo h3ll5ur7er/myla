@@ -50,3 +50,38 @@ Why A1 comes first: the interpreter is the oracle, and it is wrong about generic
 Each lane turns its reproducers into failing tests first. Before a wave is pushed, its reproducers from both reviews' bundles are re-run on the integrated tip, on every runner they name.
 
 Left for later: [[MYLA-433]] (private fields and methods, a design), [[MYLA-434]] (async trait methods), [[MYLA-435]], [[MYLA-377]], [[MYLA-317]], [[MYLA-368]], and roadmap rows #10, #39 and #40. Part 2 of the review, the whole-codebase pass, is still to come.
+
+## Round 6 (2026-11-12)
+
+What [[Project/Review-2026-11-12]] left after round 5: six tasks reopened by narrow fixes, one bug raised to `high`, and thirteen packages, the tasks of the epic `tasks/Round 6/`. Round 5 itself is closed: its other 46 tasks are `done`.
+
+The lanes are grouped by the files they touch, so they run side by side; a reopened task belongs to the lane of its file.
+
+| Lane | Tasks | Files |
+| --- | --- | --- |
+| Lowering | [[MYLA-415]] (a closure that captures a recursive enum, copied to a task), [[MYLA-543]] R1 (a use-after-free across operands, an order, two leaks, recursive-enum keys), [[MYLA-542]] | `selfhost/lower.my`, `anf.my`, the drop and copy routines |
+| Checker | [[MYLA-417]] (D178's call error on an actor's getter), [[MYLA-394]] (D95 in a shared head), [[MYLA-538]] (an unchecked impl bound, `high`), [[MYLA-544]] R2 | `selfhost/checker.my` |
+| Lexer, parser, loader | [[MYLA-413]] (a program's own `std/` read lazily), [[MYLA-545]] R3 | `selfhost/lexer.my`, `parser.my`, `loader.my` |
+| Interpreter | [[MYLA-414]] (a lost binding, the memo's growth, packed bytes in a report), [[MYLA-546]] R4 | `selfhost/interp.my` |
+| Test harness | [[MYLA-547]] R5 | `selfhost/harness.my`, `lib/std/test.my` |
+| Runtime | [[MYLA-548]] R6 | `lib/std/rt.my`, `net.my`, `term.my`, the platform modules |
+| HTTP | [[MYLA-549]] R7 (a begun request holds a worker) | `lib/std/http.my` |
+| Library | [[MYLA-460]] (the XML stream reader), [[MYLA-550]] R8 (D184's second pass), [[MYLA-553]] R11 | `lib/std/xml.my`; `yaml.my`, `io.my`, `bigint.my`, `archive.my`; `args.my`, the containers |
+| Back ends | [[MYLA-551]] R9 (`--checked` traps out of line) | `selfhost/ir_x86.my`, `ir_a64.my` |
+| Check time and seeds | [[MYLA-552]] R10 | the loader's cache, `scripts/` |
+| Docs and board | [[MYLA-554]] R12 | `docs/`, `tasks/` |
+| Generated tests | [[MYLA-555]] R13 | `tests/burn/`, the workflow |
+
+Order: the lowering, checker, interpreter, HTTP and library lanes hold the high findings and come first. R13 only adds tests, so it can start at once, and its generators then guard the other lanes. R10 follows the parser lane, which shares the loader. Toolchain lanes end in one seed (D156).
+
+The owner took the five recommendations of the review's section 4 (2026-11-12): D191, the test child's report as a framed record ([[MYLA-547]]); D192, raw mode restored on SIGINT, SIGTERM and SIGHUP, and D195, a wait on a closed notifier returning at once ([[MYLA-548]]); D193, the receiver's place before the arguments, and D194, a recursive enum as a map key natively ([[MYLA-543]]).
+
+The waves, each one pull request with one seed:
+
+| Wave | Lanes |
+| --- | --- |
+| 1 | Lowering ([[MYLA-415]], [[MYLA-543]], [[MYLA-542]]), checker ([[MYLA-417]], [[MYLA-394]], [[MYLA-538]], [[MYLA-544]]), interpreter ([[MYLA-414]], [[MYLA-546]]), library A ([[MYLA-460]], [[MYLA-550]]), HTTP ([[MYLA-549]]), generated tests ([[MYLA-555]]) |
+| 2 | Lexer, parser and loader ([[MYLA-413]], [[MYLA-545]]), test harness ([[MYLA-547]]), runtime ([[MYLA-548]]), back ends ([[MYLA-551]]), library B ([[MYLA-553]]) |
+| 3 | Check time and seeds ([[MYLA-552]], after the loader), docs and board ([[MYLA-554]], last, as it touches every task) |
+
+Left for later, as before: [[MYLA-433]] (the one to start next, as a proposal), [[MYLA-434]], [[MYLA-435]], [[MYLA-504]], [[MYLA-530]], [[MYLA-531]], [[MYLA-377]], [[MYLA-317]], [[MYLA-368]]. Part 2 of the review of 9 November, the whole-codebase pass, is still to come.

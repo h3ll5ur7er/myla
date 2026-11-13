@@ -62,3 +62,38 @@ All in [[selfhost/interp.my]] (and one line of [[selfhost/repl.my]], which shows
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Reopened ([[Project/Review-2026-11-12]]): the interpreter loses the binding of type parameters in one more place, and two things are new with this package. The rest holds: 320 generated per-width programs agree with native code, trap positions included. A validated patch for the three is in the bundle (`repro-r5/interp/candidate-fixes.patch`, 38 lines).
+
+- [x] **The binding is lost when a map key's written `eq` or `hash` runs before a `var self` call** (high, in H1's scope): `m[K { v: 1 }].sort()` on a `[uint64]` value sorts signed, and `repro-r5/interp/settle_env3.my` is an internal error (`no method 'twice'`). Settling the key consumes the pending environment; bind again after it. Reproducer `repro-r5/interp/settle_env2.my`:
+
+  ```myla
+  #derive(Hash)
+  struct K { v: int }
+  impl Eq for K { fun eq(self, other: K) -> bool { return self.v == other.v } }
+
+  fun main() {
+      var m = [K { v: 1 }: [5u64, 18446744073709551615u64, 1u64]]
+      m[K { v: 1 }].sort()
+      for x in m[K { v: 1 }] { print(x) }    // native: 1, 5, 18446744073709551615
+  }
+  ```
+- [x] **`env_memo` grows per call path** (medium, new): a generic function with two recursive call sites, `fib<T: Add + Sub + Ord>(27, 1, 2)`, takes 163 MB against 13 MB for the same function on `int` (`repro-r5/interp/gfib.my`; `gfib31.my`: 1,067 MB). Intern the environments by content
+- [x] **A test function's `Err` of packed bytes prints `ERR: VBytes()`** under `myla test` (new, with the packed `[uint8]`); natively `[97, 98]` (`repro-r5/interp/vbytes_t2.my`)
+
+## What was built (round 6)
+
+In [[selfhost/interp.my]]; the bundle's patch, taken with two changes.
+
+- **B6**: a `var self` call binds its type parameters (`bind_next`) after `settle` has found its place, right before the call, instead of before `settle` and again after it as the patch did; any other method call binds where it did. So `m[k].sort()` on a `[uint64]` under a key with a written `eq`, `m[k].grow()` calling a trait method on a `T` field, and `m[k].bump(100i8)` (now `integer overflow`, as `--checked`) behave as with a plain key.
+- **C3**: an environment is interned by the function and its whole binding, names included (`#fi T=uint64 …` in `type_env_memo`; the patch keyed by the types alone, which could give one key to two bindings of a function whose call and impl paths list the parameters in different orders). `env_memo` stays keyed by the call site and the caller's environment, but there are only as many of those as bindings now.
+- **C18**: `shown` gives packed bytes their list form, as the patch did.
+
+## Evidence (round 6)
+
+- **Failing first** (the new tests against 6e699ca's `interp.my`, everything else this branch's): `test_compiler_parity…test_generic_var_self_past_a_written_key` failed (`internal error: no method 'twice' found for a value of type 'int32'`), `test_overflow…test_sums_in_generic_code_trap [var_self_past_a_written_key]` (`('200\n', 0) != ('', 1)`), `test_selfhost_interp…test_generic_recursion_binds_its_types_in_constant_memory` (`{'int': 18.0, 'generic': 81.0}` MB for `fib(25)`), `test_test_functions…test_an_err_of_a_test_function_shows_its_value` (`packed: ERR: VBytes()`). All four pass now. The bundle's reproducers: `settle_env.my` `false 200` → `true`, `integer overflow`; `settle_env2.my` sorted `18446744073709551615 1 5` → `1 5 18446744073709551615`; `settle_env3.my` an internal error → `6 6`; `vbytes_t2.my`'s eleven reports are native code's, line for line.
+- **Memory** (peak RSS, `myla run`): generic `fib(27)` 167 MB → 11 MB (the `int` version 11 MB), 2.16 s → 1.69 s; `gfib31.my` 11 MB (1,067 MB in the review).
+- **Suites**: see [[MYLA-546]]'s, run on both tasks together.
+

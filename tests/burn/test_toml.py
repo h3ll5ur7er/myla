@@ -33,7 +33,8 @@ file again). Every valid file must read as its JSON says and be written back,
 every invalid one be refused. MYLA_TOML_TEST naming a checkout runs that one
 instead.
 
-The big corpus runs on the self-hosted native build, a small one in the
+The big corpus runs on the self-hosted native build, plain and `--checked`
+(where an integer overflow is an error, D184, MYLA-550), a small one in the
 self-hosted interpreter. With MYLA_TEST_TARGET set (`scripts/test-target.py`)
 the drivers are built for that target and run under qemu-aarch64 or Node,
 so the toml-test suite runs on every runner (MYLA-424).
@@ -636,6 +637,10 @@ class TomlAgainstPython(unittest.TestCase):
             fh.write(DRIVER)
         sh_native = os.path.join(cls.tmp.name, "sh_native")
         cls.native = {"self-hosted native": _build(gen, path, sh_native)}
+        # the same driver built checked, where an integer overflow is an error (D184, MYLA-550)
+        checked = os.path.join(cls.tmp.name, "sh_checked")
+        native_build(check_file(path), checked, checked=True)
+        cls.native["self-hosted native, checked"] = run_argv(checked)[0] if TEST_TARGET else [checked]
         writer = os.path.join(cls.tmp.name, "writer.my")
         with open(writer, "w", encoding="utf-8") as fh:
             fh.write(WRITER_DRIVER)

@@ -2,7 +2,7 @@
 id: MYLA-412
 title: "A build-time cache of the implicit modules' signatures"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [loader, performance, check-time]
 ---
@@ -52,3 +52,7 @@ A hello world's check is 20.9 M instructions (5.8 ms): the checker 14.7 M (regis
 - **Size**: `selfhost/embedded_std.my` 2.50 → 3.08 MB (the parses 0.44 MB, the implicit modules' bodies 0.18 MB of it), `build/myla` 5.52 → 6.12 MB, a stage's assembly 21.1 → 23.6 MB; the seeds don't carry it (`seed_compile`'s stub). The embedding tool takes 0.48 s to write or check it (every module parsed twice, encoded, decoded, its bodies parsed twice); `scripts/bootstrap.sh` 15.3 → 16.8 s.
 - `scripts/bootstrap.sh`: byte-identical fixed point (23,605,895 bytes).
 - Suites: `scripts/test.sh fast` 848 tests OK (3 skipped); `scripts/test.sh` 1,520 tests, two timing tests failing under load (`test_selfhost_codegen…test_children_run_in_parallel`, cpu 1.05 s against wall 0.92 s; `test_aarch64…test_an_async_read_lets_the_other_tasks_run`), both passing alone afterwards; `test_std_cache` 3 tests OK (48 s). The worktree's `selfhost/embedded_std.my` was the bootstrap's (with the parses) for these runs; until the seed commit the committed one has no `embedded_cache`.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-552]]: what is left of [[MYLA-359]]'s 5 ms; and the generated code depends on which library bodies were read (13 of 109 programs differ from an eager load, with equal output), with no eager switch to compare against.

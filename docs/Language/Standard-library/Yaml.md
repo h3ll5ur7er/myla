@@ -64,7 +64,8 @@ A plain scalar (unquoted, not a block scalar) is resolved by YAML 1.2's core sch
 | --- | --- |
 | nothing, `~`, `null`, `Null`, `NULL` | `Null` |
 | `true`, `True`, `TRUE`, `false`, `False`, `FALSE` | `Bool` |
-| `[-+]?[0-9]+`, `0o[0-7]+`, `0x[0-9a-fA-F]+` | `Int`, or a `Float` outside int64, as in `std.json` |
+| `[-+]?[0-9]+` | `Int`, or a `Float` outside int64, as in `std.json` |
+| `0o[0-7]+`, `0x[0-9a-fA-F]+` | `Int`; outside int64, where a float would hold a mask only roughly, `parse` refuses it as a value with `OutOfRange` (D184, [[MYLA-550]]; a key is its text, and `resolve` alone gives the nearest `Float`) |
 | `[-+]?(\.[0-9]+\|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?`, `[-+]?.inf`, `.nan` (also `.Inf`, `.INF`, `.NaN`, `.NAN`) | `Float` |
 | anything else | `Str` |
 
@@ -98,6 +99,7 @@ YAML 1.1, which many parsers still follow (PyYAML among them), reads some of the
 | `BlockScalarHeader` | Something other than an indentation digit, a chomping indicator and a comment after `\|` or `>` |
 | `Unexpected` | A character that can't start or continue anything where it is |
 | `TooDeep` | Collections nested more than 100 deep |
+| `OutOfRange` | A value `0o…` or `0x…` outside int64's range, `mask: 0xFFFFFFFFFFFFFFFF` |
 
 ## Tests
 

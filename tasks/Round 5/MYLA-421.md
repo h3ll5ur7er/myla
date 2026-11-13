@@ -2,7 +2,7 @@
 id: MYLA-421
 title: "P7 Regex: the lazy DFA and a differential job"
 type: bug
-status: review
+status: done
 priority: high
 labels: [std, regex, round-5]
 ---
@@ -22,3 +22,7 @@ Work package P7 of [[Project/Review-2026-11-09]] (wave A2). Files: `lib/std/rege
 - **Go's own bug**, worked around in the job: go1.24.7's parser merges a case-sensitive literal `A` with a case-folded `a` that starts another alternative, `A|(?i:a)c` finds 2-3 in `acA` where Python and std.regex find 0-2. The Go corpus has no case-sensitive `A` in patterns (texts still have it); the Python corpus has.
 - **Measured** natively before and after (a scratch program, 10 MB of words and addresses, the median of five runs, twice each, on the shared container): literal `needle` 14.2/13.5 ms before, 14.5/14.8 ms after; `\w+@\w+\.com` `find_all` 43.4/43.5 and 42.9/43.7 ms; `\w+@\w+\.org` `is_match` 43.5/41.3 and 40.0/42.4 ms; 100 alternatives 40.5/45.4 and 43.5/42.5 ms; `\bthe\b` `find_all` 60.0/64.6 and 63.9/64.5 ms; `(?m)^\w+` 70.5/68.0 and 67.0/67.8 ms; `\b\w+\b` (2 million matches) 348/332 and 332/324 ms; `(?:\w+\b ?)+\n`, an assertion inside a repetition, 118/119 and 119/119 ms; `(a*)*b` on a million `a`s 4.00/3.99 and 4.23/4.05 ms. No change beyond the noise.
 - **Suites:** `scripts/bootstrap.sh` reaches the byte-identical fixed point (`selfhost/embedded_std.my` restored after it). `scripts/test.sh fast`: 829 tests, the one failure `test_embedded_std` (expected until the seed commit). `tests.burn.test_std_modules`, `test_doc_blocks`, `test_regex`, `test_lsp`: 176 tests OK. `scripts/test.sh`: 1,482 tests, 336 skipped, the one failure `test_embedded_std`. `test_regex` takes about 28 s, so it joins `test.sh fast`'s slow modules (`scripts/test.sh`).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-555]]: the Go half of `test_regex` skips silently in CI, as the workflow installs no Go.

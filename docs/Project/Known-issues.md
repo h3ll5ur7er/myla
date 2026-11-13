@@ -1,18 +1,20 @@
 # Known issues
 
-Open bugs and gaps by component, each with a task that has its steps to reproduce; this page is the overview. A line goes when its task is `done`. The entries come from the reviews of 31 October ([[Project/Review-2026-10]]), 6 November ([[Project/Review-2026-11]]) and 9 and 10 November 2026 ([[Project/Review-2026-11-09]], [[Project/Review-2026-11-10]]), and from round 5's lanes. The findings round 5's wave A2 fixes are in its packages ([[Project/Follow-up-plan]]), not here.
+Open bugs and gaps by component, each with a task that has its steps to reproduce; this page is the overview. A line goes when its task is `done`. The entries come from the reviews of 31 October ([[Project/Review-2026-10]]), 6 November ([[Project/Review-2026-11]]) and 9, 10 and 12 November 2026 ([[Project/Review-2026-11-09]], [[Project/Review-2026-11-10]], [[Project/Review-2026-11-12]]), and from round 5's lanes. Round 6's packages ([[Project/Follow-up-plan]]) hold the smaller findings of the last review; the lines here are their main ones.
 
 [TOC]
 
 ## Self-hosted compiler
 
-- `#test` coverage of `selfhost/` is 67 percent (1,402 of 2,107 value-returning functions, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
+- `#test` coverage of `selfhost/` is 63 percent (1,447 of 2,295 value-returning functions, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
 - The interpreter is about 500 times slower than native code (`fib(30)`: 3.7 s against 7 ms on `d5d80bc`, [[MYLA-317]]).
-- **Interpreter:** a written `eq` or `hash` of a generic type, called for a list's `==` or a map key, binds no type parameter, so an operation typed by `T` falls back to erasure ([[MYLA-436]]); a `uint64` map key of 2^63 or more is written signed in `map key … not found` ([[MYLA-440]]).
-- Maps never shrink: iteration over an emptied map costs its old size, 82 s for 20,000 keys taken oldest-first from a once-10^6 map ([[MYLA-429]]).
-- `--checked` 64-bit arithmetic is three to five times slower in hot loops, as a checked `*` divides to detect overflow ([[MYLA-430]]).
-- **Checker:** an impl's bound that names a generic trait (`I: Iterator<int>`) isn't checked where the impl is used ([[MYLA-538]]).
-- An import of std.io checks `io`, `fs` and `bytes` whole, as they import each other: 61.8 M instructions of a hello world's 101 M, as [[Project/Review-2026-11-10]] measured ([[MYLA-432]]).
+- **Interpreter:** the binding of type parameters is lost when a map key's written `eq` or `hash` runs before a `var self` call, so `m[k].sort()` on a `[uint64]` sorts signed; the environment memo grows per call path (a generic `fib(27)`: 163 MB against 13 MB) ([[MYLA-414]]). Small differences from native code in texts and map order ([[MYLA-546]]).
+- **Native code, memory safety:** a value read from a container is freed by a later operand (`h.xs[0] + h.repl()` is `old1!` interpreted and `!` natively; 25 of 90 forms), with two leaks and an evaluation order that differs ([[MYLA-543]]); a closure in a variable that captures a recursive enum segfaults when copied to a task, an actor or a channel ([[MYLA-415]]).
+- `self.f(self.g(k))` in a `var self` method copies the receiver for `f` ([[MYLA-542]]).
+- `--checked` int64 arithmetic is five times slower by time in hot loops on x86-64 (0.62 s against 0.12 s), as each check jumps over an inline call ([[MYLA-551]]).
+- **Checker:** an impl's bound that names a generic trait (`I: Iterator<str>`) isn't checked where the impl is used, so an `Iterator<int>` gets in and native code reads an int as a string ([[MYLA-538]]). D178's call error fires on a generic actor's getter ([[MYLA-417]]); D95 no longer reports an `await` and a mutator in one head ([[MYLA-394]]); `x.format(spec)` on a builtin behind `T: Format` is an internal error ([[MYLA-544]]).
+- **Loading:** a program's own top-level `std/` directory is read lazily, so `myla check` says `ok` over its errors ([[MYLA-413]]); a declaration swallowed after a missing `}` loads silently when it doesn't start its line, and a library root written with `..` fails ([[MYLA-545]]). A hello world checks in 6.1 ms against the 5 ms aimed at, and the generated code depends on which library bodies were read ([[MYLA-552]]).
+- **`myla test`:** a multi-line panic is cut natively, an empty `Err` passes, and exit statuses outside 0 to 255 differ between runners ([[MYLA-547]]).
 
 ## Backends and platforms
 
@@ -23,7 +25,8 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 - A non-reentrant actor method kind is still open ([[MYLA-274]]).
 - Natively, on 16 workers, armed timers make every loop top take `__timer_lock`: CPU-bound tasks about 15 % slower ([[MYLA-296]]).
 - A trait method can't be async, so there is no async `Read` or `Write` ([[MYLA-434]]).
-- The poller takes at most four events a wait ([[MYLA-531]]); a keep-alive request through std.http's lot costs about a tenth more than a worker waiting on its connection, on 4 workers ([[MYLA-530]]).
+- The poller takes at most four events a wait (under 2 percent to gain, [[MYLA-531]]); a keep-alive request through std.http's lot costs 4 to 6 percent more than a worker waiting on its connection ([[MYLA-530]]).
+- **Runtime:** `net.line_reader` has no line limit; the poller's creation isn't checked (a hang with no descriptor left on one worker); a failure doesn't end the program while a task blocks in a key read, and a signal leaves the terminal raw ([[MYLA-548]]).
 
 ## Tooling in Myla
 
@@ -40,9 +43,13 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 ## Standard library
 
 - A failing `opt.expect("…")` points into `lib/std/option.my`, not at its caller ([[MYLA-435]]).
-- `Url` isn't `Eq` or `Hash` ([[MYLA-488]]).
+- **std.http:** one byte per socket stops a default server, as a request that has begun holds a worker for `read_ms` ([[MYLA-549]]).
+- **std.xml:** the stream reader holds back a complete event until more bytes arrive ([[MYLA-460]]).
+- **D184 leftovers:** `std.yaml` traps on a hex scalar past `int64`, a buffered seek and `bigint.bit_len` overflow, `archive.zip_read` has no output limit ([[MYLA-550]]).
+- `std.args` accepts specs that can't work; BitSet, Lru and Grid have no `iter()` ([[MYLA-553]]).
 
 ## Documentation and repository
 
 - The recorded Python answers cover only the examples and the error corpus now; 20 new corpus files are held to the CLI's own output ([[MYLA-288]]).
+- The tests pin one program per fixed bug; the reviews' generators, which found this round's older bugs, aren't in the suite ([[MYLA-555]]). Stale sentences and 25 `done` tasks with open boxes ([[MYLA-554]]).
 - The tutorial and the "Why Myla" page aren't written yet (D114, [[MYLA-299]]).

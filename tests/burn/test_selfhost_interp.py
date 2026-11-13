@@ -425,6 +425,54 @@ class SelfHostedInterpParity(unittest.TestCase):
                 self.assertTrue(a.read() == b.read())
             self.assertLess(copy_ms, 10 * read_ms + 500, f"read {read_ms} ms, copy {copy_ms} ms")
 
+    def test_generic_recursion_binds_its_types_in_constant_memory(self) -> None:
+        """A generic function recursing through two call sites takes the
+        memory the same function on `int` takes: its type parameters' binding
+        is one environment, not one per call path (MYLA-414, the 2026-11-12
+        review's C3: `fib(27)` 163 MB against 13 MB)."""
+        if self._binary is None:
+            self.skipTest("measuring needs the natively built interpreter")
+        peaks = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, sig in (("int", "fib(n: int, one: int, two: int) -> int"),
+                              ("generic", "fib<T: Add + Sub + Ord>(n: T, one: T, two: T) -> T")):
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(GENERIC_FIB.replace("SIGNATURE", sig))
+                out, peaks[name] = _peak_mb([selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, path])
+                self.assertEqual(out, "75025\n")
+        self.assertLess(peaks["generic"], peaks["int"] + 8, peaks)
+
+
+def _peak_mb(cmd: list[str]) -> tuple[str, float]:
+    """(stdout, peak resident memory in MB) of running `cmd`, which must
+    succeed."""
+    with tempfile.TemporaryFile() as out:
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.dup2(out.fileno(), 1)
+                os.execv(cmd[0], cmd)
+            finally:
+                os._exit(127)
+        _, status, usage = os.wait4(pid, 0)
+        out.seek(0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        return out.read().decode(), usage.ru_maxrss / 1024
+
+
+# A recursion through two call sites (test_generic_recursion_binds_its_types_in_constant_memory).
+GENERIC_FIB = """\
+fun SIGNATURE {
+    if n < two { return n }
+    return fib(n - one, one, two) + fib(n - two, one, two)
+}
+
+fun main() {
+    print(fib(25, 1, 2))
+}
+"""
+
 
 # A loop of in-place updates (test_updates_are_amortised_constant).
 UPDATE_N = 20000

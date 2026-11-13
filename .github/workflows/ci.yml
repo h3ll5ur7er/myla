@@ -3,7 +3,8 @@
 # standard-library unittests. The Ubuntu runners have both; the burn job also
 # installs Node, for the
 # tree-sitter CLI of the editor-grammar tests and the VS Code extension's
-# server choice, and gdb for the debug-information tests. The runners are
+# server choice, gdb for the debug-information tests, and Go for the oracle
+# of test_regex. The runners are
 # pinned (ubuntu-24.04: its python3 is 3.12, which gdb embeds). The vscode-extension job typechecks, lints and tests the VS
 # Code extension and uploads its .vsix. See docs/Development/Testing.md.
 name: CI
@@ -33,6 +34,12 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: editor/tree-sitter-myla/package-lock.json
+      # the oracle of test_regex's Go half (MYLA-555): without go it skipped
+      # here unnoticed; test_regex.GoOracle now fails without it
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache: false
       - name: gdb for the debug-information tests (MYLA-156); clang, lld and qemu-user for the aarch64 ones (MYLA-163)
         run: |
           sudo apt-get update -qq
@@ -56,6 +63,7 @@ jobs:
           python3 --version
           as --version | head -1
           ld --version | head -1
+          go version
           editor/tree-sitter-myla/node_modules/.bin/tree-sitter --version
       - name: Burn tests
         # a target whose tools are missing fails instead of skipping (MYLA-268)

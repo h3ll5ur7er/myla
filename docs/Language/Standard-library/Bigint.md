@@ -81,6 +81,8 @@ It has `message()` (`"no digits"`, `"invalid digit at byte 2"`) and implements `
 | `a.signum() -> int`, `a.is_zero()`, `a.is_negative()` | -1, 0 or 1; whether it is zero, below zero |
 | `a.bit_len() -> int` | The number of bits of the magnitude, 0 for zero |
 
+A number holds at most 2^26 - 1 limbs of 32 bits (2,147,483,616 bits, 256 MiB), so its bit length, and the position of any of its bits, is an `int` ([[MYLA-550]]: `from_int(5i64).shl(2147483646).bit_len()` was -2147483647 in a plain build and an overflow checked). An operation whose result would be larger is a runtime error (D184): `shl` and `pow` say so before they compute, naming the shift or the exponent (`bigint.shl: a shift of 2147483646 makes more than 2147483616 bits`), a product of operands that are together too long is `bigint: a product of more than 2147483616 bits`, and any other result `bigint: a number of more than 2147483616 bits`.
+
 `/` and `%` truncate, as they do on Myla's integers ([[Language/Expressions-and-operators]]): `-7 / 2` is -3 and `-7 % 2` is -1. Python's `//` and `%` round down instead, giving -4 and 1: those are `div_floor` and `mod_floor`. Division by zero is a runtime error, `bigint: division by zero`.
 
 ## Comparing, hashing, converting

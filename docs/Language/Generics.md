@@ -1,6 +1,6 @@
 # Generics
 
-Functions, structs, enums, actors, impls and traits may take type parameters. Generic code is checked once against opaque type parameters, then run by erasure in the interpreter and **monomorphized** (one concrete copy per instantiation) for native code (D13, [[Architecture/Monomorphization]]).
+Functions, structs, enums, actors, impls and traits may take type parameters. Generic code is checked once against opaque type parameters, then run in the interpreter with each call's type parameters bound to the types they stand for ([[MYLA-414]], [[Architecture/Interpreter]]) and **monomorphized** (one concrete copy per instantiation) for native code (D13, [[Architecture/Monomorphization]]).
 
 [TOC]
 
@@ -188,4 +188,4 @@ fun main() {
 
 Each instantiation gets its own name, whatever the type arguments are called ([[MYLA-9]], [[Architecture/Monomorphization]]).
 
-Polymorphic recursion, a generic function calling itself with a larger type (`grow<T>` calling `grow<[T]>`), runs in the interpreter, but native code would need an instance for every size: `myla build` refuses the call, `the instances of 'grow' nest without end: this call asks for one whose type arguments are 65 types deep (the limit is 64)`, as a type error ([[MYLA-415]]). The operators of a generic impl (`impl<T: Add> Add for Box<T>`) call its instance for the operands' types, as its methods do.
+Polymorphic recursion, a generic function calling itself with a larger type (`grow<T>` calling `grow<[T]>`), runs in the interpreter, but native code would need an instance for every size: `myla build` refuses the call, `the instances of 'grow' nest without end: this call asks for one whose type arguments are 65 types deep (the limit is 64)`, as a type error ([[MYLA-415]]). A deep type the program writes, `id(x)` of a list 65 or 100 deep, is no recursion and builds: only an instance already at the limit is refused a larger one ([[MYLA-544]]). `myla check` doesn't apply the limit, since it doesn't build instances. The operators of a generic impl (`impl<T: Add> Add for Box<T>`) call its instance for the operands' types, as its methods do.

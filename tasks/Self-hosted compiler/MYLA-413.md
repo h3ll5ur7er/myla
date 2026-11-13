@@ -2,7 +2,7 @@
 id: MYLA-413
 title: "An imported std module's bodies parsed and checked once called"
 type: improvement
-status: review
+status: todo
 priority: medium
 labels: [loader, checker, performance, check-time]
 ---
@@ -12,3 +12,10 @@ The mechanism is there: the loader's `Loader.lazy` (which files are parsed with 
 
 - [x] Decide: every non-entry module of the standard library, or also a program's own imported modules (whose authors don't run their own `myla test` on each) — D179 (2) and (3): the standard library's only, never a program's own modules
 - [x] Build it, with the loader's and the checker's sets widened, and measured as [[MYLA-359]] was (in [[MYLA-432]], after the list of the functions the back ends name and `IoError` in std.ioerror; the evidence is there)
+
+## Review 2026-11-12
+
+Reopened ([[Project/Review-2026-11-12]]): laziness is decided by the module's id, not by where its file is. The rest holds: the guards for unread bodies were proven with mutant compilers, and 399 programs in five configurations build byte-identical code lazily and eagerly, apart from [[MYLA-552]]'s vote. The task also has no evidence section of its own (it points to [[MYLA-432]]).
+
+- [ ] **A program's own top-level `std/` directory is read lazily** (D179: a program's own modules are always read whole): with `from .std.helper import ok` and a `std/helper.my` that holds a type error and a parse error in functions `main` doesn't call, `myla check main.my` says `ok` (`repro-r5/parser/own/`; the same tree with the directory named `other/` reports both, `own3/`). `Loader.lazy_std` and `in_std` test the `std$` prefix of the module id; decide by the file's root
+- [ ] An evidence section here

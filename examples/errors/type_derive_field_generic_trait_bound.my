@@ -1,0 +1,24 @@
+//~ type error: cannot derive Eq for struct 'P': field 'w' has type 'W<I>', which is Eq only where 'I: Iterator<str>'
+//~ help: write the impl instead: 'impl<I: Eq + Iterator<str>> Eq for P<I>'
+// The derive's check of its fields (MYLA-507) holds a field's impl to its
+// bounds of a generic trait too (MYLA-538): `W<I>` is `Eq` only for an
+// iterator of strings, which the derived `impl<I: Eq> Eq for P<I>` doesn't
+// require.
+struct W<I> {
+    v: I,
+}
+
+impl<I: Iterator<str>> Eq for W<I> {
+    fun eq(self, other: W<I>) -> bool {
+        return true
+    }
+}
+
+#derive(Eq)
+struct P<I> {
+    w: W<I>,
+}
+
+fun main() {
+    print(P { w: W { v: ["a"].iter() } } == P { w: W { v: ["b"].iter() } })
+}

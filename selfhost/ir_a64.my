@@ -585,7 +585,7 @@ impl CodeGen {
                     self.emit("cmp x11, x12")
                     self.emit(format("b.lo {}", ok))
                     // the index and the length reported (D183)
-                    let tr = self.want_trap(if is_str { "sindex" } else { "lindex" })
+                    let tr = self.want_index_trap(is_str, f.temps[i])
                     if tr == "" { self.a64_trap("__trap_index", p.line, p.col) }
                     else {
                         self.emit(x11_widened(f.temps[i], "1"))

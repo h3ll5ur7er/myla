@@ -2,7 +2,7 @@
 id: MYLA-418
 title: "P4 The test harness: failing reports agree across runners"
 type: bug
-status: review
+status: done
 priority: high
 labels: [test-runner, harness, round-5]
 ---
@@ -75,3 +75,7 @@ What stays different by design or by limit: a failed case runs no deferred block
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-547]]: a panic message with a later line that starts `runtime error: ` is cut natively at that line (new, against D183); it needs the report the runtime marks itself, which D189 set aside, so it is the owner's decision 1 of the review. Also there: an empty `Err` passes, and exit statuses outside 0 to 255.

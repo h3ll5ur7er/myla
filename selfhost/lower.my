@@ -623,6 +623,52 @@ fun settled_operand(e: Expr, root: str) -> bool {
     }
 }
 
+// Whether computing each index on the path of the place `e` after `v`
+// rather than before it can't be told (D193): each does nothing itself and
+// reads no variable `v` may write (`index_unaffected_by`).
+#test(codegen_on("[int]"), expr_of("c.g[0][i + 1]"), expr_of("c.v()"))[true]
+#test(codegen_on("[int]"), expr_of("c.g[c.n]"), expr_of("c.v()"))[false]
+#test(codegen_on("[int]"), expr_of("c.g[k()]"), expr_of("1"))[false]
+fun path_unaffected_by(cg: CodeGen, e: Expr, v: Expr) -> bool {
+    return match e.kind {
+        ExprKind.GetField(x, f) => path_unaffected_by(cg, x, v),
+        ExprKind.TupleIndex(x, k) => path_unaffected_by(cg, x, v),
+        ExprKind.Index(x, i) => path_unaffected_by(cg, x, v) && index_unaffected_by(cg, i, v),
+        _ => true,
+    }
+}
+
+// Whether the index `i` calls nothing and reads no variable `v` may write:
+// literals, and names, fields, elements and operators of them.
+fun index_unaffected_by(cg: CodeGen, i: Expr, v: Expr) -> bool {
+    return match i.kind {
+        ExprKind.IntLit(n, sfx, ch, big) => true,
+        ExprKind.BoolLit(b) => true,
+        ExprKind.StrLit(s) => true,
+        ExprKind.Name(n) => !may_write_expr(cg, v, n),
+        ExprKind.Unary(op, x) => index_unaffected_by(cg, x, v),
+        ExprKind.Cast(x, t) => index_unaffected_by(cg, x, v),
+        ExprKind.Binary(op, l, r) => index_unaffected_by(cg, l, v) && index_unaffected_by(cg, r, v),
+        ExprKind.GetField(x, f) => index_unaffected_by(cg, x, v),
+        ExprKind.TupleIndex(x, k) => index_unaffected_by(cg, x, v),
+        ExprKind.Index(x, j) => index_unaffected_by(cg, x, v) && index_unaffected_by(cg, j, v),
+        _ => false,
+    }
+}
+
+// Whether `e` is a variable or a field or tuple element of one, at any
+// depth: a read that runs nothing and can't fail.
+#test(expr_of("a.b.0"))[true]
+#test(expr_of("a[0].b"))[false]
+fun field_path(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Name(n) => true,
+        ExprKind.GetField(x, f) => field_path(x),
+        ExprKind.TupleIndex(x, i) => field_path(x),
+        _ => false,
+    }
+}
+
 fun settled_operands(es: [Expr], root: str) -> bool {
     for x in es { if !settled_operand(x, root) { return false } }
     return true
@@ -693,14 +739,21 @@ fun settled_path(e: Expr) -> bool {
 // Whether an argument after `argv[i]` may write the variable `argv[i]` is
 // read from (through a method that may take `var self`, or a mutating
 // builtin): then `argv[i]` is copied when it is evaluated (MYLA-237).
-fun later_writes(argv: [Expr], i: int32) -> bool {
-    let root = place_root(argv[i])
+fun later_writes(cg: CodeGen, argv: [Expr], i: int32) -> bool {
+    return written_after(cg, argv[i], argv[i + 1:])
+}
+
+// Whether one of the operands `later`, evaluated after `x`, may write the
+// variable the place `x` is read from (`may_write_expr`): then what `x`
+// reads is taken with a reference of its own first (`Lower.operand`), or the
+// write may release it before it is used (B2; an argument's, MYLA-237).
+#test(codegen_on("[int]"), expr_of("h.xs[0]"), [expr_of("h.s()")])[true]
+#test(codegen_on("[int]"), expr_of("h.xs[0]"), [expr_of("g.s()"), expr_of("f(h)")])[false]
+#test(codegen_on("[int]"), expr_of("f(h)"), [expr_of("h.s()")])[false]
+fun written_after(cg: CodeGen, x: Expr, later: [Expr]) -> bool {
+    let root = place_root(x)
     if root == "" { return false }
-    var j = i + 1
-    while j < argv.len() {
-        if may_write_expr(argv[j], root) { return true }
-        j = j + 1
-    }
+    for y in later { if may_write_expr(cg, y, root) { return true } }
     return false
 }
 
@@ -2124,11 +2177,11 @@ impl Lower {
                 let ft = self.place_type(cg, callee)
                 if !is_async_t(ft) || !lowerable(cg, ft) { return -1 }
                 let params = tfunc_params(ft)
-                let fv = self.addr(cg, callee)
+                let fv = self.operand_addr(cg, callee, args)
                 var vals: [int32] = []
                 var i = 0
                 while i < args.len() && i < params.len() {
-                    if is_aggregate(params[i]) { vals.push(self.addr(cg, args[i])) } else { vals.push(self.expr(cg, args[i])) }
+                    if is_aggregate(params[i]) { vals.push(self.operand_addr(cg, args[i], args[i + 1:])) } else { vals.push(self.operand(cg, args[i], args[i + 1:])) }
                     i = i + 1
                 }
                 let fr = self.temp(Type.TPtr)
@@ -2372,6 +2425,8 @@ impl Lower {
 
     // The instance of `callee` that the call `e` asks for, `too` large,
     // refused (H5): its function asks for a larger one in turn, without end.
+    // Only a call inside an instance at the limit is refused (MYLA-544), so
+    // a type the program writes, however deep, is never refused here.
     fun refuse_instance(var self, cg: CodeGen, e: Expr, callee: str, too: str) {
         let msg = format("the instances of '{}' nest without end: this call asks for one whose type arguments are {}", callee, too)
         let note = format("'{}' is called with a larger type at each step (polymorphic recursion), which native code can't be built for; the interpreter runs it", callee)
@@ -2912,7 +2967,8 @@ impl Lower {
         self.add(Inst.Load(p, at))
         let off = cg.map_key_off(mt)
         if is_aggregate(kt) {
-            self.add(Inst.Copy(self.slot_addr(elem), self.offset(p, off), cg.size(kt)))
+            // (a recursive enum's from its box, D194)
+            self.add(Inst.Copy(self.slot_addr(elem), self.unbox(cg, kt, self.offset(p, off)), cg.size(kt)))
         } else {
             let x = self.temp(kt)
             self.add(Inst.LoadAt(x, p, off, 8))
@@ -3218,10 +3274,10 @@ impl Lower {
             var a = -1
             var b = -1
             if is_list_t(lt) {
-                a = self.expr(cg, l)
+                a = self.operand(cg, l, [r])
                 b = self.expr(cg, r)
             } else {
-                a = self.addr(cg, l)
+                a = self.operand_addr(cg, l, [r])
                 b = self.addr(cg, r)
             }
             let eq = self.temp(Type.TBool)
@@ -3233,7 +3289,7 @@ impl Lower {
         }
         if is_tstr(lt) {
             if op == "==" || op == "!=" {
-                let a = self.expr(cg, l)
+                let a = self.operand(cg, l, [r])
                 let b = self.expr(cg, r)
                 let eq = self.temp(Type.TBool)
                 self.rt_call(cg, eq, "__str_eq", [a, b])
@@ -3243,7 +3299,7 @@ impl Lower {
                 return d
             }
             if op == "+" {
-                let a = self.expr(cg, l)
+                let a = self.operand(cg, l, [r])
                 let b = self.expr(cg, r)
                 let d = self.temp(Type.TStr)
                 self.rt_call(cg, d, "__str_concat", [a, b])
@@ -3251,7 +3307,7 @@ impl Lower {
             }
             if is_cmp(op) {
                 // byte-wise, std.rt's `str_cmp` against 0 (MYLA-318)
-                let a = self.expr(cg, l)
+                let a = self.operand(cg, l, [r])
                 let b = self.expr(cg, r)
                 let i64 = Type.TInt(64, true)
                 let c = self.temp(i64)
@@ -3462,7 +3518,8 @@ impl Lower {
         var vals: [int32] = []
         var k = 0
         for side in [l, r] {
-            let p = self.addr(cg, side)
+            // (the left one held when the right one may write its variable, B2)
+            let p = if k == 0 { self.operand_addr(cg, side, [r]) } else { self.addr(cg, side) }
             if byval[k] { for w in self.value_words(cg, lt, p) { vals.push(w) } } else { vals.push(p) }
             k = k + 1
         }
@@ -3570,7 +3627,7 @@ impl Lower {
                 let lt = cg.type_of(l.id)
                 if op == ">>" && is_tfunc(lt) { return self.compose(cg, e, l, r) }
                 if !is_overloadable_op(op) || !is_struct_or_enum_t(lt) { return self.unsupported("that operator on aggregates") }
-                let pa = self.addr(cg, l)
+                let pa = self.operand_addr(cg, l, [r])
                 let pb = self.addr(cg, r)
                 let slot = self.value_slot(cg, "__result", t, true)
                 let res = self.slot_addr(slot)
@@ -3813,6 +3870,8 @@ impl Lower {
                 }
                 if !cg.has_func(mname) {
                     if field == "eq" && args.len() == 1 && cg.derived_eq_routine(key) { return self.derived_eq(cg, mname, recv, args[0], tail) }
+                    // `x.format(spec)` of a builtin `T: Format` (MYLA-544)
+                    if field == "format" && args.len() == 1 && !is_struct_or_enum_t(cg.type_of(recv.id)) { return self.builtin_format(cg, recv, args[0]) }
                     // a tuple's `hash` is the language's (D163)
                     let rt = cg.type_of(recv.id)
                     if field == "hash" && args.len() == 1 && (is_unit(rt) || is_compound_eq_t(rt)) && !is_list_t(rt) && !tail {
@@ -3854,13 +3913,13 @@ impl Lower {
         let ft = self.place_type(cg, callee)
         if !is_tfunc(ft) || !lowerable(cg, ft) { return self.unsupported("a call through a value of that type") }
         let params = tfunc_params(ft)
-        let fv = self.addr(cg, callee)
+        let fv = self.operand_addr(cg, callee, args)
         var vals: [int32] = []
         var i = 0
         while i < args.len() && i < params.len() {
             // a later argument may write the variable this one is read from:
             // a copy taken now (MYLA-237)
-            if later_writes(args, i) && (is_aggregate(params[i]) || cg.owns_heap(params[i])) { vals.push(self.stage(cg, params[i], args[i]).1) }
+            if later_writes(cg, args, i) && (is_aggregate(params[i]) || cg.owns_heap(params[i])) { vals.push(self.stage(cg, params[i], args[i]).1) }
             else if is_aggregate(params[i]) { vals.push(self.addr(cg, args[i])) } else { vals.push(self.expr(cg, args[i])) }
             i = i + 1
         }
@@ -4122,11 +4181,22 @@ impl Lower {
         // recursion) asks for instances without end: refused where it is
         // built, past a nesting no program needs (H5)
         var too = ""
+        // only an instance past the limit itself asks for one in a
+        // recursion: a deep type the program writes is no recursion
+        // (MYLA-544: a call of `mk<[[…int…]]>` 65 deep from `main`)
+        var cur_depth = 0
+        var cur_size = 0
+        for sb in cg.subst {
+            let d = type_depth(sb.ty)
+            if d > cur_depth { cur_depth = d }
+            let z = type_size(sb.ty, MAX_INSTANCE_SIZE)
+            if z > cur_size { cur_size = z }
+        }
         for ta in targs {
             // (a type that doubles at each step grows too large long before
             // it is too deep)
-            if too == "" && type_size(ta, MAX_INSTANCE_SIZE) > MAX_INSTANCE_SIZE { too = format("more than {} types in all", MAX_INSTANCE_SIZE) }
-            else if too == "" && type_depth(ta) > MAX_INSTANCE_DEPTH { too = format("{} types deep (the limit is {})", type_depth(ta), MAX_INSTANCE_DEPTH) }
+            if too == "" && cur_size > MAX_INSTANCE_SIZE / 2 && type_size(ta, MAX_INSTANCE_SIZE) > MAX_INSTANCE_SIZE { too = format("more than {} types in all", MAX_INSTANCE_SIZE) }
+            else if too == "" && cur_depth >= MAX_INSTANCE_DEPTH && type_depth(ta) > MAX_INSTANCE_DEPTH { too = format("{} types deep (the limit is {})", type_depth(ta), MAX_INSTANCE_DEPTH) }
         }
         if too != "" { self.refuse_instance(cg, call, if sig.has_decl { sig.decl.name } else { sig.name }, too) }
         else { self.f.instances.push(Instance { orig: sig.name, targs: targs }) }
@@ -4175,7 +4245,13 @@ impl Lower {
             argv = [self.held_place(cg, argv0[0], e.id)]
             var j = 1
             while j < argv0.len() {
-                argv.push(self.held_operand(cg, argv0[j], format("%arg{}_{}", e.id, j)))
+                // a variable, or a field of one, that no later argument
+                // writes reads the same where it is passed: not copied
+                // (`lw.entry_member(cg, lw.read_cell(sm), …)` copied the
+                // code generator, MYLA-542)
+                let a = argv0[j]
+                if field_path(a) && place_root(a) != root && !written_after(cg, a, argv0[j + 1:]) { argv.push(a) }
+                else { argv.push(self.held_operand(cg, a, format("%arg{}_{}", e.id, j))) }
                 j = j + 1
             }
         }
@@ -4222,7 +4298,7 @@ impl Lower {
             }
             // a later argument may write the variable this one is read from:
             // a copy taken now, so the call gets the value it had (MYLA-237)
-            else if !(i == 0 && root != "") && later_writes(argv, i) && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
+            else if !(i == 0 && root != "") && later_writes(cg, argv, i) && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
                 let staged = self.stage(cg, params[i], argv[i])
                 if owned { self.moved(staged.0) }
                 vals.push(staged.1)
@@ -4341,7 +4417,7 @@ impl Lower {
         let bt = cg.type_of(base.id)
         let i64 = Type.TInt(64, true)
         let p = slice_parts(idx)
-        let cell = self.expr(cg, base)
+        let cell = self.operand(cg, base, [p.start, p.stop, p.step])
         var vals: [int32] = [cell]
         for b in [p.start, p.stop] {
             if is_hole_part(b) {
@@ -4405,7 +4481,7 @@ impl Lower {
     fun elem_read(var self, cg: CodeGen, e: Expr, base: Expr, idx: Expr) -> int32 {
         let bt = self.place_type(cg, base)
         if !is_list_t(bt) && !is_tstr(bt) && !is_map_t(bt) { return self.unsupported("indexing that type") }
-        let cell = self.expr(cg, base)
+        let cell = self.operand(cg, base, [idx])
         if is_map_t(bt) { return self.map_value(cg, e, bt, cell, self.key_operand(cg, bt, idx)) }
         let i = self.index_of(cg, cell, idx)
         var stride = 1
@@ -4416,16 +4492,21 @@ impl Lower {
         return d
     }
 
-    // `push(holder, value)`: the value taken first (with its references), then
-    // the list made unique, grown when full, and the value moved in.
+    // `push(holder, value)`: the indices of the holder's place first, as
+    // every method call takes its receiver's place before its arguments
+    // (D193), where the order can be told; then the value taken (with its
+    // references), then the list made unique, grown when full, and the value
+    // moved in.
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[-1]
     fun push_elem(var self, cg: CodeGen, holder: Expr, value: Expr) -> int32 {
         let lt = self.place_type(cg, holder)
         if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
         let et = list_elem(lt)
         let stride = cg.elem_size(et)
+        var at = holder
+        if !path_unaffected_by(cg, holder, value) { at = self.held_place(cg, holder, holder.id) }
         let staged = self.stage(cg, et, value)
-        let h = self.place(cg, holder)
+        let h = self.place(cg, at)
         let cell = self.temp(lt)
         self.add(Inst.Cow(cell, lt, h))
         let slot_p = self.temp(Type.TPtr)
@@ -4511,7 +4592,14 @@ impl Lower {
     fun key_operand(var self, cg: CodeGen, mt: Type, k: Expr) -> int32 {
         if !cg.map_hashed(mt) { return self.expr(cg, k) }
         let kt = map_key(mt)
-        if cg.is_boxed(kt) { return self.unsupported("a map keyed by a recursive enum") }
+        if cg.is_boxed(kt) {
+            // a recursive enum (D194), as its slot holds it: a word pointing
+            // at the value, borrowed, which the key's routines only read
+            // (`__mput_<K>` boxes a copy)
+            let w = self.new_slot("__key", Type.TPtr, 8, -1, false)
+            self.add(Inst.Store(w, self.addr(cg, k)))
+            return self.slot_addr(w)
+        }
         if is_aggregate(kt) { return self.addr(cg, k) }
         let v = self.expr(cg, k)
         let slot = self.new_slot("__key", kt, 8, -1, false)
@@ -4612,7 +4700,13 @@ impl Lower {
                     x = self.temp(Type.TFloat(64))
                     self.add(Inst.Cast(x, t, Type.TFloat(64), v))
                 }
-                self.rt_call(cg, d, "__float_to_str", [x, self.int_const(17)])
+                // (written as the interpreter's `py_repr` writes it, `3.0`,
+                // `1e+300`, by std.rt where it has the routine)
+                if cg.has_func("std$rt$key_float_text") {
+                    let text = self.temp(Type.TStr)
+                    self.rt_call(cg, text, "__float_to_str", [x, self.int_const(17)])
+                    self.add(Inst.Call(d, "std$rt$key_float_text", [text]))
+                } else { self.rt_call(cg, d, "__float_to_str", [x, self.int_const(17)]) }
             },
             _ => { self.add(Inst.Str(d, "?")) },
         }
@@ -4683,6 +4777,28 @@ impl Lower {
         self.add(Inst.Store(slot, v))
         self.own_temp(slot)
         return (slot, v)
+    }
+
+    // The value of the operand `x` of an expression whose operands `later`
+    // are evaluated after it: what it reads taken with a reference of its
+    // own (`stage`, the statement's to release) when one of them may write
+    // the variable it is read from, which would otherwise release it before
+    // it is used (B2: an operator's operands, an index's or a slice's base, a
+    // format hole, a map literal's key, a called function value; an
+    // argument's is MYLA-237's); else borrowed, as `expr` gives it.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("1"), [])[0]
+    fun operand(var self, cg: CodeGen, x: Expr, later: [Expr]) -> int32 {
+        let t = self.place_type(cg, x)
+        if cg.owns_heap(t) && !is_aggregate(t) && written_after(cg, x, later) { return self.stage(cg, t, x).1 }
+        return self.expr(cg, x)
+    }
+
+    // `operand`'s address of an aggregate operand `x`, as `addr` gives it, or
+    // of a copy of it with references of its own.
+    fun operand_addr(var self, cg: CodeGen, x: Expr, later: [Expr]) -> int32 {
+        let t = self.place_type(cg, x)
+        if is_aggregate(t) && written_after(cg, x, later) { return self.stage(cg, t, x).1 }
+        return self.addr(cg, x)
     }
 
     // Set `key` in the (unique) map the 8 bytes at `holder` point at to the
@@ -4772,7 +4888,10 @@ impl Lower {
         self.own_temp(slot)
         let h = self.slot_addr(slot)
         for en in entries {
-            let k = self.key_operand(cg, mt, en.key)
+            var key = en.key
+            // held when its value may write the variable it is read from (B2)
+            if written_after(cg, en.key, [en.value]) { key = self.held_operand(cg, en.key, format("%key{}", en.key.id)) }
+            let k = self.key_operand(cg, mt, key)
             let staged = self.stage(cg, map_val(mt), en.value)
             self.map_put(cg, mt, h, k, staged)
         }
@@ -4957,7 +5076,10 @@ impl Lower {
         if segs[0] != "" || args.len() == 1 { parts.push(self.str_const(segs[0])) }
         var k = 1
         while k < args.len() {
-            parts.push(self.render_spec(cg, args[k], specs[k - 1]))
+            // a string as it is, borrowed, but held when a later hole may
+            // write its variable (B2); every other hole's text is new
+            if specs[k - 1] == "" && is_tstr(cg.type_of(args[k].id)) { parts.push(self.operand(cg, args[k], args[k + 1:])) }
+            else { parts.push(self.render_spec(cg, args[k], specs[k - 1])) }
             if segs[k] != "" { parts.push(self.str_const(segs[k])) }
             k = k + 1
         }
@@ -5044,6 +5166,44 @@ impl Lower {
         let sv = self.temp(Type.TStr)
         self.add(Inst.Str(sv, spec))
         vals.push(sv)
+        return self.call_owning(cg, name, vals)
+    }
+
+    // `x.format(spec)` of a printable builtin value, `x: T` with `T: Format`
+    // at a builtin `T` (MYLA-544): its print form by the spec `sp`, a value,
+    // with std.fmt, as `render_spec` gives a hole's; a new string the
+    // statement owns.
+    fun builtin_format(var self, cg: CodeGen, arg: Expr, sp: Expr) -> int32 {
+        let t = cg.type_of(arg.id)
+        var name = "std$fmt$fmt_text"
+        var vals: [int32] = []
+        match t {
+            Type.TInt(w, sg) => {
+                name = "std$fmt$fmt_int"
+                let v = self.expr(cg, arg)
+                let v64 = self.temp(Type.TInt(64, true))
+                self.add(Inst.Cast(v64, t, Type.TInt(64, true), v))
+                vals = [v64, self.int_const(w), self.konst(Type.TBool, if sg { 1 } else { 0 })]
+            },
+            Type.TFloat(w) => {
+                name = "std$fmt$fmt_float"
+                let v = self.expr(cg, arg)
+                var extra = 17
+                if w == 32 { extra = 9 }
+                let text = self.temp(Type.TStr)
+                self.rt_call(cg, text, "__float_to_str", [v, self.int_const(extra)])
+                let owned_text = self.owned_value(cg, text, Type.TStr)
+                var v64 = v
+                if w == 32 {
+                    v64 = self.temp(Type.TFloat(64))
+                    self.add(Inst.Cast(v64, t, Type.TFloat(64), v))
+                }
+                vals = [v64, owned_text]
+            },
+            _ => { vals = [self.render(cg, arg)] },
+        }
+        if !cg.has_func(name) { return self.unsupported("a format spec without std.fmt") }
+        vals.push(self.expr(cg, sp))
         return self.call_owning(cg, name, vals)
     }
 
@@ -5424,7 +5584,7 @@ impl Lower {
         let root_var = place_root(scrut)
         // the copy owns references of its own when an arm may write the
         // variable, or when other calls of the actor may (MYLA-168's t13)
-        let owns_copy = root_var != "" && cg.owns_heap(sst) && (arms_may_write(arms, root_var) || self.shared_self(root_var))
+        let owns_copy = root_var != "" && cg.owns_heap(sst) && (arms_may_write(cg, arms, root_var) || self.shared_self(root_var))
         let root = self.value_slot(cg, "__scrutinee", sst, owns_copy)
         let base = self.slot_addr(root)
         if is_aggregate(sst) {
@@ -6323,7 +6483,17 @@ pub fun map_put_ir(cg: CodeGen, kt: Type, name: str) -> Routine {
     let sm = lw.new_slot("made", i64, 8, -1, false)
     lw.add(Inst.Store(sm, made))
     let ks = cg.stored_size(kt)
-    if ks > 0 {
+    if cg.is_boxed(kt) {
+        // a recursive enum's key (D194), given as a word pointing at it: a
+        // new box holding a copy, with references of its own
+        let b = lw.temp(Type.TPtr)
+        lw.add(Inst.Rt(b, "__alloc", [lw.int_const(cg.size(kt))]))
+        let src = lw.temp(Type.TPtr)
+        lw.add(Inst.LoadAt(src, lw.read_ptr(sk), 0, 8))
+        lw.add(Inst.Copy(b, src, cg.size(kt)))
+        lw.add(Inst.Retain(kt, b))
+        lw.add(Inst.StoreAt(lw.read_cell(sm), 16, b, 8))
+    } else if ks > 0 {
         let at = lw.temp(i64)
         lw.add(Inst.Bin(at, "+", i64, i64, lw.read_cell(sm), lw.int_const(16), Pos { line: 0, col: 0 }))
         let dst = lw.temp(Type.TPtr)
@@ -6821,9 +6991,13 @@ pub fun map_drop_slow_ir(cg: CodeGen, mt: Type, name: str, free: str, kind: int3
 
 // The std.rt function that words the runtime error `__trap_<kind>` (D183).
 #test("lindex")["std$rt$list_index_text"]
+#test("suindex")["std$rt$str_uindex_text"]
 pub fun trap_text_fn(kind: str) -> str {
     if kind == "lindex" { return "std$rt$list_index_text" }
     if kind == "sindex" { return "std$rt$str_index_text" }
+    // a uint64 index (MYLA-546)
+    if kind == "luindex" { return "std$rt$list_uindex_text" }
+    if kind == "suindex" { return "std$rt$str_uindex_text" }
     return "std$rt$range_text"
 }
 
@@ -7762,7 +7936,20 @@ pub fun env_deep_members_ir(cg: CodeGen, lifted: str, owned: [DropEntry], clone:
     let sc = lw.new_slot("env", Type.TInt(64, true), 8, 0, false)
     let guarded = lw.drop_guard(sc, kind)
     lw.add(Inst.StoreAt(lw.read_cell(sc), -8, lw.int_const(1), 8))
-    for d in owned { lw.deep_member(cg, sc, d.off, d.ty, clone) }
+    for d in owned {
+        if cg.is_boxed(d.ty) {
+            // a boxed enum captured is its cell's contents, inline, as
+            // `env_drop_ir` releases it: walked in place, not loaded as a box
+            // (B1)
+            let i64 = Type.TInt(64, true)
+            lw.wants.push(Want { kind: 2, t: d.ty, clone: clone })
+            let p = lw.temp(i64)
+            lw.add(Inst.Bin(p, "+", i64, i64, lw.read_cell(sc), lw.int_const(d.off), Pos { line: 0, col: 0 }))
+            lw.add(Inst.Rt(-1, cg.deep_walk_label(d.ty, clone, true), [p]))
+        } else {
+            lw.deep_member(cg, sc, d.off, d.ty, clone)
+        }
+    }
     if guarded { lw.guard_end() }
     lw.finish(Term.Ret(-1))
     return Routine { f: lw.f, wants: lw.wants }

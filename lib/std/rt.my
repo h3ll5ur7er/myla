@@ -2031,7 +2031,12 @@ pub fun map_shrink_h(holder: int64, slot_size: int64) {
     }
 }
 
-// `map_slot_h`'s slot in the map `cell`, which has room.
+// `map_slot_h`'s slot in the map `cell`, which has room: the first empty
+// one on the probe, past the tombstones, so the keys of one hash stay on it
+// in the order of insertion and are compared oldest first, as the
+// interpreter compares them (a key's written `eq` runs alike, MYLA-546).
+// A tombstone holds a rank until the next compaction, so the load bound
+// holds without reusing them.
 fun map_place_h(cell: int64, h: int64, slot_size: int64) -> int64 {
     let mask = __load64(cell + 8) - 1
     let slots = cell + 16
@@ -2039,7 +2044,7 @@ fun map_place_h(cell: int64, h: int64, slot_size: int64) -> int64 {
     while true {
         let slot = slots + i * slot_size
         let state = __load64(slot)
-        if state != 1 {
+        if state == 0 {
             let next = slots + (mask + 1) * slot_size
             let rank = __load64(next)
             __store64(slot, 1)
@@ -2383,6 +2388,16 @@ pub fun str_index_text(i: int64, n: int64) -> str {
     return "string index " + int_to_str(i) + " out of bounds (len " + int_to_str(n) + ")"
 }
 
+// The same with a `uint64` index, written unsigned (`__trap_luindex`,
+// `__trap_suindex`; MYLA-546).
+pub fun list_uindex_text(i: int64, n: int64) -> str {
+    return "list index " + uint_to_str(i as uint64) + " out of bounds (len " + int_to_str(n) + ")"
+}
+
+pub fun str_uindex_text(i: int64, n: int64) -> str {
+    return "string index " + uint_to_str(i as uint64) + " out of bounds (len " + int_to_str(n) + ")"
+}
+
 // `string range 2..9 out of bounds (len 3)`: `sb.append(s, a, b)` with a
 // range that isn't within `s` (`__trap_range`).
 pub fun range_text(a: int64, b: int64, n: int64) -> str {
@@ -2407,6 +2422,54 @@ pub fun key_bool_text(b: bool) -> str {
         return "True"
     }
     return "False"
+}
+
+// A float's from its print form `s` (`__float_to_str`): an integral value
+// with `.0` (`3.0`, `-0.0`), an exponent signed and of two digits at least
+// (`1e+300`, `1.5e-07`); `nan`, `inf` and `-inf` as they are.
+#test("3")["3.0"]
+#test("-0")["-0.0"]
+#test("2.5")["2.5"]
+#test("1e300")["1e+300"]
+#test("1.5e-7")["1.5e-07"]
+#test("1e-100")["1e-100"]
+#test("-inf")["-inf"]
+pub fun key_float_text(s: str) -> str {
+    var e = -1
+    var point = false
+    var i = 0
+    while i < s.len() {
+        if s[i] == 'e' {
+            e = i
+        }
+        if s[i] == '.' {
+            point = true
+        }
+        i += 1
+    }
+    if s == "nan" || s == "inf" || s == "-inf" {
+        return s
+    }
+    if e < 0 {
+        if point {
+            return s
+        }
+        return s + ".0"
+    }
+    var sb = StringBuilder()
+    sb.append(s, 0, e + 1)
+    var d = e + 1
+    if s[d] == '-' {
+        sb.append("-")
+        d += 1
+    } else {
+        sb.append("+")
+    }
+    if s.len() - d < 2 {
+        sb.append("0")
+    }
+    sb.append(s, d, s.len())
+    return sb.build()
 }
 
 pub fun key_str_text(s: str) -> str {

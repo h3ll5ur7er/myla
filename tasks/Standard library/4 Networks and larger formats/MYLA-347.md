@@ -2,7 +2,7 @@
 id: MYLA-347
 title: "std.http: an HTTP/1.1 client and server"
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, net, wave-4]
 ---
@@ -77,3 +77,7 @@ Worked around in `worker` and `serve_requests` by deciding outside the inner mat
 Not ready ([[Project/Review-2026-11-09]]): a chunk size that overflows `body_len + size` kills a checked or interpreted server and passes the body limit of a plain build (H7). The fix is in [[MYLA-422]].
 
 - [x] The review's blocker, fixed with [[MYLA-422]]: H7, and M23 (the server's idle, read and write time limits, no replay of a POST, redirects resolved with dot segments)
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

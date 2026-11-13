@@ -2,7 +2,7 @@
 id: MYLA-500
 title: "test_time's async-read test races its feeder under load"
 type: bug
-status: review
+status: done
 priority: low
 labels: [tests, concurrency, round-5]
 ---
@@ -32,3 +32,7 @@ The test now feeds its program itself (`fed_after_a_tick` in [[tests/burn/test_t
 
   Each failure was `AssertionError: 'line 0' != 't'`. After the full suite showed a `ResourceWarning` for the program's unclosed stdout pipe, closed now, another 30 runs beside 8 busy loops (load 10): 0 failed. Alone, at load 1, the test takes 1.0 s.
 - **Suites** (lane F of the follow-up, on `bccc624`): `scripts/test.sh fast` `Ran 848 tests … FAILED (failures=1, skipped=3)`, the failure `test_embedded_std` (expected until the seed commit); `tests.burn.test_time` `Ran 13 tests … OK`; the full `scripts/test.sh` `Ran 1517 tests … FAILED (failures=2, skipped=338)`: `test_embedded_std` again and `test_selfhost_codegen.test_children_run_in_parallel`, which asks four children for 1.5 times the wall time in CPU time and got 1.08 s of CPU in 1.36 s at a load of 6.7 on 4 cores; alone at that load it fails the same way, and nothing in this lane touches the runtime or code generation.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

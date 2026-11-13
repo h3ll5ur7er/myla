@@ -2,7 +2,7 @@
 id: MYLA-430
 title: "P16 --checked 64-bit arithmetic with the overflow flag"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [codegen, overflow, performance, round-5]
 ---
@@ -36,3 +36,7 @@ Work package P16 of [[Project/Review-2026-11-09]] (wave B, after [[MYLA-415]]). 
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-551]]: right on 26,155 boundary cases and 156 M to 34 M instructions, but an int64 loop is still five times slower by time on x86-64 (0.62 s against 0.12 s): each check is a `jno` over an inline call.

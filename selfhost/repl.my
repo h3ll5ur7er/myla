@@ -22,10 +22,10 @@ from .lexer import lex
 from .tokens import Token, TokenKind
 from .ast import Decl, DeclKind, Stmt, StmtKind, ElseTail
 from .loader import load_program_opts, load_options, file_of, normalize, Loaded, type_errors
-from .checker import build_checker_lazy, Checker
+from .checker import build_checker_lazy, Checker, Type, checker_on
 from .diag import render_one, Report, carets
 from .tokens import SrcSpan
-from .interp import new_interp, Value, SessionStep, new_mapv, map_keys_of, map_vals_of, byte_values
+from .interp import new_interp, Interp, Value, SessionStep, new_mapv, map_keys_of, map_vals_of, byte_values, payload_types
 from .util import cp_utf8
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -157,7 +157,8 @@ impl Session {
             return -1
         }
         var it = new_interp(c, ["<repl>"])
-        let step = it.session_step(self.names, self.vals, input_stmts(c, self.levels.len()), true)
+        let stmts = input_stmts(c, self.levels.len())
+        let step = it.session_step(self.names, self.vals, stmts, true)
         match step.err {
             Some(r) => {
                 report(Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col, sp: r.sp, more: [], notes: [] }, t, input)
@@ -167,7 +168,7 @@ impl Session {
         }
         if step.exited { return step.code }
         match step.shown {
-            Some(v) => { write(1, show(v) + "\n") },
+            Some(v) => { write(1, show_typed(c, v, shown_type(it, stmts)) + "\n") },
             None => {},
         }
         self.levels.push(input)
@@ -353,6 +354,109 @@ fun shows(vs: [Value]) -> str {
         if i > 0 { sb.append(", ") }
         sb.append(show(vs[i]))
         i = i + 1
+    }
+    return sb.build()
+}
+
+// The checked type of the input's last statement when it is an expression,
+// the one `session_step` shows.
+fun shown_type(it: Interp, stmts: [Stmt]) -> Option<Type> {
+    if stmts.len() == 0 { return None }
+    return match stmts[stmts.len() - 1].kind {
+        StmtKind.ExprStmt(e) => it.resolved_of(e.id),
+        _ => None,
+    }
+}
+
+// `v` as `show` writes it, read by its checked type `t`: a `uint64` of 2^63
+// or more unsigned, in a container, a field or a payload too (MYLA-546),
+// as `print` and native code write it.
+#test(checker_on("fun f() {}"), Value.VInt(-1), Some(Type.TInt(64, false)))["18446744073709551615"]
+#test(checker_on("fun f() {}"), Value.VInt(-1), Some(Type.TInt(64, true)))["-1"]
+#test(checker_on("fun f() {}"), Value.VTuple([Value.VInt(-1), Value.VStr("a")]), Some(Type.TTuple([Type.TInt(64, false), Type.TStr])))["(18446744073709551615, \"a\")"]
+#test(checker_on("fun f() {}"), Value.VEnum("Option", "Some", [Value.VInt(-2)]), Some(Type.TEnum("Option", [Type.TInt(64, false)])))["Some(18446744073709551614)"]
+#test(checker_on("fun f() {}"), Value.VInt(-1), None)["-1"]
+pub fun show_typed(ch: Checker, v: Value, t: Option<Type>) -> str {
+    let ty = match t { Some(x) => x, None => { return show(v) } }
+    match ty {
+        Type.TInt(w, sg) => { match v { Value.VInt(i) => { if w == 64 && !sg { return format("{}", i as uint64) } }, _ => {} } },
+        Type.TList(e) => {
+            match v {
+                Value.VList(xs) => {
+                    var ts: [Type] = []
+                    for x in xs { ts.push(e) }
+                    return "[" + shows_typed(ch, xs, ts) + "]"
+                },
+                _ => {},
+            }
+        },
+        Type.TTuple(ts) => { match v { Value.VTuple(es) => { if es.len() == ts.len() { return "(" + shows_typed(ch, es, ts) + ")" } }, _ => {} } },
+        Type.TMap(kt, vt) => {
+            match v {
+                Value.VMap(m) => {
+                    let ks = map_keys_of(m)
+                    if ks.len() == 0 { return "[:]" }
+                    let vs = map_vals_of(m)
+                    var sb = StringBuilder()
+                    sb.append("[")
+                    var i = 0
+                    while i < ks.len() {
+                        if i > 0 { sb.append(", ") }
+                        sb.append(show_typed(ch, ks[i], Some(kt)) + ": " + show_typed(ch, vs[i], Some(vt)))
+                        i += 1
+                    }
+                    sb.append("]")
+                    return sb.build()
+                },
+                _ => {},
+            }
+        },
+        Type.TStruct(sn, args) => {
+            match v {
+                Value.VStruct(n, names, vals) => {
+                    if names.len() == 0 { return show(v) }
+                    let fields = ch.struct_field_types(sn, args)
+                    var sb = StringBuilder()
+                    sb.append(unqualified(n) + " { ")
+                    var i = 0
+                    while i < names.len() {
+                        if i > 0 { sb.append(", ") }
+                        var ft: Option<Type> = None
+                        for f in fields { if f.name == names[i] { ft = Some(f.ty) } }
+                        sb.append(names[i] + ": " + show_typed(ch, vals[i], ft))
+                        i += 1
+                    }
+                    sb.append(" }")
+                    return sb.build()
+                },
+                _ => {},
+            }
+        },
+        Type.TEnum(en, args) => {
+            match v {
+                Value.VEnum(n, vr, pl) => {
+                    let ts = payload_types(ch, en, args, vr)
+                    if pl.len() > 0 && ts.len() == pl.len() {
+                        var head = unqualified(n) + "." + vr
+                        if n == "Option" || n == "Result" { head = vr }
+                        return head + "(" + shows_typed(ch, pl, ts) + ")"
+                    }
+                },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+    return show(v)
+}
+
+fun shows_typed(ch: Checker, vs: [Value], ts: [Type]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < vs.len() {
+        if i > 0 { sb.append(", ") }
+        sb.append(show_typed(ch, vs[i], Some(ts[i])))
+        i += 1
     }
     return sb.build()
 }

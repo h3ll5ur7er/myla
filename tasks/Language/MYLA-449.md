@@ -2,7 +2,7 @@
 id: MYLA-449
 title: "A literal before the element that fixes a wider type must fit int32"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [language, types, checker]
 ---
@@ -33,3 +33,7 @@ fun main() {
   - Error corpus (pinned `.stderr`): `type_literal_wider_than_the_type_a_later_element_fixes` (`[4000000000, 3u8]`: before `'int32'`, after `'uint8'`, at the literal) and `type_literal_no_later_element_fixes_a_wider_type` (`[1: 4000000000, 2: 7]`, the error that remains, at the literal).
 - **Check time**: see [[MYLA-448]] (one measurement for both): a hello world +0.001 %.
 - **Suites** (both items, one commit): `scripts/bootstrap.sh` reaches its fixed point; `scripts/test.sh fast` 851 tests OK (3 skipped); `tests.burn.test_error_corpus` 342 OK; the full `scripts/test.sh` 1,522 tests, 338 skipped, one failure: `test_selfhost_codegen`'s `test_children_run_in_parallel` (cpu 1.12 s for 1.13 s of wall time, a timing test of the runtime's workers), which fails run alone too while the machine's load is 7 to 9 on its 4 CPUs (six lanes); this change is the checker's only.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

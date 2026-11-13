@@ -159,6 +159,11 @@ async fun main() {
     print(show(http.fetch(base + "/truncated")))
     print(show(http.fetch(base + "/badchunk")))
     print(show(http.fetch(base + "/hugeheader")))
+    // informational responses are skipped, their heads counted against the
+    // head's limit (MYLA-549): a few, then the response; 30,000 of them
+    print(show(http.fetch(base + "/hints")))
+    print(show(http.fetch(base + "/many-1xx")))
+    print(show(await http.fetch_async(base + "/many-1xx")))
     print(show(http.send(http.request("GET", base + "/big?n=5000").with_limits(65536, 4096))))
     // a gzip bomb: 64 MiB of zeros in 64 KiB, past a limit of 1 MiB once
     // decoded (MYLA-472)
@@ -201,6 +206,9 @@ async keep-alive: true
 error: malformed request or status line
 error: connection closed inside a message
 error: malformed chunked body
+error: headers too large
+200 OK [after the hints] Content-Length=15
+error: headers too large
 error: headers too large
 error: body too large
 error: body too large
@@ -335,6 +343,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.raw(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n")
         elif path == "/hugeheader":
             self.raw(b"HTTP/1.1 200 OK\r\nX-Big: " + b"a" * 70000 + b"\r\nContent-Length: 0\r\n\r\n")
+        elif path == "/hints":
+            self.raw(b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n" * 3
+                     + b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nafter the hints")
+        elif path == "/many-1xx":
+            self.raw(b"HTTP/1.1 100 Continue\r\n\r\n" * 30000 + b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nafter")
         else:
             self.answer(404, b"no such page")
 
@@ -532,6 +545,9 @@ def python_clients(test: unittest.TestCase, port: int) -> None:
         (b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\n", b"501 Not Implemented"),
         (b"GET / HTTP/2.0\r\n\r\n", b"505 HTTP Version Not Supported"),
         (b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1x\r\n\r\n", b"400 Bad Request"),
+        # a length beside chunked must still be one (MYLA-549)
+        (b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: zz\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n",
+         b"400 Bad Request"),
         # H7 (MYLA-422): a chunk size that would take body_len + size past
         # int32 is 413, on every runner (it killed a checked server, and a
         # plain one waited for 2 GiB past its limit)
@@ -799,6 +815,26 @@ def quick_get(port: int, timeout: float = 3) -> tuple[bytes, float]:
         return recv_all(s), time.monotonic() - t0
 
 
+def sockets_of(pid: int) -> int:
+    """How many sockets the process `pid` has open (Linux's /proc)."""
+    n = 0
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            n += os.readlink(f"/proc/{pid}/fd/{fd}").startswith("socket:")
+        except OSError:   # closed meanwhile
+            pass
+    return n
+
+
+def wait_for_sockets(pid: int, n: int, limit: float) -> int:
+    """Waits, at most `limit` seconds, until the process `pid` has at most
+    `n` sockets open; how many it has."""
+    deadline = time.monotonic() + limit
+    while (have := sockets_of(pid)) > n and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return have
+
+
 def end_of(s: socket.socket, limit: float) -> tuple[bytes, float]:
     """What `s` receives until it ends (the end of the stream or a reset),
     and when, at most `limit` seconds from now."""
@@ -836,6 +872,7 @@ class TimeLimits(unittest.TestCase):
 
     def serve(self, argv, exe, check):
         proc = subprocess.Popen(argv, executable=exe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.server_pid = proc.pid
         try:
             port = int(proc.stdout.readline())
             check(port)
@@ -868,6 +905,11 @@ class TimeLimits(unittest.TestCase):
             time.sleep(0.2)
             out, took = quick_get(port, timeout=8)
             self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+            # read them once the server has closed both (it keeps its
+            # listener only): reading is progress, and a holder read before
+            # its write_ms passed gets the whole response (MYLA-555: once in
+            # 9 runs under load, the second holder's handler started late)
+            self.assertEqual(wait_for_sockets(self.server_pid, 1, 10), 1)
             for s in hold:
                 got, _ = end_of(s, 5)
                 self.assertLess(len(got), 8 << 20, "closed before the whole response")
@@ -1014,6 +1056,91 @@ class TimeLimits(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "1500", "5000", "5000"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, check)
+
+    def test_requests_begun_wait_parked_on_a_default_server(self):
+        # B7 of the review of 2026-11-12 (MYLA-549): 64 connections that
+        # each sent one byte held every worker of a default server for
+        # read_ms (20 s); renewed every 19 s they stopped it. A request
+        # begun waits for its next bytes parked, its parser kept, and holds
+        # no worker: 64 one-byte heads, 64 heads without their end and 64
+        # bodies cut short beside a default server, and a request on a
+        # connection of its own is answered at once; then each of them
+        # ends its request and is answered as if it had come whole.
+        def check(port):
+            def opened(first: bytes) -> list:
+                socks = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(64)]
+                for s in socks:
+                    s.sendall(first)
+                return socks
+            one = opened(b"G")
+            heads = opened(b"GET /x HTTP/1.1\r\nHost: x\r\nX-A: b")
+            bodies = opened(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc")
+            time.sleep(0.3)
+            took = []
+            for _ in range(3):
+                out, t = quick_get(port, timeout=5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+                took.append(t)
+            self.assertLess(max(took), 1.5, took)
+            # each request ended in two more pieces, a while apart
+            for s in one:
+                s.sendall(b"ET / HTTP/1.1\r\nHo")
+            for s in heads:
+                s.sendall(b"c\r\nConnection: cl")
+            for s in bodies:
+                s.sendall(b"defg")
+            time.sleep(0.2)
+            for s in one:
+                s.sendall(b"st: x\r\nConnection: close\r\n\r\n")
+            for s in heads:
+                s.sendall(b"ose\r\n\r\n")
+            for s in bodies:
+                s.sendall(b"hij")
+            for s in one + heads:
+                out, _ = end_of(s, 5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n") and out.endswith(b"\r\n\r\nok"), out)
+                s.close()
+            for s in bodies:
+                r = recv_response(s)
+                self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"\r\n\r\nabcdefghij"), r)
+                s.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (argv, exe) in self.forms(tmp, ["20000", "d"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, check)
+
+    def test_dribbled_heads_do_not_take_the_workers(self):
+        # the review's t_park2.py, case 3 (MYLA-549): 200 connections
+        # dribbling a head a byte a second against 2 workers; each freed
+        # worker took the next dribbler, even with read_ms 2,000. They wait
+        # parked: fresh requests are answered at once, and every dribbler
+        # is answered 408 once read_ms passed since its head began.
+        def check(port):
+            slow = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(200)]
+            t0 = time.monotonic()
+            for s in slow:
+                s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nX-Slow: ")
+            took = []
+            for _ in range(3):
+                time.sleep(0.3)
+                for s in slow:
+                    s.sendall(b"a")
+                out, t = quick_get(port, timeout=5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+                took.append(t)
+            self.assertLess(max(took), 1.0, took)
+            for s in slow:
+                out, _ = end_of(s, 5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 408 Request Timeout\r\n"), out)
+                s.close()
+            ended = time.monotonic() - t0
+            self.assertTrue(1.5 < ended < 4, ended)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "5000", "1500", "5000"]).items():
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
 

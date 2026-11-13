@@ -2,7 +2,7 @@
 id: MYLA-480
 title: "std.list: the sorts overflow on a list of more than 2^30 elements"
 type: bug
-status: review
+status: done
 priority: low
 labels: [std, list, overflow]
 ---
@@ -46,3 +46,7 @@ The index arithmetic is two helpers of [[lib/std/list.my]], each with `#test` ca
 
   The same binary's count varies by about 0.2 M between runs. `sort`'s 1.9 M are the run loop's call of `run_end`, once for every 16 elements, which isn't inlined in a method (MYLA-526). Times (best of 9, shared machine, load 1 to 4): `sort` 132.9 and 131.7 ms, `sort_unstable` 124.6 and 119.7 ms, `sort_by` 170.2 and 174.1 ms, within the noise of the machine.
 - **Suites** (lane F of the follow-up, on `bccc624`): `scripts/test.sh fast` `Ran 848 tests … FAILED (failures=1, skipped=3)`, the failure `test_embedded_std` (expected until the seed commit); `tests.burn.test_time` `Ran 13 tests … OK`; the full `scripts/test.sh` `Ran 1517 tests … FAILED (failures=2, skipped=338)`: `test_embedded_std` again and `test_selfhost_codegen.test_children_run_in_parallel`, which asks four children for 1.5 times the wall time in CPU time and got 1.08 s of CPU in 1.36 s at a load of 6.7 on 4 cores; alone at that load it fails the same way, and nothing in this lane touches the runtime or code generation.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

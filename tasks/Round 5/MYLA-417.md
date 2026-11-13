@@ -67,3 +67,30 @@ Work package P3 of [[Project/Review-2026-11-09]], the checker half that [[Projec
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189). The message of a module's member it doesn't export now names the module, as the owner asked: `module 'std.deque' does not export 'Nope' (declarations are private unless marked 'pub')`, with `member_not_exported` re-pinned in `test_selfhost_codegen`'s `SUPERSEDED` and a new error-corpus file, `examples/errors/module_member_not_exported.my`. `deque.Deque { … }` stays a parse error (D170).
+
+## Review 2026-11-12
+
+Reopened ([[Project/Review-2026-11-12]]): two regressions, both narrow. The rest holds: 4,708 generated literal programs with none wrong, 174 diagnostics without an internal name, and the package's tests catch mutations of its fixes.
+
+- [x] **D178's call error fires on a generic actor's getter called from outside** (new). The field can't be meant there, as an actor's state is private, and the fix the message gives (`let g = c.value`) is itself an error; the compiler before round 5 prints 6. `field_shadowed` should skip an actor receiver that isn't `self`. Reproducer `repro-r5/checker/bug1_d178_actor_getter.my`:
+
+  ```myla
+  actor Cell<T> { value: T }
+  impl<T> Cell<T> {
+      fun value(self) -> T { return self.value }
+  }
+  #main
+  async fun main() {
+      let c = Cell { value: (x: int) => x + 1 }
+      let f = await c.value()
+      print(f(5))
+  }
+  ```
+- [x] D95's head, which [[MYLA-394]] carries (the same function, `Reentrancy.head`)
+
+### Round 6 (checker lane)
+
+- **C1** (`field_shadowed`): an actor's field is looked at only when the receiver is `self` (an actor's state is reached through `self` in its own methods only), so `await c.value()` and `await h.c.value()` from outside call the getter. A struct's field is checked as before.
+- **D95's head**: [[MYLA-394]]'s evidence (`Reentrancy.ordered` replaces `head`).
+
+Evidence: `repro-r5/checker/bug1_d178_actor_getter.my` was `type error: 'value' is a method of 'Cell<(int32) -> int32>' and its field 'value' holds a function here: bind the field first: let g = c.value` at `6e699ca` and prints 6 now, interpreted and natively. Tests first: two `errors_of` cases in `selfhost/checker.my` (a getter called on a local actor and on one in a struct's field: `[]`, the first failing before with the D178 message), and the parity program `actor_getter_of_a_field_s_name` (pinned `6`, `11`; a type error before). The four D178 cases of round 5 still pass. Suites: [[MYLA-544]]'s evidence (one run for the lane).

@@ -17,7 +17,9 @@ first (`captures`); the answers must be the same.
   RE2's Pike VM), so it checks the whole syntax, but for a literal `A`:
   go1.24's parser merges a case-sensitive `A` with a case-folded `a` that
   starts another alternative, and finds `A|(?i:a)c` in `acA` at 2-3, where
-  Python and `std.regex` find 0-2. The test skips without `go`.
+  Python and `std.regex` find 0-2. The test skips without `go`, but not
+  in CI, which installs Go and sets MYLA_REQUIRE_TARGETS: there
+  `GoOracle.test_go_is_there` fails without it (MYLA-555).
 - Python's `re` backtracks: it agrees only where no repetition can repeat
   an empty match, so its patterns repeat only what can't be empty, and `$`
   and `\\z` are written in its spelling. Backtracking takes exponential
@@ -320,6 +322,15 @@ def python_answer(pattern: str, text: bytes) -> str:
     return "".join(out)
 
 
+@unittest.skipUnless(os.environ.get("MYLA_REQUIRE_TARGETS"), "MYLA_REQUIRE_TARGETS is not set")
+class GoOracle(unittest.TestCase):
+    """CI sets MYLA_REQUIRE_TARGETS, so the Go half below fails there
+    without `go` instead of skipping unnoticed (MYLA-555)."""
+
+    def test_go_is_there(self):
+        self.assertIsNotNone(shutil.which("go"), "the Go oracle needs go (CI's burn job installs it)")
+
+
 class RegexDifferentialTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -337,6 +348,10 @@ class RegexDifferentialTest(unittest.TestCase):
             subprocess.run(["as", "--64", "-o", exe + ".o", exe + ".s"], check=True)
             subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
             cls.native = exe
+            # the same driver built checked, where an integer overflow is an error (D184, MYLA-550)
+            cls.checked = os.path.join(cls.tmp, "driver-checked")
+            subprocess.run([selfhost_tool("main"), "build", cls.path, "-o", cls.checked, "--stdlib", STDLIB_ROOT,
+                            "--checked"], capture_output=True, check=True)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -404,6 +419,20 @@ class RegexDifferentialTest(unittest.TestCase):
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_python_natively(self) -> None:
         self.against_python(True, 4211, 10_000)
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_checked_natively(self) -> None:
+        # the plain and the checked build answer the same, counted
+        # repetitions such as `a{99999999999}` included
+        made = corpus(4214, 10_000, 0.75, python=True)
+        lines = [line(g, t) for g, _, t in made]
+        lines += [line(f"a{{{n}}}", b"aaa") for n in ("2147483647", "2147483648", "4294967296", "99999999999999999999")]
+        lines += [line(f"a{{1,{n}}}", b"aaa") for n in ("2147483647", "2147483648", "99999999999999999999")]
+        plain = self.myla(True, lines)
+        proc = subprocess.run([self.checked], input="\n".join(lines) + "\n", capture_output=True, text=True,
+                              timeout=900)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.splitlines(), plain, "the plain and the checked build differ")
 
     @unittest.skipUnless(shutil.which("go"), "Go isn't installed")
     def test_go_interpreted(self) -> None:

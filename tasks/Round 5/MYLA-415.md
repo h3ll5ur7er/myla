@@ -68,3 +68,41 @@ Each reproducer of `review1/repro/native/` became a test that failed before (the
 ## The owner's decision (2026-11-11)
 
 Proposals 1, 2 and 4 stand as built (D189). Proposal 3 is decided otherwise (D188): `myla build` of a file without an entry point is `error: no entry point …`, an error of its own kind, not a type error; once Myla has an FFI it builds a library ([[MYLA-505]]). Changed with the decision: `CodeGen.generate`'s message and `loader.kind_of`.
+
+## Review 2026-11-12
+
+Reopened ([[Project/Review-2026-11-12]]): H3 isn't closed for one shape, which the pre-round-5 compiler shares and the parity program `recursive_enums_across_tasks` never builds. Everything else holds on five runners: 35 value shapes through about 60 hand-overs each at up to 3,000 rounds and 8 threads, 10^6 levels of nesting, 5,400 generated write statements.
+
+- [x] **A closure held in a variable that captures a recursive enum segfaults when it is copied to a child task, an actor or a channel** (exit 139 on x86-64, `--checked` and aarch64; the interpreter and wasm32 print 3). Also a partial `add(cap, _)`, a struct holding the closure, nested closures, `[f, f]` to `task.all`, `ch.send(f)`. A temporary closure works. Unverified: `Lower.deep_member` loads a boxed capture as a box, where an environment holds the enum's contents inline. Reproducer `repro-r5/native/segv_closure_captures_recursive_enum_to_task.my`:
+
+  ```myla
+  enum Lst { Nil, Cons(int, Lst) }
+
+  fun total(l: Lst) -> int {
+      return match l {
+          Cons(n, rest) => n + total(rest)
+          Nil => 0
+      }
+  }
+
+  async fun run(f: () -> int) -> int { return f() }
+
+  #main
+  async fun main() {
+      let cap = Lst.Cons(1, Lst.Cons(2, Lst.Nil))
+      let f = () => total(cap)
+      async let a = run(f)
+      print(await a)
+  }
+  ```
+- [x] Closures, partials and structs holding a closure that capture a recursive enum, in the parity program
+
+### What changed (round 6)
+
+- **B1**: an environment holds a captured recursive enum as its cell's contents, inline, as `env_drop_ir` releases it; its deep copy (`env_deep_members_ir`, `myla_<lifted>_env_deep_m` and `_env_clone_m`) loaded that word as a box and gave it to `__deepb_<E>`. It walks the contents in place now (`__deepi_<E>`, `__dclonei_<E>`). The unverified guess was right: `Lower.deep_member` treated every boxed member as a box, which only an environment's capture isn't.
+
+### Evidence (round 6)
+
+- Parity program `closures_capturing_recursive_enums_across_tasks` (a closure in a variable to a child, one capturing two recursive enums and a string, a partial `add(cap, _)`, a struct holding the closure, nested closures, `[async () => f(), async () => g()]` to `task.all`, an actor keeping it, two through a channel, a child's closure awaited by two siblings and the parent, which is the clone path, and the parent's copies afterwards). Before (`build/myla` of 6e699ca): exit 139 on x86-64, `--checked` and aarch64. After: the interpreter's output on x86-64, `--checked`, aarch64 (qemu) and wasm32 (Node); the review's two reproducers (`segv_closure_captures_recursive_enum_to_task.my`, `_to_actor.my`) likewise.
+- No leak: a closure capturing a 20-element list handed to a child 10,000 and 100,000 times, 10.9 MB max RSS both.
+- `build/myla test selfhost/lower.my`: 147/147; `scripts/bootstrap.sh`: byte-identical fixed point.

@@ -1,0 +1,44 @@
+---
+id: MYLA-546
+title: "R4 The interpreter: small differences from native code, and the cost that crept in"
+type: bug
+status: review
+priority: low
+labels: [interpreter, round-6]
+---
+Work package R4 of [[Project/Review-2026-11-12]]. Files: `selfhost/interp.my`. Same lane as [[MYLA-414]] (reopened).
+
+- [x] The REPL echoes a `uint64` of 2^63 or more signed
+- [x] A `uint64` index of 2^64-1 is reported as -1 in `list index … out of bounds` (both runners; [[MYLA-440]])
+- [x] A map's order differs from native code's when written hashes collide (the number of `eq` calls differs too) and in a nested map literal ([[MYLA-506]])
+- [x] The plain loop got 8.6 percent slower over round 5, each task having measured against its own base. Add a row without a map to the benchmark table and find the step
+- [ ] Packed bytes through `extend` and `read_line` are still slow interpreted (3 MB in 60,000 lines: 9.1 s) *(open: not in round 6 wave 1's brief for this lane, which named the four items above)*
+- [ ] *(open, as the previous)* Large legitimate arguments: `math.ldexp(x, ±2^30)` takes over 5 s, `fmt.fmt_text("xy", ">1000000")` 6.4 s against 13 ms natively, `to_hex(n, 2^30)` pads one character at a time
+- [ ] *(open, as the previous)* An idle interpreted HTTP server uses 23 percent of a CPU with 1,000 parked connections (`repro-r5/http/t_idlecpu.py`); natively none
+- [x] `docs/Language/Generics.md`, first line: generic code is no longer "run by erasure" in the interpreter since [[MYLA-414]] binds the type parameters
+
+## What was built
+
+- **The REPL's echo** ([[selfhost/repl.my]]): the value of an input's final expression is written by that expression's checked type (`show_typed`, `shown_type`), so a `uint64` of 2^63 or more is unsigned alone and in a list, a tuple, a map, a struct's field and a variant's payload; `payload_types` of [[selfhost/interp.my]] is `pub` for it.
+- **A `uint64` index**: the interpreter's `list index … out of bounds` and `string index …` write the index by its type (`index_error`'s new argument, `index_text`; the text is made again with the type only when the check fails, so the hot path looks nothing up). Native code had the same bug, so its bounds check of a `uint64` index reports through `__trap_luindex` / `__trap_suindex`, whose std.rt texts (`list_uindex_text`, `str_uindex_text`) write it unsigned: one line in each back end (`want_index_trap` in [[selfhost/codegen.my]], called by the x86-64 check there and by [[selfhost/ir_a64.my]] and [[selfhost/ir_wasm.my]]), two kinds in [[selfhost/lower.my]]'s `trap_text_fn`, two names in [[selfhost/checker.my]]'s `backend_std_functions`, the two functions in [[lib/std/rt.my]].
+- **The order of a written `hash` and `eq`**: the interpreter chained a hash's keys newest first, native code's probe meets them in the order they were put in, except that a new key took the first tombstone on its probe, so after a removal its place on the probe depended on native hashes the interpreter doesn't have. Now the interpreter chains them oldest first (`MapV.index` appends; `compact` links from the newest), and std.rt's `map_place_h` gives a new compound key the first *empty* slot (one line: `state == 0` for `state != 1`): a tombstone keeps its rank until the next compaction anyway, so the load bound is the one before. A map literal evaluates each key, then its value, then hashes and finds the key (the interpreter hashed it before the value), in a nested literal too.
+- **The plain loop**: compared with round 5's base (3885271) by callgrind; see the evidence. Round 5's step on this path was H1's `typed_of` ([[MYLA-414]]): every integer literal and every operation looked its type up and tested it for a type parameter. A literal's type is never a type parameter's and one from 0 to 127 is itself in every integer type, so such a literal is made without a lookup (`eval_int_lit`); `typed_of` tests for a type parameter only once a generic call has bound one (`envs` not empty). The rest of round 5's step is the compiler's, not the interpreter's: the CLI is built with the task runtime since round 5 (its thread-local drop depth, `alloc_tasks`), because it imports std.process, whose test function has an `async let` ([[MYLA-504]], kept by the owner's decision of 2026-11-11): +6.0 M of the plain loop's +9.3 M.
+- `docs/Language/Generics.md`'s first line, [[Architecture/Interpreter]], [[Architecture/Native-backend]], [[Architecture/Self-hosted-compiler]] (the REPL), [[Language/Expressions-and-operators]] (a map literal's order), [[Language/Collections-and-strings]] (the order of `eq` on equal hashes).
+
+## Evidence
+
+- **Failing first.** `test_selfhost_cli.TestRepl.test_a_uint64_is_echoed_unsigned` printed `-1`, `[-1, 1]`, `(-1, -1)`, `[-1: [-1]]`, `P { a: -1, b: -1 }`, `E.A(-1)`, `Some(-1)`, `[Some((1, -1))]`; passes. `test_compiler_parity…test_a_uint64_index_is_reported_unsigned`: both runners said `list index -1 out of bounds (len 2)`, `-9223372036854775808`, `string index -1` (and natively on aarch64 under qemu and wasm32 under Node); all three name the index unsigned on all three targets now, and `test_runtime_errors_are_reported_alike` holds with the three programs added. `test_compiler_parity…test_written_hash_and_eq_run_alike` against the previous `interp.my` and `rt.my` failed (`eq 0 6, eq 3 6` against `eq 3 6, eq 0 6`; before the change the program printed 798 lines interpreted, 655 natively); passes, and the program prints the same on aarch64 and wasm32. A generated check, 18 random runs of 400 to 3,000 inserts, removals and lookups on a map whose written hash collides (`v % m`, m from 1 to 5), interpreted against native: every output identical, each `eq` call included.
+- **Instructions** (callgrind, `myla run` of the whole program, millions; round 5's base is 3885271's CLI built by its own compiler from its seed with its library, 6e699ca's and the final one built by this branch's compiler):
+
+  | program | 3885271 | 6e699ca | final |
+  | --- | --- | --- | --- |
+  | start-up (`fun main() {}` with an empty loop) | 41.95 | 24.85 | 24.79 |
+  | plain loop, no map: 20,000 iterations of `%`, `==`, `<`, `+=` | 273.68 | 265.54 | 237.63 |
+  | arithmetic loop, 50,000 iterations of `s = s + (i as int64) * 3 - 1; s = s ^ 5` | 924.75 | 972.86 | 888.56 |
+  | `fib(18)` | 402.78 | 111.06 | 104.02 |
+  | an `[int: int]` written and read 20,000 times | 626.05 | 635.86 | 608.27 |
+  | generic: `add<T>` 3,000 times, `sum`, `sorted`, `map`/`filter` | 1,105.87 | 786.11 | 766.09 |
+
+  Less start-up, the plain loop is 231.7 M → 240.7 M (+3.9%) → 212.8 M (−8.2% against round 5's base), the arithmetic loop 882.8 → 948.0 (+7.4%, the review's 8.6% within the machine's measuring) → 863.8 (−2.2%), the map loop 584.1 → 611.0 → 583.5. The plain loop's +9.0 M over round 5, split by building round 5's interpreter with this compiler (237.8 M): the compiler's +6.1 M (the task runtime's thread-local drop depth in `__dropb_*`, `alloc_tasks`, [[MYLA-504]]) and the interpreter's +2.9 M, which is, by function, `typed_of` and `is_param_opt` +7.1 M where `resolved_of` was 2.9 M (153,367 calls a run, 86,694 of them from literals), `eval_binary` +3.6 M (the fused read's test, the generic `eq`'s type), `fused_compound` +1.0 M, against −8.6 M of fewer lookups (`map_lookup` −3.8 M, the type table's `get` −2.2 M and its drops −2.6 M). Tried and dropped: a `match` in `typed_of` for the function's test (+1.4 M), `values_equal`'s type argument as an `if` expression (no change).
+- **Suites** (with [[MYLA-414]]'s, at the lane's tip): `build/myla test selfhost/interp.my` 446/446, `selfhost/repl.my` 52/52, `selfhost/lower.my --only trap_text_fn` 2/2, `lib/std/rt.my --stdlib lib` 22/22; `scripts/test.sh fast` 867 tests, one failure, `test_embedded_std` (expected until the seed commit: `lib/std/rt.my` changed); `scripts/test.sh` (all) 1,552 tests (341 skipped), two failures: `test_embedded_std` again and `test_children_run_in_parallel` (cpu 1.12 s against wall 0.81 s at a load of 5 to 8 on 4 cores; it fails the same with this branch's std.rt change taken out, so it is the shared machine). On aarch64 (`scripts/test-target.py aarch64-linux`) `test_compiler_parity`, `test_overflow`, `test_map_remove` pass, but for `test_allocation_does_not_scan_unusable_free_cells`, whose 5 s limit under qemu ran out at a load of 8; alone it passes. On wasm32 the three pass. `scripts/bootstrap.sh`: byte-identical fixed point (23,968,174 bytes); `selfhost/embedded_std.my` left as committed.
+

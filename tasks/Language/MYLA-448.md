@@ -2,7 +2,7 @@
 id: MYLA-448
 title: "A compound assignment's hoisted map key loses the map's key type"
 type: bug
-status: review
+status: done
 priority: low
 labels: [language, types, parser, checker]
 ---
@@ -40,3 +40,7 @@ The same hidden temporary blocks a compound assignment to a field whose value is
 - **Every form against its plain form** (a scratch script, not kept): 22 places (names, fields, list indexes `0`, `i`, `i + 1`, `ix()`, `^1`, `^(i + 1)`, `Option`/`Result`/`int64`/generic map keys, nested) × the ten operators × 10 right sides (`1`, `blank()`, `lst()`, `2.5`, `"x"`, `big`, `5000000000`, `None`, `-1`, `'a'`), each `x op= e` checked beside `x = x op e`, comparing exit status and messages: before 498 of 2,200 pairs differed, after none.
 - **Check time** (callgrind, `build/myla check`, instructions, both items): `examples/hello.my` 41,206,892 → 41,207,329 (+0.001 %); with `std.io` 60,363,444 → 60,365,055 (+0.003 %).
 - **Suites** (both items, one commit): `scripts/bootstrap.sh` reaches its fixed point; `scripts/test.sh fast` 851 tests OK (3 skipped); `tests.burn.test_error_corpus` 342 OK; the full `scripts/test.sh` 1,522 tests, 338 skipped, one failure: `test_selfhost_codegen`'s `test_children_run_in_parallel` (cpu 1.12 s for 1.13 s of wall time, a timing test of the runtime's workers), which fails run alone too while the machine's load is 7 to 9 on its 4 CPUs (six lanes); this change is the checker's only.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

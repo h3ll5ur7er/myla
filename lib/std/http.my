@@ -793,8 +793,10 @@ impl Request {
     }
 
     // The request accepting a response head of at most `header_bytes` bytes
-    // and a body of at most `body_bytes` (as received, before decoding).
-    // A negative limit is a runtime error (D184).
+    // and a body of at most `body_bytes` (as received, before decoding; a
+    // body is a `str`, so 2,147,483,647 bytes at most whatever the limit:
+    // a longer one is `BodyTooLarge`). A negative limit is a runtime error
+    // (D184).
     #test(request("GET", "/"), -1, 5)[panic("with_limits: header_bytes -1 is negative")]
     #test(request("GET", "/"), 5, -2)[panic("with_limits: body_bytes -2 is negative")]
     fun with_limits(self, header_bytes: int, body_bytes: int) -> Request {
@@ -1282,8 +1284,12 @@ impl Parser {
             }
             if self.headers.has("Content-Length") {
                 // both: the length is ignored, and the connection can't be
-                // trusted after the message
+                // trusted after the message; a request's must still be a
+                // length (MYLA-549)
                 self.close_after = true
+                if self.request && self.content_length() < -1 {
+                    return
+                }
             }
             if codings[^1] == "chunked" {
                 self.state = S_CHUNK_SIZE
@@ -1298,23 +1304,11 @@ impl Parser {
             self.state = S_UNTIL_CLOSE
             return
         }
-        let lengths = self.headers.get_all("Content-Length")
-        if lengths.len() > 0 {
-            var n = -1
-            for v in lengths {
-                for piece in v.split(",") {
-                    let k = parse_decimal(trim_ows(piece))
-                    if k == -2 {
-                        self.fail(HttpError.BodyTooLarge)
-                        return
-                    }
-                    if k < 0 || (n >= 0 && k != n) {
-                        self.fail(HttpError.BadLength)
-                        return
-                    }
-                    n = k
-                }
-            }
+        let n = self.content_length()
+        if n < -1 {
+            return
+        }
+        if n >= 0 {
             if n > self.max_body {
                 self.fail(HttpError.BodyTooLarge)
                 return
@@ -1330,6 +1324,29 @@ impl Parser {
             self.until_close = true
             self.state = S_UNTIL_CLOSE
         }
+    }
+
+    // The length the `Content-Length` fields give (each the same, a list
+    // of the same one allowed): -1 when there is none, -2 when they don't
+    // give one (the parser failed: `BadLength`, or `BodyTooLarge` past the
+    // largest `int`).
+    fun content_length(var self) -> int {
+        var n = -1
+        for v in self.headers.get_all("Content-Length") {
+            for piece in v.split(",") {
+                let k = parse_decimal(trim_ows(piece))
+                if k == -2 {
+                    self.fail(HttpError.BodyTooLarge)
+                    return -2
+                }
+                if k < 0 || (n >= 0 && k != n) {
+                    self.fail(HttpError.BadLength)
+                    return -2
+                }
+                n = k
+            }
+        }
+        return n
     }
 
     // A request whose body is still to come and that asked for `100
@@ -1526,15 +1543,24 @@ fun method_has_body(method: str) -> bool {
 
 // The request `r` as it is sent to `t`, its head and its body apart (a
 // large body isn't copied after the head): the request line, `Host` first
-// unless `r` has one, `Accept-Encoding` if it decompresses, `Connection:
-// close` unless `keep`, the framing, and the body (chunked if `r` says
-// `Transfer-Encoding: chunked`, with its trailers).
+// unless `r` has one (two, or one that isn't a host and port, are
+// `BadHeader`, as the server refuses them), `Accept-Encoding` if it
+// decompresses, `Connection: close` unless `keep`, the framing, which is
+// the body's (MYLA-549: a `Content-Length` of `r`'s own is replaced by the
+// body's, and left out beside chunked, RFC 9112 section 6.2), and the body
+// (chunked if `r` says `Transfer-Encoding: chunked`, with its trailers;
+// another transfer coding is `Unsupported`, as it isn't applied).
 fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpError> {
     if !is_token(r.method) {
         return Err(HttpError.BadStartLine)
     }
     var h = headers()
-    if !r.headers.has("Host") {
+    if r.headers.has("Host") {
+        let hosts = r.headers.get_all("Host")
+        if hosts.len() > 1 || !is_host(hosts[0]) {
+            return Err(HttpError.BadHeader)
+        }
+    } else {
         h.add("Host", t.host_header)
     }
     h = joined(h, r.headers)
@@ -1544,9 +1570,32 @@ fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpEr
     if !keep && !h.has("Connection") {
         h.add("Connection", "close")
     }
-    let chunk = h.has_token("Transfer-Encoding", "chunked")
-    if !chunk && !h.has("Content-Length") && (r.body.len() > 0 || method_has_body(r.method)) {
-        h.add("Content-Length", f"{r.body.len()}")
+    // the fields looked at, and the list rebuilt, only when the request has
+    // a framing of its own
+    var chunk = false
+    if h.has("Transfer-Encoding") {
+        for c in tokens(h.get_all("Transfer-Encoding")) {
+            if c != "chunked" {
+                return Err(HttpError.Unsupported(f"transfer coding {c}"))
+            }
+            chunk = true
+        }
+        if chunk {
+            h.set("Transfer-Encoding", "chunked")
+        } else {
+            // an empty `Transfer-Encoding` names no coding
+            h.remove("Transfer-Encoding")
+        }
+    }
+    let own_length = h.has("Content-Length")
+    if !chunk && (r.body.len() > 0 || method_has_body(r.method)) {
+        if own_length {
+            h.set("Content-Length", f"{r.body.len()}")
+        } else {
+            h.add("Content-Length", f"{r.body.len()}")
+        }
+    } else if own_length {
+        h.remove("Content-Length")
     }
     var sb = StringBuilder()
     sb.append(r.method)
@@ -1565,10 +1614,11 @@ fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpEr
 // The request `r` as a `Client` sends it: the request line with the URL's
 // target, a `Host` header from the URL unless `r` has one, `Accept-Encoding:
 // gzip, deflate` if `r` decompresses and has none, `Content-Length` when
-// there is a body (or the method is `POST`, `PUT` or `PATCH`) and no
-// framing of its own, then the body. `send` adds `Connection: close`. A URL
-// that starts with `/` (or is `*`) is sent as the target as it is, with an
-// empty `Host` unless `r` has one.
+// there is a body (or the method is `POST`, `PUT` or `PATCH`) and it isn't
+// chunked (one of `r`'s own replaced), then the body. Two `Host` fields
+// are `BadHeader`. `send` adds `Connection: close`. A URL that starts with
+// `/` (or is `*`) is sent as the target as it is, with an empty `Host`
+// unless `r` has one.
 pub fun format_request(r: Request) -> Result<str, HttpError> {
     let t = if r.url.starts_with("/") || r.url == "*" {
         Target { host: "", port: 80, path: r.url, host_header: "" }
@@ -1995,8 +2045,9 @@ pub fun client() -> Client {
 }
 
 // The request after a redirect `resp` to `r` (from the URL `from`): the
-// `Location` resolved against `from`; a 303, or a 301 or 302 to a `POST`,
-// becomes a `GET` without a body; another host doesn't get `Authorization`
+// `Location` resolved against `from`, with `from`'s fragment when it has
+// none; a 303, or a 301 or 302 to a `POST`, becomes a `GET` without a
+// body; another host doesn't get `Authorization`, `Proxy-Authorization`
 // and `Cookie`. `None` when `resp` isn't a redirect.
 fun redirected(r: Request, resp: Response) -> Option<Request> {
     let s = resp.status
@@ -2009,6 +2060,12 @@ fun redirected(r: Request, resp: Response) -> Option<Request> {
     }
     var next = r
     next.url = resolve(r.url, loc)
+    // a Location without a fragment inherits the request's (RFC 9110,
+    // section 10.2.2)
+    let hash = find_byte(r.url, 35, 0)
+    if hash >= 0 && find_byte(next.url, 35, 0) < 0 {
+        next.url = next.url + part(r.url, hash, r.url.len())
+    }
     if (s == 303 && !same_name(r.method, "HEAD")) || ((s == 301 || s == 302) && same_name(r.method, "POST")) {
         next.method = "GET"
         next.body = ""
@@ -2019,6 +2076,7 @@ fun redirected(r: Request, resp: Response) -> Option<Request> {
     next.headers.remove("Host")
     if authority(next.url) != authority(r.url) {
         next.headers.remove("Authorization")
+        next.headers.remove("Proxy-Authorization")
         next.headers.remove("Cookie")
     }
     return Some(next)
@@ -2332,9 +2390,24 @@ fun retryable(e: HttpError) -> bool {
 // The bytes of a body up to which it is sent with its head in one write.
 const ONE_WRITE: int = 16384
 
+// The room left for the head of a response under its limit `room`, after
+// an informational response whose head took `seen` bytes (MYLA-549): the
+// heads of 1xx responses count against it, so a server can't send them
+// without end. `HeadersTooLarge` when none is left.
+#test(100, 25)[Ok(75)]
+#test(25, 25)[Err(HttpError.HeadersTooLarge)]
+fun after_informational(room: int, seen: int) -> Result<int, HttpError> {
+    let left = room - seen
+    if left <= 0 {
+        return Err(HttpError.HeadersTooLarge)
+    }
+    return Ok(left)
+}
+
 impl Wire {
     // The request's head and body (`text`) sent and the response to `r`
-    // read, the informational (1xx but 101) responses before it skipped.
+    // read, the informational (1xx but 101) responses before it skipped,
+    // their heads counted against the head's limit (`after_informational`).
     fun round_trip(var self, text: (str, str), r: Request, deadline: int64) -> Result<Parser, HttpError> {
         if text.1.len() <= ONE_WRITE {
             self.send(text.0 + text.1, deadline)?
@@ -2342,11 +2415,13 @@ impl Wire {
             self.send(text.0, deadline)?
             self.send(text.1, deadline)?
         }
+        var room = r.max_header_bytes
         while true {
-            let p = self.read_message(parser(false, r.method, r.max_header_bytes, r.max_body_bytes), deadline)?
+            let p = self.read_message(parser(false, r.method, room, r.max_body_bytes), deadline)?
             if p.status >= 200 || p.status == 101 {
                 return Ok(p)
             }
+            room = after_informational(room, p.seen)?
         }
         unreachable()
     }
@@ -2355,12 +2430,14 @@ impl Wire {
     async fun round_trip_async(var self, text: (str, str), r: Request) -> Result<Parser, HttpError> {
         let sent = await self.send_parts_async(text)
         sent?
+        var room = r.max_header_bytes
         while true {
-            let got = await self.read_message_async(parser(false, r.method, r.max_header_bytes, r.max_body_bytes))
+            let got = await self.read_message_async(parser(false, r.method, room, r.max_body_bytes))
             let p = got?
             if p.status >= 200 || p.status == 101 {
                 return Ok(p)
             }
+            room = after_informational(room, p.seen)?
         }
         unreachable()
     }
@@ -2434,10 +2511,11 @@ pub async fun post_async(url: str, body: str) -> Result<Response, HttpError> {
 //   then the connection is closed (a client that doesn't read can't hold
 //   a worker).
 // A connection waiting for its next request (its first too) is parked on
-// the reactor with no task and holds no worker (MYLA-468); a keeper task
-// closes those whose time runs out, and a wait while a request is read or
-// a response sent has its time limit. The handler's own time isn't
-// limited.
+// the reactor with no task and holds no worker (MYLA-468), and so is one
+// whose request has begun and waits for more of it, its parser kept
+// (MYLA-549); a keeper task closes those whose time runs out (a request
+// begun answered 408), and a wait while a response is sent has its time
+// limit. The handler's own time isn't limited.
 pub struct ServerOptions {
     workers: int,
     max_connections: int,
@@ -2580,15 +2658,17 @@ fun earliest(a: int64, b: int64) -> int64 {
 }
 
 // How often the keeper looks for connections whose time ran out: a quarter
-// of the shorter of `idle_ms` and `keep_alive_ms`, from 10 ms to a second
-// (negative: neither limits a connection, no keeper).
+// of the shortest of `idle_ms`, `keep_alive_ms` and `read_ms` (a request
+// begun waits parked too, MYLA-549), from 10 ms to a second (negative:
+// none limits a parked connection, no keeper).
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: 60000, idle_ms: 5000, read_ms: 20000, write_ms: 30000 })[1000]
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: 300, read_ms: -1, write_ms: 1000 })[75]
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: 0, read_ms: -1, write_ms: -1 })[10]
-#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: 50, write_ms: 50 })[-1]
+#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: 200, write_ms: 50 })[50]
+#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: -1, write_ms: 50 })[-1]
 fun poll_ms(o: ServerOptions) -> int {
     var shortest = -1
-    for ms in [o.keep_alive_ms, o.idle_ms] {
+    for ms in [o.keep_alive_ms, o.idle_ms, o.read_ms] {
         if ms >= 0 && (shortest < 0 || ms < shortest) {
             shortest = ms
         }
@@ -2608,15 +2688,19 @@ fun poll_ms(o: ServerOptions) -> int {
 // is notified once and a worker takes it (`worker`). Each connection is
 // parked with its deadline (`idle_ms` from when it began to wait, and its
 // connection's time, `keep_alive_ms` from its accept) and its time's end as
-// its tag, which the worker that takes it up reads (`__sock_tag`).
+// its tag, which the worker that takes it up reads (`__sock_tag`). A
+// connection whose request has begun and waits for its next bytes is
+// parked too, with the request's time limit as its deadline, and what it
+// read in `pending` (MYLA-549).
 struct Lot {
     id: int,
     ready: task.Notifier,
+    pending: Pending,
 }
 
 fun lot_made() -> Lot {
     let n = task.notifier()
-    return Lot { id: __sock_lot(n.id), ready: n }
+    return Lot { id: __sock_lot(n.id), ready: n, pending: Pending { begun: [:] } }
 }
 
 impl Lot {
@@ -2662,26 +2746,56 @@ fun closed(h: int) {
 
 // The connection `h` parked until its next request begins: within
 // `idle_ms` from now and its time's end `life_end` (its tag); closed once
-// the lot is (a server that stopped). Past `max_connections` sockets
-// parked (the listener `l` among them when it is), the connection whose
-// time runs out first is closed (its client opens another when it has a
-// request: a quiet connection gives way to a new one).
-fun park_connection(lot: Lot, l: TcpListener, h: int, o: ServerOptions, life_end: int64) {
-    let deadline = earliest(after(time.now_ms(), o.idle_ms), life_end)
-    let count = lot.park(h, deadline, life_end)
+// the lot is (a server that stopped). Whether a parked connection must be
+// closed for it (`evict`): past `max_connections` sockets parked (the
+// listener among them when it is), the connection whose time runs out
+// first is (its client opens another when it has a request: a quiet
+// connection gives way to a new one).
+fun park_connection(lot: Lot, h: int, o: ServerOptions, life_end: int64) -> bool {
+    return parked(lot, h, earliest(after(time.now_ms(), o.idle_ms), life_end), life_end, o)
+}
+
+// The connection `h` parked with `deadline` and `tag` (`park_connection`).
+fun parked(lot: Lot, h: int, deadline: int64, tag: int64, o: ServerOptions) -> bool {
+    let count = lot.park(h, deadline, tag)
     if count < 0 {
         closed(h)
-        return
+        return false
     }
-    if o.max_connections >= 0 && count > o.max_connections {
-        evict(lot, l)
+    return o.max_connections >= 0 && count > o.max_connections
+}
+
+// The connection `h`, its request begun `b` not all there, parked until
+// more of it comes, within the request's time limit (MYLA-549); `b` kept
+// in the lot's `pending` first, so that the worker that takes it up finds
+// it. Whether a parked connection must be closed for it, as
+// `park_connection`.
+async fun park_begun(lot: Lot, h: int, b: Begun, o: ServerOptions) -> bool {
+    let deadline = b.r.deadline
+    await lot.pending.put(h, b)
+    return parked(lot, h, deadline, BEGUN, o)
+}
+
+// The parked connection `h`, taken off the lot, closed: its request begun,
+// if it has one, forgotten, and answered with `answer` first (`TimedOut`:
+// 408) as far as the socket takes it at once.
+async fun dropped(lot: Lot, h: int, answer: Option<HttpError>) {
+    if __sock_tag(h) == BEGUN {
+        let gone = await lot.pending.take(h)
+        match answer {
+            Some(e) => {
+                let sent = __sock_send(h, error_response(e), 0)
+            }
+            None => {}
+        }
     }
+    closed(h)
 }
 
 // The parked connection whose time runs out first closed (with no time
 // limit, the one parked first), not the listener `l`, which is parked
 // again when it came first.
-fun evict(lot: Lot, l: TcpListener) {
+async fun evict(lot: Lot, l: TcpListener) {
     var oldest = __sock_expired(lot.id, -1)
     if oldest == l.handle {
         let again = lot.park(l.handle, -1, -1)
@@ -2692,7 +2806,7 @@ fun evict(lot: Lot, l: TcpListener) {
         }
     }
     if oldest > 0 {
-        closed(oldest)
+        await dropped(lot, oldest, None)
     }
 }
 
@@ -2712,7 +2826,9 @@ async fun accept_waiting(l: TcpListener, o: ServerOptions, lot: Lot) -> Result<(
         match nl.accept() {
             Ok(s) => {
                 let nd = s.set_nodelay(true)
-                park_connection(lot, l, s.handle, o, after(time.now_ms(), o.keep_alive_ms))
+                if park_connection(lot, s.handle, o, after(time.now_ms(), o.keep_alive_ms)) {
+                    await evict(lot, l)
+                }
             }
             Err(e) => {
                 fate = accept_fate(e)
@@ -2722,7 +2838,7 @@ async fun accept_waiting(l: TcpListener, o: ServerOptions, lot: Lot) -> Result<(
         k += 1
     }
     if fate == LATER {
-        evict(lot, l)
+        await evict(lot, l)
         await task.sleep(10)
     }
     let parked = lot.park(l.handle, -1, -1)
@@ -2738,71 +2854,102 @@ struct Link {
     w: Wire,
 }
 
-impl Link {
-    // More bytes read, within `deadline` (negative: none): false at the end
-    // of the stream, `TimedOut` past the deadline. What the socket has is
-    // read at once; a wait for more is a task's with that time limit.
-    async fun fill_until(var self, deadline: int64) -> Result<bool, HttpError> {
-        let now = self.w.try_fill()?
-        if now != 0 {
-            return Ok(now > 0)
-        }
-        if deadline < 0 {
-            return await self.w.fill_async()
-        }
-        let left = deadline - time.now_ms()
-        if left <= 0 {
-            return Err(HttpError.TimedOut)
-        }
-        let st = self.w.stream
-        let got = await task.timeout(left as int, async () => {
-            var c = st
-            return await c.read_async(READ_SIZE)
-        })
-        return match got {
-            Some(Ok(b)) => self.w.took(b)
-            Some(Err(e)) => Err(io_error(e))
-            None => if task.cancelled() { Err(HttpError.Io(IoError.Cancelled)) } else { Err(HttpError.TimedOut) }
-        }
+// A request being read (`Link.read_request`): its parser, which part of it
+// is coming (0: none yet, 1: its head, 2: its body), the body's length when
+// its time limit last began again, and when it ends (negative: none).
+struct Reading {
+    p: Parser,
+    part_of: int,
+    stepped: int,
+    deadline: int64,
+}
+
+// A reading of a new request with the server's limits.
+fun reading(o: ServerOptions) -> Reading {
+    return Reading { p: parser(true, "", o.max_header_bytes, o.max_body_bytes), part_of: 0, stepped: 0, deadline: -1 }
+}
+
+// A request begun whose next bytes haven't come, kept while its connection
+// waits parked (MYLA-549): the reading, the bytes read and not taken yet,
+// the connection's time's end and its client's address.
+struct Begun {
+    r: Reading,
+    rest: str,
+    life_end: int64,
+    peer: Option<SocketAddr>,
+}
+
+// The requests begun of a server's parked connections, by the connection's
+// handle, which its workers share. A connection parked so has the tag
+// BEGUN; only a request that comes in pieces costs the two calls.
+actor Pending {
+    begun: [int: Begun],
+}
+
+impl Pending {
+    fun put(var self, h: int, b: Begun) {
+        self.begun[h] = b
     }
 
-    // A request read with `p`, its first bytes there: its head within
-    // `o.read_ms` of them, its body within `read_ms` of the head's end and
-    // of each 16 KiB of it. A request that asked for it gets `100
-    // Continue` before its body is read. A request the client ended too
-    // soon is `Closed` (nothing of it came) or the parser's error.
-    async fun read_request(var self, p: Parser, o: ServerOptions) -> Result<Parser, HttpError> {
-        var q = p
-        // 0: before the request, 1: its head, 2: its body
-        var part_of = 0
-        var stepped = 0
-        var deadline: int64 = -1
+    // The request begun of `h`, no longer kept.
+    fun take(var self, h: int) -> Option<Begun> {
+        if !self.begun.contains(h) {
+            return None
+        }
+        let b = self.begun[h]
+        self.begun.remove(h)
+        return Some(b)
+    }
+}
+
+// The tag of a connection parked with a request begun (its time's end is
+// in its `Begun`; another tag is that end, or -1 for none).
+const BEGUN: int64 = -2
+
+impl Link {
+    // A request read on with `r` as far as its bytes have come (MYLA-549):
+    // its head within `o.read_ms` of its first byte, its body within
+    // `read_ms` of the head's end and of each 16 KiB of it. The reading
+    // given back is done (`r.p.done()`), or waits for bytes the socket
+    // doesn't have yet: its caller parks the connection with it, holding
+    // no worker. A request that asked for it gets `100 Continue` before
+    // its body is read. A request the client ended too soon is `Closed`
+    // (nothing of it came) or the parser's error; one whose time ran out
+    // `TimedOut`.
+    async fun read_request(var self, r: Reading, o: ServerOptions) -> Result<Reading, HttpError> {
+        var q = r
         while true {
-            self.w.pos = q.advance(self.w.buf, self.w.pos)
-            if q.failed {
-                return Err(q.err)
+            self.w.pos = q.p.advance(self.w.buf, self.w.pos)
+            if q.p.failed {
+                return Err(q.p.err)
             }
-            if q.done() {
+            if q.p.done() {
                 return Ok(q)
             }
-            if q.expect_continue {
-                q.expect_continue = false
-                if q.body_len == 0 {
+            if q.p.expect_continue {
+                q.p.expect_continue = false
+                if q.p.body_len == 0 {
                     let sent = await self.send("HTTP/1.1 100 Continue\r\n\r\n", o.write_ms)
                     sent?
                 }
             }
-            let now_part = if !q.started { 0 } else if q.state >= S_LENGTH { 2 } else { 1 }
-            if now_part != part_of || (part_of == 2 && q.body_len - stepped >= READ_STEP) {
-                part_of = now_part
-                stepped = q.body_len
-                deadline = after(time.now_ms(), o.read_ms)
+            let now_part = if !q.p.started { 0 } else if q.p.state >= S_LENGTH { 2 } else { 1 }
+            if now_part != q.part_of || (q.part_of == 2 && q.p.body_len - q.stepped >= READ_STEP) {
+                q.part_of = now_part
+                q.stepped = q.p.body_len
+                q.deadline = after(time.now_ms(), o.read_ms)
             }
-            let more = await self.fill_until(deadline)
-            if !more? {
-                q.at_end()
-                if q.failed {
-                    return Err(q.err)
+            let got = self.w.try_fill()?
+            if got < 0 {
+                q.p.at_end()
+                if q.p.failed {
+                    return Err(q.p.err)
+                }
+                return Ok(q)
+            }
+            if got == 0 {
+                if q.deadline >= 0 && time.now_ms() >= q.deadline {
+                    return Err(HttpError.TimedOut)
                 }
                 return Ok(q)
             }
@@ -2869,55 +3016,98 @@ impl Link {
 // The connection `h`, taken up ready (its next request has begun, or it
 // ended), served request after request while they come at once (a
 // pipelining client's), then parked again until the next begins, or
-// closed: a client that closes it, a request that can't be read (answered
-// with its status), one that asks to close, the connection's time up, the
-// server's limit reached. A response from a little before the time's end
-// says `Connection: close`, so that a keep-alive client doesn't send a
-// request the server won't read. Whether the worker goes on, and the
-// requests answered. Only a server with a limit counts its requests in
+// parked with a request begun until more of it comes (and taken up where
+// it stopped, MYLA-549), or closed: a client that closes it, a request
+// that can't be read (answered with its status), one that asks to close,
+// the connection's time up, the server's limit reached. A response from a
+// little before the time's end says `Connection: close`, so that a
+// keep-alive client doesn't send a request the server won't read. Whether
+// the worker goes on, and the requests answered. Only a server with a limit counts its requests in
 // `tally` as they come: two actor calls a request.
 async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (Request) -> Response, tally: Tally, lot: Lot) -> (bool, int) {
     let counted = o.max_requests >= 0
     var answered = 0
-    let life_end = __sock_tag(h)
+    var life_end = __sock_tag(h)
+    var link = Link { w: wire(stream_of(h)) }
+    // a request begun, taken up where it waited (MYLA-549)
+    var begun: Option<Reading> = None
+    var peer: Option<SocketAddr> = None
+    if life_end == BEGUN {
+        match await lot.pending.take(h) {
+            Some(b) => {
+                life_end = b.life_end
+                link.w.buf = b.rest
+                peer = b.peer
+                begun = Some(b.r)
+            }
+            None => {
+                closed(h)
+                return (true, answered)
+            }
+        }
+    }
     var close_at = life_end
     if life_end >= 0 {
         let margin = if o.keep_alive_ms / 10 > 1000 { 1000 } else { o.keep_alive_ms / 10 }
         close_at = life_end - margin as int64
     }
-    var link = Link { w: wire(stream_of(h)) }
-    let peer = match link.w.stream.peer_addr() {
-        Ok(a) => Some(a)
-        Err(_) => None
+    if begun.is_none() {
+        peer = match link.w.stream.peer_addr() {
+            Ok(a) => Some(a)
+            Err(_) => None
+        }
     }
     while true {
-        // a request may begin until the connection's time is up
-        if life_end >= 0 && time.now_ms() >= life_end {
-            closed(h)
-            return (true, answered)
+        var resumed = false
+        let r = match begun {
+            Some(b) => {
+                resumed = true
+                b
+            }
+            None => reading(o)
         }
-        if !link.w.buffered() {
-            match link.w.try_fill() {
-                Ok(got) => {
-                    if got == 0 {
-                        // nothing yet: parked until it comes
-                        park_connection(lot, l, h, o, life_end)
-                        return (true, answered)
+        if !resumed {
+            // a request may begin until the connection's time is up
+            if life_end >= 0 && time.now_ms() >= life_end {
+                closed(h)
+                return (true, answered)
+            }
+            if !link.w.buffered() {
+                match link.w.try_fill() {
+                    Ok(got) => {
+                        if got == 0 {
+                            // nothing yet: parked until it comes
+                            if park_connection(lot, h, o, life_end) {
+                                await evict(lot, l)
+                            }
+                            return (true, answered)
+                        }
+                        if got < 0 {
+                            closed(h)
+                            return (true, answered)
+                        }
                     }
-                    if got < 0 {
+                    Err(_) => {
                         closed(h)
                         return (true, answered)
                     }
                 }
-                Err(_) => {
-                    closed(h)
-                    return (true, answered)
-                }
             }
         }
-        let got = await link.read_request(parser(true, "", o.max_header_bytes, o.max_body_bytes), o)
+        begun = None
+        let got = await link.read_request(r, o)
         let p = match got {
-            Ok(p) => p
+            Ok(q) => {
+                if !q.p.done() {
+                    // the rest of it not there yet: parked with what came
+                    let rest = part(link.w.buf, link.w.pos, link.w.buf.len())
+                    if await park_begun(lot, h, Begun { r: q, rest: rest, life_end: life_end, peer: peer }, o) {
+                        await evict(lot, l)
+                    }
+                    return (true, answered)
+                }
+                q.p
+            }
             Err(e) => {
                 if answerable(e) {
                     let sent = await link.send_parts((error_response(e), ""), o.write_ms)
@@ -3020,9 +3210,10 @@ async fun worker(l: TcpListener, o: ServerOptions, handler: async (Request) -> R
 }
 
 // The lot's keeper: every `poll` milliseconds the connections whose time
-// ran out while they were parked (`idle_ms` without a request beginning,
-// or their time up) closed without an answer, until the task is cancelled
-// or every worker stopped.
+// ran out while they were parked closed: without an answer those waiting
+// for a request (`idle_ms` without one beginning, or their time up), with
+// 408 those whose request began and didn't come within `read_ms`
+// (MYLA-549); until the task is cancelled or every worker stopped.
 async fun keeper(lot: Lot, tally: Tally, poll: int) -> Result<int, HttpError> {
     while true {
         await task.sleep(poll)
@@ -3032,7 +3223,7 @@ async fun keeper(lot: Lot, tally: Tally, poll: int) -> Result<int, HttpError> {
         let now = time.now_ms()
         var h = __sock_expired(lot.id, now)
         while h > 0 {
-            closed(h)
+            await dropped(lot, h, Some(HttpError.TimedOut))
             h = __sock_expired(lot.id, now)
         }
     }
@@ -3310,6 +3501,24 @@ fun requests_formatted() {
     assert(formatted_request(request("GET", "https://h/")) == "error: unsupported: https", "https")
     let origin = request("GET", "/only/a/path").with_decompress(false)
     assert(formatted_request(origin) == "GET /only/a/path HTTP/1.1\r\nHost: \r\n\r\n", "a target as it is")
+    // the framing is the body's, and one Host (MYLA-549): two of the
+    // caller's are refused as the server refuses them, a length of the
+    // caller's that isn't the body's is replaced, and one beside chunked
+    // left out (RFC 9112, section 6.2)
+    let hosts = request("GET", "http://h/").with_header("Host", "a").with_header("Host", "b")
+    assert(formatted_request(hosts) == "error: malformed header", "two Host fields")
+    assert(formatted_request(request("GET", "http://h/").with_header("Host", "a b")) == "error: malformed header", "a Host that isn't one")
+    let own_length = request("POST", "http://h/").with_header("Content-Length", "1").with_header("X", "y").with_body("abc").with_decompress(false)
+    assert(formatted_request(own_length) == "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nX: y\r\n\r\nabc", "a length of its own replaced")
+    let no_body = request("GET", "http://h/").with_header("Content-Length", "5").with_decompress(false)
+    assert(formatted_request(no_body) == "GET / HTTP/1.1\r\nHost: h\r\n\r\n", "a length without a body left out")
+    let both = request("POST", "http://h/").with_header("Content-Length", "3").with_header("Transfer-Encoding", "chunked").with_body("abc").with_decompress(false)
+    assert(formatted_request(both) == "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n", "a length beside chunked left out")
+    let twice = request("POST", "http://h/").with_header("Transfer-Encoding", "chunked").with_header("transfer-encoding", "chunked").with_body("abc").with_decompress(false)
+    assert(formatted_request(twice) == "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n", "chunked once")
+    assert(formatted_request(request("POST", "http://h/").with_header("Transfer-Encoding", "gzip, chunked").with_body("abc")) == "error: unsupported: transfer coding gzip", "a coding it doesn't apply")
+    let no_coding = request("POST", "http://h/").with_header("Transfer-Encoding", "").with_body("abc").with_decompress(false)
+    assert(formatted_request(no_coding) == "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nabc", "an empty coding")
     // and back: what is formatted parses to the same request
     match parse_request(formatted_request(post)) {
         Ok(back) => {
@@ -3486,6 +3695,10 @@ fun limits() {
     var w = parser(true, "", 1000, 2147483647)
     let at8 = w.advance("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n7ffffffe\r\n", 0)
     assert(!w.failed && w.left == 2147483646, "a chunk up to the largest int")
+    // a body is an `int` of bytes at most, whatever the limit (MYLA-549)
+    var y = parser(false, "GET", 1000, 2147483647)
+    let at10 = y.advance("HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\n", 0)
+    assert(y.failed && y.err == HttpError.BodyTooLarge, "a length past the largest int")
     var x = parser(true, "", 1000, 100)
     let at9 = x.advance("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1;" + "a".repeat(5000) + "\r\n", 0)
     assert(x.failed && x.err == HttpError.BadChunk, "a chunk line past its limit")
@@ -3505,6 +3718,17 @@ fun framing() {
     var both = parser(true, "", MAX_HEAD, 100)
     let x = both.advance("POST / HTTP/1.1\r\nContent-Length: 99\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
     assert(both.done() && both.close_after && both.to_request().body == "a", "chunked wins, and the connection closes")
+    // the length beside it must still be one (MYLA-549): a request whose
+    // framing can't be read whole is refused
+    var bad_both = parser(true, "", MAX_HEAD, 100)
+    let w = bad_both.advance("POST / HTTP/1.1\r\nContent-Length: zz\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
+    assert(bad_both.failed && bad_both.err == HttpError.BadLength, "a malformed length beside chunked")
+    var odd_both = parser(true, "", MAX_HEAD, 100)
+    let v = odd_both.advance("POST / HTTP/1.1\r\nContent-Length: 1, 2\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
+    assert(odd_both.failed && odd_both.err == HttpError.BadLength, "two lengths beside chunked")
+    var resp_both = parser(false, "GET", MAX_HEAD, 100)
+    let u = resp_both.advance("HTTP/1.1 200 OK\r\nContent-Length: zz\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
+    assert(resp_both.done() && resp_both.close_after && resp_both.to_response().body == "a", "a response's is ignored")
     var ask = parser(true, "", MAX_HEAD, 100)
     let y = ask.advance("PUT / HTTP/1.1\r\nExpect: 100-Continue\r\nContent-Length: 2\r\n\r\n", 0)
     assert(ask.expect_continue && !ask.done(), "100-continue asked")
@@ -3584,9 +3808,27 @@ fun redirects() {
             None => assert(false, f"{c.0}: a redirect")
         }
     }
-    match redirected(request("GET", "http://a/").with_header("Authorization", "s"), response(302, "").with_header("Location", "http://b/")) {
-        Some(next) => assert(!next.headers.has("Authorization") && next.url == "http://b/", "another host")
+    match redirected(request("GET", "http://a/").with_header("Authorization", "s").with_header("Proxy-Authorization", "p").with_header("Cookie", "c"), response(302, "").with_header("Location", "http://b/")) {
+        Some(next) => {
+            assert(!next.headers.has("Authorization") && next.url == "http://b/", "another host")
+            // the credentials of every kind stay with their host (MYLA-549)
+            assert(!next.headers.has("Proxy-Authorization") && !next.headers.has("Cookie"), "another host's credentials")
+        }
         None => assert(false, "another host")
+    }
+    // a Location without a fragment inherits the request's (RFC 9110,
+    // section 10.2.2; MYLA-549); one with its own keeps it
+    match redirected(request("GET", "http://a/x#top"), response(302, "").with_header("Location", "/y")) {
+        Some(next) => assert(next.url == "http://a/y#top", f"the fragment inherited: {next.url}")
+        None => assert(false, "the fragment inherited")
+    }
+    match redirected(request("GET", "http://a/x#top"), response(302, "").with_header("Location", "http://b/y?q#end")) {
+        Some(next) => assert(next.url == "http://b/y?q#end", f"a fragment of its own: {next.url}")
+        None => assert(false, "a fragment of its own")
+    }
+    match redirected(request("GET", "http://a/x"), response(302, "").with_header("Location", "/y?z")) {
+        Some(next) => assert(next.url == "http://a/y?z", f"no fragment: {next.url}")
+        None => assert(false, "no fragment")
     }
     match redirected(post, response(200, "").with_header("Location", "/x")) {
         Some(_) => assert(false, "200 isn't a redirect")

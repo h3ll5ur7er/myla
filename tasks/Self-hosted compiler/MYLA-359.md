@@ -2,7 +2,7 @@
 id: MYLA-359
 title: "Check time of the implicit std modules: about 26 ms for every program"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [checker, performance, stdlib]
 ---
@@ -15,7 +15,7 @@ Options, cheapest first:
 
 - [x] std.hash's checksums (FNV-1a, CRC-32, Adler-32) moved to a module of their own, imported as any other (D166): std.hash keeps the `Hasher` and the `Hash` impls
 - [x] A profile of hello-world's check with the seven modules
-- [ ] The cheapest fix that brings it under 5 ms, measured (halved, 44.4 → 21.6 ms in round 3; in round 4 the bodies read only once called, 100.7 → 39.4 M instructions, 26.1 → 10.0 ms on the busier container: not under 5 ms, see "Round 4: what is left", [[MYLA-412]])
+- [x] The cheapest fix that brings it under 5 ms, measured (halved, 44.4 → 21.6 ms in round 3; in round 4 the bodies read only once called, 100.7 → 39.4 M instructions, 26.1 → 10.0 ms on the busier container: not under 5 ms, see "Round 4: what is left", [[MYLA-412]]) — not reached here: 6.1 ms and 21.2 M instructions on `547339a`; carried over to [[MYLA-552]] (review 2026-11-12)
 
 ## The profile
 
@@ -136,3 +136,7 @@ Not ready ([[Project/Review-2026-11-10]]): lazy parsing can load a different pro
 ## Round 5's follow-up: the parse the toolchain carries
 
 [[MYLA-412]] (2026-11-11): every module of `std` but std.rt is read from a parse written when the toolchain is built, wherever its text is the embedded one (the implicit modules' bodies parsed too). A hello world's check 40.7 → 20.9 M instructions, CPU time 9.1 → 5.8 ms (median of 31; min 8.4 → 5.3) on the shared container: not under 5 ms, so the last box stays open. What is left is mostly the checker's: registering the implicit modules' methods (`resolve_impls` 5.0 M), checking the 205 bodies (4.3 M), the globals, derives and signatures (2.8 M); and renaming the signatures (2.5 M). See MYLA-412's "What is left".
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-552]]: a hello world checks in 21.2 M instructions and 6.1 ms on `547339a` (39.4 M and 8.7 ms before round 5); the last box, under 5 ms, moves there.

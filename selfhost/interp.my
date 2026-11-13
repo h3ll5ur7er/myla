@@ -13,7 +13,7 @@ from .checker import is_notify_primitive
 from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_lot_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, add_overflows, sub_overflows, mul_overflows, int_min, int_neg_overflows, shift_out_of_range, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs, written_type_name
-from std.fmt import fmt_int, fmt_float, fmt_text
+from std.fmt import fmt_int, fmt_float, fmt_text, parse_spec
 from std.slice import range_of, str_whole, take_str
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write, eprint, errno_text
@@ -332,7 +332,8 @@ pub struct Interp {
     env_memo: [int64: EnvMemo],
     // (`type_env_memo`: the index a call by no call site gives, by the
     // function and the closed type it binds by: a written `eq`, `hash` or
-    // `format` the interpreter calls itself, MYLA-436)
+    // `format` the interpreter calls itself, MYLA-436; and, by `#`, the
+    // function and what it binds, so equal environments are one)
     type_env_memo: [str: int32],
     env_next: int32,
     env_fi: int32,
@@ -1092,12 +1093,13 @@ impl Interp {
     // not.
     #test(interp_on("enum E { A, B(int) }"), Value.VList([Value.VInt(7)]), Value.VInt(0), expr_of("a.b[0]"), false, -1)[true]
     fun check_index(var self, c: Value, k: Value, e: Expr, assigning: bool, place: int32) -> bool {
-        let msg = index_error(c, k, assigning, place)
+        let msg = index_error(c, k, assigning, place, None)
         if msg.len() > 0 {
             // a missing key written by its type, a uint64's unsigned, as
             // native code writes it (D183, MYLA-440), a type of another
-            // module's by the name messages give it (MYLA-514)
-            if is_vmap(c) { self.fail(e, missing_key(typed_repr(self.checker, as_written(k), self.index_key_type(e)))) } else { self.fail(e, msg) }
+            // module's by the name messages give it (MYLA-514); a uint64
+            // index unsigned too (MYLA-546)
+            if is_vmap(c) { self.fail(e, missing_key(typed_repr(self.checker, as_written(k), self.index_key_type(e)))) } else { self.fail(e, index_error(c, k, assigning, place, self.index_key_type(e))) }
             return false
         }
         return true
@@ -3186,6 +3188,10 @@ impl Interp {
         // a `char` literal where an integer is expected (`let b: uint8 =
         // 'a'`) is that number (the 2026-11-10 review's L4)
         if isc && !is_int_value_type(self.resolved_of(e.id)) { return Value.VChar(v) }
+        // a small one is itself in every integer type, and a literal's type
+        // is never a type parameter's: none looked up (most literals; the
+        // plain loop's cost, MYLA-546)
+        if v >= 0 && v < 128 { return Value.VInt(v) }
         return Value.VInt(wrap_opt(v, self.typed_of(e.id)))
     }
 
@@ -3474,10 +3480,14 @@ impl Interp {
         var m = new_mapv()
         for en in entries {
             let k = self.eval(en.key)
+            // the key hashed and found after its value, as natively, and as
+            // a store into a container is (MYLA-4, MYLA-546)
+            let v = self.eval(en.value)
+            if self.stop() { return Value.VUnit }
             let (found, h) = self.key_place(m, k, kt)
             var j = found
             if j < 0 { j = m.add_key(k, h) }
-            m.vs[j] = self.eval(en.value)
+            m.vs[j] = v
         }
         return Value.VMap(m)
     }
@@ -3730,21 +3740,59 @@ impl Interp {
             }
             let argv = self.eval_args(args)
             if self.stop() { return Value.VUnit }
-            self.bind_next(fi, e.id, self.resolved_of(recv.id))
             if var_self && place.root != "" {
                 // (its keys found once: again only if they moved, MYLA-506)
                 place = self.settle(place, false)
                 let ok = !self.stop()
                 self.receivers.push(if ok { self.value_at(place) } else { Value.VUnit })
                 if ok { self.update_place(place, PlaceOp.OSet(Value.VUnit)) }
+                // bound after `settle`: a key's written `hash` or `eq` it
+                // runs would take the binding (the 2026-11-12 review's B6)
+                self.bind_next(fi, e.id, self.resolved_of(recv.id))
                 let (r, final_self) = self.call_with_receiver(fi, argv)
                 self.write_place(place, final_self)
                 // an async body deferred: its `self` goes back here when it ends
                 match self.deferred { Some(d) => { self.deferred_place = Some(place) }, None => {} }
                 return r
             }
+            self.bind_next(fi, e.id, self.resolved_of(recv.id))
             let (r, fs) = self.call_method(fi, rv, argv)
             return r
+        }
+        // `x.format(spec)` of a printable builtin value, `x: T` with
+        // `T: Format` (MYLA-544): its print form by the spec, as a hole's
+        if method == "format" && args.len() == 1 && fi < 0 {
+            if !evaluated {
+                rv = self.eval(recv)
+                evaluated = true
+            }
+            let user = match self.deref(rv) {
+                Value.VStruct(n, fns, fvs) => true,
+                Value.VEnum(en, vr, pl) => true,
+                _ => false,
+            }
+            if !user {
+                let spec = as_str(self.eval(args[0]))
+                if self.stop() { return Value.VUnit }
+                let t = self.full_type_of(recv.id)
+                match parse_spec(spec) {
+                    Ok(sp) => { return Value.VStr(self.format_spec_value(rv, t, spec)) },
+                    Err(why) => {},
+                }
+                // a spec that isn't one: the program's std.fmt fails on it,
+                // as native code's does, not the interpreter's own copy
+                let (name, argv) = match t {
+                    Some(Type.TInt(w, sg)) => ("std$fmt$fmt_int", [Value.VInt(as_int(rv)), Value.VInt(w as int64), Value.VBool(sg), Value.VStr(spec)]),
+                    Some(Type.TFloat(w)) => ("std$fmt$fmt_float", [Value.VFloat(as_float(rv)), Value.VStr(format_typed(rv, t)), Value.VStr(spec)]),
+                    _ => ("std$fmt$fmt_text", [Value.VStr(format_typed(rv, t)), Value.VStr(spec)]),
+                }
+                let ffi = self.func_idx(name)
+                if ffi < 0 {
+                    self.fail(e, format("invalid format spec '{}'", spec))
+                    return Value.VUnit
+                }
+                return self.call_func(ffi, argv)
+            }
         }
         // not a method: a field holding a function, called (an actor's
         // through its handle, from its own method: the 2026-11-10 review's
@@ -3854,9 +3902,10 @@ impl Interp {
     // the common case costs a tag's test.
     #test(interp_on("[int]"), -1)[None]
     fun typed_of(self, id: int32) -> Option<Type> {
-        var r = self.resolved.get(id)
-        // (a function's test: a match here retains the type and drops it)
-        if is_param_opt(r) { r = Some(self.env_type(opt_type(r))) }
+        let r = self.resolved.get(id)
+        // (a function's test: a match here retains the type and drops it;
+        // no test before the first generic call, as nothing is bound)
+        if self.envs.len() > 0 && is_param_opt(r) { return Some(self.env_type(opt_type(r))) }
         return r
     }
 
@@ -3930,8 +3979,22 @@ impl Interp {
         }
         var k = -1
         if sub.len() > 0 {
-            k = self.envs.len()
-            self.envs.push(TEnv { fi: fi, sub: sub })
+            // one environment per content: a call site's memo is keyed by
+            // the caller's environment, so a recursion through two call
+            // sites would make one per call path (the 2026-11-12 review's
+            // C3: generic `fib(27)` held 163 MB)
+            var sb = StringBuilder()
+            sb.append(f"#{fi}")
+            for s in sub { sb.append(f" {s.name}={type_name(s.ty)}") }
+            let ck = sb.build()
+            match self.type_env_memo.get(ck) {
+                Some(j) => { k = j },
+                None => {
+                    k = self.envs.len()
+                    self.envs.push(TEnv { fi: fi, sub: sub })
+                    self.type_env_memo[ck] = k
+                },
+            }
         }
         if id >= 0 { self.env_memo[key] = EnvMemo { fi: fi, env: k } }
         if tkey != "" { self.type_env_memo[tkey] = k }
@@ -4602,6 +4665,8 @@ impl Interp {
             Value.VStruct(n, fns, fvs) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(typed_repr(self.checker, v, t)) } },
             Value.VEnum(en, vr, pl) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(typed_repr(self.checker, v, t)) } },
             Value.VList(xs) => { return without_module_ids(typed_repr(self.checker, v, t)) },
+            // (packed bytes too: `ERR: VBytes()`, the 2026-11-12 review's C18)
+            Value.VBytes(bs) => { return py_repr(v) },
             Value.VTuple(es) => { return without_module_ids(typed_repr(self.checker, v, t)) },
             Value.VMap(m) => { return without_module_ids(typed_repr(self.checker, v, t)) },
             _ => {},
@@ -5921,29 +5986,32 @@ fun value_len(v: Value) -> int64 {
 
 // Why `c[k]` can't be read (or, `assigning`, written: a missing map key is
 // then an insert), with the Python interpreter's message; "" if it can.
-#test(Value.VStr("a"), Value.VInt(0), false, -1)[""]
-#test(Value.VStr("b"), Value.VInt(0), false, -1)[""]
-#test(Value.VStr("e"), Value.VInt(0), false, -1)[""]
-#test(Value.VMap(new_mapv()), Value.VInt(0), false, -1)["map key 0 not found"]
-// (`place`: a map key's place, as `Interp.place_in` finds it)
-fun index_error(c: Value, k: Value, assigning: bool, place: int32) -> str {
+#test(Value.VStr("a"), Value.VInt(0), false, -1, None)[""]
+#test(Value.VStr("b"), Value.VInt(0), false, -1, None)[""]
+#test(Value.VStr("e"), Value.VInt(0), false, -1, None)[""]
+#test(Value.VMap(new_mapv()), Value.VInt(0), false, -1, None)["map key 0 not found"]
+#test(Value.VList([]), Value.VInt(-1), false, -1, Some(Type.TInt(64, false)))["list index 18446744073709551615 out of bounds (len 0)"]
+#test(Value.VStr("ab"), Value.VInt(-1), false, -1, Some(Type.TInt(64, true)))["string index -1 out of bounds (len 2)"]
+// (`place`: a map key's place, as `Interp.place_in` finds it; `it`: the
+// index's type, by which a `uint64` is written unsigned, MYLA-546)
+fun index_error(c: Value, k: Value, assigning: bool, place: int32, it: Option<Type>) -> str {
     match c {
         Value.VList(xs) => {
             let i = as_int(k)
             if i < 0 || i >= (xs.len() as int64) {
-                return format("list index {} out of bounds (len {})", i, xs.len())
+                return format("list index {} out of bounds (len {})", index_text(i, it), xs.len())
             }
         },
         Value.VBytes(s) => {
             let i = as_int(k)
             if i < 0 || i >= (s.len() as int64) {
-                return format("list index {} out of bounds (len {})", i, s.len())
+                return format("list index {} out of bounds (len {})", index_text(i, it), s.len())
             }
         },
         Value.VStr(str_) => {
             let i = as_int(k)
             if i < 0 || i >= (str_.len() as int64) {
-                return format("string index {} out of bounds (len {})", i, str_.len())
+                return format("string index {} out of bounds (len {})", index_text(i, it), str_.len())
             }
         },
         Value.VMap(m) => {
@@ -5952,6 +6020,14 @@ fun index_error(c: Value, k: Value, assigning: bool, place: int32) -> str {
         _ => {},
     }
     return ""
+}
+
+// An index `i` of type `it` as an error's text writes it: a `uint64`'s
+// unsigned.
+#test(-1, Some(Type.TInt(64, false)))["18446744073709551615"]
+#test(-1, None)["-1"]
+fun index_text(i: int64, it: Option<Type>) -> str {
+    return match it { Some(Type.TInt(w, sg)) => if w == 64 && !sg { format("{}", i as uint64) } else { format("{}", i) }, _ => format("{}", i) }
 }
 
 // `v` with the name of each struct and enum in it as messages write it
@@ -6212,15 +6288,22 @@ impl MapV {
     }
 
     // `k` indexed at the place `j`: by its number or itself, else by its
-    // hash `h`, first among those of `h`.
+    // hash `h`, last among those of `h`, so a hash's keys are compared
+    // oldest first, as native code's probe meets them (MYLA-546).
     fun index(var self, k: Value, h: int64, j: int32) {
         if let Value.VStr(s) = k {
             self.strs[s] = j
         } else if is_int_key(k) {
             self.ints[as_int(k)] = j
         } else {
-            self.nexts[j] = self.first_of(h)
-            self.heads[h] = j
+            self.nexts[j] = -1
+            var at = self.first_of(h)
+            if at < 0 {
+                self.heads[h] = j
+            } else {
+                while self.nexts[at] >= 0 { at = self.nexts[at] }
+                self.nexts[at] = j
+            }
         }
     }
 
@@ -6306,13 +6389,22 @@ impl MapV {
         while i < self.ks.len() {
             if self.here[i] {
                 self.nexts.push(-1)
-                self.index(self.ks[i], old_hashes[i], ks.len())
+                if is_plain_key(self.ks[i]) { self.index(self.ks[i], old_hashes[i], ks.len()) }
                 ks.push(self.ks[i])
                 vs.push(self.vs[i])
                 here.push(true)
                 hashes.push(old_hashes[i])
             }
             i = i + 1
+        }
+        // each hash's chain, oldest first (`index`), linked from the newest
+        var j = ks.len() - 1
+        while j >= 0 {
+            if !is_plain_key(ks[j]) {
+                self.nexts[j] = self.first_of(hashes[j])
+                self.heads[hashes[j]] = j
+            }
+            j -= 1
         }
         self.ks = ks
         self.vs = vs
@@ -6711,7 +6803,7 @@ pub fun typed_repr(ch: Checker, v: Value, t: Option<Type>) -> str {
 // none known.
 #test(checker_on("fun f() {}"), "Result", [Type.TStr, Type.TBool], "Err")[[Type.TBool]]
 #test(checker_on("enum E<T> { A(T, int) }"), "E", [Type.TStr], "A")[[Type.TStr, Type.TInt(32, true)]]
-fun payload_types(ch: Checker, en: str, args: [Type], vr: str) -> [Type] {
+pub fun payload_types(ch: Checker, en: str, args: [Type], vr: str) -> [Type] {
     if en == "Option" && args.len() == 1 { return [args[0]] }
     if en == "Result" && args.len() == 2 { return if vr == "Ok" { [args[0]] } else { [args[1]] } }
     return match ch.enum_variant_payload(en, args, vr) { Some(p) => p, None => [] }

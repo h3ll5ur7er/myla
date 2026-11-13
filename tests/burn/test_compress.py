@@ -295,6 +295,10 @@ class CompressTest(unittest.TestCase):
             subprocess.run(["as", "--64", "-o", exe + ".o", exe + ".s"], check=True)
             subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
             cls.native = exe
+            # the same driver built checked, where an integer overflow is an error (D184, MYLA-550)
+            cls.checked = os.path.join(cls.tmp, "driver-checked")
+            subprocess.run([selfhost_tool("main"), "build", path, "-o", cls.checked, "--stdlib", STDLIB_ROOT,
+                            "--checked"], capture_output=True, check=True)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -338,6 +342,13 @@ class CompressTest(unittest.TestCase):
                 want = _python(fmt, data, mode != "whole")
                 with self.subTest(case=name, mode=mode):
                     proc = self.run_driver(True, fmt, mode, data)
+                    # the plain and the checked build answer the same (what a stream
+                    # gave before its error depends on how the pipe cut the input)
+                    checked = subprocess.run([self.checked, fmt, mode], input=data, capture_output=True, timeout=300)
+                    self.assertEqual((checked.returncode, checked.stderr), (proc.returncode, proc.stderr),
+                                     "the plain and the checked build differ")
+                    if proc.returncode == 0:
+                        self.assertTrue(checked.stdout == proc.stdout, "the plain and the checked build differ")
                     if want is None:
                         self.assertEqual(proc.returncode, 1, proc.stderr.decode(errors="replace"))
                         self.assertTrue(proc.stderr.startswith(b"error: "), proc.stderr)

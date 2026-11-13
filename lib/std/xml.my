@@ -1428,20 +1428,21 @@ pub struct XmlStreamReader<R> {
     lex: XmlReader,
     chunk: int,         // the next read's size: doubled while an event needs more
     io: Option<IoError>,
+    scan: int,          // `scan_event`'s state after the bytes of `lex.s`
 }
 
 // A pull reader of the document the stream `r` holds.
 pub fun stream_reader<R: Read>(r: R) -> XmlStreamReader<R> {
     var lex = reader("")
     lex.whole = false
-    return XmlStreamReader { src: [r], lex: lex, chunk: CHUNK, io: None }
+    return XmlStreamReader { src: [r], lex: lex, chunk: CHUNK, io: None, scan: E_START }
 }
 
 impl<R: Read> XmlStreamReader<R> {
     // The next event, or why the document isn't well-formed.
     fun read_event(var self) -> Result<Event, XmlError> {
         while true {
-            if self.lex.state == BEGIN && !self.lex.whole && self.lex.s.len() < 4 {
+            if self.lex.state == BEGIN && !self.lex.whole && mark_cut(self.lex.s) {
                 self.fill()?
                 continue
             }
@@ -1466,17 +1467,22 @@ impl<R: Read> XmlStreamReader<R> {
     }
 
     // The bytes read so far but not used dropped, and more read after the
-    // rest: at least as many as the rest holds (or to the end), however few
-    // a read gives, gathered in one builder. A chunk may end inside an event
-    // or a character: the event there fails, and is read again once the
-    // bytes after it have doubled, so a long event is read a logarithmic
-    // number of times, not once a read (MYLA-460).
+    // rest, gathered in one builder, until the event the rest starts may end
+    // in them (`scan_event`), they at least match the rest, or the stream
+    // ends. A chunk may end inside an event or a character: the event there
+    // fails, and is read again once the bytes after it may end it, so an
+    // event whole in the bytes read is given before the next read, which may
+    // block, and a long event is read a logarithmic number of times, not
+    // once a read (MYLA-460).
     fun fill(var self) -> Result<(), XmlError> {
         let lex = self.lex
         let p = advance(lex.s, lex.i, Pos { line: lex.base_line, col: lex.base_col, cr: lex.base_cr })
         var sb = StringBuilder()
         sb.append(lex.s, lex.i, lex.s.len())
         let want = lex.s.len() - lex.i
+        // an end in the rest didn't end the event: only one read now may
+        var scan = if lex.i == 0 { self.scan } else { scan_event(E_START, lex.s, lex.i, lex.s.len()) }
+        scan = scan & ~E_FOUND
         var added = 0
         while true {
             var r = self.src.pop()
@@ -1489,13 +1495,11 @@ impl<R: Read> XmlStreamReader<R> {
                         self.lex.whole = true
                         break
                     }
-                    if lex.latin1 {
-                        sb.append(latin1_to_utf8(b))
-                    } else {
-                        sb.append(b)
-                    }
+                    let text = if lex.latin1 { latin1_to_utf8(b) } else { b }
+                    sb.append(text)
                     added += b.len()
-                    if added >= want {
+                    scan = scan_event(scan, text, 0, text.len())
+                    if added >= want || scan & E_FOUND != 0 {
                         break
                     }
                 }
@@ -1507,6 +1511,7 @@ impl<R: Read> XmlStreamReader<R> {
         }
         self.lex.s = sb.build()
         self.lex.i = 0
+        self.scan = scan & ~E_FOUND
         self.lex.base_line = p.line
         self.lex.base_col = p.col
         self.lex.base_cr = p.cr
@@ -1515,6 +1520,137 @@ impl<R: Read> XmlStreamReader<R> {
         }
         return Ok(())
     }
+}
+
+// Whether the bytes `s` at a stream's start may still be cut in a byte order
+// mark or a UTF-16 mark, which `begin` needs whole.
+#test("")[true]
+#test("<")[true]
+#test("<s>")[false]
+#test("\u{FEFF}")[false]
+#test("ab")[false]
+fun mark_cut(s: str) -> bool {
+    return s.len() < 2 || (s.len() < 3 && s[0] == 0xEFu8 && s[1] == 0xBBu8)
+}
+
+// The states of `scan_event`, which reads the bytes of an event the stream
+// reader couldn't finish for the bytes it may end at. It is a superset of
+// where a well-formed event ends (an error waits for the end of the stream
+// anyway), so the reader never waits for bytes an event doesn't need.
+const E_START: int = 0      // nothing seen
+const E_LT: int = 1         // `<`
+const E_BANG: int = 2       // `<!`
+const E_BANG_DASH: int = 3  // `<!-`
+const E_COMMENT: int = 4    // in a comment; 5 and 6 after one and more `-`
+const E_CDATA: int = 7      // in a CDATA section; 8 and 9 after one and more `]`
+const E_PI: int = 10        // in a processing instruction (the declaration's too)
+const E_PI_Q: int = 11      // and after a `?`
+const E_TAG: int = 12       // in a tag, outside quotes
+const E_TAG_DQ: int = 13    // in a tag's `"…"`
+const E_TAG_SQ: int = 14    // in a tag's `'…'`
+const E_DECL: int = 15      // a DOCTYPE: any `>` may end it
+const E_REF: int = 16       // a reference: a `;` ends it
+const E_TEXT: int = 17      // a text cut in a character, a CR or a `]`: any byte
+const E_WAIT: int = 18      // an error: nothing ends it
+const E_FOUND: int = 32     // added to the state: an end was seen
+
+// The scan's state after the bytes of `s` from `a` up to `b`, from the
+// state `st`, with E_FOUND added if the event may end in them.
+#test(E_START, "<m v=\"a>", 0, 8)[E_TAG_DQ]
+#test(E_TAG_DQ, "\"/>", 0, 3)[E_TAG + E_FOUND]
+#test(E_START, "<!-- a -> -", 0, 11)[E_COMMENT + 1]
+#test(E_COMMENT + 1, "->", 0, 2)[E_COMMENT + E_FOUND]
+#test(E_START, "<![CDATA[x]>]]]]", 0, 16)[E_CDATA + 2]
+#test(E_START, "<?p a>b?", 0, 8)[E_PI_Q]
+#test(E_START, "<!DOCTYPE a [<!ENTITY x 'y'>", 0, 28)[E_DECL + E_FOUND]
+#test(E_START, "&amp", 0, 4)[E_REF]
+#test(E_START, "\r", 0, 1)[E_TEXT + E_FOUND]
+#test(E_START, "x>", 0, 2)[E_WAIT]
+fun scan_event(st: int, s: str, a: int, b: int) -> int {
+    var state = st
+    var found = 0
+    var i = a
+    while i < b {
+        let c = s[i]
+        if state == E_START {
+            if c == '<' {
+                state = E_LT
+            } else if c == '&' {
+                state = E_REF
+            } else if c == ']' || c == '\r' || c >= 0x80u8 {
+                state = E_TEXT
+                found = E_FOUND
+            } else {
+                state = E_WAIT
+            }
+        } else if state == E_LT || state == E_TAG {
+            if c == '?' && state == E_LT {
+                state = E_PI
+            } else if c == '!' && state == E_LT {
+                state = E_BANG
+            } else {
+                state = E_TAG
+                if c == '"' {
+                    state = E_TAG_DQ
+                } else if c == '\'' {
+                    state = E_TAG_SQ
+                } else if c == '>' {
+                    found = E_FOUND
+                }
+            }
+        } else if state == E_TAG_DQ || state == E_TAG_SQ {
+            // an attribute's value may be long: its bytes in a tighter loop
+            let q = if state == E_TAG_DQ { '"' as uint8 } else { '\'' as uint8 }
+            while i + 1 < b && s[i] != q {
+                i += 1
+            }
+            if s[i] == q {
+                state = E_TAG
+            }
+        } else if state == E_BANG || state == E_BANG_DASH {
+            if c == '-' {
+                state = if state == E_BANG { E_BANG_DASH } else { E_COMMENT }
+            } else if c == '[' && state == E_BANG {
+                state = E_CDATA
+            } else {
+                state = E_DECL
+                if c == '>' {
+                    found = E_FOUND
+                }
+            }
+        } else if state >= E_COMMENT && state <= E_CDATA + 2 {
+            let base = if state < E_CDATA { E_COMMENT } else { E_CDATA }
+            let mark = if base == E_COMMENT { '-' as uint8 } else { ']' as uint8 }
+            if c == mark {
+                if state < base + 2 {
+                    state += 1
+                }
+            } else {
+                if c == '>' && state == base + 2 {
+                    found = E_FOUND
+                }
+                state = base
+            }
+        } else if state == E_PI || state == E_PI_Q {
+            if c == '>' && state == E_PI_Q {
+                found = E_FOUND
+            }
+            state = if c == '?' { E_PI_Q } else { E_PI }
+        } else if state == E_DECL {
+            if c == '>' {
+                found = E_FOUND
+            }
+        } else if state == E_REF {
+            if c == ';' {
+                state = E_TEXT
+                found = E_FOUND
+            }
+        } else if state == E_TEXT {
+            found = E_FOUND
+        }
+        i += 1
+    }
+    return state + found
 }
 
 impl<R: Read> Iterator<Result<Event, XmlError>> for XmlStreamReader<R> {
@@ -2229,6 +2365,9 @@ impl Read for Trickle {
         if end > self.data.len() {
             end = self.data.len()
         }
+        if self.fail_at >= 0 && end > self.fail_at {
+            end = self.fail_at
+        }
         var out = StringBuilder()
         out.append(self.data, self.pos, end)
         self.pos = end
@@ -2239,8 +2378,13 @@ impl Read for Trickle {
 // The events a stream reader gives for `text` in pieces of 1 to `most`
 // bytes, texts that follow each other joined.
 fun stream_events(text: str, most: int) -> [str] {
+    return stream_events_until(text, most, -1)
+}
+
+// The same of a stream that fails once `fail_at` bytes are given.
+fun stream_events_until(text: str, most: int, fail_at: int) -> [str] {
     var out: [str] = []
-    var r = stream_reader(Trickle { data: text, pos: 0, step: 0, most: most, fail_at: -1 })
+    var r = stream_reader(Trickle { data: text, pos: 0, step: 0, most: most, fail_at: fail_at })
     var pending = ""
     while true {
         match r.read_event() {
@@ -2345,6 +2489,37 @@ fun stream_long_event() {
                 assert(false, f"{e}")
                 return
             }
+        }
+    }
+}
+
+// An event whole in the bytes read is given before the next read, which
+// may block (a pipe whose sender waits for an answer): here the stream fails
+// after the first part of each document, which holds `k` events whole
+// (MYLA-460, the review's B4).
+#test
+fun stream_gives_whole_events() {
+    let docs = [
+        ("<s><m v=\"0000000000\"/>", "</s>", 3),
+        ("<s>", "</s>", 1),
+        ("<?xml version='1.0'?>", "<s/>", 1),
+        ("<!DOCTYPE s [<!ENTITY x 'y>'> <!-- ]> -->]>", "<s/>", 1),
+        ("<s a='>' b=\"'>\">", "</s>", 1),
+        ("<s><!-- c -> d - -->", "</s>", 2),
+        ("<s><!---->", "</s>", 2),
+        ("<s><?p a>b??>", "</s>", 2),
+        ("<s><![CDATA[x]>]]]]>", "</s>", 2),
+        ("<s><t>u&amp;</t>", "</s>", 4),
+        ("<s>\r\n<t/>", "</s>", 4),
+        ("<s>é]<t/>", "</s>", 4),
+        ("\u{FEFF}<s>", "</s>", 1),
+        ("<s></s>", "", 2),
+    ]
+    for d in docs {
+        let want = events_of(d.0 + d.1)
+        for most in [1, 2, 3, 7, 64] {
+            let got = stream_events_until(d.0 + d.1, most, d.0.len())
+            assert(got.len() == d.2 + 1 && got[:d.2] == want[:d.2] && got[d.2].ends_with("the stream failed"), f"{d.0} in pieces of {most}: {got.join("|")}")
         }
     }
 }

@@ -2,7 +2,7 @@
 id: MYLA-432
 title: "P18 Check time: IoError on its own, then lazy std modules"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [check-time, loader, round-5]
 ---
@@ -11,7 +11,7 @@ Work package P18 of [[Project/Review-2026-11-10]] (wave B). Follows D179.
 - [x] `IoError` and `from_errno` in a small module of their own, so std.io and std.fs no longer import each other (std.io's import reads 36 KB instead of 81 KB; estimated 101 M to about 60 M instructions)
 - [x] One list of the standard functions the back ends name (`std$fmt$…`, `std$slice$…`, `std$task$cancel`), marked as called
 - [x] Then [[MYLA-413]] for the standard library (its prototype miscompiled `slices_and_formats.my` without the list)
-- [ ] Then [[MYLA-412]]'s signature cache, toward [[MYLA-359]]'s 5 ms — not started: it is large (a serialized form of the seven modules' renamed declarations, every kind of declaration, type, attribute and constant expression, with node ids relocated and each module's renamer kept for its bodies, written by `scripts/bootstrap.sh` and read by the loader, with a fallback for `--stdlib`), more than this package had time for. After this package a hello world still checks in 41.3 M instructions, all of it the implicit modules' signatures, which is MYLA-412's estimate's starting point; an import now costs its modules' signatures and the bodies it calls (std.io 19 M, std.http 160 M), so the cache would pay for the other modules of `std` too
+- [x] Then [[MYLA-412]]'s signature cache, toward [[MYLA-359]]'s 5 ms — not started: it is large (a serialized form of the seven modules' renamed declarations, every kind of declaration, type, attribute and constant expression, with node ids relocated and each module's renamer kept for its bodies, written by `scripts/bootstrap.sh` and read by the loader, with a fallback for `--stdlib`), more than this package had time for. After this package a hello world still checks in 41.3 M instructions, all of it the implicit modules' signatures, which is MYLA-412's estimate's starting point; an import now costs its modules' signatures and the bodies it calls (std.io 19 M, std.http 160 M), so the cache would pay for the other modules of `std` too — since built in [[MYLA-412]] (review 2026-11-12; the text before this note is from before it)
 
 ## What changed
 
@@ -57,3 +57,7 @@ Suites: `scripts/test.sh fast` (843 tests; the two failures are the embedded lib
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-552]]: the last box named [[MYLA-412]] as not started; it has since been built and is signed off with this review.

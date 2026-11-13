@@ -2,7 +2,7 @@
 id: MYLA-423
 title: "P9 Archives and compression: pax numbers, ids, output limits"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [std, archive, compress, round-5]
 ---
@@ -45,3 +45,7 @@ Decisions the items left open, built as recommended; the owner decides.
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-550]]: `archive.zip_read` has no output limit, and a tar entry of 2^31 bytes or more is `BadHeader`.
