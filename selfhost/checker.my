@@ -9799,6 +9799,10 @@ fun derived_error_at(src: str) -> (int32, int32, str, bool) {
 #test("fun main() { let c = true\nlet a = if c { \"x\" } else { 5000000000 } }")[["integer literal 5000000000 does not fit in 'int32'"]]
 #test("fun main() { let small: int8 = 1\nlet a = if small > 0 { small } else { 5000000000 } }")[["integer literal 5000000000 does not fit in 'int8'"]]
 #test("fun main() { let big: int64 = 5\nlet a: int32 = if big > 0 { 1 } else { 5000000000 } }")[["integer literal 5000000000 does not fit in 'int32'"]]
+// polymorphic recursion, whether called or not (MYLA-543); type parameters
+// passed on as they are, swapped, or in a larger type without a way back
+#test("fun grow<T>(n: int, x: T) -> int { return grow<[T]>(n, [x]) }")[["the instances of 'grow' nest without end: this call, in 'grow<T>', asks for 'grow<[T]>'"]]
+#test("fun swap<A, B>(n: int, a: A, b: B) -> int { if n == 0 { return 0 }\nreturn swap(n - 1, b, a) }\nfun wrap<T>(x: T) -> [T] { return [x] }\nfun twice<T>(x: T) -> [[T]] { return wrap(wrap(x)) }")[[]]
 #test("fun main() { let v: uint8 = -'a' }")[["integer literal -97 (the char literal negated) does not fit in 'uint8'"]]
 #test("struct V<T> { v: T }\nimpl<T: Add> Add for V<T> { fun add(self, other: V<T>) -> V<T> { return V { v: self.v + other.v } } }\nfun main() { let c: V<int64> = V { v: 2 } + V { v: 5 }\nlet d = V { v: 2 } + V { v: 1u8 }\nlet e: uint8 = d.v }")[[]]
 #test("trait Z { fun zero() -> Self }\nimpl Z for int { fun zero() -> int { return 0 } }\nfun f<T>() -> T { return T.zero() }")[["type parameter 'T' has no function 'zero': it has no bounds (write 'T: Trait' to call a trait's functions)"]]
