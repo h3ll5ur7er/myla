@@ -84,7 +84,7 @@ pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Opti
     // its group of DISPATCH_GROUP and its place there, and the list of the
     // cases a function of its own, so that no function is both large and
     // run through often (a wasm engine optimizes such a function, which
-    // took Node 2 s a run on `std.int`'s 1826 cases, MYLA-370)
+    // made Node slow on `std.int`'s 1826 cases, MYLA-370)
     var aw = ""
     if g.has_async { aw = "await " }
     let fun_kw = if g.has_async { "async fun" } else { "fun" }
