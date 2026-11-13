@@ -321,6 +321,8 @@ pub struct Interp {
     // runs itself (`run_own`), -1 when the program has none
     fi_find_from: int32,
     fi_extend: int32,
+    // each builtin's code (`builtin_codes`, MYLA-605)
+    bcodes: [str: int32],
     sleep_seq: int64,
     virtual_time: bool,
     vclock: int64,
@@ -649,7 +651,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
-        sleepers: [], deadlines: [], fired: [], fd_waits: [], fds_seen: 0, fds_gap: LOOK_GAP_MIN, notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], lots: [], sock_tags: [:], parked_socks: 0, lots_seen: 0, lots_gap: LOOK_GAP_MIN, fi_find_from: -1, fi_extend: -1, sleep_seq: 0, virtual_time: false, vclock: 0,
+        sleepers: [], deadlines: [], fired: [], fd_waits: [], fds_seen: 0, fds_gap: LOOK_GAP_MIN, notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], lots: [], sock_tags: [:], parked_socks: 0, lots_seen: 0, lots_gap: LOOK_GAP_MIN, fi_find_from: -1, fi_extend: -1, bcodes: builtin_codes(), sleep_seq: 0, virtual_time: false, vclock: 0,
         testing: false, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
         static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: c.call_types,
         tparams: [], envs: [], env_memo: [:], type_env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
@@ -3749,7 +3751,8 @@ impl Interp {
             ExprKind.GetField(tgt, field) => {
                 // `h.wrapping_mul(k)` (D175) first: hashes and digests make
                 // many, and no impl can define the name on an integer
-                if is_wrapping_method(field) && is_int_value_type(self.resolved_of(tgt.id)) { return self.eval_wrapping_on(e, field, tgt, args) }
+                let bc = self.builtin_code(field)
+                if bc == G_WRAPPING && is_int_value_type(self.resolved_of(tgt.id)) { return self.eval_wrapping_on(e, field, tgt, args) }
                 // `T.zero()`, `int.zero()`: a function of the type (D172)
                 match self.static_calls.get(e.id) {
                     Some(st) => { return self.eval_static_call(e, st, field, args) },
@@ -3757,12 +3760,12 @@ impl Interp {
                 }
                 // a builtin function called as a method of its first argument
                 // (`xs.push(v)` is `push(xs, v)`, D103, MYLA-221)
-                if builtin_method_name(field) && self.func_idx(format("{}.{}", self.recv_key(tgt), field)) < 0 {
+                if is_method_code(bc) {
                     let is_builtin = match self.resolved_of(tgt.id) { Some(t) => builtin_method(t, field), None => false }
-                    if is_builtin {
+                    if is_builtin && self.func_idx(format("{}.{}", self.recv_key(tgt), field)) < 0 {
                         var all: [Expr] = [tgt]
                         for a in args { all.push(a) }
-                        return self.eval_name_call(e, field, all)
+                        return self.eval_builtin_call(e, bc, field, all)
                     }
                 }
                 return self.eval_getfield_call(e, tgt, field, args)
@@ -4944,13 +4947,37 @@ impl Interp {
 
     #test(interp_on("[int]"), Expr { id: 133, line: 83, col: 20, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 22 }, kind: ExprKind.Call(Expr { id: 132, line: 83, col: 11, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 20 }, kind: ExprKind.Name("page_size") }, [], []) }, "page_size", [])[Value.VUnit]
     fun eval_name_call(var self, e: Expr, nm: str, args: [Expr]) -> Value {
+        let c = self.builtin_code(nm)
+        if c == 0 {
+            // (see `eval_builtin_call`)
+            if self.captured_io { self.captured_io = false }
+            // a program's or the library's own function, or a variant
+            return self.call_named(e, nm, args)
+        }
+        return self.eval_builtin_call(e, c, nm, args)
+    }
+
+    // The code of the builtin `nm` (`builtin_codes`, MYLA-605), 0 for a name
+    // that is no builtin's. (A primitive of the checker's lists the table
+    // misses still finds its group, by name.)
+    #test(interp_on("[int]"), "len")[B_LEN]
+    #test(interp_on("[int]"), "__sock_poll")[G_NET]
+    #test(interp_on("[int]"), "fib")[0]
+    fun builtin_code(self, nm: str) -> int32 {
+        let c = self.bcodes.get_or(nm, 0)
+        if c != 0 || nm.len() < 3 || nm[0] != '_' || nm[1] != '_' { return c }
+        return primitive_group(nm)
+    }
+
+    // The call of the builtin `nm`, whose code is `c` (not 0): each case
+    // tests the code, a builtin's call compares no names (MYLA-605: it
+    // compared `nm` with each builtin's before its own, 14 percent of
+    // reading lines).
+    fun eval_builtin_call(var self, e: Expr, c: int32, nm: str, args: [Expr]) -> Value {
         // a captured write leaves no errno of its own: `__io_errno` right
         // after it reads 0, not what an earlier primitive left (M5)
-        if self.captured_io && nm != "__io_errno" { self.captured_io = false }
-        // a program's or the library's own function, or a variant, without
-        // testing every builtin's name first (MYLA-380's follow-up)
-        if !names_a_builtin(nm) { return self.call_named(e, nm, args) }
-        if nm == "std$task$cancel" {
+        if self.captured_io && c != B_IO_ERRNO { self.captured_io = false }
+        if c == B_TASK_CANCEL {
             match self.eval(args[0]) {
                 Value.VTask(id) => { self.request_cancel(id) },
                 _ => {},
@@ -4959,7 +4986,7 @@ impl Interp {
         }
         // a deadline for the child (D124, `task.timeout`), and whether it had
         // not passed
-        if nm == "__cancel_after" {
+        if c == B_CANCEL_AFTER {
             let c = self.eval(args[0])
             let ms = as_int(self.eval(args[1]))
             let rec = self.fired.len()
@@ -4972,20 +4999,20 @@ impl Interp {
             }
             return Value.VInt(rec as int64)
         }
-        if nm == "__disarm" {
+        if c == B_DISARM {
             let rec = as_int(self.eval(args[0]))
             return Value.VBool(!self.fired[rec as int32])
         }
-        if nm == "__task_cancelled" {
+        if c == B_TASK_CANCELLED {
             return Value.VBool(self.cur < self.tasks.len() && self.tasks[self.cur].requested)
         }
         // std.task's notifiers (MYLA-387)
-        if is_notify_primitive(nm) { return self.notify_primitive(nm, args) }
+        if c == G_NOTIFY { return self.notify_primitive(nm, args) }
         // nothing but the turn its `await` gives (MYLA-228)
-        if nm == "__yield" { return Value.VUnit }
+        if c == B_YIELD { return Value.VUnit }
         // the running task asleep (D124): parked until its time, which
         // `wake_sleepers` sees; outside any task, the thread asleep
-        if nm == "__sleep" {
+        if c == B_SLEEP {
             let ms = as_int(self.eval(args[0]))
             if self.stop() { return Value.VUnit }
             if self.cur < 0 || self.cur >= self.tasks.len() {
@@ -5002,14 +5029,14 @@ impl Interp {
             self.parked = true
             return Value.VUnit
         }
-        if nm == "__clock_ns" { return Value.VInt(self.now()) }
+        if c == B_CLOCK_NS { return Value.VInt(self.now()) }
         // the wall clock (MYLA-334): the host's, also under MYLA_TIME=virtual
-        if nm == "__wall_ns" { return Value.VInt(__wall_ns()) }
+        if c == B_WALL_NS { return Value.VInt(__wall_ns()) }
         // waiting for input (D124): parked until `fd` is readable, unless it
         // is now or the task was asked to stop; outside any task, nothing.
         // A negative descriptor, which poll(2) ignores, is ready at once, as
         // natively, where the poller can't watch it (`wait_fds` in std.rt)
-        if nm == "__wait_readable" {
+        if c == B_WAIT_READABLE {
             let fd = as_int(self.eval(args[0])) as int32
             if self.stop() { return Value.VUnit }
             // (a case's stdin is empty: ready at once, MYLA-547)
@@ -5022,7 +5049,7 @@ impl Interp {
         // waiting for room to write to `fd` (a child's input, MYLA-419), as
         // for input; outside any task the thread waits in the host's
         // `__poll_write`, as natively (std.rt's `wait_alone`)
-        if nm == "__wait_writable" {
+        if c == B_WAIT_WRITABLE {
             let fd = as_int(self.eval(args[0])) as int32
             if self.stop() { return Value.VUnit }
             if fd < 0 { return Value.VUnit }
@@ -5036,13 +5063,13 @@ impl Interp {
             self.parked = true
             return Value.VUnit
         }
-        if nm == "__poll_write" {
+        if c == B_POLL_WRITE {
             let fd = as_int(self.eval(args[0])) as int32
             return Value.VInt(__poll_write(fd, as_int(self.eval(args[1])) as int32) as int64)
         }
         // waiting for a socket (MYLA-346): as for input, through the host's
         // `__sock_poll`; outside any task the thread waits in it
-        if nm == "__wait_socket" {
+        if c == B_WAIT_SOCKET {
             let h = as_int(self.eval(args[0])) as int32
             let ev = as_int(self.eval(args[1])) as int32
             if self.stop() { return Value.VUnit }
@@ -5056,7 +5083,7 @@ impl Interp {
             self.parked = true
             return Value.VUnit
         }
-        if nm == "__wait_either" {
+        if c == B_WAIT_EITHER {
             let fa = as_int(self.eval(args[0])) as int32
             let fb = as_int(self.eval(args[1])) as int32
             if self.stop() { return Value.VUnit }
@@ -5067,13 +5094,13 @@ impl Interp {
             self.parked = true
             return Value.VUnit
         }
-        if nm == "__sleep_ns" {
+        if c == B_SLEEP_NS {
             let n = as_int(self.eval(args[0]))
             if self.stop() { return Value.VUnit }
             if self.virtual_time { self.vclock = self.vclock + n } else if n > 0 { __sleep_ns(n) }
             return Value.VUnit
         }
-        if nm == "print" {
+        if c == B_PRINT {
             let v = self.eval(args[0])
             if self.stop() { return Value.VUnit }
             // a struct or enum through its `format` (D159), the rest as before
@@ -5081,7 +5108,7 @@ impl Interp {
             self.emit("\n")
             return Value.VUnit
         }
-        if nm == "__write" {
+        if c == B_WRITE {
             let fd = as_int(self.eval(args[0])) as int32
             let s = as_str(self.eval(args[1]))
             if self.stop() { return Value.VUnit }
@@ -5092,16 +5119,16 @@ impl Interp {
             else { write(fd, s) }
             return Value.VUnit
         }
-        if nm == "__exit" {
+        if c == B_EXIT {
             let code = as_int(self.eval(args[0])) as int32
             self.ctrl = Ctrl.CExit
             self.exit_code = code
             return Value.VUnit
         }
-        if nm == "__read_file" {
+        if c == B_READ_FILE {
             return Value.VStr(__read_file(as_str(self.eval(args[0]))))
         }
-        if nm == "__read" {
+        if c == B_READ {
             let fd = as_int(self.eval(args[0])) as int32
             let n = as_int(self.eval(args[1])) as int32
             if self.empty_stdin(fd) { return Value.VStr("") }
@@ -5109,13 +5136,13 @@ impl Interp {
         }
         // `__read` and `__write` of bytes (D177): here through a string,
         // which the bytes stay (`VBytes`, S2)
-        if nm == "__read_bytes" {
+        if c == B_READ_BYTES {
             let fd = as_int(self.eval(args[0])) as int32
             let n = as_int(self.eval(args[1])) as int32
             if self.empty_stdin(fd) { return Value.VBytes("") }
             return Value.VBytes(__read(fd, n))
         }
-        if nm == "__write_bytes" {
+        if c == B_WRITE_BYTES {
             let fd = as_int(self.eval(args[0])) as int32
             let s = match self.eval(args[1]) {
                 Value.VBytes(b) => b,
@@ -5134,21 +5161,21 @@ impl Interp {
             else { write(fd, s) }
             return Value.VUnit
         }
-        if nm == "__poll" {
+        if c == B_POLL {
             let fd = as_int(self.eval(args[0])) as int32
             let ms = as_int(self.eval(args[1])) as int32
             if self.empty_stdin(fd) { return Value.VInt(1) }
             return Value.VInt(__poll(fd, ms) as int64)
         }
-        if nm == "__io_errno" {
+        if c == B_IO_ERRNO {
             if self.captured_io {
                 self.captured_io = false
                 return Value.VInt(0)
             }
             return Value.VInt(__io_errno() as int64)
         }
-        if nm == "__getcwd" { return Value.VStr(__getcwd()) }
-        if nm == "__test_dir" {
+        if c == B_GETCWD { return Value.VStr(__getcwd()) }
+        if c == B_TEST_DIR {
             // the case's scratch root, made on the first call (D162)
             if self.test_root == "" && self.testing {
                 var base = __getenv("TMPDIR")
@@ -5161,46 +5188,46 @@ impl Interp {
             }
             return Value.VStr(self.test_root)
         }
-        if nm == "__test_program" { return Value.VStr(self.test_program) }
-        if nm == "__getenv" { return Value.VStr(__getenv(as_str(self.eval(args[0])))) }
-        if nm == "__sqrt" { return Value.VFloat(__sqrt(as_float(self.eval(args[0])))) }
-        if is_raw_memory_primitive(nm) {
+        if c == B_TEST_PROGRAM { return Value.VStr(self.test_program) }
+        if c == B_GETENV { return Value.VStr(__getenv(as_str(self.eval(args[0])))) }
+        if c == B_SQRT { return Value.VFloat(__sqrt(as_float(self.eval(args[0])))) }
+        if c == G_RAW_MEMORY {
             self.fail(e, format("'{}' reads and writes raw memory, which only native code does", nm))
             return Value.VUnit
         }
-        if nm == "__f64_bits" { return Value.VInt(__f64_bits(as_float(self.eval(args[0]))) as int64) }
-        if nm == "__f64_from_bits" { return Value.VFloat(__f64_from_bits(as_int(self.eval(args[0])) as uint64)) }
-        if nm == "__write_file" {
+        if c == B_F64_BITS { return Value.VInt(__f64_bits(as_float(self.eval(args[0]))) as int64) }
+        if c == B_F64_FROM_BITS { return Value.VFloat(__f64_from_bits(as_int(self.eval(args[0])) as uint64)) }
+        if c == B_WRITE_FILE {
             __write_file(as_str(self.eval(args[0])), as_str(self.eval(args[1])))
             return Value.VUnit
         }
-        if nm == "__list_dir" { return Value.VStr(__list_dir(as_str(self.eval(args[0])))) }
-        if nm == "__stat" { return Value.VInt(__stat(as_str(self.eval(args[0]))) as int64) }
-        if nm == "__mkdir" {
+        if c == B_LIST_DIR { return Value.VStr(__list_dir(as_str(self.eval(args[0])))) }
+        if c == B_STAT { return Value.VInt(__stat(as_str(self.eval(args[0]))) as int64) }
+        if c == B_MKDIR {
             let path = as_str(self.eval(args[0]))
             __mkdir(path, as_int(self.eval(args[1])) as int32)
             return Value.VUnit
         }
-        if nm == "__unlink" {
+        if c == B_UNLINK {
             __unlink(as_str(self.eval(args[0])))
             return Value.VUnit
         }
-        if nm == "__rmdir" {
+        if c == B_RMDIR {
             __rmdir(as_str(self.eval(args[0])))
             return Value.VUnit
         }
-        if nm == "__rename" {
+        if c == B_RENAME {
             let from_path = as_str(self.eval(args[0]))
             __rename(from_path, as_str(self.eval(args[1])))
             return Value.VUnit
         }
-        if nm == "__args" {
+        if c == B_ARGS {
             var out: [Value] = []
             for a in self.argv { out.push(Value.VStr(a)) }
             return Value.VList(out)
         }
         // a child not waited for (D124): the native primitives' own
-        if nm == "__spawn" {
+        if c == B_SPAWN {
             let prog = as_str(self.eval(args[0]))
             var argv: [str] = []
             match self.eval(args[1]) {
@@ -5212,7 +5239,7 @@ impl Interp {
             return Value.VList(out)
         }
         // `__run` and `__spawn` with D147's options: the host's own
-        if nm == "__run_with" || nm == "__spawn_with" {
+        if c == B_RUN_WITH || c == B_SPAWN_WITH {
             let prog = as_str(self.eval(args[0]))
             var argv: [str] = []
             match self.eval(args[1]) {
@@ -5224,32 +5251,32 @@ impl Interp {
                 Value.VList(xs) => { for x in xs { opts.push(as_str(x)) } },
                 _ => {},
             }
-            if nm == "__run_with" { return bytes_to_value(__run_with(prog, argv, opts)) }
+            if c == B_RUN_WITH { return bytes_to_value(__run_with(prog, argv, opts)) }
             var out: [Value] = []
             for x in __spawn_with(prog, argv, opts) { out.push(Value.VInt(x as int64)) }
             return Value.VList(out)
         }
-        if nm == "__reap" { return Value.VInt(__reap(as_int(self.eval(args[0])) as int32) as int64) }
+        if c == B_REAP { return Value.VInt(__reap(as_int(self.eval(args[0])) as int32) as int64) }
         // MYLA-336's: entropy, descriptors, a child with pipes; the host's own
-        if nm == "__random_bytes" { return bytes_to_value(__random_bytes(as_int(self.eval(args[0])) as int32)) }
-        if nm == "__open" {
+        if c == B_RANDOM_BYTES { return bytes_to_value(__random_bytes(as_int(self.eval(args[0])) as int32)) }
+        if c == B_OPEN {
             let path = as_str(self.eval(args[0]))
             let flags = as_int(self.eval(args[1])) as int32
             return Value.VInt(__open(path, flags, as_int(self.eval(args[2])) as int32) as int64)
         }
-        if nm == "__seek" {
+        if c == B_SEEK {
             let fd = as_int(self.eval(args[0])) as int32
             let offset = as_int(self.eval(args[1]))
             return Value.VInt(__seek(fd, offset, as_int(self.eval(args[2])) as int32))
         }
-        if nm == "__fstat" {
+        if c == B_FSTAT {
             var out: [Value] = []
             for x in __fstat(as_int(self.eval(args[0])) as int32) { out.push(Value.VInt(x)) }
             return Value.VList(out)
         }
         // a string's bytes as a list and back (MYLA-369)
-        if nm == "__str_to_bytes" { return Value.VBytes(as_str(self.eval(args[0]))) }
-        if nm == "__bytes_to_str" {
+        if c == B_STR_TO_BYTES { return Value.VBytes(as_str(self.eval(args[0]))) }
+        if c == B_BYTES_TO_STR {
             match self.eval(args[0]) {
                 Value.VBytes(s) => { return Value.VStr(s) },
                 Value.VList(xs) => {
@@ -5261,14 +5288,14 @@ impl Interp {
             }
             return Value.VStr("")
         }
-        if nm == "__path_stat" {
+        if c == B_PATH_STAT {
             let path = as_str(self.eval(args[0]))
             let follow = as_bool(self.eval(args[1]))
             var out: [Value] = []
             for x in __path_stat(path, follow) { out.push(Value.VInt(x)) }
             return Value.VList(out)
         }
-        if nm == "__spawn_piped" {
+        if c == B_SPAWN_PIPED {
             let prog = as_str(self.eval(args[0]))
             var argv: [str] = []
             match self.eval(args[1]) {
@@ -5284,20 +5311,20 @@ impl Interp {
             for x in __spawn_piped(prog, argv, opts) { out.push(Value.VInt(x as int64)) }
             return Value.VList(out)
         }
-        if is_lot_primitive(nm) { return self.lot_primitive(nm, args) }
-        if is_net_primitive(nm) { return self.net_primitive(nm, args) }
-        if is_term_primitive(nm) { return self.term_primitive(nm, args) }
-        if nm == "__try_reap" { return Value.VInt(__try_reap(as_int(self.eval(args[0])) as int32) as int64) }
-        if nm == "__close" {
+        if c == G_LOT { return self.lot_primitive(nm, args) }
+        if c == G_NET { return self.net_primitive(nm, args) }
+        if c == G_TERM { return self.term_primitive(nm, args) }
+        if c == B_TRY_REAP { return Value.VInt(__try_reap(as_int(self.eval(args[0])) as int32) as int64) }
+        if c == B_CLOSE {
             __close(as_int(self.eval(args[0])) as int32)
             return Value.VUnit
         }
-        if nm == "__kill" {
+        if c == B_KILL {
             let pid = as_int(self.eval(args[0])) as int32
             __kill(pid, as_int(self.eval(args[1])) as int32)
             return Value.VUnit
         }
-        if nm == "__run" {
+        if c == B_RUN {
             let prog = as_str(self.eval(args[0]))
             var argv: [str] = []
             match self.eval(args[1]) {
@@ -5306,11 +5333,11 @@ impl Interp {
             }
             return bytes_to_value(__run(prog, argv))
         }
-        if nm == "__run_stderr" { return bytes_to_value(__run_stderr()) }
-        if nm == "__run_exit_code" { return Value.VInt(__run_exit_code() as int64) }
-        if nm == "__run_signal" { return Value.VInt(__run_signal() as int64) }
-        if nm == "__run_errno" { return Value.VInt(__run_errno() as int64) }
-        if nm == "assert" {
+        if c == B_RUN_STDERR { return bytes_to_value(__run_stderr()) }
+        if c == B_RUN_EXIT_CODE { return Value.VInt(__run_exit_code() as int64) }
+        if c == B_RUN_SIGNAL { return Value.VInt(__run_signal() as int64) }
+        if c == B_RUN_ERRNO { return Value.VInt(__run_errno() as int64) }
+        if c == B_ASSERT {
             let ok = as_bool(self.eval(args[0]))
             if !ok && !self.stop() {
                 var msg = "assertion failed"
@@ -5319,18 +5346,18 @@ impl Interp {
             }
             return Value.VUnit
         }
-        if nm == "panic" {
+        if c == B_PANIC {
             let msg = as_str(self.eval(args[0]))
             self.fail(e, msg)
             return Value.VUnit
         }
-        if nm == "unreachable" {
+        if c == B_UNREACHABLE {
             self.fail(e, "reached unreachable code")
             return Value.VUnit
         }
-        if nm == "len" { return Value.VInt(value_len(self.eval(args[0]))) }
-        if is_wrapping_method(nm) { return self.eval_wrapping(e, nm, args) }
-        if nm == "push" {
+        if c == B_LEN { return Value.VInt(value_len(self.eval(args[0]))) }
+        if c == G_WRAPPING { return self.eval_wrapping(e, nm, args) }
+        if c == B_PUSH {
             // the list's place, then the value; the list is changed afterwards,
             // so `push(xs, pop(xs))` sees the pop
             let p = self.place_of(args[0])
@@ -5340,7 +5367,7 @@ impl Interp {
             self.update_place(q, PlaceOp.OPush(v))
             return Value.VUnit
         }
-        if nm == "pop" {
+        if c == B_POP {
             let named = self.place_of(args[0])
             let p = self.settle(named, false)
             if self.stop() { return Value.VUnit }
@@ -5351,13 +5378,13 @@ impl Interp {
             }
             return self.update_place(p, PlaceOp.OPop)
         }
-        if nm == "contains" {
+        if c == B_CONTAINS {
             let m = self.eval(args[0])
             let k = self.eval(args[1])
             let kt = self.hashed_key_type(args[0])
             return Value.VBool(self.place_in(m, k, kt) >= 0)
         }
-        if nm == "remove" {
+        if c == B_REMOVE {
             let p = self.place_of(args[0])
             let k = self.eval(args[1])
             let q = self.settle(p, false)
@@ -5366,17 +5393,17 @@ impl Interp {
             self.update_place(q, PlaceOp.ORemove(k, kt))
             return Value.VUnit
         }
-        if nm == "keys" { return map_keys(self.eval(args[0])) }
-        if nm == "chars" { return decode_chars(as_str(self.eval(args[0]))) }
-        if nm == "format" { return self.eval_format(args) }
-        if nm == "StringBuilder" {
+        if c == B_KEYS { return map_keys(self.eval(args[0])) }
+        if c == B_CHARS { return decode_chars(as_str(self.eval(args[0]))) }
+        if c == B_FORMAT { return self.eval_format(args) }
+        if c == B_STRINGBUILDER {
             // with a capacity (MYLA-369), room for as many bytes, as natively
             if args.len() == 0 { return Value.VSB(StringBuilder()) }
             let n = as_int(self.eval(args[0]))
             if self.stop() { return Value.VUnit }
             return Value.VSB(StringBuilder(n as int32))
         }
-        if nm == "append" {
+        if c == B_APPEND {
             let p = self.place_of(args[0])
             var piece = as_str(self.eval(args[1]))
             if args.len() == 4 {                    // append(sb, s, start, end) (MYLA-85)
@@ -5396,7 +5423,7 @@ impl Interp {
             self.update_place(q, PlaceOp.OAppend(piece))
             return Value.VUnit
         }
-        if nm == "append_char" {
+        if c == B_APPEND_CHAR {
             // the character's UTF-8 bytes (MYLA-390)
             let p = self.place_of(args[0])
             let c = self.eval(args[1])
@@ -5408,7 +5435,7 @@ impl Interp {
             }
             return Value.VUnit
         }
-        if nm == "append_byte" {
+        if c == B_APPEND_BYTE {
             let p = self.place_of(args[0])
             let b = as_int(self.eval(args[1]))
             let q = self.settle(p, false)
@@ -5416,11 +5443,11 @@ impl Interp {
             self.update_place(q, PlaceOp.OAppendByte(b))
             return Value.VUnit
         }
-        if nm == "build" { return Value.VStr(sb_build(self.eval(args[0]))) }
+        if c == B_BUILD { return Value.VStr(sb_build(self.eval(args[0]))) }
         return self.call_named(e, nm, args)
     }
 
-    // `nm(args)` where `nm` names no builtin (`names_a_builtin`): a
+    // `nm(args)` where `nm` names no builtin (`builtin_code`): a
     // variant, a function value in scope or a function.
     fun call_named(var self, e: Expr, nm: str, args: [Expr]) -> Value {
         // a bare enum constructor with payload, e.g. `Some(x)`, `Ok(x)`
@@ -5640,18 +5667,214 @@ fun format_typed(v: Value, t: Option<Type>) -> str {
     return format_value(v)
 }
 
-// Whether `Interp.eval_name_call` takes the call of `nm` itself: a
-// primitive (`__…`), `task.cancel`, or a builtin function or method.
-#test("__write")[true]
-#test("push")[true]
-#test("wrapping_add")[true]
-#test("std$task$cancel")[true]
-#test("fib")[false]
-#test("Some")[false]
-#test("_")[false]
-fun names_a_builtin(nm: str) -> bool {
-    if nm.len() >= 2 && nm[0] == '_' && nm[1] == '_' { return true }
-    return nm == "print" || nm == "assert" || nm == "panic" || nm == "unreachable" || nm == "len" || nm == "push" || nm == "pop" || nm == "contains" || nm == "remove" || nm == "keys" || nm == "chars" || nm == "format" || nm == "StringBuilder" || nm == "append" || nm == "append_char" || nm == "append_byte" || nm == "build" || nm == "std$task$cancel" || is_wrapping_method(nm)
+// The builtins `Interp.eval_builtin_call` takes itself, each by a code
+// (MYLA-605): a primitive (`__…`), `task.cancel`, or a builtin function or
+// method; a group of primitives that another function takes has one code
+// for all (`G_…`). The codes follow the order of its cases.
+const B_IO_ERRNO: int32 = 1
+const B_TASK_CANCEL: int32 = 2
+const B_CANCEL_AFTER: int32 = 3
+const B_DISARM: int32 = 4
+const B_TASK_CANCELLED: int32 = 5
+const G_NOTIFY: int32 = 6
+const B_YIELD: int32 = 7
+const B_SLEEP: int32 = 8
+const B_CLOCK_NS: int32 = 9
+const B_WALL_NS: int32 = 10
+const B_WAIT_READABLE: int32 = 11
+const B_WAIT_WRITABLE: int32 = 12
+const B_POLL_WRITE: int32 = 13
+const B_WAIT_SOCKET: int32 = 14
+const B_WAIT_EITHER: int32 = 15
+const B_SLEEP_NS: int32 = 16
+const B_PRINT: int32 = 17
+const B_WRITE: int32 = 18
+const B_EXIT: int32 = 19
+const B_READ_FILE: int32 = 20
+const B_READ: int32 = 21
+const B_READ_BYTES: int32 = 22
+const B_WRITE_BYTES: int32 = 23
+const B_POLL: int32 = 24
+const B_GETCWD: int32 = 25
+const B_TEST_DIR: int32 = 26
+const B_TEST_PROGRAM: int32 = 27
+const B_GETENV: int32 = 28
+const B_SQRT: int32 = 29
+const G_RAW_MEMORY: int32 = 30
+const B_F64_BITS: int32 = 31
+const B_F64_FROM_BITS: int32 = 32
+const B_WRITE_FILE: int32 = 33
+const B_LIST_DIR: int32 = 34
+const B_STAT: int32 = 35
+const B_MKDIR: int32 = 36
+const B_UNLINK: int32 = 37
+const B_RMDIR: int32 = 38
+const B_RENAME: int32 = 39
+const B_ARGS: int32 = 40
+const B_SPAWN: int32 = 41
+const B_RUN_WITH: int32 = 42
+const B_SPAWN_WITH: int32 = 43
+const B_REAP: int32 = 44
+const B_RANDOM_BYTES: int32 = 45
+const B_OPEN: int32 = 46
+const B_SEEK: int32 = 47
+const B_FSTAT: int32 = 48
+const B_STR_TO_BYTES: int32 = 49
+const B_BYTES_TO_STR: int32 = 50
+const B_PATH_STAT: int32 = 51
+const B_SPAWN_PIPED: int32 = 52
+const G_LOT: int32 = 53
+const G_NET: int32 = 54
+const G_TERM: int32 = 55
+const B_TRY_REAP: int32 = 56
+const B_CLOSE: int32 = 57
+const B_KILL: int32 = 58
+const B_RUN: int32 = 59
+const B_RUN_STDERR: int32 = 60
+const B_RUN_EXIT_CODE: int32 = 61
+const B_RUN_SIGNAL: int32 = 62
+const B_RUN_ERRNO: int32 = 63
+const B_ASSERT: int32 = 64
+const B_PANIC: int32 = 65
+const B_UNREACHABLE: int32 = 66
+const B_LEN: int32 = 67
+const G_WRAPPING: int32 = 68
+const B_PUSH: int32 = 69
+const B_POP: int32 = 70
+const B_CONTAINS: int32 = 71
+const B_REMOVE: int32 = 72
+const B_KEYS: int32 = 73
+const B_CHARS: int32 = 74
+const B_FORMAT: int32 = 75
+const B_STRINGBUILDER: int32 = 76
+const B_APPEND: int32 = 77
+const B_APPEND_CHAR: int32 = 78
+const B_APPEND_BYTE: int32 = 79
+const B_BUILD: int32 = 80
+
+// Each builtin's name and its code (`Interp.bcodes`).
+fun builtin_codes() -> [str: int32] {
+    var m: [str: int32] = [:]
+    m["__io_errno"] = B_IO_ERRNO
+    m["std$task$cancel"] = B_TASK_CANCEL
+    m["__cancel_after"] = B_CANCEL_AFTER
+    m["__disarm"] = B_DISARM
+    m["__task_cancelled"] = B_TASK_CANCELLED
+    m["__yield"] = B_YIELD
+    m["__sleep"] = B_SLEEP
+    m["__clock_ns"] = B_CLOCK_NS
+    m["__wall_ns"] = B_WALL_NS
+    m["__wait_readable"] = B_WAIT_READABLE
+    m["__wait_writable"] = B_WAIT_WRITABLE
+    m["__poll_write"] = B_POLL_WRITE
+    m["__wait_socket"] = B_WAIT_SOCKET
+    m["__wait_either"] = B_WAIT_EITHER
+    m["__sleep_ns"] = B_SLEEP_NS
+    m["print"] = B_PRINT
+    m["__write"] = B_WRITE
+    m["__exit"] = B_EXIT
+    m["__read_file"] = B_READ_FILE
+    m["__read"] = B_READ
+    m["__read_bytes"] = B_READ_BYTES
+    m["__write_bytes"] = B_WRITE_BYTES
+    m["__poll"] = B_POLL
+    m["__getcwd"] = B_GETCWD
+    m["__test_dir"] = B_TEST_DIR
+    m["__test_program"] = B_TEST_PROGRAM
+    m["__getenv"] = B_GETENV
+    m["__sqrt"] = B_SQRT
+    m["__f64_bits"] = B_F64_BITS
+    m["__f64_from_bits"] = B_F64_FROM_BITS
+    m["__write_file"] = B_WRITE_FILE
+    m["__list_dir"] = B_LIST_DIR
+    m["__stat"] = B_STAT
+    m["__mkdir"] = B_MKDIR
+    m["__unlink"] = B_UNLINK
+    m["__rmdir"] = B_RMDIR
+    m["__rename"] = B_RENAME
+    m["__args"] = B_ARGS
+    m["__spawn"] = B_SPAWN
+    m["__run_with"] = B_RUN_WITH
+    m["__spawn_with"] = B_SPAWN_WITH
+    m["__reap"] = B_REAP
+    m["__random_bytes"] = B_RANDOM_BYTES
+    m["__open"] = B_OPEN
+    m["__seek"] = B_SEEK
+    m["__fstat"] = B_FSTAT
+    m["__str_to_bytes"] = B_STR_TO_BYTES
+    m["__bytes_to_str"] = B_BYTES_TO_STR
+    m["__path_stat"] = B_PATH_STAT
+    m["__spawn_piped"] = B_SPAWN_PIPED
+    m["__try_reap"] = B_TRY_REAP
+    m["__close"] = B_CLOSE
+    m["__kill"] = B_KILL
+    m["__run"] = B_RUN
+    m["__run_stderr"] = B_RUN_STDERR
+    m["__run_exit_code"] = B_RUN_EXIT_CODE
+    m["__run_signal"] = B_RUN_SIGNAL
+    m["__run_errno"] = B_RUN_ERRNO
+    m["assert"] = B_ASSERT
+    m["panic"] = B_PANIC
+    m["unreachable"] = B_UNREACHABLE
+    m["len"] = B_LEN
+    m["push"] = B_PUSH
+    m["pop"] = B_POP
+    m["contains"] = B_CONTAINS
+    m["remove"] = B_REMOVE
+    m["keys"] = B_KEYS
+    m["chars"] = B_CHARS
+    m["format"] = B_FORMAT
+    m["StringBuilder"] = B_STRINGBUILDER
+    m["append"] = B_APPEND
+    m["append_char"] = B_APPEND_CHAR
+    m["append_byte"] = B_APPEND_BYTE
+    m["build"] = B_BUILD
+    for n in ["__notifier", "__notify", "__notify_gen", "__waiter", "__park", "__woken", "__notifier_close"] { m[n] = G_NOTIFY }
+    for n in ["__load8", "__load64", "__store8", "__store64", "__alloc", "__addr_of", "__str_of", "__copy_bytes", "__equal_bytes", "__syscall", "__syscall5", "__set_io_errno", "__free", "__environ", "__set_run_status", "__set_run_stderr", "__argv", "__load32", "__store32", "__list_addr", "__list_of", "__rotl", "__rt_addr", "__rt_get", "__bsr64", "__trap_oom", "__rt_waddr", "__cas64", "__xchg64", "__fetch_add64", "__pause", "__run_frame", "__f64_round", "__load_acq64", "__store_rel64", "__call_code"] { m[n] = G_RAW_MEMORY }
+    for n in ["__sock_lot", "__sock_park", "__sock_ready", "__sock_expired", "__sock_tag", "__sock_lot_close"] { m[n] = G_LOT }
+    for n in ["__sock_open", "__sock_set_nonblocking", "__sock_bind", "__sock_listen", "__sock_accept", "__sock_connect", "__sock_error", "__sock_send", "__sock_recv", "__sock_send_to", "__sock_recv_from", "__sock_addr", "__sock_shutdown", "__sock_option", "__sock_poll", "__sock_close", "__net_config"] { m[n] = G_NET }
+    for n in ["__term_is_tty", "__term_size", "__term_get", "__term_set", "__term_raw", "__term_cbreak", "__term_vt", "__signal_listen", "__signal_take"] { m[n] = G_TERM }
+    for n in ["wrapping_add", "wrapping_sub", "wrapping_mul", "wrapping_neg"] { m[n] = G_WRAPPING }
+    return m
+}
+
+// The group of the primitive `nm` by the checker's lists, 0 for none: a
+// primitive the table misses is still taken (only slower).
+#test("__park")[G_NOTIFY]
+#test("__load64")[G_RAW_MEMORY]
+#test("__sock_tag")[G_LOT]
+#test("__sock_send")[G_NET]
+#test("__term_raw")[G_TERM]
+#test("__no_such")[0]
+fun primitive_group(nm: str) -> int32 {
+    if is_notify_primitive(nm) { return G_NOTIFY }
+    if is_raw_memory_primitive(nm) { return G_RAW_MEMORY }
+    if is_lot_primitive(nm) { return G_LOT }
+    if is_net_primitive(nm) { return G_NET }
+    if is_term_primitive(nm) { return G_TERM }
+    return 0
+}
+
+// Whether the builtin of code `c` is also a method (`builtin_method_name`,
+// D103).
+#test(B_PUSH)[true]
+#test(G_WRAPPING)[true]
+#test(B_FORMAT)[false]
+#test(B_PRINT)[false]
+fun is_method_code(c: int32) -> bool {
+    return c == G_WRAPPING || (c >= B_LEN && c <= B_BUILD && c != B_FORMAT && c != B_STRINGBUILDER)
+}
+
+// The table agrees with the checker's lists: a name's group is the one its
+// list names, and its code a method's when the name is a method's.
+#test
+fun builtin_codes_agree() {
+    for (nm, c) in builtin_codes().items() {
+        if is_method_code(c) != builtin_method_name(nm) { panic(f"{nm}: a method's code {is_method_code(c)}") }
+        if c == G_WRAPPING && !is_wrapping_method(nm) { panic(f"{nm}: not a wrapping method") }
+        let g = primitive_group(nm)
+        if (c == G_NOTIFY || c == G_RAW_MEMORY || c == G_LOT || c == G_NET || c == G_TERM) && g != c { panic(f"{nm}: group {c}, the checker's {g}") }
+    }
 }
 
 // Whether `t` names a type parameter, which a generic function's frame
