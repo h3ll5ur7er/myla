@@ -352,7 +352,7 @@ impl str {
         }
         // In bulk: the text doubled into a run of `c` copies, up to 4,096
         // bytes, appended whole, so a million copies of a byte are 245
-        // appends, not a million (2.6 s interpreted, MYLA-546), and need
+        // appends, not a million (slow interpreted, MYLA-546), and need
         // 4 KB past the result
         var run = self
         var c = 1

@@ -9552,8 +9552,8 @@ pub fun build_checker_lazy(decls: [Decl], next_id: int32, primitives: bool, std_
 }
 
 // A checker that has checked `src` alone, the receiver of `#test` cases of
-// the checker's methods (MYLA-184): without the prelude, which would take a
-// third of a second per case in the Python interpreter. Its errors stay in
+// the checker's methods (MYLA-184): without the prelude, which each case
+// would otherwise check again. Its errors stay in
 // `errs`; a `src` that doesn't parse gives an empty checker.
 pub fun checker_on(src: str) -> Checker {
     var decls: [Decl] = []
@@ -12305,9 +12305,9 @@ fun is_name_byte(b: uint8) -> bool {
 // lowering and everything after them see each call with all its arguments,
 // and a loop over an iterator as one written with `while`. The rest stay as
 // they are, the standard library's mostly (MYLA-382: rebuilding every body
-// cost a hello world 8 ms). The rebuilt nodes keep their ids, so the side
-// tables (types, the calls' targets) still apply; a default's nodes are
-// shared by the calls it fills, as they have one type.
+// cost every program, a hello world too, check time). The rebuilt nodes keep
+// their ids, so the side tables (types, the calls' targets) still apply; a
+// default's nodes are shared by the calls it fills, as they have one type.
 
 pub struct Fills { defaults: [int32: [Expr]], fors: [int32: Stmt], renames: [int32: str] }
 

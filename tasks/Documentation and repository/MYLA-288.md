@@ -2,7 +2,7 @@
 id: MYLA-288
 title: Hard expectations instead of the recorded Python answers
 type: improvement
-status: in-progress
+status: backlog
 priority: high
 labels: [tests, oracle]
 ---
@@ -21,3 +21,11 @@ Found by the review of 6 November 2026 ([[Project/Review-2026-11]]). With the Py
 - `test_selfhost_interp`'s corpus parity walks `RECORDED_EXAMPLES` too.
 - Until the third box, the 32 recorded examples' text is frozen: a gate keyed by a file's text (the `myla test` parity, the declaration mutants, the interpreter's corpus parity) has no answer for an edited one. `examples/floats.my`'s comments are stale for that reason (they say `float` is float32 and show the old long digits); editing them failed four gates, so they stay until the expectation files replace the recordings.
 - Open: token and AST expectation files for the examples, so `_golden.py` and the stores can go; the floors of the remaining gates.
+
+## Back to the backlog (2026-11-13, [[MYLA-554]])
+
+Untouched since 7 November, so back in `backlog` until someone takes up the third box. What is still missing, as the tree stands after round 6:
+
+- The token and AST expectation files for the examples. The gates read frozen copies of the recorded examples (`tests/burn/data/recorded_corpus/examples/`) and ask the Python toolchain's answers, 27 stores in `tests/burn/data/golden/` (3.7 MB), through `tests/burn/_golden.py`, from 17 burn modules (the lexer, parser, checker, interpreter, CLI and language-server gates among them).
+- With the expectation files, `_golden.py`, `golden_aliases.py`, the stores and the frozen copies go, and the 32 recorded examples can be edited again (`examples/floats.my`'s stale comments first).
+- The floors of the gates other than the CLI's and the checker's: a gate that skips what it has no answer for counts what it compared and fails below a floor.

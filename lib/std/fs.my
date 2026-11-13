@@ -733,7 +733,7 @@ fun random_suffix() -> Result<str, IoError> {
 }
 
 // The bytes `b` as hexadecimal digits, two each: std.encoding's
-// `hex_encode`, whose import would add 1.4 M instructions (3.4 %, 0.3 ms) to
+// `hex_encode`, whose import would add 1.4 M instructions (3.4 %) to
 // checking a program that imports std.fs, for the names of temporary files
 // (measured in November 2026 with the lazy modules, MYLA-553).
 #test([0u8, 15u8, 160u8, 255u8])["000fa0ff"]

@@ -74,6 +74,8 @@ fun main() {
 
 A spec has either `many` or commands: with `many`, every argument past the positionals is one of its. A short name is one ASCII character.
 
+`check_name` and `check_option`, methods of `Spec`, are the declaring methods' own checks (the panics below), public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
+
 A spec that can't be parsed is a mistake in the program, so the method that would make it panics, naming the argument ([[MYLA-426]]): a name declared twice (options, positionals and `many` share the names `Args` is asked by: `args: 'out' is declared twice`), a short name given twice (`args: '-v' is declared twice (--verbose and --very)`), an empty name or one that starts with `-` or holds `=`, an option's name with a space or a control character (it is typed as one argument; a positional's name is only shown, `<lib dir>`), a short name that isn't a printed ASCII character or is `-` or `=`, a required positional after an optional one, a positional after `many` or a command (it is read before them, so declared after them it would look like a last argument, `cp <from>... <to>`: `args: the positional 'to' comes after 'many' ('from'), which takes the rest`), `many` twice or together with commands, and a command declared twice or that can't be given, its name empty, starting with `-` or holding a space ([[MYLA-553]]).
 
 ## Parsing

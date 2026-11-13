@@ -421,7 +421,7 @@ async fun main() {
     print(await missing())
     // the timeout ends the 5-second child: timed from the timeout itself, so
     // the interpreter's speed on the 400 KB above doesn't count (its copy
-    // took most of 3 s interpreted on a loaded machine)
+    // is slow interpreted on a loaded machine)
     let before = time.now_ms()
     let r = await task.timeout(50, async () => await slow())
     print(match r { Some(v) => "finished", None => "timed out" })
@@ -469,7 +469,7 @@ class Time(unittest.TestCase):
     def test_ten_thousand_sleepers_in_the_interpreter(self):
         # MYLA-296: a lambda copies only the variables it reads; it copied
         # every one in scope, so each of these 10,000 kept the list being
-        # built and every push copied it (600 MB, 1.8 s; now under 40 MB)
+        # built and every push copied it (600 MB; now under 40 MB)
         from ._tools import selfhost_tool
         cmd = [selfhost_tool("interp_main"), self.source("ten_thousand", TEN_THOUSAND), STDLIB_ROOT]
         # through a minimal helper process: a child's peak RSS counts its

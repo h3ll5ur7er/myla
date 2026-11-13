@@ -4207,8 +4207,8 @@ impl Interp {
     // top of `self.receivers`, run by the interpreter itself, as the
     // standard library's code does it but without a step a byte or an
     // element: what `read_line` scans and a list of bytes gathers
-    // (MYLA-546: 3 MB in 60,000 lines took 9 s). Yields the result and the
-    // final `self`.
+    // (MYLA-546: a step a byte made 3 MB in 60,000 lines slow). Yields the
+    // result and the final `self`.
     fun run_own(var self, fi: int32, argv: [Value]) -> (Value, Value) {
         var recv = self.receivers.pop()
         if fi == self.fi_find_from {

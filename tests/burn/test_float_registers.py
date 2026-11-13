@@ -135,9 +135,9 @@ class FloatRegisters(unittest.TestCase):
                              check=True).stdout
         body = _function(asm, "inside")
         self.assertNotIn("movabsq", body, body)
-        self.assertRegex(body, r"movsd \.Lfc\d+\(%rip\), %xmm\d+")
+        self.assertRegex(body, r"movsd \.Lfc[0-9a-f]+\(%rip\), %xmm\d+")
         self.assertRegex(body, r"xorpd (%xmm\d+), \1")
-        self.assertRegex(asm, r"\.Lfc\d+:\n\t\.quad 4611686018427387904\n")   # 2.0
+        self.assertRegex(asm, r"\.Lfc4000000000000000:\n\t\.quad 4611686018427387904\n")   # 2.0, named by its bits (MYLA-552)
         myla = selfhost_tool("main")
         exe = os.path.join(self.tmp.name, "mandel")
         subprocess.run([myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT], check=True)

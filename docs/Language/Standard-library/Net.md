@@ -188,7 +188,7 @@ Without libc there is no getaddrinfo: `lookup` reads the hosts file, then asks t
 | `Resolver`: `lookup(name)` | An address itself; else the hosts file's entries for the name (its case ignored, a trailing dot allowed, Windows' line ends too); else, for `localhost` and the names below it (`db.localhost`), `127.0.0.1` and `::1`, as RFC 6761 has them, with no hosts file too ([[MYLA-426]]); else the first server's answer, IPv4's addresses first. `NotFound`: no such name, or no records, or no server to ask; `TimedOut`: no server answered; `InvalidData`: none gave a usable answer; `InvalidInput`: a name DNS can't carry (an empty label, one past 63 bytes, a name past 253). A reply from elsewhere or with another id is ignored |
 | `hosts_lookup(text, name) -> [IpAddr]`, `nameservers(text) -> [SocketAddr]` | The two parsers, for a hosts file's and a resolv.conf's text |
 
-`ask_one`, a method of `Resolver`, is `lookup`'s step, one query of one server, public only because a method can't be private yet ([[MYLA-433]]); a program has no need of it.
+`ask_one`, a method of `Resolver`, is `lookup`'s step, one query of one server, public only because a method can't be private yet ([[MYLA-433]]); a program has no need of it. So are `LineReader`'s `line` and `took`, the steps of `read_line` (the next line if the buffer holds one; the bytes of one read added).
 
 ## Primitives
 

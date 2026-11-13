@@ -447,7 +447,7 @@ class SelfHostedInterpParity(unittest.TestCase):
     def test_lines_and_extended_bytes_take_no_step_a_byte(self) -> None:
         """`read_line` and `extend` of `[uint8]` cost what the lines or the
         reads do, not their bytes: 6,000 lines of 500 bytes take about what
-        6,000 lines of 5 do (MYLA-546: 3 MB in 60,000 lines took 9.1 s, the
+        6,000 lines of 5 do (MYLA-546: 3 MB in 60,000 lines were slow, the
         interpreter scanning for each line's end a byte at a time and
         `extend` pushing each byte)."""
         if self._binary is None:

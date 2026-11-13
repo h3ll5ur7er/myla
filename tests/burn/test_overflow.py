@@ -362,7 +362,7 @@ class TestOverflow(unittest.TestCase):
                 traps = [k for k, line in enumerate(lines) if "__trap_overflow" in line]
                 # `i * 3`, `-`, `s +=`, `i += 1`, each its own position
                 self.assertEqual(len(traps), 4, body)
-                self.assertTrue(all(k > lines.index(".Lret_main:") for k in traps), body)
+                self.assertTrue(all(k > lines.index(".Lmain_ret:") for k in traps), body)
             self.assertEqual(selfhost_run(path), ("12499900000\n", "", 0))
             if CAN_BUILD_NATIVE:
                 self.assertEqual(build_and_run(path, True), ("12499900000\n", "", 0))

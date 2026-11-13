@@ -28,8 +28,8 @@ import .int as int_m        // `checked_add`, `checked_sub`, `checked_mul`
 // `text` given the fill, alignment (left by default) and width of a format
 // spec, `[[fill]align][width]`, as `std.fmt.pad` gives them; the rest of a
 // spec is ignored. Not `std.fmt`'s own: importing it and `std.num` would
-// cost every program that imports `std.time`, `std.test` among them, 16 ms
-// of checking.
+// cost every program that imports `std.time`, `std.test` among them, check
+// time.
 #test("ab", ">4")["  ab"]
 #test("ab", "*^6")["**ab**"]
 #test("µs", "<4")["µs  "]

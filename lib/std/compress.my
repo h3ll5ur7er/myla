@@ -2403,7 +2403,7 @@ impl<W: Write> Write for Encoder<W> {
 // std.encoding's `hex_decode`, whose import would add 1.8 M instructions
 // (1.9 %) to checking every program that imports this module, for the
 // tests' sake; this copy, which only the tests call, costs them nothing
-// (MYLA-553; 3 ms before the lazy modules, MYLA-428).
+// (MYLA-553, and MYLA-428 before the lazy modules).
 #test("00ff1a")[[0u8, 255u8, 26u8]]
 fun unhex(s: str) -> [uint8] {
     var out: [uint8] = []

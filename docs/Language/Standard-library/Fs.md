@@ -150,7 +150,7 @@ The digits come from the system's entropy (`__random_bytes`), and the name is ma
 
 ## Measurements
 
-Natively on x86-64, measured on the development container (4 cores of a Xeon at 2.1 GHz, shared with other work: a load of 3.5 to 5), 2026-11-11, the best of 16 runs in two sets (of 14 for the 1 MiB, of 5 for the 1 GiB), with a loop of `read(1 << 20)` and `write` through two `File`s:
+Natively on x86-64, measured on the development container (4 cores of a Xeon at 2.1 GHz, shared with other work: a load of 3.5 to 5), 2026-11-11 at `bccc624`, the best of 16 runs in two sets (of 14 for the 1 MiB, of 5 for the 1 GiB), with a loop of `read(1 << 20)` and `write` through two `File`s:
 
 | What | Time | Largest resident set |
 | --- | ---: | ---: |

@@ -1048,7 +1048,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         """`myla_<name>`'s tail calls of itself jump back to its entry block
         (MYLA-250): no call of itself, no jump to its start."""
         body = self._function_asm(asm, name)
-        entry = re.search(r"^(\.L\d+):$", body, re.M).group(1)
+        entry = re.search(r"^(\.L[^\s:]+_\d+):$", body, re.M).group(1)
         self.assertIn(f"jmp {entry}\n", body)
         self.assertNotIn(f"call myla_{name}\n", body)
         self.assertNotIn(f"jmp myla_{name}\n", body)
@@ -1521,7 +1521,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         body = self._function_asm(asm, "spin")
         # the loop: from its first block to the jump back to it
         loop = ""
-        for m in re.finditer(r"\tj[a-z]+ (\.L\d+)\n", body):
+        for m in re.finditer(r"\tj[a-z]+ (\.L[^\s:]+_\d+)\n", body):
             at = body.find(m.group(1) + ":")
             if 0 <= at < m.start():
                 loop = body[at:m.start()]

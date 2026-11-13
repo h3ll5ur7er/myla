@@ -43,7 +43,7 @@ As in shells, a name that starts with `.` is matched only by a component that st
 
 Both the pattern and the path must be absolute, or both relative. Empty components don't count, so `a//b/` is `a/b`; `.` and `..` are names like any other (normalize with `std.path` first if you need them resolved).
 
-The matching takes time proportional to the pattern's length times the path's at worst, never exponential: a component is matched with two pointers, where the last `*` takes one more character on a mismatch, and `**` with a table over the pattern's and the path's components. `a*a*a*a*a*b` against 10,000 `a`s takes 36 µs natively.
+The matching takes time proportional to the pattern's length times the path's at worst, never exponential: a component is matched with two pointers, where the last `*` takes one more character on a mismatch, and `**` with a table over the pattern's and the path's components. `a*a*a*a*a*b` against 10,000 `a`s takes 36 µs natively (2026-11-07, `f70137a`).
 
 | Function | Result |
 | --- | --- |

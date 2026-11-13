@@ -34,12 +34,14 @@ OUT_DIR="build/seed-update"
 scripts/bootstrap.sh "$OUT_DIR"
 . scripts/host.sh
 
-# the seven implicit modules checked whole (D179, MYLA-416): a program reads
-# a body of theirs only once it calls it, and the compiler builds against a
-# library whose broken body nothing calls, so the seed would carry it
-for module in str char int list option map hash; do
-    if ! run_tool "$OUT_DIR/myla" check "lib/std/$module.my" --stdlib lib > /dev/null; then
-        echo "FAIL: lib/std/$module.my doesn't check as a whole (\`build/myla check lib/std/$module.my --stdlib lib\`)" >&2
+# every module of the standard library checked whole (D179, MYLA-416,
+# MYLA-552): a program reads a body of std's but std.rt's only once it calls
+# it, and the compiler builds against a library whose broken body nothing
+# calls, so the seed and the embedded library would carry it; a module's
+# own check reads every body
+for module in $(find lib/std -name '*.my' | LC_ALL=C sort); do
+    if ! run_tool "$OUT_DIR/myla" check "$module" --stdlib lib > /dev/null; then
+        echo "FAIL: $module doesn't check as a whole (\`build/myla check $module --stdlib lib\`)" >&2
         exit 1
     fi
 done

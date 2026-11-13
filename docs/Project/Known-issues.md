@@ -6,19 +6,21 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 
 ## Self-hosted compiler
 
-- `#test` coverage of `selfhost/` is 63 percent (1,447 of 2,295 value-returning functions, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
+- `#test` coverage of `selfhost/` is 63 percent (1,475 of 2,347 value-returning functions after round 6, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
 - The interpreter is about 500 times slower than native code (`fib(30)`: 3.7 s against 7 ms on `d5d80bc`, [[MYLA-317]]).
-- **Interpreter:** the binding of type parameters is lost when a map key's written `eq` or `hash` runs before a `var self` call, so `m[k].sort()` on a `[uint64]` sorts signed; the environment memo grows per call path (a generic `fib(27)`: 163 MB against 13 MB) ([[MYLA-414]]). Small differences from native code in texts and map order ([[MYLA-546]]).
+- **Interpreter:** the binding of type parameters is lost when a map key's written `eq` or `hash` runs before a `var self` call, so `m[k].sort()` on a `[uint64]` sorts signed; the environment memo grows per call path (a generic `fib(27)`: 163 MB against 13 MB) ([[MYLA-414]]). Small differences from native code in texts and map order ([[MYLA-546]]). A `StringBuilder` holds each byte in a word (a 20 MB string takes 280 MB to build, [[MYLA-600]]); every turn of the scheduler polls every task that waits for a descriptor ([[MYLA-604]]); a builtin's call is found by comparing its name with each builtin's, 14 percent of reading lines ([[MYLA-605]]).
 - **Native code, memory safety:** a value read from a container is freed by a later operand (`h.xs[0] + h.repl()` is `old1!` interpreted and `!` natively; 25 of 90 forms), with two leaks and an evaluation order that differs ([[MYLA-543]]); a closure in a variable that captures a recursive enum segfaults when copied to a task, an actor or a channel ([[MYLA-415]]).
 - `self.f(self.g(k))` in a `var self` method copies the receiver for `f` ([[MYLA-542]]).
 - `--checked` int64 arithmetic is twice as slow by time in hot loops on x86-64 (`s += i * 3 - (i >> 1)`: 0.22 s against 0.11 s plain, 0.25 s with the trap inline on the same machine, where the review measured 0.62 s against 0.12 s): each check is now a `jo` to its trap after the function's return, one not-taken branch per operation ([[MYLA-551]]).
-- **Checker:** an impl's bound that names a generic trait (`I: Iterator<str>`) isn't checked where the impl is used, so an `Iterator<int>` gets in and native code reads an int as a string ([[MYLA-538]]). D178's call error fires on a generic actor's getter ([[MYLA-417]]); D95 no longer reports an `await` and a mutator in one head ([[MYLA-394]]); `x.format(spec)` on a builtin behind `T: Format` is an internal error ([[MYLA-544]]).
-- **Loading:** a program's own top-level `std/` directory is read lazily, so `myla check` says `ok` over its errors ([[MYLA-413]]); a declaration swallowed after a missing `}` loads silently when it doesn't start its line, and a library root written with `..` fails ([[MYLA-545]]). A hello world checks in 6.1 ms against the 5 ms aimed at, and the generated code depends on which library bodies were read ([[MYLA-552]]).
+- **Checker:** an impl's bound that names a generic trait (`I: Iterator<str>`) isn't checked where the impl is used, so an `Iterator<int>` gets in and native code reads an int as a string ([[MYLA-538]]). D178's call error fires on a generic actor's getter ([[MYLA-417]]); D95 no longer reports an `await` and a mutator in one head ([[MYLA-394]]); `x.format(spec)` on a builtin behind `T: Format` is an internal error ([[MYLA-544]]). An integer literal past `int32` in an `if` or `match` arm doesn't take another arm's `int64` ([[MYLA-609]]).
+- **Loading:** a program's own top-level `std/` directory is read lazily, so `myla check` says `ok` over its errors ([[MYLA-413]]); a declaration swallowed after a missing `}` loads silently when it doesn't start its line, and a library root written with `..` fails ([[MYLA-545]]). A hello world checks in 6.1 ms (2026-11-12, `547339a`) against the 5 ms aimed at, and the generated code depends on which library bodies were read ([[MYLA-552]]); a third of that check is page faults, which huge pages for the heap's chunks would mostly save ([[MYLA-608]]). A program's own `std/` directory gets the library's privileges in the checker: raw memory without a type error, `__` primitives without a warning ([[MYLA-584]]).
 - **`myla test`:** a multi-line panic is cut natively, an empty `Err` passes, and exit statuses outside 0 to 255 differ between runners ([[MYLA-547]]).
 
 ## Backends and platforms
 
 The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows are planned ([[MYLA-62]]).
+
+- x86-64 passes `exit`'s status to std.rt's `exit_program` zero-extended (`exit(-1)` arrives as 4294967295; nothing a program sees, as the low byte is the status) ([[MYLA-588]]).
 
 ## Concurrency
 
@@ -26,7 +28,7 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 - Natively, on 16 workers, armed timers make every loop top take `__timer_lock`: CPU-bound tasks about 15 % slower ([[MYLA-296]]).
 - A trait method can't be async, so there is no async `Read` or `Write` ([[MYLA-434]]).
 - The poller takes at most four events a wait (under 2 percent to gain, [[MYLA-531]]); a keep-alive request through std.http's lot costs 4 to 6 percent more than a worker waiting on its connection ([[MYLA-530]]).
-- **Runtime:** `net.line_reader` has no line limit; the poller's creation isn't checked (a hang with no descriptor left on one worker); a failure doesn't end the program while a task blocks in a key read, and a signal leaves the terminal raw ([[MYLA-548]]).
+- **Runtime:** `net.line_reader` has no line limit; the poller's creation isn't checked (a hang with no descriptor left on one worker); a failure doesn't end the program while a task blocks in a key read, and a signal leaves the terminal raw ([[MYLA-548]]). A SIGSEGV sent by `kill` is swallowed once natively, as the stack overflow handler takes it for a fault ([[MYLA-592]]).
 
 ## Tooling in Myla
 
@@ -50,6 +52,6 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 
 ## Documentation and repository
 
-- The recorded Python answers cover only the examples and the error corpus now; 20 new corpus files are held to the CLI's own output ([[MYLA-288]]).
+- Seventeen burn modules still ask the recorded Python answers about the 32 examples of the retirement, so the gates keyed by an example's text freeze it (`examples/floats.my`'s stale comments stay); token and AST expectation files would replace the recordings ([[MYLA-288]]).
 - The tests pin one program per fixed bug; the reviews' generators, which found this round's older bugs, aren't in the suite ([[MYLA-555]]). Stale sentences and 25 `done` tasks with open boxes ([[MYLA-554]]).
-- The tutorial and the "Why Myla" page aren't written yet (D114, [[MYLA-299]]).
+- The tutorial and the "Why Myla" page aren't written yet (D114, [[MYLA-234]]).

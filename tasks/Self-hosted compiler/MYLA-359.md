@@ -140,3 +140,7 @@ Not ready ([[Project/Review-2026-11-10]]): lazy parsing can load a different pro
 ## Review 2026-11-12
 
 Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-552]]: a hello world checks in 21.2 M instructions and 6.1 ms on `547339a` (39.4 M and 8.7 ms before round 5); the last box, under 5 ms, moves there.
+
+## Round 6 ([[MYLA-552]])
+
+The reason it stays near 6 ms, measured on `dafd287` (20.7 M instructions): a third of the time is the kernel's, a page fault for each 4 KB of the 4.1 MB of fresh heap the check touches (1,109 faults, about 2.1 ms of system time); the instructions take about 4 ms. Huge pages for the heap bring the faults to 90 and the check under 5 ms, at 0.2 ms more for every small program with tasks: [[MYLA-608]] proposes them for the toolchain only.

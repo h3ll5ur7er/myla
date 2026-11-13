@@ -138,8 +138,8 @@ fun fill_to(text: str, sp: Spec, dflt: uint8) -> str {
     var left = 0
     if align == '>' { left = gap } else if align == '^' { left = gap / 2 }
     if gap > 16 {
-        // in bulk: a width of a million, a fill a step, took 2.7 s
-        // interpreted (MYLA-546)
+        // in bulk: a width of a million, a fill a step, was slow interpreted
+        // (MYLA-546)
         return sp.fill.repeat(left) + text + sp.fill.repeat(gap - left)
     }
     var sb = StringBuilder()

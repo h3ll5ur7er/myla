@@ -10323,8 +10323,8 @@ STRESS_FRAGMENTED_FREE_SRC = (
     # Leaves 8000 freed cells of 8000 different sizes behind (each `keys(m)` on
     # a growing map frees a list one slot longer than the last), then allocates
     # 30000 small lists that none of those cells fit. An allocator that scans
-    # one free list on every allocation does 240 million probes here (about
-    # 14 s); size-class free lists find "nothing free" at once (MYLA-16).
+    # one free list on every allocation does 240 million probes here;
+    # size-class free lists find "nothing free" at once (MYLA-16).
     "#main\nfun main() {\n"
     "    var m: [int: int] = [:]\n"
     "    var i = 0\n"

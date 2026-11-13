@@ -11,7 +11,7 @@
 ## Build the toolchain
 
 ```bash
-scripts/bootstrap.sh            # output in ./build (gitignored); about 8 seconds
+scripts/bootstrap.sh            # output in ./build (gitignored); about 8 seconds (2026-10-25, 95c12aa)
 ```
 
 This builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly, so only `as` and `ld` are needed), checks that it compiles itself to a byte-identical fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server. Details, stages and timings: [[Development/Bootstrap]].
@@ -161,8 +161,8 @@ The second argument of the compiler is the folder that contains `std/` (by defau
 ## Run the tests
 
 ```bash
-scripts/test.sh fast        # the quick burn tests, about a minute once the tools are cached
-scripts/test.sh             # all of them (python3 -m unittest discover -s tests/burn -t .), about 5 minutes
+scripts/test.sh fast        # the quick burn tests, about a minute once the tools are cached (2026-11-06, bae1a7f)
+scripts/test.sh             # all of them (python3 -m unittest discover -s tests/burn -t .), about 5 minutes (2026-11-06, bae1a7f)
 ```
 
 What each suite guarantees and the current results: [[Development/Testing]].

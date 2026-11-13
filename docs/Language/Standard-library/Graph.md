@@ -115,7 +115,7 @@ A goal is a predicate, not a node, so a search can stop at any node that qualifi
 
 ## Speed
 
-Measured natively on x86-64, best of five runs, on a 1000×1000 grid:
+Measured natively on x86-64, best of five runs, on a 1000×1000 grid (2026-11-08, `38c1555`):
 
 | Work | Time |
 | --- | --- |

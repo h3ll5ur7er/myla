@@ -23,7 +23,7 @@ impl Store {
 The normalizer wraps the initializer in an async lambda capturing `self` ([[selfhost/anf.my]]), the lowering deep-copies every capture but actor handles ([[selfhost/lower.my]]), so the child evaluates `self.xs` on another worker, off the actor, while `churn` runs on it (the parent left the actor at `await a`). With two `churner` tasks and two `peeker` tasks: `MYLA_THREADS=1` prints `true`; `MYLA_THREADS=4` gives `runtime error: index out of bounds` in 5 of 5 runs; `MYLA_THREADS=8` crashes or hangs. The Python interpreter is safe by accident (`_actor_field` locks), the self-hosted interpreter is single-threaded. [[Language/Concurrency]] promises that an actor's fields are reachable only through `self` in its own methods: this breaks it natively.
 
 - [x] Both checkers reject `self` (a field read, or a call of a sync method on `self`) in an `async let` initializer of an actor method, as they do for a lambda in it (`type_actor_child_reads_self.my` in the error corpus, same message in both)
-- [ ] Alternatively settle whether the parent may evaluate the captured fields before the child starts (a decision); the rejection is the safe first step
+- [ ] Alternatively settle whether the parent may evaluate the captured fields before the child starts (a decision); the rejection is the safe first step (dropped: the rejection stayed the rule, [[Language/Concurrency]] and the error corpus's `type_actor_child_reads_self.my` and `type_actor_child_calls_self.my` pin it; no program has asked for evaluation in the parent)
 - [x] The program above as a stress program (`t13_child_of_an_actor_method.my`) once it is rejected, or as a parity program if evaluation in the parent is chosen
 
 ## Evidence

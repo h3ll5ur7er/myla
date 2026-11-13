@@ -12,7 +12,7 @@ The Python and self-hosted toolchains check statically; this is the biggest sema
 
 ## Done when
 
-- [ ] Decide whether the Rust edition is meant to stay "lightly typed" (then say so in its spec) or to gain a checker
-- [ ] At minimum: name resolution, arity checks and literal range checks at compile time
+- [ ] Decide whether the Rust edition is meant to stay "lightly typed" (then say so in its spec) or to gain a checker (dropped: the Rust edition was removed, [[MYLA-70]])
+- [ ] At minimum: name resolution, arity checks and literal range checks at compile time (dropped: the Rust edition was removed, [[MYLA-70]])
 
 **Closed without a fix:** the Rust edition was removed from the repository ([[MYLA-70]]); its code is in git history (commit `043acb9`). See [[Architecture/Rust-edition]].

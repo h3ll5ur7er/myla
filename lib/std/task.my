@@ -498,8 +498,8 @@ enum Step<T> {
 // A first-in first-out queue: a list and the index of its front. Taking
 // from the front moves the index; the list drops what was taken once that
 // is half of it, so each value is copied once more on average. (`std.deque`
-// would do, but importing it costs every program that imports `std.task`
-// about 2.5 ms of checking.)
+// would do, but importing it would cost every program that imports
+// `std.task` check time.)
 struct Fifo<T> {
     xs: [T],
     head: int,

@@ -311,7 +311,7 @@ The concurrency stress tests ([[Development/Concurrency-stress-tests]], [[MYLA-1
 
 An `async let`'s captures, a spawned child's captures and result, and an actor method's arguments and result are copied deeply when they cross (D89). Every value Myla has today can be copied this way: scalars, strings, lists, maps, structs, tuples, enums, function values (with their captures) and actor handles. So every value is *sendable*. The rule is for kinds of values that may come later.
 
-A copy costs what the value holds: every element of a list, every entry of a map, all the way down. Natively it happens only in a program that has a task (frames mode, D92); passing a list of 100,000 integers to an actor's method costs about 1.5 ms a call there, where the same program without any `async let` passes it in place. Pass what the callee needs rather than a whole collection, or keep a large collection in the actor itself and send it the small changes ([[MYLA-173]]).
+A copy costs what the value holds: every element of a list, every entry of a map, all the way down. Natively it happens only in a program that has a task (frames mode, D92); passing a list of 100,000 integers to an actor's method costs about 1.5 ms a call there (2026-11-01, `561fcc7`), where the same program without any `async let` passes it in place. Pass what the callee needs rather than a whole collection, or keep a large collection in the actor itself and send it the small changes ([[MYLA-173]]).
 
 ## The entry point
 

@@ -63,7 +63,7 @@ Myla has no global variables (D28), so each call reads `MYLA_LOG` again. A `Logg
 
 It has the methods `error`, `warn`, `info`, `debug`, `log` and `enabled`, as the functions.
 
-Measured natively on x86-64, best of three runs, with 168 environment variables:
+Measured natively on x86-64, best of three runs, with 168 environment variables (2026-11-07, `cf0595d`):
 
 | Call | Time |
 | --- | --- |
