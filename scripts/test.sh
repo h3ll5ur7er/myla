@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # test.sh [fast|all] — run the test suites (MYLA-58).
 #
-#   fast  the burn tests that take less than about 4 seconds each (about 20
-#         seconds once the tools are cached)
-#   all   the whole burn suite (the default; about 2 minutes with the tools
-#         cached)
+#   fast  the burn tests that take less than about 4 seconds each
+#   all   the whole burn suite (the default)
 #
 # Uses only the standard library's unittest (pytest works too: uv run pytest).
 # The compiler (bootstrapped from bootstrap/seed.s) and the tools the tests

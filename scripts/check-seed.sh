@@ -14,7 +14,7 @@
 #
 # With BUILD_DIR holding a bootstrap's stage3 and stage3.s (scripts/bootstrap.sh
 # BUILD_DIR), those are used; otherwise stages 0–3 run from this machine's
-# seed into build/seed-check (about 5 s on x86-64), the fixed point included.
+# seed into build/seed-check, the fixed point included.
 #
 # Exit status: 0 when the seed is current, 1 when it isn't (run
 # scripts/update-seed.sh and commit the seeds) or when the bootstrap

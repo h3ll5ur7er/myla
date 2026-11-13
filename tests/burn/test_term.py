@@ -510,7 +510,7 @@ class RawModeEnds(Case):
         task blocks in a key read. The terminal is cooked again when the
         failure is reported, while the program waits a second (the bounded
         wait for the other workers) and the waiting worker sleeps: it ran on,
-        raw, a worker at 99 percent of a CPU, until a key came. (On one
+        raw, a worker spinning on a whole CPU, until a key came. (On one
         worker the key read holds the only worker, the failing task's too.)"""
         built = Built(BLOCKED_KEY)
         try:
@@ -961,7 +961,7 @@ fun main() {
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class LongLines(Case):
     """M22: drawing a line costs what is drawn, not the line's length
-    squared: 2,000 characters typed one by one took 17 s natively."""
+    squared, which made 2,000 characters typed one by one slow natively."""
 
     def test_a_paste_draws_in_linear_time(self):
         with tempfile.TemporaryDirectory() as tmp:

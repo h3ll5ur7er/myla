@@ -38,7 +38,7 @@ scripts/bootstrap.sh "$OUT_DIR"
 # MYLA-552): a program reads a body of std's but std.rt's only once it calls
 # it, and the compiler builds against a library whose broken body nothing
 # calls, so the seed and the embedded library would carry it; a module's
-# own check reads every body (about a second for all of them)
+# own check reads every body
 for module in $(find lib/std -name '*.my' | LC_ALL=C sort); do
     if ! run_tool "$OUT_DIR/myla" check "$module" --stdlib lib > /dev/null; then
         echo "FAIL: $module doesn't check as a whole (\`build/myla check $module --stdlib lib\`)" >&2
