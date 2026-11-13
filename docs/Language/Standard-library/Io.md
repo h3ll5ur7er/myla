@@ -205,7 +205,7 @@ The medians put 64 and 128 KiB together (215 to 231 ms and 213 to 224 ms to a ne
 
 ## Speed
 
-Natively on x86-64, measured on the development container (4 cores of a Xeon at 2.1 GHz, shared with other work: a load of 3.5 to 5 while measuring), 2026-11-11, the best of 16 runs in two sets, by a program outside the suite. The medians were up to 30 % above the best, those of the pipes and of the files written up to 45 %. The lines are 50 MB of lines of up to 120 bytes (819,831 of them).
+Natively on x86-64, measured on the development container (4 cores of a Xeon at 2.1 GHz, shared with other work: a load of 3.5 to 5 while measuring), 2026-11-11 at `bccc624`, the best of 16 runs in two sets, by a program outside the suite. The medians were up to 30 % above the best, those of the pipes and of the files written up to 45 %. The lines are 50 MB of lines of up to 120 bytes (819,831 of them).
 
 | What | Time |
 | --- | ---: |

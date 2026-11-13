@@ -194,7 +194,7 @@ Everything goes through `std.net` and std.rt's socket primitives: a port to anot
 
 ## Speed
 
-Natively on x86-64, a server and a client in two programs on loopback, on a 4-core machine shared with other work, the best of six runs (the server with 4 workers; under the machine's load the runs ranged down to about 60 % of these):
+Natively on x86-64, a server and a client in two programs on loopback, on a 4-core machine shared with other work, the best of six runs (2026-11-08, `8a56bc3`; the server with 4 workers; under the machine's load the runs ranged down to about 60 % of these):
 
 | What | Speed |
 | --- | --- |

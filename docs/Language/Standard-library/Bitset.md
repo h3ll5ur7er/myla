@@ -109,7 +109,7 @@ A written `impl Hash` that skipped the zero words would have let any two sets of
 
 ## Speed
 
-Measured natively on x86-64, best of five runs:
+Measured natively on x86-64, best of five runs (2026-11-08, `38c1555`):
 
 | Work | Time |
 | --- | --- |

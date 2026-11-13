@@ -64,4 +64,4 @@ The integers are what the sets hold. Other values are numbered first, with a `[T
 
 ## Speed
 
-Measured natively on x86-64, best of five runs: `new(1000000)`, a million `union`s of random pairs, then a `find` of each integer: 82 ms.
+Measured natively on x86-64, best of five runs: `new(1000000)`, a million `union`s of random pairs, then a `find` of each integer: 82 ms (2026-11-08, `38c1555`).
