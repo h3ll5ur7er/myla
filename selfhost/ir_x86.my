@@ -902,6 +902,9 @@ impl CodeGen {
                 self.pop_words(n)
             },
             Inst.Label(d, sym) => { self.def_into_temp(inst, d, slot_off, temp_base) },
+            // (never rematerialized: its record is named for the function's
+            // file, which is known only from here on)
+            Inst.Position(d, p) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.CallInd(d, fv, args) => {
                 // the arguments, the environment in %r10, then the call
                 let n = self.pass_words(args, temp_base)
@@ -987,9 +990,11 @@ impl CodeGen {
             Inst.Exit(v) => {
                 // the exit hook, then exit_group (every thread ends, D187); when
                 // tasks take turns, held for the parent if a task other than the
-                // entry's exits
+                // entry's exits. The `int` sign-extended, as every argument
+                // of its type (MYLA-588: `exit(-1)` reached `exit_program`
+                // as 4294967295)
                 self.load_temp(v, "rax", temp_base)
-                self.emit("movl %eax, %edi")
+                self.emit("movslq %eax, %rdi")
                 if self.frames { self.emit("call __task_exit") } else { self.emit("call __exit_program") }
             },
             Inst.Elem(d, c, i, stride, is_str, checked, p) => {
@@ -1534,6 +1539,11 @@ impl CodeGen {
             Term.Panic(m, p) => {
                 self.load_temp(m, "rdi", temp_base)
                 self.load_position(p.line, p.col, "rsi")
+                self.emit("call __panic")
+            },
+            Term.PanicAt(m, p) => {
+                self.load_temp(m, "rdi", temp_base)
+                self.load_temp(p, "rsi", temp_base)
                 self.emit("call __panic")
             },
         }
@@ -2101,6 +2111,7 @@ impl CodeGen {
             Inst.Str(d, text) => format("leaq {}(%rip), %", self.string_label(text))
             Inst.Addr(d, s) => self.slot_addr_text(slot_off[s])
             Inst.Label(d, sym) => format("leaq {}(%rip), %", sym)
+            Inst.Position(d, p) => format("leaq {}(%rip), %", self.position_label(p.line, p.col))
             _ => ""
         }
     }
@@ -3219,6 +3230,7 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.Global(d, sym, width) => 0,
         Inst.Moved(s) => 0,
         Inst.Label(d, sym) => 0,
+        Inst.Position(d, p) => 0,
         Inst.Loc(p) => 0,
         Inst.Bind(name, s) => 0,
         Inst.Scope(open) => 0,
@@ -3422,6 +3434,7 @@ fun writes_no_slot(inst: Inst) -> bool {
         Inst.Check(v, kind, pos) => true
         Inst.Global(d, sym, w) => true
         Inst.Label(d, sym) => true
+        Inst.Position(d, p) => true
         Inst.Loc(p) => true
         Inst.Bind(name, s) => true
         Inst.Scope(open) => true

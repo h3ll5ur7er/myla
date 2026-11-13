@@ -1,0 +1,13 @@
+//~ type error: 'become' can't call 'countdown', which reports its caller's position ('#track_caller')
+// `become` leaves the caller's frame, whose position a `#track_caller`
+// function would report (MYLA-435).
+#track_caller
+fun countdown(n: int) -> int {
+    assert(n >= 0, "a negative count")
+    if n == 0 { return 0 }
+    become countdown(n - 1)
+}
+
+fun main() {
+    print(countdown(3))
+}

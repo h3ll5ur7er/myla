@@ -424,7 +424,7 @@ SUPERSEDED: dict[str, str] = {
     # D162: an async function takes cases; an async method still doesn't
     "unit_test_165": "err 5 5 5:5-5:25 type: '#test' can't run an async method (test it through an async test function, D162)",
     # D161: a method takes '#allow' too
-    "unit_test_164": "err 5 5 5:5-5:10 type: attribute '#main' can't be applied to a method (a method takes only '#test' and '#allow')",
+    "unit_test_164": "err 5 5 5:5-5:10 type: attribute '#main' can't be applied to a method (a method takes only '#test', '#allow' and '#track_caller')",
     # D163 (MYLA-313): map keys are the Eq + Hash types; tuples and lists are Eq (and Hash) when
     # their elements are; Hash is derivable
     # (unit_test_76, a float key, was refused by D163; D198 (MYLA-586): floats are Hash)

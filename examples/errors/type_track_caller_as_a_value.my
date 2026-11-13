@@ -1,0 +1,15 @@
+//~ type error: 'positive' reports its caller's position ('#track_caller'): it can only be called
+//~ span: positive
+//~ help: call it in a lambda: '(…) => positive(…)'
+// A `#track_caller` function takes its caller's position as a hidden
+// argument, which a function value has no place for (MYLA-435).
+#track_caller
+fun positive(x: int) -> int {
+    assert(x > 0, "not positive")
+    return x
+}
+
+fun main() {
+    let f: (int) -> int = positive
+    print(f(3))
+}

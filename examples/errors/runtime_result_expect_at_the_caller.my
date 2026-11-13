@@ -1,0 +1,11 @@
+//~ runtime error: the port is a number
+//~ native: runtime error: the port is a number
+//~ span: num.parse_int32("80a").expect("the port is a number")
+// A failing `Result.expect` points at its call, not into std.option
+// (`#track_caller`, MYLA-435).
+import std.num as num
+
+fun main() {
+    let port = num.parse_int32("80a").expect("the port is a number")
+    print(port)
+}

@@ -1,0 +1,19 @@
+//~ type error: the instances of 'pair_up' nest without end
+//~ span: pair_up(n - 1, (x, x))
+//~ note: 'halve' calls itself through 'pair_up' with a larger type at each step
+// Polymorphic recursion through another function (MYLA-543): `halve<T>`
+// asks for `pair_up<(T, T)>`, which asks for `halve<(T, T)>` back. The
+// call that makes the type larger is the one refused, as `myla build`
+// refused it.
+fun halve<T>(n: int, x: T) -> int {
+    if n == 0 { return 0 }
+    return pair_up(n - 1, (x, x))
+}
+
+fun pair_up<U>(n: int, y: U) -> int {
+    return halve(n, y)
+}
+
+fun main() {
+    print(halve(3, 1))
+}

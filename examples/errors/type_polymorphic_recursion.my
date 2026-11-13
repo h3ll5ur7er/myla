@@ -1,0 +1,15 @@
+//~ type error: the instances of 'grow' nest without end
+//~ span: grow<[T]>(n - 1, [x])
+//~ note: calls itself with a larger type at each step (polymorphic recursion)
+// A generic function calling itself with a larger type asks native code
+// for an instance per step, without end (H5, MYLA-415): `myla build`
+// refused it, at this call, while `myla check` said `ok` (MYLA-543). The
+// checker refuses it now, so every command says the same.
+fun grow<T>(n: int, x: T) -> int {
+    if n == 0 { return 0 }
+    return 1 + grow<[T]>(n - 1, [x])
+}
+
+fun main() {
+    print(grow(3, 1))
+}

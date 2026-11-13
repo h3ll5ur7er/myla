@@ -163,8 +163,15 @@ impl CodeGen {
             // the interrupted sp (ucontext + 432, the sigcontext's sp) is a
             // stack overflow, reported once (a worker overflowing after
             // another waits for its exit to end the process); any other
-            // fault gets the default action back and happens again
+            // fault gets the default action back and happens again. A
+            // signal sent (`si_code`, siginfo + 8, at most 0), which faults
+            // nothing again, gets it back and is sent again by
+            // `__on_raw_signal` (a raw terminal's mode put back first): the
+            // program ends by it once the handler returns (MYLA-592)
             "__on_segv:",
+            "\tldrsw x10, [x1, #8]",
+            "\tcmp x10, #0",
+            "\tb.le .Lsegv_other",
             "\tldr x3, [x1, #16]",
             "\tldr x4, [x2, #432]",
             "\tsub x5, x4, #16, lsl #12",
@@ -209,6 +216,13 @@ impl CodeGen {
             "\tmov x8, #134",
             "\tsvc #0",
             "\tadd sp, sp, #32",
+            "\tcmp x10, #0",
+            "\tb.gt .Lsegv_ret",
+            "\tstp x29, x30, [sp, #-16]!",
+            "\tmov x0, #11",
+            "\tbl __on_raw_signal",
+            "\tldp x29, x30, [sp], #16",
+            ".Lsegv_ret:",
             "\tret",
             // __on_signal(sig), on any thread's stack: the signal's number
             // written as a byte to the self-pipe of std.signal (MYLA-350,

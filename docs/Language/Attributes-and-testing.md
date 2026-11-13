@@ -13,6 +13,7 @@ An attribute is written on the lines above a declaration: `#name`, optionally fo
 | `#test` | a non-generic function without parameters, with no result or a `Result<(), E>` | A test function (D162): it passes when it returns, fails on a runtime error, `exit` or `Err(e)` |
 | `#derive(Eq)`, `#derive(Hash)`, `#derive(Eq, Hash)`, `#derive(Json)`, `#derive(Toml)` | a struct or enum, generic too (its impl bounded by the trait, [[MYLA-379]]) | Structural equality and hashing ([[Language/Methods-and-traits]], D163), a JSON form (std.json's `ToJson` and `FromJson`, [[Language/Standard-library/Json]], D172), a TOML form (std.toml's `ToToml` and `FromToml`, [[Language/Standard-library/Toml]], [[MYLA-407]]); `Eq`, `Hash`, `Json` and `Toml` are the traits that can be derived (`cannot derive 'Ord': only 'Eq', 'Hash', 'Json' and 'Toml' are derivable`) |
 | `#allow(name, …)` | a function, a method or an `impl` block | Silences the warnings of that name inside it (D161, below) |
+| `#track_caller` | a function or a method of a type's own `impl`, generic too; not async, not an actor's or a trait's method, not the entry point | Its `panic`, `assert` and `unreachable` report the position of its call ([[MYLA-435]], [below](#track_caller)) |
 
 ## Warnings and #allow
 
@@ -81,7 +82,7 @@ fun main() {
   }
   ```
 
-  For a `var self` method only the result is compared, not the changed receiver. A method of a generic `impl` or with type parameters of its own, an actor's method (its receiver is a running actor, not a value) and an `async` method can't have cases (an async function can, [below](#async-cases)); `#test` is the only attribute a method takes.
+  For a `var self` method only the result is compared, not the changed receiver. A method of a generic `impl` or with type parameters of its own, an actor's method (its receiver is a running actor, not a value) and an `async` method can't have cases (an async function can, [below](#async-cases)); a method takes `#test`, `#allow` and `#track_caller`, no other attribute.
 
 Every value-returning function in `examples/` carries tests, and the burn tests enforce that ([[Development/Conventions]]); in `selfhost/` some do ([[MYLA-184]]). A `#test` in an imported module can use that module's own declarations ([[MYLA-11]]).
 
@@ -245,6 +246,32 @@ There are no global variables.
 
 `panic` and `unreachable` never return, so they satisfy the return check and need no value in a `match` arm.
 
+## #track_caller
+
+A function under `#track_caller` reports its caller's position ([[MYLA-435]], as Rust's `#[track_caller]`): its `panic`, `assert` and `unreachable` fail at the call of the function, not at their own line, so a check that is the caller's mistake points at the caller. A call from one such function to another passes its own caller's position on, so the error lands in the first function that isn't one. std.option's `expect`s ([[Language/Standard-library/Option]]) and std.args' spec and name checks ([[Language/Standard-library/Args]]) are such functions:
+
+```myla
+#track_caller
+fun percent(p: int) -> float {
+    assert(p >= 0 && p <= 100, f"a percentage is 0 to 100, not {p}")
+    return p as float / 100.0
+}
+
+fun main() {
+    print(percent(40))
+}
+// output:
+// 0.4
+```
+
+With `print(percent(140))` in `main`, the program fails with `runtime error: a percentage is 0 to 100, not 140` at that call (its `(`, as for any call), not at the `assert`: interpreted and natively, on every target and in every build (`-g`, `--checked`; `examples/errors/runtime_track_caller.my`).
+
+- It takes no arguments and stands on a function or on a method of a type's own `impl`, generic or not. Not on an async function or an actor's method (their calls may start a task or go through the actor's queue), a method of a trait's impl (called through a bound, which passes no position) or the entry point (nothing calls it). Each is a type error.
+- Only `panic`, `assert` and `unreachable` move: an index out of bounds, a missing key, a division by zero or an overflow in the function keep their own position, a mistake of the function's own. A lambda inside it is a function of its own, whose failures are at their own position.
+- It can only be called: as a value (`let f = percent`) or partially applied (`percent(_)`) it is the type error `'percent' reports its caller's position ('#track_caller'): it can only be called`, with the help to call it in a lambda, `(p: int) => percent(p)`, whose call is then the position; `become percent(p)` is an error too, as the frame whose position it would report is gone.
+- What it costs: natively the caller's position travels as a hidden last argument, the address of a record of the call's file, line and column (one instruction at the call, [[Architecture/Native-backend#runtime-error-positions]]); the interpreter keeps the call in the function's frame.
+- It is open to any program: a helper that checks its arguments for its callers, such as a test's own `expect`, points at the line that called it.
+
 ## Runtime errors
 
 Both report on stderr and exit 1, with the same message, values included (D183, [[MYLA-415]]). The interpreter gives the message, the source position, the source line and a caret; a native binary prints the first two lines, `runtime error: <message>`, then the same position ([[MYLA-17]], [[MYLA-65]]):
@@ -262,7 +289,7 @@ runtime error: list index 3 out of bounds (len 3)
   --> examples/errors/runtime_list_index_oob.my:8:13
 ```
 
-The position is that of the expression that fails: an index's `[`, a call's `(` (`pop`, `append`, `assert`, `panic`, `unreachable`), a division's operator. A binary names the file as `myla build` named it when it was compiled: the entry file as given on the command line, an imported module relative to the working directory (D75).
+The position is that of the expression that fails: an index's `[`, a call's `(` (`pop`, `append`, `assert`, `panic`, `unreachable`), a division's operator; in a `#track_caller` function, the `(` of its call for its `panic`, `assert` and `unreachable` ([above](#track_caller)), so a failing `opt.expect("…")` points at the program's line, not into std.option. A binary names the file as `myla build` named it when it was compiled: the entry file as given on the command line, an imported module relative to the working directory (D75).
 
 | Error | Interpreter | Native |
 | --- | --- | --- |

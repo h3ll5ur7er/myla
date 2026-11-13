@@ -26,13 +26,14 @@ from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
-# a runtime error inside a body of std.option, which the loader reads late:
-# its message names the place in the library's file
+# a runtime error inside a body of std.list, which the loader reads late:
+# its message names the place in the library's file (std.option's `expect`
+# reports its caller's position since MYLA-435)
 PANIC = """fun main() {
     let xs = [3, 1, 2]
     print(xs.sorted()[0])
-    let o: Option<int> = None
-    print(o.expect("boom"))
+    let n = 0
+    print(xs.chunks(n).len())
 }
 """
 
@@ -129,7 +130,7 @@ class WithAndWithoutTheCache(unittest.TestCase):
     def test_an_error_in_a_body_read_late_is_at_its_place(self):
         code, out, err = self.carried["panic run"]
         self.assertEqual((code, out), (1, "1\n"))
-        self.assertRegex(err, r"^runtime error: boom\n  --> .*/std/option\.my:\d+:\d+\n")
+        self.assertRegex(err, r"^runtime error: chunks: size 0 isn't positive\n  --> .*/std/list\.my:\d+:\d+\n")
         self._same("panic")
 
 
