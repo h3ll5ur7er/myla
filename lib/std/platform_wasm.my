@@ -26,6 +26,9 @@ pub const EAGAIN: int64 = -11
 pub const EPIPE: int64 = -32
 // Whether memory unmapped goes back to the system (the linear memory doesn't shrink).
 pub const RETURNS_MEMORY: bool = false
+// Whether `advise_huge_pages` can back memory with huge pages (the linear
+// memory's pages are the engine's).
+pub const HUGE_PAGES: bool = false
 
 const W_FD_WRITE: int64 = 1
 const W_FD_READ: int64 = 2
@@ -854,6 +857,10 @@ pub fun map_memory(n: int64) -> int64 {
 
 // The linear memory doesn't shrink: nothing given back.
 pub fun unmap_memory(p: int64, n: int64) {
+}
+
+// No huge pages to ask for: nothing changes.
+pub fun advise_huge_pages(p: int64, n: int64) {
 }
 
 // --- time ----------------------------------------------------------------------
