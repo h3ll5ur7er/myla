@@ -39,3 +39,47 @@ fun main() {
 | `Matrix` | `matrix(rows, cols, data)`, `from_rows([[…]])`, `zero_matrix(r, c)`, `identity(n)`; `*` by a `Matrix`, a `Vector` or a scalar, `+`, `-`, `m[(r, c)]`, `row`, `col`, `transpose`, `determinant`, `inverse` (Gauss-Jordan with partial pivoting) |
 
 Angles are in radians, rotations counterclockwise looking at the origin from the axis' positive side. Matrices are `Eq` and `Hash`, and print by rows: `[(1, 0), (0, 1)]` (a `Matrix`, `[[1, 0], [0, 1]]`).
+
+## JSON
+
+A matrix is the JSON array of its elements column by column, as glTF writes a node's `"matrix"` (D203): a `Mat4` is 16 numbers, the translation in the 13th to 15th. A `Matrix` is `{"rows": 2, "cols": 3, "data": […]}`, its data column by column too; data that doesn't fit the shape is an error at `$.data`.
+
+```myla
+import std.json as json
+from std.vector import Vec3, vec3
+from std.matrix import Mat4, translation
+from std.quaternion import Quat, quat
+
+#derive(Json)
+struct Node {
+    name: str,
+    translation: Vec3,
+    rotation: Quat,
+    matrix: Mat4,
+}
+
+fun main() {
+    let node = Node { name: "box", translation: vec3(1.0, 2.0, 3.0), rotation: quat(0.0, 0.0, 0.0, 1.0), matrix: translation(vec3(7.0, 8.0, 9.0)) }
+    let text = json.encode(node)
+    print(text)
+    match json.decode<Node>(text) {
+        Ok(back) => print(back.matrix == node.matrix)
+        Err(e) => print(f"{e}")
+    }
+}
+// output:
+// {"name":"box","translation":[1.0,2.0,3.0],"rotation":[0.0,0.0,0.0,1.0],"matrix":[1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0,7.0,8.0,9.0,1.0]}
+// true
+```
+
+## Speed
+
+`benchmarks/linalg_std.my`, natively on x86-64 (2026-11-13, `3bcafb0`, the fastest run of each, on a shared 4-core machine):
+
+| Work | The library | By hand |
+| --- | --- | --- |
+| `Mat4 * Vec4` | 19.7 ns | 19.5 ns, the 16 products written on the fields |
+| `Mat4 * Mat4` | 76 ns | 142 ns, the triple loop over two `[float]` of 16 |
+| `Matrix * Matrix`, 4x4 | 160 ns | 142 ns, the same loop |
+
+`MatN * VecN` sums each component's products; before `1abd660` it added the scaled columns, building a vector for each, and `Mat4 * Vec4` took 26 ns (`Mat4 * Mat4`, four of them, 101 ns).
