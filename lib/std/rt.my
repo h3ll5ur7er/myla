@@ -3110,6 +3110,22 @@ pub fun task_cancelled() -> int64 {
     return 0
 }
 
+// `__tasks_waiting`: 1 when another task waits for a worker that none is
+// free to give it: a frame queued, or no worker idle while timers or
+// watched descriptors wait (only an idle worker looks at them), else 0; a
+// glance, without the locks. A blocking wait for a socket asks it, to say
+// so when it holds its worker while others wait (MYLA-548, `std.net`'s
+// `wait_ready`). A program without tasks has the constant -1 instead.
+pub fun tasks_waiting() -> int {
+    if exec_peek() != 0 {
+        return 1
+    }
+    if __rt_get("__exec_idle") == 0 && (__rt_get("__timer_count") != 0 || __rt_get("__watch_count") != 0) {
+        return 1
+    }
+    return 0
+}
+
 // `__failed_wait`: once a task has failed (D97), until no other worker runs
 // a frame; at once otherwise.
 pub fun failed_wait() {

@@ -5540,7 +5540,7 @@ impl Lower {
         }
         // helpers without a result, then those with one
         let effects = ["__exit", "__write", "__write_bytes", "__write_file", "__mkdir", "__unlink", "__rmdir", "__rename", "__sleep_ns", "__kill", "__close"]
-        let results = ["__clock_ns", "__disarm", "__spawn", "__run_with", "__spawn_with", "__reap", "__args", "__read_file", "__read", "__poll", "__getcwd", "__getenv", "__sqrt", "__f64_bits", "__f64_from_bits", "__list_dir", "__stat", "__run", "__task_cancelled", "__str_to_bytes", "__bytes_to_str", "__read_bytes"]
+        let results = ["__clock_ns", "__disarm", "__spawn", "__run_with", "__spawn_with", "__reap", "__args", "__read_file", "__read", "__poll", "__getcwd", "__getenv", "__sqrt", "__f64_bits", "__f64_from_bits", "__list_dir", "__stat", "__run", "__task_cancelled", "__tasks_waiting", "__str_to_bytes", "__bytes_to_str", "__read_bytes"]
         var has_result = false
         var known = false
         for r in effects { if r == nm { known = true } }
@@ -5575,6 +5575,8 @@ impl Lower {
         if !known { return self.unsupported(format("the builtin {}", nm)) }
         // without tasks nothing is ever asked to stop (MYLA-263: no routine)
         if nm == "__task_cancelled" && !cg.frames { return self.konst(Type.TBool, 0) }
+        // a program without tasks has no other task to wait (MYLA-548)
+        if nm == "__tasks_waiting" && !cg.frames { return self.konst(Type.TInt(32, true), -1) }
         var vals: [int32] = []
         for a in args { vals.push(self.expr(cg, a)) }
         if nm == "__exit" {
@@ -5934,6 +5936,11 @@ pub fun myla_runtime_function(name: str) -> str {
         var sb = StringBuilder()
         sb.append(name, 2, name.len())
         return "std$rt$" + sb.build()
+    }
+    // whether other tasks wait for a worker, with tasks (MYLA-548): called
+    // where it is used, so a library without it builds every other program
+    if name == "__tasks_waiting" {
+        return "std$rt$tasks_waiting"
     }
     return ""
 }

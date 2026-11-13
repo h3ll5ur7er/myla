@@ -4996,6 +4996,14 @@ impl Interp {
         if nm == "__task_cancelled" {
             return Value.VBool(self.cur < self.tasks.len() && self.tasks[self.cur].requested)
         }
+        // outside any task -1; in one, whether another is ready, asleep or
+        // waiting for a descriptor: none of them runs while this one holds
+        // the thread in a blocking call (MYLA-548)
+        if nm == "__tasks_waiting" {
+            if self.cur < 0 || self.cur >= self.tasks.len() { return Value.VInt(-1) }
+            if self.qlen > 0 || self.sleepers.len() > 0 || self.fd_waits.len() > 0 { return Value.VInt(1) }
+            return Value.VInt(0)
+        }
         // std.task's notifiers (MYLA-387)
         if is_notify_primitive(nm) { return self.notify_primitive(nm, args) }
         // nothing but the turn its `await` gives (MYLA-228)

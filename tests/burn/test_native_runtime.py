@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -375,6 +376,25 @@ class NativeRuntime(unittest.TestCase):
                                           env={**os.environ, "MYLA_THREADS": "4"})
                     self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
                                      ("", "runtime error: stack overflow\n", 1))
+
+    @unittest.skipUnless(shutil.which("gdb"), "gdb is not installed")
+    def test_exit_passes_its_status_sign_extended(self):
+        # `exit`'s status reaches std.rt's `exit_program(code: int)` as any
+        # `int` argument does, sign-extended in its 64-bit register, with and
+        # without tasks (`__exit_program`, `__task_exit`): it came
+        # zero-extended, so `code as int64` was 4294967295 for `exit(-1)`
+        # (MYLA-588)
+        plain = "from std.process import exit\n\nfun main() {\n    exit(-1)\n}\n"
+        tasks = ("import std.task as task\nfrom std.process import exit\n\n#main\nasync fun main() {\n"
+                 "    await task.sleep(1)\n    exit(-1)\n}\n")
+        for name, source in (("exit_plain", plain), ("exit_tasks", tasks)):
+            for backend, binary in self.binaries(name, source):
+                with self.subTest(program=name, backend=backend):
+                    proc = subprocess.run(["gdb", "-q", "-batch", "-nx", "-ex", "break __exit_program", "-ex", "run",
+                                           "-ex", "printf \"code %ld\\n\", $rdi", binary],
+                                          capture_output=True, text=True, timeout=120)
+                    self.assertIn("code -1\n", proc.stdout, proc.stdout + proc.stderr)
+                    self.assertEqual(subprocess.run([binary]).returncode, 255)
 
     def test_a_tasked_program_reserves_an_arena_per_worker(self):
         # one 4 GiB arena per worker, not 32 always: with one worker a tasked

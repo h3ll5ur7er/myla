@@ -174,8 +174,16 @@ impl CodeGen {
         // address (siginfo + 16) within 64 KiB below or 1 MiB above the interrupted
         // %rsp (ucontext + 160) is a stack overflow (MYLA-182), reported once:
         // a worker overflowing after another sleeps until its exit ends the
-        // process (MYLA-172)
+        // process (MYLA-172). Any other fault gets the default action back
+        // and happens again. A signal sent (`si_code`, siginfo + 8, at most
+        // 0: SI_USER, SI_QUEUE, SI_TKILL), which faults nothing again, gets
+        // it back and is sent again by `__on_raw_signal`, which puts a raw
+        // terminal's mode back first: the program ends by it once the
+        // handler returns (MYLA-592: the first was swallowed)
         self.raw("__on_segv:")
+        self.raw("	movl 8(%rsi), %r9d")
+        self.raw("	testl %r9d, %r9d")
+        self.raw("	jle .Lsegv_other")
         self.raw("	movq 16(%rsi), %rax")
         self.raw("	movq 160(%rdx), %rcx")
         self.raw("	movq %rcx, %r8")
@@ -215,6 +223,13 @@ impl CodeGen {
         self.raw("	movl $8, %r10d")
         self.raw("	syscall")
         self.raw("	addq $32, %rsp")
+        self.raw("	testl %r9d, %r9d")
+        self.raw("	jg .Lsegv_ret")
+        self.raw("	subq $8, %rsp")
+        self.raw("	movl $11, %edi")
+        self.raw("	call __on_raw_signal")
+        self.raw("	addq $8, %rsp")
+        self.raw(".Lsegv_ret:")
         self.raw("	ret")
         self.raw("__sig_restorer:")
         self.raw("	movq $15, %rax")
@@ -506,7 +521,7 @@ impl CodeGen {
             self.raw("\tret")
             self.raw("")
         }
-        // __task_exit: `exit` (%edi the code) when tasks take turns
+        // __task_exit: `exit` (%rdi the code, sign-extended) when tasks take turns
         self.raw("__task_exit:")
         self.raw("\tpushq %rdi")
         self.raw("\tmovslq %edi, %rsi")

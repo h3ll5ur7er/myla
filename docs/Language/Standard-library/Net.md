@@ -49,7 +49,7 @@ fun main() {
 | `TcpListener`: `local_addr()`, `close()` | Its address; closed (a second close is `Other(9)`, as every operation through a closed handle is, D181, and as a `File`'s is; it did nothing before [[MYLA-548]]) |
 | `connect(a)`, `connect_timeout(a, ms)`, `connect_async(a)` (async) | A connection: `ConnectionRefused`, `HostUnreachable`, `NetworkUnreachable`, `TimedOut` |
 | `connect_host(host: str, port: int)` | `lookup(host)`'s addresses tried in turn |
-| `TcpStream` | A `Read` and a `Write` of `std.io` ([[Language/Standard-library/Io#streams]]): `copy` and `read_all` take it, and `buffered(s)` reads its lines outside tasks (in a task it blocks its worker: use `line_reader`). A read gives what one receive gives, `[]` at the end of the stream; a write sends every byte. A copy is the same connection, and `close` closes it for every copy; a second close, through it or a copy, is `Other(9)` |
+| `TcpStream` | A `Read` and a `Write` of `std.io` ([[Language/Standard-library/Io#streams]]): `copy` and `read_all` take it, and `buffered(s)` reads its lines outside tasks (in a task it blocks its worker: use `line_reader`; a blocking wait that held its worker for a second while other tasks wait for one says so on stderr, [[MYLA-548]]). A read gives what one receive gives, `[]` at the end of the stream; a write sends every byte. A copy is the same connection, and `close` closes it for every copy; a second close, through it or a copy, is `Other(9)` |
 | `TcpStream`: `read_async(n)`, `write_async(b)` (async) | The read and the write, the task waiting; bytes, as `Read` and `Write` deal in (D177) |
 | `TcpStream`: `peer_addr()`, `local_addr()`, `shutdown(how)`, `set_nodelay(on)`, `set_read_timeout(ms)`, `set_write_timeout(ms)`, `close()` | `how` is `Shutdown.Read`, `Write` or `Both`; after `Write` the peer reads the end. A timeout (negative: none, the default) makes a blocking wait `TimedOut` |
 | `line_reader(s: TcpStream) -> LineReader` | Lines of text from `s` (D180), of any length: a peer that never sends `"\n"` makes it hold all it sends, about three times its size (a 512 MiB line: 1.59 GB) |
@@ -175,6 +175,8 @@ async fun main() {
 // PONG
 // 2
 ```
+
+Every blocking call of this module (a read, a write, an accept, `connect_timeout`) holds its worker that way while it waits. In a program with tasks it waits in slices of 100 ms, and once it has held its worker for a second while another task waits for a worker (one queued, or none idle to look at the timers and the reactor; interpreted, another task ready, asleep or waiting for input), it writes `warning: a blocking wait for a socket has held its worker for a second while other tasks wait for one; in a task, use the async calls (lines: 'net.line_reader(s)' and 'await r.read_line_async()')` on stderr, once per wait, and goes on waiting: a program that waits for good still does, but no longer silently ([[MYLA-548]]). A program without tasks waits in one piece, as before.
 
 ## Names
 
