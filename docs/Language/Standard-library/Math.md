@@ -1,6 +1,6 @@
 # std.math
 
-Mathematical functions on `float64` ([[MYLA-248]]). Every program also has them as methods of both float types, `x.sqrt()`, `y.atan2(x)`, without an import: [[Language/Standard-library/Float]] (D197). `sqrt` is the processor's correctly rounded square root. The rest is written in Myla after fdlibm (the reference implementation behind most C math libraries), so the interpreter and native code give bit-identical results. `tests/burn/test_math.py` holds each to its stated error against the C library, NaN, the infinities and signed zeros included.
+Mathematical functions on `float64` ([[MYLA-248]]). Every program also has them as methods of both float types, `x.sqrt()`, `y.atan2(x)`, without an import: [[Language/Standard-library/Float]] (D199). `sqrt` is the processor's correctly rounded square root. The rest is written in Myla after fdlibm (the reference implementation behind most C math libraries), so the interpreter and native code give bit-identical results. `tests/burn/test_math.py` holds each to its stated error against the C library, NaN, the infinities and signed zeros included.
 
 ```myla
 from std.math import sqrt, sin, atan2, pow, PI

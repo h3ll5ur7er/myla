@@ -326,7 +326,7 @@ pub struct Interp {
     // a later one), `env_tail` and `env_tail_fi` a `become`'s; -1 binds
     // nothing
     static_calls: [int32: Type],
-    op_sites: [int32: str],      // the checker's operators that call an operator impl (D198)
+    op_sites: [int32: str],      // the checker's operators that call an operator impl (D200)
     op_sets: [int32: str],       // and its index assignments that call an `IndexSet`
     op_impls: [OpImpl],
     impl_selfs: [str: Type],
@@ -462,7 +462,7 @@ fun fill_holes(slots: [Value], holes: [bool], argv: [Value]) -> [Value] {
 #test("V.mul$float64")[false]
 fun is_qualified(name: str) -> bool {
     // (before a method's dot: an operator method's own name may hold a `$`,
-    // `V.mul$float64`, D198)
+    // `V.mul$float64`, D200)
     for c in name.chars() {
         if c == '.' { return false }
         if c == '$' { return true }
@@ -2831,7 +2831,7 @@ impl Interp {
                 self.bind_destructure(bind_elems(binding), v)
             },
             StmtKind.Assign(target, value) => {
-                // `x[i] = v` by an `IndexSet` (D198): `x.set_index(i, v)`,
+                // `x[i] = v` by an `IndexSet` (D200): `x.set_index(i, v)`,
                 // the place first, as a method call takes it (D193)
                 if self.op_sets.len() > 0 {
                     match target.kind {
@@ -3241,7 +3241,7 @@ impl Interp {
         return self.nullary_ix.get(name)
     }
 
-    // The operator method the node `id` calls (D198): the checker's choice,
+    // The operator method the node `id` calls (D200): the checker's choice,
     // or in generic code the impl the operands' types pick now, `l`'s and
     // `r`'s (`r` none for `Neg`); "" for a number's own operator, a list's
     // own index, a classic impl.
@@ -3252,7 +3252,7 @@ impl Interp {
         }
     }
 
-    // `op_call` of the index assignment `id`, by its `IndexSet` (D198).
+    // `op_call` of the index assignment `id`, by its `IndexSet` (D200).
     fun op_set_call(self, id: int32, b: Expr, ix: Expr) -> str {
         return match self.op_sets.get(id) {
             Some(m) => if m != "" { m } else { self.op_by_types("IndexSet", b, Some(ix)) },
@@ -3261,7 +3261,7 @@ impl Interp {
     }
 
     // The operator method of the trait `tr` that the types of `l` and `r`
-    // pick now, in generic code (D198); "" for none.
+    // pick now, in generic code (D200); "" for none.
     fun op_by_types(self, tr: str, l: Expr, r: Option<Expr>) -> str {
         let lt = match self.full_type_of(l.id) {
             Some(t) => t,
@@ -3280,7 +3280,7 @@ impl Interp {
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "-", expr_of("a.b[0]"))[Value.VInt(0)]
     fun eval_unary(var self, e: Expr, op: str, x: Expr) -> Value {
-        // a struct's or enum's `-` by its `Neg` (D198)
+        // a struct's or enum's `-` by its `Neg` (D200)
         if op == "-" && self.op_sites.len() > 0 {
             let m = self.op_call(e.id, "Neg", x, None)
             if m != "" { return self.eval_method_call(e, x, m, []) }
@@ -3318,7 +3318,7 @@ impl Interp {
             if as_bool(self.eval(l)) { return Value.VBool(true) }
             return Value.VBool(as_bool(self.eval(r)))
         }
-        // an operator impl by type arguments (D198): its method called, the
+        // an operator impl by type arguments (D200): its method called, the
         // operands its receiver and argument
         if self.op_sites.len() > 0 && l.id != self.fused {
             match arith_trait(op) {
@@ -3569,7 +3569,7 @@ impl Interp {
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Value.VUnit]
     fun eval_index(var self, e: Expr, tgt: Expr, idx: Expr) -> Value {
-        // a struct's or enum's `x[i]` by its `Index` (D198)
+        // a struct's or enum's `x[i]` by its `Index` (D200)
         if self.op_sites.len() > 0 {
             let m = self.op_call(e.id, "Index", tgt, Some(idx))
             if m != "" { return self.eval_method_call(e, tgt, m, [idx]) }
@@ -4615,7 +4615,7 @@ impl Interp {
 
     // The state the `hash` written for the type `key` gives `v`, a generic
     // impl's type parameters bound by `v`'s type `t`.
-    // A float key's hash (D196): a NaN's is the runtime error std.hash's
+    // A float key's hash (D198): a NaN's is the runtime error std.hash's
     // own `hash` raises, called here as native code calls it; any other's by
     // its bits, -0.0's as 0.0's (`value_hash`).
     fun float_key_hash(var self, v: Value) -> int64 {

@@ -1,6 +1,6 @@
 # std.quaternion
 
-Rotations of 3D space as `float64` quaternions (D199, [[MYLA-587]]); `std.quaternion32` is the same module in `float32`. `Quat` has the fields `x`, `y`, `z` (the vector part) and `w`, and is made by `from_axis_angle(axis, angle)`, `from_rotation_x/y/z(angle)`, `from_euler_xyz(x, y, z)` (x first, then y, then z), `quat(x, y, z, w)` and `Quat.identity()` ([[Language/Standard-library/Algebra]]). `a * b` rotates by `b` first, as matrices do ([[Language/Standard-library/Matrix]]), and `q * v` rotates the `Vec3` `v`.
+Rotations of 3D space as `float64` quaternions (D201, [[MYLA-587]]); `std.quaternion32` is the same module in `float32`. `Quat` has the fields `x`, `y`, `z` (the vector part) and `w`, and is made by `from_axis_angle(axis, angle)`, `from_rotation_x/y/z(angle)`, `from_euler_xyz(x, y, z)` (x first, then y, then z), `quat(x, y, z, w)` and `Quat.identity()` ([[Language/Standard-library/Algebra]]). `a * b` rotates by `b` first, as matrices do ([[Language/Standard-library/Matrix]]), and `q * v` rotates the `Vec3` `v`.
 
 ```myla
 import std.float as float

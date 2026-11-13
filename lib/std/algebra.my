@@ -1,4 +1,4 @@
-// std.algebra: the traits of a type's distinguished values (D199, MYLA-587).
+// std.algebra: the traits of a type's distinguished values (D201, MYLA-587).
 //
 // `Zero` is the additive identity, `One` the multiplicative one of a number
 // (and a vector of ones), `Identity` what `*` leaves unchanged for a matrix or

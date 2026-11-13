@@ -55,7 +55,7 @@ fun main() {
 
 ## Implicit imports
 
-The modules of the standard library that give the built-in types their methods, `std.str`, `std.char`, `std.int`, `std.float` (D197), `std.list`, `std.option` and `std.map`, are part of every program without an `import` (D164, [[MYLA-320]]), and so is `std.hash`, for the `Hasher`'s methods and the `Hash` impls of the built-in types (D163, [[MYLA-313]]): `s.trim()`, `xs.sorted()` and `m.get_or(k, 0)` work in a file that imports nothing.
+The modules of the standard library that give the built-in types their methods, `std.str`, `std.char`, `std.int`, `std.float` (D199), `std.list`, `std.option` and `std.map`, are part of every program without an `import` (D164, [[MYLA-320]]), and so is `std.hash`, for the `Hasher`'s methods and the `Hash` impls of the built-in types (D163, [[MYLA-313]]): `s.trim()`, `xs.sorted()` and `m.get_or(k, 0)` work in a file that imports nothing.
 
 - They are loaded as if the program imported them, so their `impl` blocks' methods are there. They bind no name: a public function of one is reached only through an explicit import (`from std.str import f`), and a program may declare a name of theirs for itself.
 - An explicit import of one (`import std.str as s`) still works: it names the same module, loaded once.

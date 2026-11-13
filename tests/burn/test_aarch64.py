@@ -249,12 +249,12 @@ PROGRAMS["builtin_impls"] = test_builtin_impls.PROGRAM
 PROGRAMS["slices"] = test_slices.PROGRAM
 # `defer` (D135): every way a scope ends, in plain and async functions
 PROGRAMS["defer"] = test_defer.PROGRAM
-# operators between different types, `Neg`, `Index`, `IndexSet` (D198)
+# operators between different types, `Neg`, `Index`, `IndexSet` (D200)
 PROGRAMS["operator_traits"] = test_operator_traits.PROGRAM
-# floats' methods (D197) and floats as map keys (D196)
+# floats' methods (D199) and floats as map keys (D198)
 PROGRAMS["float_methods"] = test_float_methods.PROGRAM
 PROGRAMS["float_keys"] = test_float_keys.PROGRAM
-# std.vector, std.matrix, std.quaternion and their float32 twins (D199)
+# std.vector, std.matrix, std.quaternion and their float32 twins (D201)
 PROGRAMS["linalg"] = test_linalg.PROGRAM
 # counting loops at INT32_MAX: a `<` loop's step done on 64 bits, a `<=`
 # loop's still wrapping (MYLA-251)

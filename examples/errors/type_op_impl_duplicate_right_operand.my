@@ -1,6 +1,6 @@
 //~ type error: duplicate impl of trait 'Mul<float64, …>' for type 'V' (one per type of the right operand or index)
 // One impl of an operator trait per right operand's type: two for `float`
-// would leave `v * 2.0` two results (D198).
+// would leave `v * 2.0` two results (D200).
 struct V {
     x: float,
 }

@@ -6,7 +6,7 @@ status: review
 priority: medium
 labels: [language, stdlib, checker]
 ---
-The owner's decision D196 (2026-11-13), superseding D163's "floats aren't `Hash`". `float32` and `float64` become `Hash`, so a float, a tuple or list of floats, an `Option<float>`, and a `#derive(Eq, Hash)` struct with float fields can be map keys and set members (points, colours, quantised coordinates in [[MYLA-587]]'s types).
+The owner's decision D198 (2026-11-13), superseding D163's "floats aren't `Hash`". `float32` and `float64` become `Hash`, so a float, a tuple or list of floats, an `Option<float>`, and a `#derive(Eq, Hash)` struct with float fields can be map keys and set members (points, colours, quantised coordinates in [[MYLA-587]]'s types).
 
 - `x.hash(h)` adds the value's bits; `-0.0` and `0.0` hash alike (they are `==`), so the sign of zero is cleared first.
 - Hashing a NaN is the runtime error `cannot hash NaN` (wording to settle with the message conventions), the same interpreted and natively, so a NaN never enters a map silently: it would be a key no lookup finds, as NaN is unequal to itself.

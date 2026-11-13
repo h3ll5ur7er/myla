@@ -1351,7 +1351,7 @@ impl Renamer {
                 let q = if contains_byte(n, '.') { self.module_type(n, t, true) } else { self.type_name(n) }
                 // a module's name alone (MYLA-371's follow-up); a built-in
                 // type's name is the type where a type stands, whatever a
-                // module is imported as (`import std.float as float`, D197)
+                // module is imported as (`import std.float as float`, D199)
                 if q == n && !contains_byte(n, '.') && !has(self.tys, n) && !self.env.contains(n) && self.aliases.contains(n) && !is_builtin_type_word(n) {
                     self.fail(t.line, t.col, t.sp, format("'{}' is a module, not a type: name one of its types, '{}.T'", n, n))
                 }

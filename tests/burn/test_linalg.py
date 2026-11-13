@@ -1,11 +1,11 @@
 """Burn test: std.vector, std.matrix, std.quaternion and their float32 twins
-(D199, MYLA-587).
+(D201, MYLA-587).
 
 The fixed sizes (`Vec2`-`Vec4`, `Mat2`-`Mat4`, `Quat`) and `Vector`/`Matrix`
-of any size, in float64 and float32: their operators (D198), the transforms
+of any size, in float64 and float32: their operators (D200), the transforms
 (column-major, column vectors, right-handed), inverses, quaternion rotations
 agreeing with the matrices, std.algebra's `Zero`/`One`/`Identity`, vectors as
-map keys (D196), the conversions between the precisions; alike in the
+map keys (D198), the conversions between the precisions; alike in the
 interpreter and natively. A shape mismatch is a runtime error. The six
 modules are what scripts/gen_std_linalg.py writes."""
 import os

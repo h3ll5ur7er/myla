@@ -427,7 +427,7 @@ SUPERSEDED: dict[str, str] = {
     "unit_test_164": "err 5 5 5:5-5:10 type: attribute '#main' can't be applied to a method (a method takes only '#test' and '#allow')",
     # D163 (MYLA-313): map keys are the Eq + Hash types; tuples and lists are Eq (and Hash) when
     # their elements are; Hash is derivable
-    # (unit_test_76, a float key, was refused by D163; D196 (MYLA-586): floats are Hash)
+    # (unit_test_76, a float key, was refused by D163; D198 (MYLA-586): floats are Hash)
     "unit_test_76": "ok",
     "unit_test_144": "err 1 9 1:9-1:12 type: cannot derive 'Ord': only 'Eq', 'Hash', 'Json' and 'Toml' are derivable",
     "unit_test_156": "ok",

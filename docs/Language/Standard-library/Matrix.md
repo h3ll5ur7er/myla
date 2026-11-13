@@ -1,6 +1,6 @@
 # std.matrix
 
-Matrices of `float64` (D199, [[MYLA-587]]); `std.matrix32` is the same module in `float32`. `Mat2`, `Mat3` and `Mat4` are **column-major**: their fields are the columns, `x_axis`, `y_axis`, `z_axis`, `w_axis` (vectors of [[Language/Standard-library/Vector]]), and a matrix multiplies a **column vector**, `m * v`, so in `a * b * v` the transform `b` comes first. `m[(row, col)]` is an element, `m[i]` a column (D198). They are made by `mat3(c0, c1, c2)` (columns), `mat3_from_rows(r0, r1, r2)`, `Mat3.identity()` and `Mat3.zero()` ([[Language/Standard-library/Algebra]]), and the transforms below, all right-handed. `Matrix` has any shape, its elements in one column-major list, its operators checking the shapes (`matrix shapes don't fit: 2x3 * 2x3`).
+Matrices of `float64` (D201, [[MYLA-587]]); `std.matrix32` is the same module in `float32`. `Mat2`, `Mat3` and `Mat4` are **column-major**: their fields are the columns, `x_axis`, `y_axis`, `z_axis`, `w_axis` (vectors of [[Language/Standard-library/Vector]]), and a matrix multiplies a **column vector**, `m * v`, so in `a * b * v` the transform `b` comes first. `m[(row, col)]` is an element, `m[i]` a column (D200). They are made by `mat3(c0, c1, c2)` (columns), `mat3_from_rows(r0, r1, r2)`, `Mat3.identity()` and `Mat3.zero()` ([[Language/Standard-library/Algebra]]), and the transforms below, all right-handed. `Matrix` has any shape, its elements in one column-major list, its operators checking the shapes (`matrix shapes don't fit: 2x3 * 2x3`).
 
 ```myla
 import std.float as float

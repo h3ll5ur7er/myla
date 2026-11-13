@@ -73,7 +73,7 @@ fun main() {
 | a tuple of `Hash` elements | each element's `hash` in turn (the language's own, as no impl can name a tuple) |
 | `#derive(Hash)` | its fields in order; an enum's variant index as a `uint64`, then its payload |
 
-A float is `Hash` (D196, [[MYLA-586]]): it adds the bits of its value as a float64, `-0.0` as `0.0`, which it equals; hashing a NaN panics with `cannot hash NaN`, and a map with a float key calls that `hash` (natively too) for exactly that check and fold. A map doesn't hash its keys through the `Hasher`: an integer, `char`, `bool` or `str` key has std.rt's own hash, and natively a compound key is hashed by its parts, a type's written `hash` called (the interpreter does the same); the order of a map is its insertion order (D105), so no hash shows.
+A float is `Hash` (D198, [[MYLA-586]]): it adds the bits of its value as a float64, `-0.0` as `0.0`, which it equals; hashing a NaN panics with `cannot hash NaN`, and a map with a float key calls that `hash` (natively too) for exactly that check and fold. A map doesn't hash its keys through the `Hasher`: an integer, `char`, `bool` or `str` key has std.rt's own hash, and natively a compound key is hashed by its parts, a type's written `hash` called (the interpreter does the same); the order of a map is its insertion order (D105), so no hash shows.
 
 ## The Hasher
 

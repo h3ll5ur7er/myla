@@ -1,4 +1,4 @@
-// std.float: the methods of float64 and float32 (D197, MYLA-585).
+// std.float: the methods of float64 and float32 (D199, MYLA-585).
 //
 // Like std.int for the integers, this module is in every program without an
 // import (D164): `x.sqrt()`, `x.floor()`, `a.atan2(b)`, `x.is_nan()` work on

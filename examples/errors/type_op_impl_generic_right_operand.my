@@ -1,6 +1,6 @@
 //~ type error: the right operand of an operator impl can't use the impl's type parameters (found 'T')
 // The operands' types pick an operator impl where they are known, so its
-// right operand is a type of its own, or the target itself (D198).
+// right operand is a type of its own, or the target itself (D200).
 struct B<T> {
     v: T,
 }

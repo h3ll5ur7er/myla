@@ -1,6 +1,6 @@
 //~ type error: unary '-' is not defined for 'V': it needs 'impl Neg for V'
 //~ span: -v
-// Unary `-` on a struct calls its `Neg` (D198).
+// Unary `-` on a struct calls its `Neg` (D200).
 struct V {
     x: float,
 }

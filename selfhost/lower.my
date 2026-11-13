@@ -2496,7 +2496,7 @@ impl Lower {
     // (through a `var self` parameter's address too). The new value is taken
     // (retained) before the old one is released, which it may share.
     fun assign(var self, cg: CodeGen, target: Expr, value: Expr) {
-        // `x[i] = v` by an `IndexSet` (D198): `x.set_index(i, v)`, the place
+        // `x[i] = v` by an `IndexSet` (D200): `x.set_index(i, v)`, the place
         // first, as a method call takes it (D193)
         match target.kind {
             ExprKind.Index(base, idx) => {
@@ -3162,7 +3162,7 @@ impl Lower {
             },
             ExprKind.Name(n) => { return self.name(cg, n, t) },
             ExprKind.Unary(op, x) => {
-                // a struct's or enum's `-x` by its `Neg` (D198)
+                // a struct's or enum's `-x` by its `Neg` (D200)
                 let om = if op == "-" { cg.op_method("Neg", cg.type_of(x.id), cg.type_of(x.id)) } else { "" }
                 if om != "" { return self.direct_call(cg, e, om, [x], -1, false) }
                 if !is_scalar(t) { return self.unsupported("a unary operator on a value that isn't a scalar") }
@@ -3212,7 +3212,7 @@ impl Lower {
             ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
             ExprKind.Index(base, idx) => {
                 if is_slice_expr(idx) { return self.slice_expr(cg, e, base, idx) }
-                // a struct's or enum's `x[i]` by its `Index` (D198)
+                // a struct's or enum's `x[i]` by its `Index` (D200)
                 let om = cg.op_method("Index", cg.type_of(base.id), cg.type_of(idx.id))
                 if om != "" { return self.direct_call(cg, e, om, [base, idx], -1, false) }
                 let p = self.elem_read(cg, e, base, idx)
@@ -3275,7 +3275,7 @@ impl Lower {
         return self.unsupported("a function used as a value")
     }
 
-    // The method of the operator impl by type arguments (D198) that `l op
+    // The method of the operator impl by type arguments (D200) that `l op
     // r` calls, by the operands' types here (an instance's, in generic
     // code); "" for a number's own operator or a classic impl.
     fun op_call(self, cg: CodeGen, op: str, l: Expr, r: Expr) -> str {
@@ -3290,7 +3290,7 @@ impl Lower {
     fun binary(var self, cg: CodeGen, e: Expr, op: str, l: Expr, r: Expr) -> int32 {
         if op == "&&" || op == "||" { return self.logical(cg, op, l, r) }
         let lt = cg.type_of(l.id)
-        // an operator impl by type arguments (D198): its method called
+        // an operator impl by type arguments (D200): its method called
         let om = self.op_call(cg, op, l, r)
         if om != "" { return self.direct_call(cg, e, om, [l, r], -1, false) }
         let rt = cg.type_of(e.id)
@@ -3661,7 +3661,7 @@ impl Lower {
             ExprKind.Binary(op, l, r) => {
                 let lt = cg.type_of(l.id)
                 if op == ">>" && is_tfunc(lt) { return self.compose(cg, e, l, r) }
-                // an operator impl by type arguments (D198): its method called
+                // an operator impl by type arguments (D200): its method called
                 let om = self.op_call(cg, op, l, r)
                 if om != "" { return self.direct_call(cg, e, om, [l, r], into, false) }
                 if !is_overloadable_op(op) || !is_struct_or_enum_t(lt) { return self.unsupported("that operator on aggregates") }
@@ -3678,13 +3678,13 @@ impl Lower {
             },
             ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
             ExprKind.Index(base, idx) => {
-                // a struct's or enum's `x[i]` by its `Index` (D198)
+                // a struct's or enum's `x[i]` by its `Index` (D200)
                 let om = cg.op_method("Index", cg.type_of(base.id), cg.type_of(idx.id))
                 if om != "" { return self.direct_call(cg, e, om, [base, idx], into, false) }
                 return self.unbox(cg, t, self.elem_read(cg, e, base, idx))
             },
             ExprKind.Unary(op, x) => {
-                // a struct's or enum's `-x` by its `Neg` (D198)
+                // a struct's or enum's `-x` by its `Neg` (D200)
                 let om = if op == "-" { cg.op_method("Neg", cg.type_of(x.id), cg.type_of(x.id)) } else { "" }
                 if om != "" { return self.direct_call(cg, e, om, [x], into, false) }
             },
@@ -6341,7 +6341,7 @@ impl Lower {
             self.mix_word(sh, h)
             return
         }
-        // a float by std.hash's own `hash` (D196), as a float64 (a float32 is
+        // a float by std.hash's own `hash` (D198), as a float64 (a float32 is
         // one exactly): its NaN error and -0.0 folded into 0.0 in one place,
         // the one the interpreter calls for a NaN too
         if is_tfloat_ir(ft) {

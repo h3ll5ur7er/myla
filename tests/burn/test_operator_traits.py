@@ -1,4 +1,4 @@
-"""Burn test: operators between different types (D198, MYLA-584).
+"""Burn test: operators between different types (D200, MYLA-612).
 
 The operator traits take type arguments: `Add<R, O>`, `Sub`, `Mul`, `Div`,
 `Rem` with `fun add(self, other: R) -> O`, where a bare `Mul` is

@@ -2,7 +2,7 @@
 //~ span: v * 2
 //~ note: 'V' implements Mul<float64, V>
 // An integer literal never becomes a float, beside an operator either: with
-// only `Mul<float>`, `v * 2` asks for `Mul<int32, …>`; write `2.0` (D198).
+// only `Mul<float>`, `v * 2` asks for `Mul<int32, …>`; write `2.0` (D200).
 struct V {
     x: float,
 }

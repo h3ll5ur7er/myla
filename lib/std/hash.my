@@ -156,7 +156,7 @@ impl Hasher {
 // methods above do; a list adds its length and then its elements, so that
 // `([1], [2, 3])` and `([1, 2], [3])` differ. A tuple's is the language's
 // own (its elements in turn), as no impl can name a tuple of any length.
-// A float adds its bits (D196): -0.0 as 0.0, which it equals; a NaN, which
+// A float adds its bits (D198): -0.0 as 0.0, which it equals; a NaN, which
 // is unequal to itself and would be a key no lookup finds, is the runtime
 // error `cannot hash NaN`.
 

@@ -228,7 +228,7 @@ fun main() {
 
 ## Operator overloading
 
-A fixed set of built-in traits backs the operators on structs and enums (D52, D198):
+A fixed set of built-in traits backs the operators on structs and enums (D52, D200):
 
 | Trait | Method | Operators |
 | --- | --- | --- |
@@ -239,7 +239,7 @@ A fixed set of built-in traits backs the operators on structs and enums (D52, D1
 | `Eq` | `eq(self, other: Self) -> bool` | `==`, `!=` |
 | `Ord` | `cmp(self, other: Self) -> int` (negative, zero, positive) | `< <= > >=` |
 
-The arithmetic traits take the right operand's type and the result's (D198, [[MYLA-584]]): a bare `Mul` is `Mul<Self, Self>`, the classic same-type operator, and `Mul<R>` is `Mul<R, Self>`; a bare `Neg` is `Neg<Self>`. A type may implement one trait for several right operands, `impl Mul<float> for Vec2` beside `impl Mul<Vec2, float> for Vec2` (a dot product) and `impl Mul for Mat2`: the operands' types pick the impl, and its result type is the expression's. A number may implement an arithmetic trait with a struct or enum on the right, for the scalar on the left: `impl Mul<Vec2, Vec2> for float64` gives `2.0 * v`. `Index` and `IndexSet` take the index's type and the element's, one impl per index type (`Index<int, float>` beside `Index<(int, int), float>`); `x[i] = v` needs `x` to be a `var` place, and `x[i] += v` is `x.set_index(i, x.index(i) + v)`.
+The arithmetic traits take the right operand's type and the result's (D200, [[MYLA-612]]): a bare `Mul` is `Mul<Self, Self>`, the classic same-type operator, and `Mul<R>` is `Mul<R, Self>`; a bare `Neg` is `Neg<Self>`. A type may implement one trait for several right operands, `impl Mul<float> for Vec2` beside `impl Mul<Vec2, float> for Vec2` (a dot product) and `impl Mul for Mat2`: the operands' types pick the impl, and its result type is the expression's. A number may implement an arithmetic trait with a struct or enum on the right, for the scalar on the left: `impl Mul<Vec2, Vec2> for float64` gives `2.0 * v`. `Index` and `IndexSet` take the index's type and the element's, one impl per index type (`Index<int, float>` beside `Index<(int, int), float>`); `x[i] = v` needs `x` to be a `var` place, and `x[i] += v` is `x.set_index(i, x.index(i) + v)`.
 
 ```myla
 struct Vec2 {
@@ -425,7 +425,7 @@ fun main() {
 
 `trait Hash { fun hash(self, h: Hasher) -> Hasher }` is in the prelude with the `Hasher` it passes through, by value since Myla has no `var` parameters (D163). The hasher's methods and its algorithm are [[Language/Standard-library/Hash]]'s: `h.add(x)` adds any `Hash` value (it is `x.hash(h)`), `add_u64`, `add_str` and the others add one of a built-in type, `finish()` gives the hash. A map's key type is any type that is `Eq` and `Hash` ([[Language/Collections-and-strings]]).
 
-- The integers, the floats, `char`, `bool` and `str` are `Hash`, and a tuple and a list are when their elements are (a list adds its length, then its elements). A float adds its bits, `-0.0` as `0.0`; hashing a NaN is the runtime error `cannot hash NaN`, as NaN is unequal to itself (D196, superseding D163's "floats aren't").
+- The integers, the floats, `char`, `bool` and `str` are `Hash`, and a tuple and a list are when their elements are (a list adds its length, then its elements). A float adds its bits, `-0.0` as `0.0`; hashing a NaN is the runtime error `cannot hash NaN`, as NaN is unequal to itself (D198, superseding D163's "floats aren't").
 - That `a == b` gives `a.hash(h) == b.hash(h)` is the promise of a written impl: a map finds a key only among those of the same hash. A derived `Hash` with a derived `Eq` keeps it.
 - A tuple's `hash` is the language's, as no impl can name a tuple of every length: `(1, "a").hash(h)` adds `1`, then `"a"`.
 - A generic function that hashes takes `T: Hash` (`h.add(x)` and `x.hash(h)` on a `T: Hash`), and one with a map keyed by a type parameter `K` needs `K: Eq + Hash` written (D167, [[Language/Collections-and-strings]]).
@@ -448,7 +448,7 @@ fun main() {
 // 6
 ```
 
-A type parameter may carry bounds `T: Add + Eq` (built-in or user traits, D53; `Hash` is the prelude's). The bound is checked where the function is called, against the concrete type (primitives count as implementing their built-in operator traits, and the printable ones `Format`, D162). Inside the body, a bound permits that trait's **operators** on `T` (`Add`, `Eq`, `Ord`, …: their methods are their operators; an operator trait's arguments say what the right operand and the result are, `T: Mul<float>` allowing `a * 2.0` and giving a `T`, D198) and the **methods** of a user trait or of `Format`, with `Self` the type parameter; a `T: Format` goes in a format hole as its type does ([[MYLA-291]]), and its `x.format(spec)` is, for a primitive `T`, its print form by the spec, as `f"{x:>8}"` gives it ([[MYLA-544]]). The interpreter calls the method of the value's type, native code the method of the type the copy is made for ([[Architecture/Monomorphization]]).
+A type parameter may carry bounds `T: Add + Eq` (built-in or user traits, D53; `Hash` is the prelude's). The bound is checked where the function is called, against the concrete type (primitives count as implementing their built-in operator traits, and the printable ones `Format`, D162). Inside the body, a bound permits that trait's **operators** on `T` (`Add`, `Eq`, `Ord`, …: their methods are their operators; an operator trait's arguments say what the right operand and the result are, `T: Mul<float>` allowing `a * 2.0` and giving a `T`, D200) and the **methods** of a user trait or of `Format`, with `Self` the type parameter; a `T: Format` goes in a format hole as its type does ([[MYLA-291]]), and its `x.format(spec)` is, for a primitive `T`, its print form by the spec, as `f"{x:>8}"` gives it ([[MYLA-544]]). The interpreter calls the method of the value's type, native code the method of the type the copy is made for ([[Architecture/Monomorphization]]).
 
 ```myla
 trait Shape {

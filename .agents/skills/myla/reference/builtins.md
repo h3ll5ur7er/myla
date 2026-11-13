@@ -42,7 +42,7 @@ Implicit std methods (the most used). Every method, with its signature, is in [s
 | `std.map` (`impl<K: Eq + Hash, V> [K: V]`) | `get(k) -> Option<V>`, `get_or(k, default)`, `update(k, default, f)`, `values`, `items -> [(K, V)]`, `iter`, `merge(other)`. Free function `counts(xs)`, which needs an import |
 | `std.hash` (`impl Hasher`) | `add<T: Hash>(x)`, `add_u8` … `add_u64`, `add_i8` … `add_i64`, `add_bool`, `add_char`, `add_str`, `add_bytes`, `finish() -> uint64`. It also has the `Hash` impls of the integers, `char`, `bool`, `str` and `[T: Hash]`. Free functions `new()` and `with_seed`, which need an import |
 
-**Floats have methods** from the implicit `std.float` (D197): `abs`, `floor`, `round`, `sqrt`, `cbrt`, `pow`, `powi`, `sin` … `atan2`, `sinh`, `lerp`, `clamp`, `is_nan`, `to_bits`, `total_cmp`, … on `float64` and `float32` (see [stdlib.md](stdlib.md)). `bool` has none.
+**Floats have methods** from the implicit `std.float` (D199): `abs`, `floor`, `round`, `sqrt`, `cbrt`, `pow`, `powi`, `sin` … `atan2`, `sinh`, `lerp`, `clamp`, `is_nan`, `to_bits`, `total_cmp`, … on `float64` and `float32` (see [stdlib.md](stdlib.md)). `bool` has none.
 
 A program's own method with the name of an implicit one on the same type is `duplicate method 'trim' for type 'str'`, with a note naming the standard library's module (`duplicate_method`). A new name is fine (`impl str { fun shout(self) -> str { … } }`). The modules' `pub` functions need an import (`import std.list as list`, then `list.filled(3, 0)`).
 
@@ -58,7 +58,7 @@ struct Hasher { state: uint64 }           // with impl Eq; methods from std.hash
 trait Hash { fun hash(self, h: Hasher) -> Hasher }
 trait Iterator<T> { fun next(var self) -> Option<T> }
 // built in, not redeclarable ("'Eq' is a built-in operator trait and cannot be redeclared"):
-// Add<R, O>.add, Sub.sub, Mul.mul, Div.div, Rem.rem: (self, other: R) -> O   (D198)
+// Add<R, O>.add, Sub.sub, Mul.mul, Div.div, Rem.rem: (self, other: R) -> O   (D200)
 //     a bare `Mul` is `Mul<Self, Self>`, `Mul<R>` is `Mul<R, Self>`
 // Neg<O>.neg: (self) -> O                   (bare `Neg` = `Neg<Self>`: unary `-`)
 // Index<I, O>.index: (self, i: I) -> O      (`x[i]`)
@@ -82,7 +82,7 @@ The built-in traits a primitive type has without an impl (`primitive_default_tra
 | Type | Traits |
 | --- | --- |
 | integers | Add Sub Mul Div Rem Eq Ord Format Hash (and `Neg`, the signed ones) |
-| floats | Add Sub Mul Div Rem Neg Eq Ord Format Hash (D196: a NaN's hash is the runtime error `cannot hash NaN`; `-0.0` hashes as `0.0`) |
+| floats | Add Sub Mul Div Rem Neg Eq Ord Format Hash (D198: a NaN's hash is the runtime error `cannot hash NaN`; `-0.0` hashes as `0.0`) |
 | `char` | Eq Ord Format Hash |
 | `bool` | Eq Format Hash (**not Ord**: `true < false` is an error) |
 | `str` | Add Eq Ord Format Hash (`<` is byte-wise) |
@@ -97,7 +97,7 @@ Calling an operator trait's method by name on a type parameter fails: `a.eq(b)` 
 Only `Eq`, `Hash`, `Json` and `Toml` can be derived, and only on a struct or enum (`cannot derive 'Ord': only 'Eq', 'Hash', 'Json' and 'Toml' are derivable`).
 
 - `Eq`: every field or payload must be Eq. A float is Eq, a map isn't. On a generic type it gives `impl<T: Eq> Eq for Box<T>`. Deriving `Eq` and also writing `impl Eq` is an error.
-- `Hash`: the type must also be `Eq` (`cannot derive Hash for 'P': it isn't Eq; derive both, '#derive(Eq, Hash)', …`). Float fields are fine (D196).
+- `Hash`: the type must also be `Eq` (`cannot derive Hash for 'P': it isn't Eq; derive both, '#derive(Eq, Hash)', …`). Float fields are fine (D198).
 - `Json` / `Toml`: needs `import std.json as json` / `import std.toml as toml` in the file (`… std.json isn't imported`). Fields may be integers, floats, `bool`, `str`, `char`, lists, maps with `str` keys and derived types. `Option` fields are allowed (for TOML only as a struct field). No tuples.
 - Attributes: `#derive(...)`, `#test(...)[...]`, a bare `#test`, `#main`, `#allow(primitive|reentrancy)`. Anything else is `unknown attribute '#x'`. `#main`/`#test` don't go on a generic function. On a method only `#test` and `#allow` are allowed.
 
@@ -117,7 +117,7 @@ Only `Eq`, `Hash`, `Json` and `Toml` can be derived, and only on a struct or enu
 
 | Operator | Operands |
 | --- | --- |
-| `+` | two numbers of one type, `str + str`, `char + int32 -> char`, or a type with `Add` (`Add<R, O>`: the right operand `R`, the result `O`; a number on the left by its own impl, D198) |
+| `+` | two numbers of one type, `str + str`, `char + int32 -> char`, or a type with `Add` (`Add<R, O>`: the right operand `R`, the result `O`; a number on the left by its own impl, D200) |
 | `- * / %` | two numbers of one type (`%` works on floats), or a type with the trait. `char - char -> int32`, `char - int32 -> char` |
 | `& \| ^`, unary `~` | integers only (`operator '&' is not defined for floats`) |
 | `<< >>` | an integer on the left and any integer on the right. A constant shift amount must be in `0..width-1`. A function on the left of `>>` composes two one-argument functions |
@@ -125,9 +125,9 @@ Only `Eq`, `Hash`, `Json` and `Toml` can be derived, and only on a struct or enu
 | `< <= > >=` | numbers, `char`, `str`, and types with `Ord` |
 | `&& \|\| !` | `bool` |
 
-An overloaded operator's operands have the same type unless the type has an impl by type arguments for the right one (D198): with only the classic impl, `operator '+' requires both operands to have the same type, found …`; with impls by arguments, `operator '*' is not defined for 'V' and 'int32': it needs 'impl Mul<int32, …> for V'` and a note naming the impls it has.
+An overloaded operator's operands have the same type unless the type has an impl by type arguments for the right one (D200): with only the classic impl, `operator '+' requires both operands to have the same type, found …`; with impls by arguments, `operator '*' is not defined for 'V' and 'int32': it needs 'impl Mul<int32, …> for V'` and a note naming the impls it has.
 
-**Map keys** (`check_key`, `key_why`): integers, `char`, `bool` and `str` (the fast path, `is_map_key`), floats (D196: hashed by std.hash's `float64.hash`, natively too, which panics `cannot hash NaN` and folds `-0.0` into `0.0`; found by `==`), or any type that is Eq and Hash: tuples and lists of such, `Option`/`Result` of such, and structs and enums with `#derive(Eq, Hash)` or both impls. A generic `K` needs `K: Eq + Hash`, even in an `impl<K, V> [K: V]` block or a function that only calls `m.len()` or `m.keys()`: write `impl<K: Eq + Hash, V> [K: V]`.
+**Map keys** (`check_key`, `key_why`): integers, `char`, `bool` and `str` (the fast path, `is_map_key`), floats (D198: hashed by std.hash's `float64.hash`, natively too, which panics `cannot hash NaN` and folds `-0.0` into `0.0`; found by `==`), or any type that is Eq and Hash: tuples and lists of such, `Option`/`Result` of such, and structs and enums with `#derive(Eq, Hash)` or both impls. A generic `K` needs `K: Eq + Hash`, even in an `impl<K, V> [K: V]` block or a function that only calls `m.len()` or `m.keys()`: write `impl<K: Eq + Hash, V> [K: V]`.
 
 **Indexing** (`infer_index`, `check_lvalue_node`): `[T][int] -> T`, `str[int] -> uint8`, `[K: V][K] -> V` (a missing key fails at run time). Slices `a[i:j:step]` of lists and strings have the same type (a map has none). `^n` counts from the end. Strings are immutable, and you can't assign to a slice.
 
@@ -257,7 +257,7 @@ Loops never count, `while true { return x }` included: add `unreachable()` after
 | `function 'new' in 'impl P' has no 'self': only a trait's functions go without one` | write a free `fun new_p() -> P` |
 | `'Self' is only valid inside a trait declaration` | name the type in impls |
 | `operator '*' is not defined for 'V' and 'int32': it needs 'impl Mul<int32, …> for V'` | no impl for that right operand; an integer literal never becomes a float, write `2.0` |
-| `unary '-' is not defined for 'V': it needs 'impl Neg for V'`, `type 'V' can't be indexed: it needs 'impl Index<int32, …> for V'`, `cannot assign to an index of 'V': it needs 'impl IndexSet<int32, float64> for V'` | implement the operator trait (D198) |
+| `unary '-' is not defined for 'V': it needs 'impl Neg for V'`, `type 'V' can't be indexed: it needs 'impl Index<int32, …> for V'`, `cannot assign to an index of 'V': it needs 'impl IndexSet<int32, float64> for V'` | implement the operator trait (D200) |
 | `operator '*' on a value of type parameter 'T' is not defined for 'int32': its bounds give 'T: Mul<float64>'` | the bound's right operand decides |
 | `a lambda can't change 'n', a variable it captures: it holds a copy of its own` | return the new value, or use an actor |
 | `cannot infer the type of lambda parameter 'x'; annotate it (e.g. 'x: int')` | |

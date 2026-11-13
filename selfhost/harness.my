@@ -32,7 +32,7 @@ from std.test import Case as TCase
 // How many cases one function of the dispatcher picks from.
 const DISPATCH_GROUP: int32 = 32
 
-// The operator of the arithmetic trait `tr` (D198).
+// The operator of the arithmetic trait `tr` (D200).
 #test("Rem")["%"]
 fun op_symbol(tr: str) -> str {
     if tr == "Add" { return "+" }
@@ -79,7 +79,7 @@ pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Opti
                 for m in methods {
                     var name = format("{}.{}", key, m.name)
                     // an operator method beside others of its trait, renamed
-                    // for its right operand's type (D198)
+                    // for its right operand's type (D200)
                     for oi in g.ch.op_impls {
                         if oi.decl == d.id && op_trait_method(oi.tr) == m.name { name = oi.method }
                     }
@@ -172,7 +172,7 @@ pub fun runner_case(c: Case) -> TCase {
 // alias), the helpers written (`out`, one equality and one repr per type,
 // keyed by the type's name), the cases and their code.
 struct Gen {
-    op_tr: str,              // the operator trait of the impl whose methods are being read, "" for none (D198)
+    op_tr: str,              // the operator trait of the impl whose methods are being read, "" for none (D200)
     ch: Checker,
     text: str,
     line_starts: [int32],
@@ -261,7 +261,7 @@ impl Gen {
             i = i + 1
         }
         // an operator trait's method through its operator: one beside others
-        // of its trait is named for its right operand's type (D198), which
+        // of its trait is named for its right operand's type (D200), which
         // the source's name doesn't say
         if self.op_tr != "" && fd.name == op_trait_method(self.op_tr) && first == 1 {
             let a1 = if attr.args.len() > 1 { self.slice(attr.args[1].sp) } else { "" }
@@ -670,7 +670,7 @@ fun canon(n: str) -> str {
 #test("V.mul$float64")[false]
 pub fun is_qualified(name: str) -> bool {
     // (before a method's dot: an operator method's own name may hold a `$`,
-    // `V.mul$float64`, D198)
+    // `V.mul$float64`, D200)
     var i = 0
     while i < name.len() {
         if name[i] == '.' { return false }

@@ -14,7 +14,7 @@ A method in an `impl` has no `pub` of its own and follows its type (public type:
 
 Builtin methods (compiler, not std; an `impl` can't redefine them): `len()` on lists, maps, `str` and `StringBuilder`; `xs.push(v)` and `xs.pop()`; `m.contains(k)`, `m.keys()` and `m.remove(k)` (returns `()`); `s.chars()`; `sb.append(s)`, `sb.append(s, start, end)`, `sb.append_byte(b)`, `sb.append_char(c)` and `sb.build()`; `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg` on every integer.
 
-None of these exist: `s.is_empty()`, `xs.is_empty()`, `xs.min()`, `xs.max()`, `xs.first()`, `opt.unwrap()`. Use `len() == 0`, `iter.min(xs.iter())` or `xs.min_by(…)`, and `opt.unwrap_or(…)`. Floats have methods (`x.sqrt()`, implicit `std.float`, D197).
+None of these exist: `s.is_empty()`, `xs.is_empty()`, `xs.min()`, `xs.max()`, `xs.first()`, `opt.unwrap()`. Use `len() == 0`, `iter.min(xs.iter())` or `xs.min_by(…)`, and `opt.unwrap_or(…)`. Floats have methods (`x.sqrt()`, implicit `std.float`, D199).
 
 ```myla
 import std.iter as iter
@@ -83,7 +83,7 @@ Purpose: arithmetic helpers on `int8` to `int64` and `uint8` to `uint64`. The mo
 - Prose: `docs/Language/Standard-library/Int.md`
 
 ## std.float (implicit): methods on `float64` and `float32`
-Purpose: the float operations as methods (D197, MYLA-585), over std.math. `impl float64` and `impl float32` with the same methods; a float32 one computes in float64 and rounds.
+Purpose: the float operations as methods (D199, MYLA-585), over std.math. `impl float64` and `impl float32` with the same methods; a float32 one computes in float64 and rounds.
 - Sign, rounding: `x.abs()`, `x.signum()` (a zero's sign too, NaN for NaN), `x.copysign(s)`, `x.trunc()`, `x.floor()`, `x.ceil()`, `x.round()` (halves away from zero), `x.fract()`
 - Comparing: `x.min(o)`, `x.max(o)` (NaN gives way), `x.clamp(lo, hi)`, `x.total_cmp(o) -> int` (IEEE total order: `-0.0 < 0.0`, NaN last; `xs.sort_by((a, b) => a.total_cmp(b) < 0)`), `x.approx_eq(o, eps) -> bool`
 - Powers: `x.sqrt()`, `x.cbrt()`, `x.hypot(o)`, `x.pow(y)`, `x.powi(n: int)`, `x.exp()`, `x.ln()`, `x.log2()`, `x.log10()`, `x.log(base)`
@@ -152,7 +152,7 @@ Purpose: building, higher-order operations, sorting, searching and combinatorics
   - `h.add<T: Hash>(x: T)`, `h.add_str(s: str)`, `h.add_bytes(b: [uint8])`, `h.add_bool(x: bool)`, `h.add_char(x: char)`
   - Integers: `h.add_u8(x)`, `h.add_u16(x)`, `h.add_u32(x)`, `h.add_u64(x)`, `h.add_i8(x)`, `h.add_i16(x)`, `h.add_i32(x)`, `h.add_i64(x)`
   - `h.finish() -> uint64`
-- `impl Hash for` every integer type, `float64`, `float32` (D196: the value's float64 bits, `-0.0` as `0.0`; a NaN panics `cannot hash NaN`), `char`, `bool`, `str` and `[T: Hash]`. A list adds its length first. Tuples are hashed by the language.
+- `impl Hash for` every integer type, `float64`, `float32` (D198: the value's float64 bits, `-0.0` as `0.0`; a NaN panics `cannot hash NaN`), `char`, `bool`, `str` and `[T: Hash]`. A list adds its length first. Tuples are hashed by the language.
 - `pub fun new() -> Hasher`, `pub fun with_seed(seed: uint64) -> Hasher`, `pub fun wyhash(s: str, seed: uint64) -> uint64`, `pub fun wyhash_bytes(b: [uint8], seed: uint64) -> uint64`. These need `import std.hash as hash`.
 - Gotchas:
   - The hasher is a value: write `h = h.add_u64(x)` or chain the calls.
@@ -176,7 +176,7 @@ tar (ustar + pax/GNU read; pax written) read/write; zip read only (stored + defl
 - `fun zip_list(b: [uint8]) -> Result<[ZipFile], ArchiveError>` · `fun zip_data(b: [uint8], f: ZipFile, max_output: int = 0x7FFFFFFF) -> Result<[uint8], ArchiveError>` · `fun zip_read(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[Entry], ArchiveError>`
 
 ## std.algebra: `Zero`, `One`, `Identity`
-Purpose: the traits of distinguished values (D199): `trait Zero { fun zero() -> Self }`, `trait One { fun one() -> Self }`, `trait Identity { fun identity() -> Self }`, called on a type (`int.zero()`, `Vec3.zero()`, `Mat4.identity()`, `T.zero()` under a bound). Every integer and float type implements `Zero` and `One` here.
+Purpose: the traits of distinguished values (D201): `trait Zero { fun zero() -> Self }`, `trait One { fun one() -> Self }`, `trait Identity { fun identity() -> Self }`, called on a type (`int.zero()`, `Vec3.zero()`, `Mat4.identity()`, `T.zero()` under a bound). Every integer and float type implements `Zero` and `One` here.
 - `pub fun sum<T: Add + Zero>(xs: [T]) -> T`, `pub fun product<T: Mul + One>(xs: [T]) -> T`
 - Gotchas: importing it (or std.vector/matrix/quaternion, which do) makes `zero`/`one` the number types' methods: a program's own `impl Zero for int` of another trait is then a duplicate method. `#test` can't sit on a generic function (its cases are a test function with `assert`).
 - Prose: `docs/Language/Standard-library/Algebra.md`
@@ -946,7 +946,7 @@ Import: `import std.uuid as uuid`.
 - Prose: `docs/Language/Standard-library/Uuid.md`
 
 ## std.vector, std.matrix, std.quaternion (and std.vector32, std.matrix32, std.quaternion32)
-Purpose: linear algebra for graphics and numerics (D199, MYLA-587). The plain modules are `float64`, the `32` ones `float32` with the same names (`vector32.Vec3`), all six GENERATED by `scripts/gen_std_linalg.py` (edit the script; `--check` in `test_linalg`). `x.to_f32()` / `x.to_f64()` convert between twins.
+Purpose: linear algebra for graphics and numerics (D201, MYLA-587). The plain modules are `float64`, the `32` ones `float32` with the same names (`vector32.Vec3`), all six GENERATED by `scripts/gen_std_linalg.py` (edit the script; `--check` in `test_linalg`). `x.to_f32()` / `x.to_f64()` convert between twins.
 - std.vector: `Vec2`/`Vec3`/`Vec4` `{ x, y[, z[, w]] }` (`#derive(Eq, Hash)`, print `(1, 2, 3)`), `vec3(x, y, z)`, `splat3(s)`, `Vec3.zero()`, `Vec3.one()`. Operators: `+ - * /` by component, `v * s`, `s * v`, `v / s`, `-v`, `v[i]`, `v[i] = s`. Methods: `dot`, `length`, `length_squared`, `normalized` (NaN for zero), `try_normalized -> Option`, `distance`, `distance_squared`, `lerp(o, t)`, `min`, `max`, `abs`, `min_element`, `max_element`, `reflect(n)`, `project_onto(o)`, `angle_between(o)`, `to_list`; `Vec2.perp()`, `perp_dot`, `extend(z)`; `Vec3.cross(o)`, `extend(w)`, `truncate()`; `Vec4.truncate()`. `Vector { data: [S] }` of any length: `vector(xs)`, `zeros(n)`, `filled(n, v)`, the same operators (lengths checked: `vector lengths differ: 2 and 3`), `len`, `dot`, `length`, `normalized`, `distance`, `sum`, `map(f)`, `to_list`.
 - std.matrix: column-major `Mat2`/`Mat3`/`Mat4`, fields = columns `x_axis`, `y_axis`, `z_axis`, `w_axis`; `m * v` (column vectors: `a * b * v` applies `b` first). `mat3(c0, c1, c2)` (columns), `mat3_from_rows(r0, r1, r2)`, `Mat3.identity()`, `Mat3.zero()`. Operators: `a * b`, `m * v`, `m * s`, `s * m`, `+`, `-`, `-m`, `m[(row, col)]` (and `= s`), `m[i]` a column (and `= col`). Methods: `col(i)`, `row(i)`, `transpose`, `determinant`, `inverse -> Option`, `trace`, `to_list` (column-major), `to_matrix`; `Mat3.to_mat4()`, `transform_point2`, `transform_vector2`; `Mat4.upper_left()`, `transform_point3` (affine, no divide), `transform_vector3`, `project_point3` (divides by w). Free functions: `rotation2(a) -> Mat2`, `translation2d(v)`, `rotation2d(a)`, `scaling2d(v)` (affine Mat3); `translation(v)`, `scaling(v)`, `rotation_x/y/z(a)`, `rotation_axis(axis, a)`, `look_at_rh(eye, center, up)`, `perspective_rh_gl(fov_y, aspect, near, far)` / `orthographic_rh_gl(l, r, b, t, n, f)` (depth -1..1), `perspective_rh` / `orthographic_rh` (depth 0..1). `Matrix { rows, cols, data }` (column-major): `matrix(r, c, data)`, `from_rows([[…]])`, `zero_matrix(r, c)`, `identity(n)`; `*` by Matrix/Vector/scalar, `+`, `-`, `m[(r, c)]`, `row`, `col`, `transpose`, `determinant`, `inverse` (Gauss-Jordan, partial pivoting); shape errors are runtime errors (`matrix shapes don't fit: 2x3 * 2x3`). Fixed matrices print by rows `[(1, 0), (0, 1)]`, a `Matrix` `[[1, 0], [0, 1]]`.
 - std.quaternion: `Quat { x, y, z, w }`: `from_axis_angle(axis, a)`, `from_rotation_x/y/z(a)`, `from_euler_xyz(x, y, z)` (x first), `quat(x, y, z, w)`, `Quat.identity()`. `a * b` (b first), `q * v` rotates a `Vec3`, `q * s`, `+`, `-`, `-q`. Methods: `dot`, `length`, `normalized`, `conjugate`, `inverse`, `slerp(end, t)`, `to_mat3`, `to_mat4`, `to_axis_angle -> (Vec3, S)`.

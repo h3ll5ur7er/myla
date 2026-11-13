@@ -283,7 +283,7 @@ pub struct CodeGen {
     // called that nothing called (`Checker.unmarked_std`): asking for one is
     // an internal error, as its body may never have been read
     unmarked: [str: bool],
-    op_impls: [OpImpl],             // the operator impls by type arguments (D198)
+    op_impls: [OpImpl],             // the operator impls by type arguments (D200)
 }
 
 // A code generator for `src` (checked alone, `checker_on`), the receiver of
@@ -1483,7 +1483,7 @@ impl CodeGen {
         return out
     }
 
-    // The method of an operator impl by type arguments (D198) of the trait
+    // The method of an operator impl by type arguments (D200) of the trait
     // `tr` for a left operand (or indexed value) of the type `lt` and a right
     // one (or index) of the type `rt` (`Neg` reads `lt` alone): its full name,
     // "" for none, a number's own operator or a classic impl's.

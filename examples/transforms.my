@@ -1,6 +1,6 @@
 // A small 3D pipeline: a cube's corners moved, rotated and looked at, then
 // projected onto a 640x480 screen (std.vector, std.matrix, std.quaternion,
-// D198, D199). Matrices are column-major and multiply column vectors, so in
+// D200, D201). Matrices are column-major and multiply column vectors, so in
 // `projection * view * model` the model's transform comes first.
 
 import std.float as float

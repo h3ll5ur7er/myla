@@ -1,5 +1,5 @@
 ---
-id: MYLA-584
+id: MYLA-612
 title: Operators between different types (operator traits with type arguments)
 type: feature
 status: review
@@ -47,7 +47,7 @@ pos += vel * dt
 
 ## Open questions for the owner
 
-- [x] Choose an option (recommendation: A) and record it as a decision: A, D198 (2026-11-13)
+- [x] Choose an option (recommendation: A) and record it as a decision: A, D200 (2026-11-13)
 - [x] A literal beside a non-literal operand: `v * 2` with only `Mul<float64, Vec3>` is an error; write `2.0` (the owner, 2026-11-13)
 - [x] `Neg` and an `Index` trait in this round (the owner, 2026-11-13): `Index<I, O>` for `v[i]`, `IndexSet<I, V>` for `v[i] = x`; `m[r, c]` syntax is not part of it (`m[(r, c)]`)
 
@@ -61,10 +61,10 @@ pos += vel * dt
 
 ## Evidence
 
-- Built as option A (D198), with `Neg<O>`, `Index<I, O>` and `IndexSet<I, V>`. No AST node: the checker keeps `op_impls` (the impls by type arguments, their methods renamed `mul$float64` in the declarations too) and records each operator that calls one in `op_sites` (`IndexSet` targets in `op_sets`: a compound assignment's target node is also its value's left operand, which first overwrote the write's entry: `p[0] += 1.5` did nothing until they were kept apart). The interpreter calls the method through `eval_method_call`, the lowering through `direct_call`; generic code picks the impl by the instance's types (`find_op_impl`). The classic same-type impl keeps its old path in all three stages.
+- Built as option A (D200), with `Neg<O>`, `Index<I, O>` and `IndexSet<I, V>`. No AST node: the checker keeps `op_impls` (the impls by type arguments, their methods renamed `mul$float64` in the declarations too) and records each operator that calls one in `op_sites` (`IndexSet` targets in `op_sets`: a compound assignment's target node is also its value's left operand, which first overwrote the write's entry: `p[0] += 1.5` did nothing until they were kept apart). The interpreter calls the method through `eval_method_call`, the lowering through `direct_call`; generic code picks the impl by the instance's types (`find_op_impl`). The classic same-type impl keeps its old path in all three stages.
 - Tests first: `tests/burn/test_operator_traits.py` failed before the change (`trait 'Mul' expects 0 type argument(s), got 1`, `unknown trait 'Neg'`, …) and passes after: 3/3 (the program and an async one alike interpreted and natively, 11 error cases). The program also prints the same as a `wasm32-wasi` module under Node, and builds for `aarch64-linux` (no qemu here: registered in `test_aarch64.PROGRAMS` and `_targets.py` for CI).
 - Error corpus: `type_op_int_literal_for_float`, `type_op_impl_duplicate_right_operand`, `type_op_impl_generic_right_operand`, `type_index_set_missing`, `type_neg_missing`, pinned; `test_error_corpus` 359/359.
 - The compiler's own cases: checker 1021/1021 (`trait_idx` of `Eq` moved from 5 to 8 with three new built-in traits), codegen 362/362, interp 446/446, lower 150/150.
 - `scripts/test.sh fast`: 878 tests, one failure, the skill's concurrency example, which printed `await a + await b` and so depended on which task reached the counter first (the interpreter 5, native workers 4): it prints the counter's total now. `test_doc_blocks`, `test_examples_run`, `test_compiler_parity`: 320/320. Bootstrap: byte-identical fixed point.
-- Docs: [[Language/Methods-and-traits#operator-overloading]] (a tested example), [[Language/Expressions-and-operators]], D198 (with a note on D52), [[Development/Testing]], the skill (`SKILL.md`, `reference/builtins.md`, `reference/compiler.md`).
+- Docs: [[Language/Methods-and-traits#operator-overloading]] (a tested example), [[Language/Expressions-and-operators]], D200 (with a note on D52), [[Development/Testing]], the skill (`SKILL.md`, `reference/builtins.md`, `reference/compiler.md`).
 - `scripts/test.sh` (all): 1,622 tests, one failure: `test_selfhost_checker`'s recorded answer for `a + b` with `T: Add` and an `int32` `b` is the old `operator '+' requires both operands to have the same type, found 'T' and 'int32'`. A bound that is only the classic one keeps that message now; one with type arguments says what its bounds give. The parity test, the operator test and the error corpus pass after (369/369).

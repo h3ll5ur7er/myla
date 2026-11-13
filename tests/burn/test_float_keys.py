@@ -1,4 +1,4 @@
-"""Burn test: floats are `Hash` (D196, MYLA-586).
+"""Burn test: floats are `Hash` (D198, MYLA-586).
 
 A float, and a tuple, list, `Option` or `#derive(Eq, Hash)` struct holding
 one, is a map key; `-0.0` and `0.0`, which are `==`, are one key; hashing a

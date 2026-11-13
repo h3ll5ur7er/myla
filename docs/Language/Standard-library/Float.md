@@ -1,6 +1,6 @@
 # std.float
 
-Methods on `float64` and `float32` (D197, [[MYLA-585]]), as [[Language/Standard-library/Int]] gives the integers theirs: every program sees them without an import (D164), so numeric code reads left to right, `(a - b).abs().sqrt()` rather than `math.sqrt(math.abs(a - b))`. Its constants and free functions need an import, `import std.float as float` (a built-in type's name stays the type where a type stands, so `float` is still the type there). It imports [[Language/Standard-library/Math]], whose functions do the work.
+Methods on `float64` and `float32` (D199, [[MYLA-585]]), as [[Language/Standard-library/Int]] gives the integers theirs: every program sees them without an import (D164), so numeric code reads left to right, `(a - b).abs().sqrt()` rather than `math.sqrt(math.abs(a - b))`. Its constants and free functions need an import, `import std.float as float` (a built-in type's name stays the type where a type stands, so `float` is still the type there). It imports [[Language/Standard-library/Math]], whose functions do the work.
 
 ```myla
 import std.float as float

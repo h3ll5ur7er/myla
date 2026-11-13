@@ -1,4 +1,4 @@
-"""Burn test: floats have methods (D197, MYLA-585).
+"""Burn test: floats have methods (D199, MYLA-585).
 
 `std.float` is implicit, as `std.int` is (D164): `x.sqrt()`, `x.floor()`,
 `a.atan2(b)`, `x.is_nan()`, `x.to_bits()` work on a float64 and a float32
