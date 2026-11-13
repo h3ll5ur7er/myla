@@ -14,6 +14,7 @@ import unittest
 from ._native import (
     CAN_BUILD_NATIVE,
     SKIP_REASON,
+    TEST_TARGET,
     Program,
     build_and_run_full,
     check_file,
@@ -360,6 +361,67 @@ class NonBlockingOutput(unittest.TestCase):
                         # start (reading the library) is most of what is left
                         self.assertGreater(wall, 0.6)
                         self.assertLess(cpu, 0.4 * wall, f"{cpu:.2f} s of CPU in {wall:.2f} s")
+
+
+# MYLA-572: a read of two billion bytes of a short input, and how much the
+# peak of the process's address space grew meanwhile, in kB (-1 without
+# /proc/self/status)
+READS_A_HUGE_COUNT = """import std.io as io
+import std.fs as fs
+import std.num as num
+from std.io import Read
+
+fun peak_kb() -> int {
+    return match fs.read_to_string("/proc/self/status") {
+        Ok(s) => {
+            var kb = -1
+            for l in s.lines() {
+                if l.starts_with("VmPeak:") {
+                    kb = num.parse_int(l[7:].trim().split(" ")[0]).unwrap_or(-1) as int
+                }
+            }
+            kb
+        }
+        Err(e) => -1
+    }
+}
+
+fun main() {
+    let before = peak_kb()
+    var r = io.fd_stream(0)
+    match r.read(2000000000) {
+        Ok(b) => print(f"{b.len()} bytes")
+        Err(e) => print(f"error {e}")
+    }
+    let after = peak_kb()
+    print(if before < 0 || after < 0 { -1 } else { after - before })
+}
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class HugeReads(unittest.TestCase):
+    def test_a_huge_count_costs_the_room_of_a_few_mib(self):
+        """MYLA-572: `read(n)` may give fewer bytes than asked (D177), so its
+        room is capped (4 MiB): a read of 2,000,000,000 bytes of `abc` used
+        to ask for 2 GB first, `out of memory` under a 400 MB limit. The
+        program reports its own address space's growth; on wasm32 /proc is
+        Node's, and the linear memory's peak is the measure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, argv, exe in _argvs(tmp, READS_A_HUGE_COUNT):
+                with self.subTest(run=name):
+                    mem = os.path.join(tmp, "memory")
+                    env = dict(os.environ, MYLA_WASM_MEMORY_OUT=mem)
+                    p = subprocess.run(argv, executable=exe, input="abc\n", capture_output=True, text=True,
+                                       env=env, timeout=120)
+                    self.assertEqual((p.stderr, p.returncode), ("", 0))
+                    got, grown = p.stdout.split("\n")[:2]
+                    self.assertEqual(got, "4 bytes")
+                    if name == "native" and TEST_TARGET == "wasm32-wasi":
+                        with open(mem, encoding="utf-8") as fh:
+                            self.assertLess(int(fh.read()), 64 << 20)
+                    else:
+                        self.assertLess(int(grown), 65536, f"{grown} kB more address space")
 
 
 if __name__ == "__main__":

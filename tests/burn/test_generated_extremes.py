@@ -58,13 +58,8 @@ NEVER = [re.compile(p) for p in [
 # two builds only; MYLA_GENERATED=full on all three, where the interpreter
 # may run out of time (they may fail then, as their known failures).
 SLOW = [re.compile(p) for p in [
-    # `ldexp` scales by 2^±1023 |k| / 1023 times: 2 million steps (MYLA-580)
-    r"^ldexp\([^,]+,(1073741823|1073741824|1073741825|2147483646|2147483647|\(-2147483647 - 1\)"
-    r"|-2147483647|-1073741824)\)$",
     # a number of 2^30 bits and more
     rf"^bigint\.shl\({_HUGE}\)$",
-    # a million characters of padding, a character a step
-    r"1000000\"\)$",
 ]]
 
 # the cases that fail today, per group, with the task that fixes them

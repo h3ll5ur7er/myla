@@ -1477,6 +1477,24 @@ pub fun term_make_raw(fd: int64) -> int64 {
     return r
 }
 
+// The terminal `fd` a key at a time from its mode now (MYLA-548): without
+// ICANON, VMIN 1 and VTIME 0, everything else kept (echo, the signal keys,
+// a CR read as a line end). 0, or minus the errno. A port does the same to
+// its console (Windows: SetConsoleMode on the input without
+// ENABLE_LINE_INPUT).
+pub fun term_make_cbreak(fd: int64) -> int64 {
+    let t = __alloc(64)
+    var r = __syscall(SYS_IOCTL, fd, TCGETS, t)
+    if r >= 0 {
+        __store32(t + 12, __load32(t + 12) & ~2u32)     // ICANON
+        __store8(t + 17 + 5, 0u8)                       // VTIME: no timer
+        __store8(t + 17 + 6, 1u8)                       // VMIN: a byte at a time
+        r = __syscall(SYS_IOCTL, fd, TCSETS, t)
+    }
+    __free(t)
+    return r
+}
+
 // A raw terminal's input flags: without BRKINT, ICRNL, INPCK, ISTRIP and
 // IXON (as `cfmakeraw` and line editors set them).
 #test(1280u32)[0u32]
@@ -1557,7 +1575,11 @@ fun catch_signal(sig: int64, handler: int64, saved: int64) {
     __store64(act + 8, 0)
     __store64(act + 16, 0)
     __store64(act + 24, 0)
-    if handler > 1 {
+    if handler == __rt_addr("__on_raw_signal") {
+        // raw mode's (D192): the default back as it runs, the signal it
+        // sends again not held
+        __store64(act + 8, 3489660928)                 // SA_RESETHAND | SA_NODEFER | SA_RESTART
+    } else if handler > 1 {
         __store64(act + 8, 268435456)                  // SA_RESTART: the kernel's own trampoline returns
     }
     var old: int64 = 0
@@ -1581,6 +1603,13 @@ fun drain(fd: int64) {
     __free(buf)
 }
 
+// The descriptor `signal_listen(1)` gives (the pipe's read end), or -1
+// before the first listener: what std.rt checks a listener's handle holds
+// (D181, MYLA-548).
+pub fun signal_fd() -> int64 {
+    return __load64(__rt_addr("__sig_pipe") + 8) - 1
+}
+
 // The next signal caught on the handle `h` that `signal_listen` gave, the
 // thread waiting for one: 2 or 15, 0 when the pipe ended, or minus the
 // errno.
@@ -1596,6 +1625,62 @@ pub fun signal_take(h: int64) -> int64 {
     }
     __free(b)
     return r
+}
+
+// --- raw mode and signals (D192) ---------------------------------------------------
+// While std.term holds the terminal raw, the signals that would end the
+// program by their default, SIGHUP, SIGINT, SIGQUIT and SIGTERM, run
+// `raw_signal` instead (`raw_signals`, from std.rt's `__term_raw`): it puts
+// the terminal's mode back, as the exit hook does (D187), and ends the
+// program as the signal would have. A signal ignored or caught (std.signal)
+// is left as it is. Installed with SA_RESETHAND and SA_NODEFER, the
+// default is back when the handler runs and the signal sent again isn't
+// held, so it ends the program at once. The handler allocates nothing and
+// reads only the exit hook's block (the runtime's `__exit_hook`: the
+// terminal's descriptor plus one, then the mode as a string's cell, its
+// bytes at 32); `__on_raw_signal` is its address (the code generator's
+// name for it, as for the executor's routines). A port does the same on
+// its console (Windows: a SetConsoleCtrlHandler routine that puts the mode
+// back and returns FALSE, so the next handler, the default, ends the
+// process).
+
+const SIGHUP: int64 = 1
+const SIGQUIT: int64 = 3
+
+// The handler of a signal that ends the program while the terminal is raw.
+pub fun raw_signal(sig: int64) {
+    let h = __rt_addr("__exit_hook")
+    let fd = __load64(h) - 1
+    if fd >= 0 {
+        __store64(h, 0)
+        __syscall(SYS_IOCTL, fd, TCSETS, h + 32)
+    }
+    __syscall(SYS_KILL, __syscall(SYS_GETPID, 0, 0, 0), sig, 0)
+}
+
+// `raw_signal` the handler, from now on, of each of the four signals whose
+// handler is the default (`on`; or it already, as a listener that let go
+// put it back), or the default again for each whose handler it is (not
+// `on`); under `signal_listen`'s lock.
+pub fun raw_signals(on: bool) {
+    let st = __rt_addr("__sig_pipe")
+    while __xchg64(st + 24, 1) != 0 {
+        __pause()
+    }
+    let raw = __rt_addr("__on_raw_signal")
+    let act = __alloc(64)
+    for sig in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
+        __store64(act, 0)
+        __syscall5(SYS_RT_SIGACTION, sig, 0, act, 8, 0)
+        let now = __load64(act)
+        if on && (now == 0 || now == raw) {
+            catch_signal(sig, raw, 0)
+        } else if !on && now == raw {
+            catch_signal(sig, 0, 0)
+        }
+    }
+    __free(act)
+    __store_rel64(st + 24, 0)
 }
 
 // --- memory --------------------------------------------------------------------
@@ -1650,12 +1735,17 @@ pub fun sleep_ns(n: int64) {
 // (`__poll_buf`); a wake-up only writes the constant 1 there.
 
 // A new poller with its wake-up descriptor watched: the poller's
-// descriptor in the low 32 bits, the wake-up one's in the high ones.
+// descriptor in the low 32 bits, the wake-up one's in the high ones; or
+// minus the errno (EMFILE: no descriptor left, MYLA-548), nothing kept.
 pub fun poller_new() -> int64 {
     let ep = __syscall(SYS_EPOLL_CREATE1, 524288, 0, 0)  // EPOLL_CLOEXEC
+    if ep < 0 {
+        return ep
+    }
     let ev = __syscall(SYS_EVENTFD2, 0, 526336, 0)  // EFD_CLOEXEC | EFD_NONBLOCK
-    if ep < 0 || ev < 0 {
-        return -1
+    if ev < 0 {
+        __syscall(SYS_CLOSE, ep, 0, 0)
+        return ev
     }
     let e = __rt_addr("__poll_buf") + 32
     __store32(e, 1u32)  // EPOLLIN

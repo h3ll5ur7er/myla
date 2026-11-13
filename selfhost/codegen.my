@@ -103,6 +103,12 @@ pub struct CodeGen {
     fnval_set: [str],
     uses_float: bool,
     epilogue: str,
+    // the current function's out-of-line traps of a checked build's
+    // arithmetic (MYLA-551): their lines, each a label and the call,
+    // emitted after the function's return; one per `kind:line:col`, the
+    // key of its label
+    cold_traps: [str],
+    cold_keys: [str: str],
     ret_type: Option<Type>,
     // Reference-counting helper worklists: concrete owning types whose per-type
     // drop/clone routines must be emitted (deduped by mangled token).
@@ -354,7 +360,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         subst: [], fn_worklist: [], fn_seen: [:],
         lam_jobs: [], lam_seen: [:], partial_jobs: [], fnval_set: [],
         uses_float: false,
-        epilogue: "", ret_type: None,
+        epilogue: "", cold_traps: [], cold_keys: [:], ret_type: None,
         need_drop: [], type_jobs: [], type_jobs_seen: [:], drop_emitted: [], drop_kinds: [], need_clone: [], clone_emitted: [],
         need_walk: [], need_deep: [], deep_inline: [], deep_clone: [], need_deepc: [], deepc_clone: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
@@ -2047,8 +2053,10 @@ impl CodeGen {
     fun rt_exec(self) -> [(str, str)] {
         // every program's (`__map_lookup`: `remove`'s too)
         // (`__exit_program`: every end of the program, through the exit
-        // hook, D187)
-        var out = [("__exit_program", "std$rt$exit_program"), ("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_lookup", "std$rt$map_lookup"), ("__equal_bytes", "std$rt$equal_bytes"), ("__func_retain", "std$rt$func_retain"), ("__func_drop", "std$rt$func_drop")]
+        // hook, D187; `__on_raw_signal`: the handler of a signal that ends
+        // the program while the terminal is raw, D192, MYLA-548; named
+        // unqualified when std.platform is the entry, `platform_fn`)
+        var out = [("__exit_program", "std$rt$exit_program"), ("__on_raw_signal", self.platform_fn("raw_signal")), ("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_lookup", "std$rt$map_lookup"), ("__equal_bytes", "std$rt$equal_bytes"), ("__func_retain", "std$rt$func_retain"), ("__func_drop", "std$rt$func_drop")]
         if self.frames {
             for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__deep_env", "std$rt$deep_env"), ("__dclone_env", "std$rt$dclone_env"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd"), ("myla___wait_fd2", "std$rt$wait_fd2"), ("myla___wait_sock", "std$rt$wait_sock")] { out.push(p) }
         }
@@ -2358,6 +2366,11 @@ impl CodeGen {
         // `write_err_num`)
         out.push("__panic_buf:")
         out.push("\t.skip 32")
+        // in a test child of `myla test --native`, the head of its records
+        // as a string's cell, which std.test sets (0 elsewhere): std.rt
+        // writes how the case ended as one (`test_record`, D191)
+        out.push("__test_report:")
+        out.push("\t.skip 8")
         // the poller's events and words (std.platform, D124)
         out.push("__poll_buf:")
         out.push("\t.skip 128")

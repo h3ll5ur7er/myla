@@ -80,11 +80,12 @@ pub struct DeclOrigin { module: str, path: str, implicit: bool, lazy: bool }
 pub fun backend_std_functions() -> [str] {
     return [
         // f-strings' holes and slices (`lower.my`), `task.cancel` (D96)
-        "std$fmt$fmt_text", "std$fmt$fmt_int", "std$fmt$fmt_float",
+        "std$fmt$fmt_text", "std$fmt$fmt_int", "std$fmt$fmt_float", "std$fmt$spec_error",
         "std$slice$take", "std$slice$take_str", "std$slice$str_whole",
         "std$task$cancel",
-        // the wasm32 start and its memory (`runtime_wasm.my`)
-        "std$platform$wasm_start", "std$platform$map_memory",
+        // the wasm32 start and its memory (`runtime_wasm.my`); the handler
+        // of a signal while the terminal is raw (`codegen.my`, D192)
+        "std$platform$wasm_start", "std$platform$map_memory", "std$platform$raw_signal",
         // the runtime's (`lower.my`, `codegen.my`, `ir_*.my`, `runtime_*.my`)
         "std$rt$actor_enter", "std$rt$actor_leave", "std$rt$alloc", "std$rt$alloc_tasks", "std$rt$cancel_after",
         "std$rt$char_text", "std$rt$dclone_cell", "std$rt$dclone_env", "std$rt$dclone_str", "std$rt$deep_env",
@@ -990,10 +991,11 @@ pub fun is_platform_primitive(name: str) -> bool {
 #test("__term_raw")[true]
 #test("__signal_take")[true]
 #test("__term_vt")[true]
+#test("__term_cbreak")[true]
 #test("__terminal")[false]
 pub fun is_term_primitive(name: str) -> bool {
     if name.len() < 9 || name[0] != '_' || name[1] != '_' { return false }
-    return name == "__term_is_tty" || name == "__term_size" || name == "__term_get" || name == "__term_set" || name == "__term_raw" || name == "__term_vt" || name == "__signal_listen" || name == "__signal_take"
+    return name == "__term_is_tty" || name == "__term_size" || name == "__term_get" || name == "__term_set" || name == "__term_raw" || name == "__term_cbreak" || name == "__term_vt" || name == "__signal_listen" || name == "__signal_take"
 }
 
 // A terminal or signal primitive's parameters, as its messages show them
@@ -3612,6 +3614,9 @@ impl Checker {
             if tps.len() > 0 {
                 var want: [Type] = []
                 for p in tps { want.push(Type.TParam(p.name)) }
+                for p in tps {
+                    if !list_mentions(targs, p.name) { return Err(impl_param_unused(ln, cl, sp, p.name, target, key_or_none(key_opt))) }
+                }
                 if !type_list_eq(targs, want) { return Err(terr_at(ln, cl, sp, format("a generic impl must apply to '{}<{}>' with its type parameters in order", key_or_none(key_opt), join_strs(tp_names(tps), ", ")))) }
             } else {
                 if targs.len() > 0 { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on a concrete generic instantiation; write 'impl<T> {}<T> {{ ... }}' to cover every instance", key_or_none(key_opt)))) }
@@ -3786,6 +3791,16 @@ impl Checker {
         }
         return Ok(0)
     }
+}
+
+// The error of an impl's type parameter `p` that its type `target` doesn't
+// take: an impl's are its type's own, in order (D55), so one that only a
+// bound names has no type to come from, as a function's has (D171,
+// MYLA-564).
+#test(3, 1, no_span(), "T", Type.TStruct("W", [Type.TParam("I")]), "W")[CheckErr { line: 3, col: 1, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "the impl's type parameter 'T' is not one of 'W<I>': a generic impl takes its type's own type parameters, in order", decl: -1, notes: [Note { label: "help", msg: "only a generic function may have a type parameter that only a bound names ('fun f<…, T>(…)'); or add 'T' to the type parameters of 'W'", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }] }]
+fun impl_param_unused(ln: int32, cl: int32, sp: SrcSpan, p: str, target: Type, key: str) -> CheckErr {
+    let e = terr_at(ln, cl, sp, format("the impl's type parameter '{}' is not one of '{}': a generic impl takes its type's own type parameters, in order", p, type_name(target)))
+    return with_notes(e, [Note { label: "help", msg: format("only a generic function may have a type parameter that only a bound names ('fun f<…, {}>(…)'); or add '{}' to the type parameters of '{}'", p, p, key), line: 0, col: 0, sp: no_span() }])
 }
 
 // A method key as Python's f-strings print it (`None` for no key).
@@ -6320,7 +6335,8 @@ impl Checker {
                         // its impl's bound unmet: why (MYLA-538)
                         var why = self.bound_why(it, "Iterator")
                         if why == "" { why = iterator_hint(it) }
-                        return Err(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("`for ... in` requires a list, a map, a string, a range or an Iterator, found '{}'{}", type_name(it), why)))
+                        // with an `iter()` method: "write 's.iter()'" (MYLA-553)
+                        return Err(with_notes(terr_at(it_expr.line, it_expr.col, it_expr.sp, format("`for ... in` requires a list, a map, a string, a range or an Iterator, found '{}'{}", type_name(it), why)), self.iter_hint(it, "Iterator", it_expr)))
                     },
                 }
             },
@@ -8082,13 +8098,18 @@ impl Checker {
     }
 
     // The help for a struct or enum `t` that isn't std.json's or std.toml's
-    // trait `trnm`: the derive that gives it one.
+    // trait `trnm`: the derive that gives it one. A TCP stream isn't a
+    // descriptor `std.io` can wait for (`Pollable`): its lines in a task
+    // come from std.net's line reader (MYLA-548).
     #test(checker_on("struct P { x: int }"), Type.TStruct("P", []), "ToJson")[[]]
     fun json_help(self, t: Type, trnm: str) -> [Note] {
         let name = match t {
             Type.TStruct(n, a) => n,
             Type.TEnum(n, a) => n,
             _ => "",
+        }
+        if name == "std$net$TcpStream" && trnm == "std$io$Pollable" {
+            return [Note { label: "help", msg: "in a task, read a TCP stream's lines with 'net.line_reader(s)' and 'await r.read_line_async()' (D180)", line: 0, col: 0, sp: no_span() }]
         }
         for f in [json_serial(), toml_serial()] {
             match self.serial_prefix(f) {

@@ -1,0 +1,6 @@
+type error: the impl's type parameter 'T' is not one of 'W<I, J>': a generic impl takes its type's own type parameters, in order
+  --> examples/errors/type_impl_param_only_a_bound_names.my:7:1
+  |
+7 | impl<I: Iterator<T>, J: Iterator<T>, T> Eq for W<I, J> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: only a generic function may have a type parameter that only a bound names ('fun f<…, T>(…)'); or add 'T' to the type parameters of 'W'

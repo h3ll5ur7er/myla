@@ -1,0 +1,11 @@
+//~ type error: the impl's type parameter 'T' is not one of 'W<I, J>'
+//~ help: only a generic function may have a type parameter that only a bound names
+// An impl takes its type's own type parameters, in order (D55): one that
+// only a bound names (`T` here, D171) has no type to come from (MYLA-564)
+struct W<I, J> { a: I, b: J }
+
+impl<I: Iterator<T>, J: Iterator<T>, T> Eq for W<I, J> {
+    fun eq(self, other: W<I, J>) -> bool { return true }
+}
+
+fun main() { print(1) }

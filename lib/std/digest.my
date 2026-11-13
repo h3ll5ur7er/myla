@@ -21,6 +21,8 @@
 // copies the smallest in): unrolled, they would more than double its source
 // for 10 to 20 % more speed.
 
+import .encoding as enc_m // `hex_encode`, for the HMACs' hex (MYLA-553)
+
 // What `hmac` needs of a digest: every digest type of this module has it.
 pub trait Digest {
     fun update(var self, data: [uint8])
@@ -310,19 +312,6 @@ fun be_bytes64(ws: [uint64], n: int) -> [uint8] {
         }
     }
     return out
-}
-
-// Lower-case hex: std.encoding's `hex_encode`, but importing it took 4 ms
-// more to check a program importing this module (MYLA-428).
-#test([0x00u8, 0x9fu8, 0xa0u8, 0xffu8])["009fa0ff"]
-fun hex_of(bytes: [uint8]) -> str {
-    let digits = "0123456789abcdef"
-    var sb = StringBuilder()
-    for b in bytes {
-        sb.append_byte(digits[(b >> 4u8) as int])
-        sb.append_byte(digits[(b & 15u8) as int])
-    }
-    return sb.build()
 }
 
 // The bytes of `s`, in one copy (MYLA-369).
@@ -2559,7 +2548,7 @@ pub fun hmac_md5(key: [uint8], msg: [uint8]) -> [uint8] {
 // The same of two strings' bytes, in hex.
 #test("Jefe", "what do ya want for nothing?")["750c783e6ab0b503eaa86e310a5db738"]
 pub fun hmac_md5_hex(key: str, msg: str) -> str {
-    return hex_of(hmac(new_md5(), bytes_of(key), bytes_of(msg)))
+    return enc_m.hex_encode(hmac(new_md5(), bytes_of(key), bytes_of(msg)))
 }
 
 // HMAC-SHA-1 (RFC 2202), 20 bytes.
@@ -2570,7 +2559,7 @@ pub fun hmac_sha1(key: [uint8], msg: [uint8]) -> [uint8] {
 
 #test("Jefe", "what do ya want for nothing?")["effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"]
 pub fun hmac_sha1_hex(key: str, msg: str) -> str {
-    return hex_of(hmac(new_sha1(), bytes_of(key), bytes_of(msg)))
+    return enc_m.hex_encode(hmac(new_sha1(), bytes_of(key), bytes_of(msg)))
 }
 
 // HMAC-SHA-256 (RFC 4231), 32 bytes.
@@ -2581,7 +2570,7 @@ pub fun hmac_sha256(key: [uint8], msg: [uint8]) -> [uint8] {
 
 #test("Jefe", "what do ya want for nothing?")["5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"]
 pub fun hmac_sha256_hex(key: str, msg: str) -> str {
-    return hex_of(hmac(new_sha256(), bytes_of(key), bytes_of(msg)))
+    return enc_m.hex_encode(hmac(new_sha256(), bytes_of(key), bytes_of(msg)))
 }
 
 // HMAC-SHA-512 (RFC 4231), 64 bytes.
@@ -2592,7 +2581,7 @@ pub fun hmac_sha512(key: [uint8], msg: [uint8]) -> [uint8] {
 
 #test("Jefe", "what do ya want for nothing?")["164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737"]
 pub fun hmac_sha512_hex(key: str, msg: str) -> str {
-    return hex_of(hmac(new_sha512(), bytes_of(key), bytes_of(msg)))
+    return enc_m.hex_encode(hmac(new_sha512(), bytes_of(key), bytes_of(msg)))
 }
 
 // ---- Tests
@@ -2607,7 +2596,7 @@ fun repeated(b: uint8, n: int) -> [uint8] {
 }
 
 fun check(got: [uint8], want: str, what: str) {
-    let hex = hex_of(got)
+    let hex = enc_m.hex_encode(got)
     assert(hex == want, f"{what}: {hex}, expected {want}")
 }
 
@@ -2678,10 +2667,10 @@ fun incremental() {
         text.append_byte(b)
     }
     let s = text.build()
-    let want5 = hex_of(md5(data))
-    let want1 = hex_of(sha1(data))
-    let want256 = hex_of(sha256(data))
-    let want512 = hex_of(sha512(data))
+    let want5 = enc_m.hex_encode(md5(data))
+    let want1 = enc_m.hex_encode(sha1(data))
+    let want256 = enc_m.hex_encode(sha256(data))
+    let want512 = enc_m.hex_encode(sha512(data))
     assert(md5_hex(s) == want5, "md5_hex")
     assert(sha512_hex(s) == want512, "sha512_hex")
     for step in [1, 3, 4, 63, 64, 65, 127, 129] {

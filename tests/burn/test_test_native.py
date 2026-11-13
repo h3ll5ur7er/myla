@@ -309,6 +309,131 @@ fun pair_err() -> Result<(), (int, str)> {
 }
 """
 
+# MYLA-547 (D191): how a case ended, told by a framed record the runtime
+# writes: a message of many lines matched whole (C5), the old protocol's
+# marks and a line like a runtime error's written by a case and then an
+# `exit`, which is reported as the exit it is, an exit status as the process
+# ends with it and an expected one outside 0 to 255 refused (C7), an empty
+# `Err`, which fails (C6), an `Err` of `()` and of a closure shown alike, an
+# empty stdin for every case, and a stack overflow, held to every runner
+_FRAMED = """from std.io import eprint, write, stdin
+from std.process import exit
+
+#test("a\\nruntime error: b")[panic("a\\nruntime error: b")]
+#test("a\\nruntime error: b")[panic("b")]
+fun boom(m: str) -> int {
+    panic(m)
+}
+
+#test
+fun wraps_a_tools_error() {
+    panic("the tool failed:\\nruntime error: list index 3 out of bounds (len 3)\\n  --> t.my:1:1")
+}
+
+#test
+fun old_marks_then_exit() {
+    eprint("\\u{1}myla-done\\u{1}")
+    exit(3)
+}
+
+#test
+fun a_runtime_error_line_then_exit() {
+    eprint("runtime error: fake\\n")
+    exit(1)
+}
+
+#test
+fun case_marks_then_fail() {
+    let w = write(1, "\\u{1}myla-case\\u{1}")
+    eprint("\\u{1}myla-case\\u{1}")
+    panic("x")
+}
+
+#test
+fun after_the_marks() {}
+
+#test(256)[exit(0)]
+#test(256)[exit(256)]
+#test(-1)[exit(255)]
+fun leaves(n: int) -> int {
+    exit(n)
+    return 2
+}
+
+#test
+fun empty_err() -> Result<(), str> {
+    return Err("")
+}
+
+#test
+fun unit_err() -> Result<(), ()> {
+    return Err(())
+}
+
+#test
+fun function_err() -> Result<(), (int) -> int> {
+    return Err((x: int) => x + 1)
+}
+
+#test
+fun reads_stdin() {
+    var input = stdin()
+    match input.read_line() {
+        Ok(None) => {},
+        Ok(Some(line)) => { panic(f"read a line: {line}") },
+        Err(e) => { panic("an error") },
+    }
+}
+
+#test
+async fun reads_stdin_async() {
+    var input = stdin()
+    match await input.read_line_async() {
+        Ok(None) => {},
+        Ok(Some(line)) => { panic(f"read a line: {line}") },
+        Err(e) => { panic("an error") },
+    }
+}
+
+#test(0)[panic("stack overflow")]
+fun deep(n: int) -> int {
+    return deep(n + 1) + 1
+}
+"""
+
+_FRAMED_WANT = """PASS  boom #1
+FAIL  boom #2: expected runtime error 'b', got runtime error 'a\\nruntime error: b'
+FAIL  wraps_a_tools_error: runtime error: the tool failed:\\nruntime error: list index 3 out of bounds (len 3)\\n  --> t.my:1:1
+FAIL  old_marks_then_exit: exited with status 3
+FAIL  a_runtime_error_line_then_exit: exited with status 1
+FAIL  case_marks_then_fail: runtime error: x
+      | \x01myla-case\x01
+PASS  after_the_marks
+PASS  leaves #1
+FAIL  leaves #2: expected exit status 256: a status is 0 to 255
+PASS  leaves #3
+FAIL  empty_err
+FAIL  unit_err: ()
+FAIL  function_err: <function>
+PASS  reads_stdin
+PASS  reads_stdin_async
+PASS  deep #1
+
+7/16 passed.
+"""
+
+_FRAMED_STDERR = "\x01myla-done\x01runtime error: fake\n\x01myla-case\x01"
+
+
+def _framed(tmp: str, *flags: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    """`myla test` of `_FRAMED` with a line on its stdin, which no case reads."""
+    path = _write(tmp, "framed.my", _FRAMED)
+    full = dict(os.environ)
+    full.update(env or {})
+    return subprocess.run([selfhost_tool("main"), "test", path, *flags, "--stdlib", STDLIB_ROOT],
+                          capture_output=True, text=True, cwd=tmp, env=full, input="x\n", timeout=600)
+
+
 
 def _corpus() -> list[str]:
     """The files with cases whose native report must be the interpreter's."""
@@ -412,6 +537,20 @@ class TestNative(unittest.TestCase):
                     proc = _myla(["test", path, *flags], tmp)
                     self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_RUNTIME_TEXTS_WANT, "", 1))
 
+    def test_the_records_of_a_test_child(self):
+        # D191, MYLA-547: the same report and stderr interpreted and natively
+        for flags in ([], ["--native"]):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as tmp:
+                proc = _framed(tmp, *flags)
+                self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_FRAMED_WANT, _FRAMED_STDERR, 1))
+
+    def test_the_runtime_s_own_cases(self):
+        # std.rt is every native program's runtime: its cases run interpreted
+        proc = _myla(["test", os.path.join("lib", "std", "rt.my"), "--native"], _REPO)
+        self.assertEqual((proc.stdout, proc.returncode), ("", 1))
+        self.assertIn("is std.rt, the runtime of every native program", proc.stderr)
+        self.assertNotIn("internal error", proc.stderr)
+
     def test_a_compound_err_is_shown_alike(self):
         # MYLA-414's half: interpreted, a list's `Err` was `ERR: VList()`
         with tempfile.TemporaryDirectory() as tmp:
@@ -465,7 +604,7 @@ class TestNative(unittest.TestCase):
             kept = glob.glob(os.path.join(scratch, "myla-test-*", "harness.my"))
             self.assertEqual(len(kept), 1, proc.stderr)
             with open(kept[0], encoding="utf-8") as fh:
-                self.assertIn("fun __myla_case_0() -> str", fh.read())
+                self.assertIn("fun __myla_case_0() -> Option<str>", fh.read())
 
     def test_the_corpus_agrees(self):
         files = _corpus()
@@ -494,6 +633,11 @@ class TestAarch64(unittest.TestCase):
             proc = _myla(["test", path, "--target", "aarch64-linux"], tmp)
             self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_FAILING_WANT, _FAILING_STDERR, 1))
 
+    def test_the_records_of_a_test_child_under_qemu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = _framed(tmp, "--target", "aarch64-linux")
+            self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_FRAMED_WANT, _FRAMED_STDERR, 1))
+
     def test_its_platform_module_however_the_paths_are_written(self):
         # S3 (MYLA-397): the harness is the target's std.platform under any
         # spelling of the file and of the library's root
@@ -507,6 +651,15 @@ class TestAarch64(unittest.TestCase):
                           ([rel], None)):
             with self.subTest(argv=argv, env=env):
                 proc = _tool(["test", *argv, "--target", "aarch64-linux"], _REPO, env)
+                self.assertEqual(proc.stderr, "")
+                self.assertTrue(proc.stdout.endswith(f"\n{n}/{n} passed.\n"), proc.stdout)
+        # MYLA-545: a root or a file written with a leading `..`
+        up = os.path.join(os.pardir, os.path.basename(_REPO), rel)
+        for argv, cwd in ((["platform_aarch64.my", "--stdlib", ".."], os.path.join(_REPO, "lib", "std")),
+                          ([os.path.join("std", "platform_aarch64.my"), "--stdlib", os.path.join(os.pardir, "lib")], lib),
+                          ([up, "--stdlib", "lib"], _REPO)):
+            with self.subTest(argv=argv, cwd=cwd):
+                proc = _tool(["test", *argv, "--target", "aarch64-linux"], cwd)
                 self.assertEqual(proc.stderr, "")
                 self.assertTrue(proc.stdout.endswith(f"\n{n}/{n} passed.\n"), proc.stdout)
 
@@ -568,6 +721,12 @@ fun last() {}
             path = _write(tmp, "failing.my", _FAILING)
             proc = self._run(tmp, path)
             self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_FAILING_WANT, _FAILING_STDERR, 1))
+
+    def test_the_records_of_a_run(self):
+        # a case that prints the old case mark shifts no later verdict (D191)
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = _framed(tmp, "--target", "wasm32-wasi", env={"MYLA_EMULATOR": f"node {_RUN_MJS}"})
+            self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_FRAMED_WANT, _FRAMED_STDERR, 1))
 
     def test_its_platform_module_however_the_paths_are_written(self):
         # S3 (MYLA-397): an internal compiler error under another spelling

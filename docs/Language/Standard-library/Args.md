@@ -74,7 +74,7 @@ fun main() {
 
 A spec has either `many` or commands: with `many`, every argument past the positionals is one of its. A short name is one ASCII character.
 
-A spec that can't be parsed is a mistake in the program, so the method that would make it panics, naming the argument ([[MYLA-426]]): a name declared twice (options, positionals and `many` share the names `Args` is asked by: `args: 'out' is declared twice`), a short name given twice (`args: '-v' is declared twice (--verbose and --very)`), an empty name or one that starts with `-` or holds `=`, a short name that isn't a printed ASCII character or is `-`, a required positional after an optional one, `many` together with commands, and a command declared twice.
+A spec that can't be parsed is a mistake in the program, so the method that would make it panics, naming the argument ([[MYLA-426]]): a name declared twice (options, positionals and `many` share the names `Args` is asked by: `args: 'out' is declared twice`), a short name given twice (`args: '-v' is declared twice (--verbose and --very)`), an empty name or one that starts with `-` or holds `=`, an option's name with a space or a control character (it is typed as one argument; a positional's name is only shown, `<lib dir>`), a short name that isn't a printed ASCII character or is `-` or `=`, a required positional after an optional one, a positional after `many` or a command (it is read before them, so declared after them it would look like a last argument, `cp <from>... <to>`: `args: the positional 'to' comes after 'many' ('from'), which takes the rest`), `many` twice or together with commands, and a command declared twice or that can't be given, its name empty, starting with `-` or holding a space ([[MYLA-553]]).
 
 ## Parsing
 
@@ -85,7 +85,7 @@ A spec that can't be parsed is a mistake in the program, so the method that woul
 - Options may come anywhere among the positionals; `--` ends them, and every argument after it is a positional, a command's name too. `-` alone is a positional.
 - An option given twice keeps both values. A flag may be given more than once.
 - Past a command's name, the arguments are the command's: `tool -v build -r` gives `-v` to `tool` and `-r` to `build`.
-- `--help`, and `-h` unless the spec gives `h` to one of its own, give `Err(ArgsError.Help(text))`, the help of the spec or of the command they were given to. The help lists them as `-h, --help`.
+- `--help`, and `-h` unless the spec gives `h` to one of its own, give `Err(ArgsError.Help(text))`, the help of the spec or of the command they were given to. The help lists them as `-h, --help`. A spec that declares `help` itself (`flag("help", 'h', "…")`, or an option `--help TOPIC`) takes `--help` as that argument and gives no `Help` error: the program prints `s.help()` itself, which lists its own `--help` in place of the built-in one.
 
 `parse_or_exit(s: Spec, argv: [str]) -> Args` is `parse` for a program that has nothing better to do with an error: for `--help` it prints the help and exits with status 0; for an error it prints `prog: <message>` and the usage line on stderr and exits with status 2. The usage line is that of the spec whose arguments were wrong: `tool build` without its file prints `usage: tool build [options] <file>`.
 

@@ -169,11 +169,28 @@ pub struct RawMode {
 // keys as escape sequences (`key_reader`, `parse_key`); output is unchanged.
 // `NotATerminal` when the input isn't one, `Unsupported` on wasm32.
 pub fun raw_mode() -> Result<RawMode, TermError> {
+    return keys_mode(true)
+}
+
+// The terminal on the standard input a key at a time, as raw mode has it,
+// but echoed, with Ctrl-C and Ctrl-Z still signals and the line ends as they
+// were: what a program keeps while it is busy, so that what is typed
+// meanwhile waits whole for it (the terminal's own line editing holds 4,095
+// bytes of a line and drops the rest, MYLA-548); a read of the input gets
+// the keys as typed, without that editing. `restore` puts the mode back; it
+// ends with the program, signals included, as raw mode does (D187, D192).
+pub fun cbreak_mode() -> Result<RawMode, TermError> {
+    return keys_mode(false)
+}
+
+// `raw_mode` (`raw`) or `cbreak_mode`.
+fun keys_mode(raw: bool) -> Result<RawMode, TermError> {
     let saved = __term_get(0)
     if saved.len() == 0 {
         return Err(error_of(__io_errno()))
     }
-    if __term_raw(0) < 0 {
+    let r = if raw { __term_raw(0) } else { __term_cbreak(0) }
+    if r < 0 {
         return Err(error_of(__io_errno()))
     }
     return Ok(RawMode { fd: 0, saved: saved })
