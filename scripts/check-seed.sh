@@ -1,24 +1,37 @@
 #!/usr/bin/env bash
 #
-# check-seed.sh — are the seeds the current compiler? (MYLA-218, D127)
+# check-seed.sh — do the seeds bootstrap these sources? (MYLA-218, D127, D207)
 #
-# Each seed must be the self-hosted compiler of the sources it is committed
-# with: what the stage 3 compiler of a bootstrap of those sources writes for
-# each seed's target, without the embedded standard library (seed_compile in
-# scripts/host.sh, MYLA-431).
-# CI's bootstrap job runs this on every pull request; the optional pre-push
+# A seed needn't be the compiler of the sources it is committed with (D207,
+# which replaced D156's seed in every pull request): it must bootstrap them,
+# stage 0 (the seed) building stage 1, the current compiler, and stages 2 and
+# 3 at the byte-identical fixed point. A seed is updated (scripts/update-seed.sh)
+# only when it no longer can: when the compiler or the standard library it
+# imports starts using something the seed doesn't know (a primitive, a
+# runtime variable, an attribute), in a `Stage:` commit before that use.
+# This machine's seed is checked here; the other targets' seeds by CI on
+# their own machine (the bootstrap-arm64 job for bootstrap/seed-aarch64.s).
+# Whether each seed is also the current compiler is reported, not required.
+#
+# selfhost/embedded_std.my, the standard library the tools carry (MYLA-243),
+# must match lib/: the bootstrap rewrites it, and a difference from the
+# commit fails.
+#
+# CI's bootstrap jobs run this on every pull request; the optional pre-push
 # hook (.githooks/pre-push, scripts/install-hooks.sh) runs it before a push.
 #
 # Usage:
 #   scripts/check-seed.sh [BUILD_DIR]
 #
 # With BUILD_DIR holding a bootstrap's stage3 and stage3.s (scripts/bootstrap.sh
-# BUILD_DIR), those are used; otherwise stages 0–3 run from this machine's
-# seed into build/seed-check, the fixed point included.
+# BUILD_DIR, which fails itself when the seed can't bootstrap the sources),
+# those are used; otherwise stages 0–3 run from this machine's seed into
+# build/seed-check, the fixed point included.
 #
-# Exit status: 0 when the seed is current, 1 when it isn't (run
-# scripts/update-seed.sh and commit the seeds) or when the bootstrap
-# rewrote selfhost/embedded_std.my (commit it too), 2 on a failed bootstrap.
+# Exit status: 0 when the seed bootstraps the sources and the embedded
+# library is current; 1 when the embedded library differs from the commit
+# (commit it); 2 when the seed can't bootstrap the sources (run
+# scripts/update-seed.sh and commit the seeds).
 
 set -euo pipefail
 
@@ -29,6 +42,10 @@ cd "$REPO_ROOT"
 SEED="$HOST_SEED"
 ENTRY="selfhost/gen_main.my"
 STDLIB_ROOT="lib"
+
+update_hint() {
+    echo "check-seed: $SEED can't bootstrap these sources: run scripts/update-seed.sh and commit the seeds (D207; as a \`Stage:\` commit when the sources start using something the seed doesn't know, before that use)" >&2
+}
 
 stage3=""
 if [ $# -gt 0 ] && [ -f "$1/stage3.s" ] && [ -x "$1/stage3" ]; then
@@ -44,28 +61,31 @@ else
         run_tool "$out/stage2" "$ENTRY" "$STDLIB_ROOT" > "$out/stage3.s"
     }; then
         echo "check-seed: the bootstrap from $SEED failed" >&2
+        update_hint
         exit 2
     fi
     if ! cmp -s "$out/stage2.s" "$out/stage3.s"; then
         echo "check-seed: no fixed point (stage2.s and stage3.s differ); scripts/bootstrap.sh shows where" >&2
+        update_hint
         exit 2
     fi
     stage3="$out/stage3.s"
     compiler="$out/stage2"
 fi
+echo "check-seed: $SEED bootstraps these sources (the fixed point)"
 
 # the standard library the toolchain carries (MYLA-243): the bootstrap writes
 # selfhost/embedded_std.my from lib/, so after one it differs from the commit
 # when the committed module is older than lib/
 EMBEDDED="selfhost/embedded_std.my"
 if git rev-parse --verify -q HEAD > /dev/null 2>&1 && ! git diff --quiet HEAD -- "$EMBEDDED"; then
-    echo "check-seed: $EMBEDDED differs from the commit: the bootstrap wrote it from lib/; commit it (with scripts/update-seed.sh's seed)" >&2
+    echo "check-seed: $EMBEDDED differs from the commit: the bootstrap wrote it from lib/; commit it" >&2
     exit 1
 fi
 
-# each seed's assembly (everything after its header of comment lines) against
-# the compiler's output for its target
-stale=""
+# whether each seed is also the current compiler (its assembly, everything
+# after its header of comment lines, against the compiler's output for its
+# target): reported only (D207)
 for entry in $SEEDS; do
     target="${entry%%:*}"
     seed="${entry#*:}"
@@ -74,15 +94,11 @@ for entry in $SEEDS; do
         echo "check-seed: the compiler failed to build itself for $target" >&2
         exit 2
     fi
+    from="$(sed -n 's/^# fixed point, from \(.*\), without the embedded standard library$/\1/p' "$seed" 2>/dev/null | head -1 || true)"
     if [ -f "$seed" ] && awk 'f || !/^#/ { f = 1; print }' "$seed" | cmp -s - "$want"; then
         echo "check-seed: $seed is the current compiler"
     else
-        echo "check-seed: $seed is not the compiler of these sources" >&2
-        stale="$stale $seed"
+        echo "check-seed: $seed is an older compiler${from:+ (from $from)}; kept until it can't bootstrap the sources (D207)"
     fi
 done
-if [ -n "$stale" ]; then
-    echo "check-seed: run scripts/update-seed.sh and commit$stale" >&2
-    exit 1
-fi
 exit 0

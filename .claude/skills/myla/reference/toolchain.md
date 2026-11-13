@@ -241,8 +241,8 @@ A literal format spec in `format`/an f-string is checked at compile time (`type 
 | Script | Purpose |
 | --- | --- |
 | `scripts/bootstrap.sh [OUT=build]` | stage0 = the machine's seed (`bootstrap/seed.s` x86-64, `seed-aarch64.s` aarch64) assembled; **embed**: stage0 builds `tools/embed` which rewrites `selfhost/embedded_std.my` from `lib/` if it changed (a tracked file: commit it); stage1 `gen_tool` = stage0 compiling `selfhost/gen_main.my`; stage2, stage3; asserts `stage2.s == stage3.s` byte for byte; stage3 builds `build/myla` (from `selfhost/main.my`) and `build/myla-lsp`; smoke-tests a type error (exit 1) and an LSP initialize/shutdown. Linux only; needs `as`, `ld`; about 17 s on 2026-11-13 at `706eaec` |
-| `scripts/update-seed.sh` | bootstraps into `build/seed-update`, checks the eight implicit modules whole (`myla check lib/std/<m>.my --stdlib lib`), writes both seeds (stage3's output per target, built with an empty embedded library, with a header naming the commit and a sha256). Ends every PR that changes `selfhost/` or `lib/std/` (D156) |
-| `scripts/check-seed.sh [BUILD]` | exit 0 when both seeds are the current compiler; 1 when stale or when `selfhost/embedded_std.my` differs from HEAD; 2 on a failed bootstrap. CI and the pre-push hook run it |
+| `scripts/update-seed.sh` | bootstraps into `build/seed-update`, checks the eight implicit modules whole (`myla check lib/std/<m>.my --stdlib lib`), writes both seeds (stage3's output per target, built with an empty embedded library, with a header naming the commit and a sha256); `--out DIR` writes them to `DIR`. Only when the seed can't bootstrap the sources, as a `Stage:` commit (D207) |
+| `scripts/check-seed.sh [BUILD]` | exit 0 when the machine's seed bootstraps the sources (it reports whether each seed is also the current compiler); 1 when `selfhost/embedded_std.my` differs from HEAD; 2 when the seed can't bootstrap the sources (D207). CI and the pre-push hook run it |
 | `scripts/host.sh` | sourced: host target, seed, `asm_to_bin`, `run_tool`, `seed_compile` |
 | `scripts/test.sh [fast\|all]` | burn tests via `python3 -m unittest`; `fast` drops `test_selfhost_*` and ~25 slow modules |
 | `scripts/test-target.py T [MODULE…] [-j N]` | burn suites for `aarch64-linux` (qemu) or `wasm32-wasi` (Node), exceptions in `tests/burn/_targets.py` |
@@ -267,8 +267,8 @@ The compiler itself: `build/stage3 <file.my> <stdlib-dir> [--target T] [-g] [--c
 | `burn` | the whole burn suite with gdb, clang, lld, qemu-user, Node, Go and tree-sitter, `MYLA_REQUIRE_TARGETS=1` |
 | `targets` (aarch64-linux, wasm32-wasi) | `scripts/test-target.py <target>` |
 | `wasm-page` | the playground page in Chromium (Playwright) |
-| `bootstrap` | `scripts/bootstrap.sh build`, `scripts/check-seed.sh build`, stage3 builds `examples/hello.my` |
-| `bootstrap-arm64` | `just bootstrap` on arm64, check-seed, every example built vs interpreted, stress runs |
+| `bootstrap` | `scripts/bootstrap.sh build`, `scripts/check-seed.sh build`, stage3 builds `examples/hello.my`; on a push to master uploads the seeds and the x86-64 `myla`/`myla-lsp` as artifacts (90 days) |
+| `bootstrap-arm64` | `just bootstrap` on arm64 (the aarch64 seed), check-seed, every example built vs interpreted, stress runs; on a push to master uploads the aarch64 `myla`/`myla-lsp` |
 | `vscode-extension` | typecheck, lint, tests (debugger against gdb), `.vsix` |
 
 ## `tools/`

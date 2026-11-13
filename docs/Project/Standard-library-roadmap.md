@@ -203,9 +203,9 @@ The integrator, one agent per wave:
 1. Merges the lanes' branches into the wave's branch in task order, and resolves the index rows.
 2. Replaces the private helpers with the modules that now exist.
 3. Runs the whole suite (`scripts/test.sh`).
-4. Makes the one seed commit (`scripts/update-seed.sh`, D156) and opens one pull request for the wave.
+4. Commits `selfhost/embedded_std.my`, and a new seed only when the old one can't bootstrap the sources (D207, which replaced D156's seed in every pull request), and opens one pull request for the wave.
 
-Compiler and platform tasks have their own pull requests, each with its seed commit, and the wave's branch merges master after each one.
+Compiler and platform tasks have their own pull requests, staging a seed when the library is about to use what they add, and the wave's branch merges master after each one.
 
 ## Left out
 

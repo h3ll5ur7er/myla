@@ -10,16 +10,21 @@
 # embedded standard library (seed_compile in scripts/host.sh, MYLA-431), which
 # stage 0 never reads, since the bootstrap gives it lib/.
 #
-# When: with every change to the compiler's output (selfhost/, the standard
-# library it imports), committed with that change: CI fails a pull request
-# whose seed isn't the current compiler (scripts/check-seed.sh), and the
-# optional pre-push hook checks it before a push (scripts/install-hooks.sh).
+# When: only when the seed can no longer bootstrap the sources (D207, which
+# replaced D156's seed in every pull request): when the compiler or the
+# standard library it imports starts using something the seed doesn't know
+# (a primitive, a runtime variable, an attribute), in a `Stage:` commit
+# before that use. scripts/check-seed.sh and CI's bootstrap jobs fail then
+# and say so; a seed older than the sources that still bootstraps them is
+# kept.
 #
 # Checking a seed: run this at the commit its header names and compare; the
 # compiler is deterministic, so the assembly is the same byte for byte.
 #
 # Usage:
-#   scripts/update-seed.sh
+#   scripts/update-seed.sh            # rewrite bootstrap/seed*.s
+#   scripts/update-seed.sh --out DIR  # write the seeds to DIR, bootstrap/ untouched
+#                                     # (CI's artifacts of each master commit)
 #
 # A seed that can no longer compile the sources is updated in steps: an older
 # compiler builds a newer one (git history), or, as for the first seed, the
@@ -28,6 +33,15 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEST=""
+if [ $# -gt 0 ]; then
+    if [ "$1" = "--out" ] && [ $# -eq 2 ]; then
+        DEST="$(mkdir -p "$2" && cd "$2" && pwd)"
+    else
+        echo "usage: scripts/update-seed.sh [--out DIR]" >&2
+        exit 2
+    fi
+fi
 cd "$REPO_ROOT"
 
 OUT_DIR="build/seed-update"
@@ -57,10 +71,14 @@ mkdir -p bootstrap
 for entry in $SEEDS; do
     target="${entry%%:*}"
     seed="${entry#*:}"
+    name="$seed"
+    if [ -n "$DEST" ]; then
+        seed="$DEST/$(basename "$seed")"
+    fi
     body="$OUT_DIR/seed-$target.s"
     seed_compile "$OUT_DIR/stage3" "$target" "$body"
     {
-        echo "# $seed: stage 0 of the Myla bootstrap on $target (MYLA-218, D101, D127)."
+        echo "# $name: stage 0 of the Myla bootstrap on $target (MYLA-218, D101, D127)."
         echo "# The self-hosted compiler (selfhost/gen_main.my) compiled by itself at its"
         echo "# fixed point, from ${source}, without the embedded standard library"
         echo "# (MYLA-431: the bootstrap gives stage 0 lib/)."
