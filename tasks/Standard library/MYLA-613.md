@@ -36,7 +36,7 @@ A router in `std.http` for easy, typed web APIs in the spirit of Python's FastAP
 - `Router { base, routes: [str: Route], wraps }`; routes keyed by `"METHOD pattern"`, so adding the same method and pattern replaces the route. `mount(sub)` stores `sub.handler()` (its middleware included) as a route that matches `sub`'s base and everything below, and hands the rest of the path on in the reserved parameter `%rest`; `static_files` is a `GET` route `prefix/{%file:path}`.
 - Specificity, not registration order: literal 3, `{name:int}` 2, `{name}` 1, `{name:path}` 0, ties to the first added. 405 with `Allow` when only other methods match; `GET` routes answer `HEAD`.
 - `Request` gained `params: [(str, str)]` and `param`, `param_int`, `query_param`. `http.json(f)` / `http.json_body(f)` for `#derive(Json)` endpoints; a body that doesn't decode is 422 `{"error": "$.name: missing field"}` (the `JsonError`'s `Format`, so the field is named). `json_response`, `json_error`, `content_type`.
-- `examples/book_api.my`: a read-only book API, run directly through `app().handler()`.
+- `examples/book_api.my`: a read-only book API; its logic is plain functions with `#test` cases (`find`, `search_for`, `add_book`), the routes closures over them, called directly through the router's handler. 7/7 cases pass interpreted and `--native`.
 
 ## Evidence
 
