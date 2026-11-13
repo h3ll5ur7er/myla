@@ -20,15 +20,13 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 
 The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows are planned ([[MYLA-62]]).
 
-- x86-64 passes `exit`'s status to std.rt's `exit_program` zero-extended (`exit(-1)` arrives as 4294967295; nothing a program sees, as the low byte is the status) ([[MYLA-588]]).
-
 ## Concurrency
 
 - A non-reentrant actor method kind is still open ([[MYLA-274]]).
 - Natively, on 16 workers, armed timers make every loop top take `__timer_lock`: CPU-bound tasks about 15 % slower ([[MYLA-296]]).
 - A trait method can't be async, so there is no async `Read` or `Write` ([[MYLA-434]]).
 - The poller takes at most four events a wait (under 2 percent to gain, [[MYLA-531]]); a keep-alive request through std.http's lot costs 4 to 6 percent more than a worker waiting on its connection ([[MYLA-530]]).
-- **Runtime:** `net.line_reader` has no line limit; the poller's creation isn't checked (a hang with no descriptor left on one worker); a failure doesn't end the program while a task blocks in a key read, and a signal leaves the terminal raw ([[MYLA-548]]). A SIGSEGV sent by `kill` is swallowed once natively, as the stack overflow handler takes it for a fault ([[MYLA-592]]).
+- **Runtime:** a blocking read of a socket in a task (`io.buffered(s).read_line()`) still holds its worker, and with more of them than workers the program hangs, saying so on stderr after a second ([[MYLA-548]]).
 
 ## Tooling in Myla
 
