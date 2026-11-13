@@ -144,3 +144,7 @@ Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-552]]: a
 ## Round 6 ([[MYLA-552]])
 
 The reason it stays near 6 ms, measured on `dafd287` (20.7 M instructions): a third of the time is the kernel's, a page fault for each 4 KB of the 4.1 MB of fresh heap the check touches (1,109 faults, about 2.1 ms of system time); the instructions take about 4 ms. Huge pages for the heap bring the faults to 90 and the check under 5 ms, at 0.2 ms more for every small program with tasks: [[MYLA-608]] proposes them for the toolchain only.
+
+## Round 6's follow-up ([[MYLA-608]])
+
+Under 5 ms: the toolchain asks for huge pages for its heap at its start (std.rt's `heap_huge_pages`), so the check's 4 MB of fresh heap faults 2 MiB at a time. A hello world's `myla check` (`MYLA_THREADS=1`, 200 runs from a shell loop as above, the binaries alternating, four rounds): before 5.05, 5.72, 5.09, 5.24 ms, after 4.16, 3.81, 4.13, 4.45 ms; minor faults 1,199 → 179; instructions unchanged (20,701,695 → 20,701,739). Programs `myla build` builds don't ask and are unchanged. Evidence in [[MYLA-608]].

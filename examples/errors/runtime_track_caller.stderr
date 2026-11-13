@@ -1,0 +1,5 @@
+runtime error: a percentage is 0 to 100, not 140
+  --> examples/errors/runtime_track_caller.my:20:18
+   |
+20 |     print(percent(140))
+   |           ^^^^^^^^^^^^

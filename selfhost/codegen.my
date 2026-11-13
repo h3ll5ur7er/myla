@@ -2444,6 +2444,10 @@ impl CodeGen {
         // writes how the case ended as one (`test_record`, D191)
         out.push("__test_report:")
         out.push("\t.skip 8")
+        // 1 once the program asked for huge pages for its heap's chunks
+        // (std.rt's `heap_huge_pages`, the toolchain's opt-in, MYLA-608)
+        out.push("__heap_huge:")
+        out.push("\t.skip 8")
         // the poller's events and words (std.platform, D124)
         out.push("__poll_buf:")
         out.push("\t.skip 128")
@@ -4543,7 +4547,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__test_dir" || nm == "__test_program" { return true }
     if nm == "__sqrt" || nm == "__f64_bits" || nm == "__f64_from_bits" { return true }
     if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
-    if nm == "__task_cancelled" || nm == "__clock_ns" || nm == "__sleep_ns" || nm == "__disarm" { return true }
+    if nm == "__task_cancelled" || nm == "__tasks_waiting" || nm == "__clock_ns" || nm == "__sleep_ns" || nm == "__disarm" { return true }
     if nm == "__spawn" || nm == "__reap" || nm == "__kill" || nm == "__close" { return true }
     if nm == "__run_with" || nm == "__spawn_with" { return true }
     if nm == "__str_to_bytes" || nm == "__bytes_to_str" || nm == "__read_bytes" || nm == "__write_bytes" { return true }

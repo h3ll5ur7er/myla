@@ -28,6 +28,7 @@
 from std.process import args, exit
 from std.io import eprintln, println
 from std.platform import TARGET
+from std.rt import heap_huge_pages
 from .repl import repl
 from .loader import load_options, LoadOptions, parse_package_flag
 from .stdroot import default_stdlib_root
@@ -180,6 +181,11 @@ fun main() {
         usage()
         exit(2)
     }
+    // huge pages for the heap of a check or a build, which touch megabytes
+    // of it at once (MYLA-608); not for a program the interpreter runs,
+    // whose heap may grow to hundreds of MB in 2 MB pages that are each
+    // zeroed whole, with an occasional stall
+    if cmd == "check" || cmd == "build" { heap_huge_pages() }
     var cl = CommandLine { file: "", opts: load_options(""), output: "", debug: false, checked: false, target: TARGET, deps: false, update: false, name: "", lib: false, tests: all_tests(), native: false, rest: [] }
     match parse_command_line(argv) {
         Ok(c) => { cl = c },

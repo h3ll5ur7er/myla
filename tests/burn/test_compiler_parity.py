@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from tests.burn._targets import program_excuse
-from tests.burn._tools import selfhost_tool
+from tests.burn._tools import peak_memory, selfhost_tool
 from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run, build_and_run_full, interpret,
                                 native_build, run_argv, run_file_both_now, selfhost_run, write_program)
 
@@ -8769,6 +8769,37 @@ fun main() {
     print(w)
 }
 """,
+    # MYLA-609: an arm's literal past int32 takes another arm's type
+    "arm_literals_past_int32": r"""// MYLA-609: an unsuffixed integer literal past int32 in an arm of an `if`
+// or a `match` takes another arm's type, in either arm, negated or not, as
+// one beside a typed operand does
+fun pick(c: bool, big: int64) -> int64 {
+    let a = if c { big } else { 5000000000 }
+    let b = if c { -5000000000 } else { big }
+    let m = match c { true => 6000000000, false => big }
+    let n = match big {
+        0 => big,
+        1 => -7000000000,
+        _ => {
+            let k = big * 2
+            8000000000
+        },
+    }
+    print(f"{a} {b} {m} {n}")
+    return a + b + m + n
+}
+
+fun main() {
+    print(pick(true, 1))
+    print(pick(false, 0))
+    print(pick(false, 2))
+    let u: uint64 = 1
+    let v = if u > 0 { 10000000000000000000 } else { u }
+    print(v)
+    let w: int64 = if u > 0 { 5000000000 } else { 1 }
+    print(w + 1)
+}
+""",
     # MYLA-417 (C1): a generic actor's getter called from outside
     "actor_getter_of_a_field_s_name": r"""// MYLA-417 (C1): a generic actor's getter of a field's name, called from
 // outside, is the method: the actor's fields are its own methods' only, so
@@ -10891,19 +10922,9 @@ async fun main() {
 
 
 def _peak_kb(argv: list[str], exe: str | None) -> tuple[str, int]:
-    """(stdout, peak resident memory in KB) of running `argv`."""
-    with tempfile.TemporaryFile() as out:
-        pid = os.fork()
-        if pid == 0:
-            try:
-                os.dup2(out.fileno(), 1)
-                os.execvp(exe or argv[0], argv)
-            finally:
-                os._exit(127)
-        _, status, usage = os.wait4(pid, 0)
-        out.seek(0)
-        assert os.waitstatus_to_exitcode(status) == 0
-        return out.read().decode(), usage.ru_maxrss
+    """(stdout, peak resident memory in KB) of running `argv`: the program's
+    own peak, not this process's (MYLA-611)."""
+    return peak_memory(argv, exe)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -10990,50 +11011,101 @@ class TestCompilerParity(unittest.TestCase):
     def test_polymorphic_recursion_is_refused_where_it_is_built(self):
         # MYLA-415 (H5): a generic function calling itself with a larger type
         # asks for instances without end, and `myla build` never ended; it is
-        # a type error at the call now, on every target, when the type
-        # arguments grow too deep or (a pair of pairs of ...) too large; the
-        # interpreter runs it
+        # a type error at the call now. MYLA-543: the checker sees it where
+        # the type arguments are written with the caller's type parameters,
+        # so `myla check`, `myla run` and `myla build` on every target say
+        # the same, at the call that makes the type larger (where the build
+        # refused it before)
         myla = selfhost_tool("main")
         cases = (
             ("grow", "fun grow<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n"
                      "    return 1 + grow<[T]>(n - 1, [x])\n}\nfun main() { print(grow(3, 1)) }\n",
-             "3:25", "65 types deep (the limit is 64)", "3\n"),
+             "3:25", "in 'grow<T>', asks for 'grow<[T]>'", "'grow' calls itself"),
             ("g", "fun f<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n    return g(n - 1, (x, x))\n}\n"
                   "fun g<T>(n: int, x: T) -> int {\n    return f(n, x)\n}\nfun main() { print(f(3, 1)) }\n",
-             "3:13", "more than 4096 types in all", "0\n"),
+             "3:13", "in 'f<T>', asks for 'g<(T, T)>'", "'f' calls itself through 'g'"),
             ("h", "fun h<T>(n: int, x: T) -> int {\n"
                   "    let k = (m: int) => if m == 0 { 0 } else { h(m - 1, Some(x)) }\n    return k(n)\n}\n"
                   "fun main() { print(h(3, 1)) }\n",
-             "2:49", "65 types deep (the limit is 64)", "0\n"),
+             "2:49", "in 'h<T>', asks for 'h<Option<T>>'", "'h' calls itself"),
+            ("Box.deep", "struct Box<T> { v: T }\nimpl<T> Box<T> {\n    fun deep(self, n: int) -> int {\n"
+                         "        if n == 0 { return 0 }\n        return 1 + Box { v: [self.v] }.deep(n - 1)\n    }\n}\n"
+                         "fun main() { print(Box { v: 1 }.deep(3)) }\n",
+             "5:44", "in 'Box.deep<T>', asks for 'Box.deep<[T]>'", "'Box.deep' calls itself"),
         )
-        for callee, src, at, why, out in cases:
+        for callee, src, at, what, how in cases:
             with self.subTest(callee=callee), tempfile.TemporaryDirectory() as tmp:
                 path = write_program(tmp, src)
+                checked = subprocess.run([myla, "check", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual(checked.returncode, 1, checked.stderr)
+                self.assertTrue(checked.stderr.startswith(f"type error: the instances of '{callee}' nest without end: "
+                                                          f"this call, {what}\n  --> {path}:{at}\n"), checked.stderr)
+                self.assertIn(f"note: {how} with a larger type at each step (polymorphic recursion), which native "
+                              "code can't be built for\n", checked.stderr)
                 ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
-                self.assertEqual((ran.stdout, ran.returncode), (out, 0), ran.stderr)
+                self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("", checked.stderr, 1))
+                for target in ("x86_64-linux", "aarch64-linux", "wasm32-wasi"):
+                    built = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--target", target],
+                                           capture_output=True, text=True, timeout=60)
+                    self.assertEqual((built.stderr, built.returncode), (checked.stderr, 1))
+
+    def test_polymorphic_recursion_through_a_trait_is_refused_by_the_build(self):
+        # MYLA-543: through a trait's method, which instance a call reaches
+        # depends on the type the instance gets, so the checker can't see the
+        # recursion (`run<T: Tr>` calls `x.go()`, `Box<U>`'s `go` calls
+        # `run<Box<[U]>>`); the build still refuses it where the type
+        # arguments grow too deep or (a pair of pairs of ...) too large, and
+        # the interpreter runs it
+        myla = selfhost_tool("main")
+        head = "trait Tr {\n    fun go(self, n: int) -> int\n}\nstruct Box<U> { v: U }\nimpl<U> Tr for Box<U> {\n"
+        tail = ("fun run<T: Tr>(x: T, n: int) -> int {\n    if n == 0 { return 0 }\n    return 1 + x.go(n - 1)\n}\n"
+                "fun main() { print(run(Box { v: 1 }, 3)) }\n")
+        cases = (
+            ("[self.v]", "66 types deep (the limit is 64)"),
+            ("(self.v, self.v)", "more than 4096 types in all"),
+        )
+        for grown, why in cases:
+            src = head + f"    fun go(self, n: int) -> int {{\n        return run(Box {{ v: {grown} }}, n)\n    }}\n}}\n" + tail
+            with self.subTest(grown=grown), tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, src)
+                checked = subprocess.run([myla, "check", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual((checked.stdout, checked.returncode), ("ok\n", 0), checked.stderr)
+                ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual((ran.stdout, ran.returncode), ("3\n", 0), ran.stderr)
                 for target in ("x86_64-linux", "aarch64-linux", "wasm32-wasi"):
                     built = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--target", target],
                                            capture_output=True, text=True, timeout=60)
                     self.assertEqual(built.returncode, 1, built.stderr)
-                    self.assertIn(f"type error: the instances of '{callee}' nest without end: this call asks for one "
-                                  f"whose type arguments are {why}\n  --> {path}:{at}\n", built.stderr)
+                    self.assertIn(f"type error: the instances of 'run' nest without end: this call asks for one "
+                                  f"whose type arguments are {why}\n  --> {path}:7:19\n", built.stderr)
                     self.assertIn("(polymorphic recursion)", built.stderr)
 
     def test_a_deep_type_the_program_writes_is_no_recursion(self):
         # MYLA-544: a type 65 or 100 deep that the program writes is no
         # polymorphic recursion: native code builds its instance, which only
         # an instance past the limit asking for a deeper one was refused
-        # for; the interpreter runs it
+        # for; the interpreter runs it. MYLA-543: `myla check` says `ok`, and
+        # a recursion that passes such a type on unchanged, or hands it to
+        # another generic function as it is, builds too (it was refused)
+        myla = selfhost_tool("main")
         for depth in (65, 100):
             t, v = "int", "5"
             for _ in range(depth):
                 t, v = f"[{t}]", f"[{v}]"
             src = (f"fun mk<T>(x: T) -> T {{\n    return x\n}}\n"
-                   f"fun main() {{\n    let x: {t} = {v}\n    print(mk(x) == x)\n}}\n")
+                   f"fun count<T>(x: T, n: int) -> int {{\n    if n == 0 {{ return 0 }}\n    return 1 + count(x, n - 1)\n}}\n"
+                   f"fun wrap<U>(x: U) -> [U] {{\n    return [x]\n}}\n"
+                   f"fun outer<T>(x: T) -> int {{\n    return wrap(x).len()\n}}\n"
+                   f"fun main() {{\n    let x: {t} = {v}\n    print(mk(x) == x)\n    print(count(x, 3))\n"
+                   f"    print(outer(x))\n}}\n")
             with self.subTest(depth=depth):
                 interp, native = _both(src)
                 self.assertEqual(native, interp)
-                self.assertEqual(native, ("true\n", "", 0))
+                self.assertEqual(native, ("true\n3\n1\n", "", 0))
+                with tempfile.TemporaryDirectory() as tmp:
+                    checked = subprocess.run([myla, "check", write_program(tmp, src)], capture_output=True, text=True,
+                                             timeout=60)
+                    self.assertEqual((checked.stdout, checked.stderr, checked.returncode), ("ok\n", "", 0))
 
     def test_an_invalid_spec_of_a_builtin_format_is_a_runtime_error(self):
         # MYLA-544 (C8): a spec known only when it runs, invalid, is the
@@ -11204,6 +11276,72 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertEqual(lines[0], "runtime error: " + message)
                 self.assertTrue(lines[1].startswith("  --> "), err)
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(lines[:2]) + "\n", 1))
+
+    def test_track_caller_reports_the_callers_position(self):
+        # MYLA-435: a `#track_caller` function's `panic`, `assert` and
+        # `unreachable` report where it was called, on every runner (a
+        # call from one such function to another passes its caller's on);
+        # std.option's `expect`s and std.args' spec checks are such. Each
+        # case: its program's `main`, the call or index its error points
+        # at (at its first bracket, as every runtime error at a call does)
+        # and its message
+        tracked = ("#track_caller\nfun must(ok: bool, why: str) {\n    if !ok { panic(why) }\n}\n"
+                   "#track_caller\nfun never() -> int {\n    unreachable()\n}\n"
+                   "#track_caller\nfun outer(x: Option<int>) -> int {\n    must(true, \"\")\n    return x.expect(\"outer\")\n}\n"
+                   "fun middle(x: Option<int>) -> int {\n    return x.expect(\"middle\")\n}\n"
+                   "#track_caller\nfun via_middle(x: Option<int>) -> int {\n    return middle(x)\n}\n"
+                   "#track_caller\nfun first(xs: [int]) -> int {\n    return xs[0]\n}\n"
+                   "#track_caller\nfun in_lambda(x: int) -> int {\n    let f = (y: int) => {\n"
+                   "        assert(y < 10, \"big\")\n        return y\n    }\n    return f(x)\n}\n"
+                   "struct Box<T> {\n    v: Option<T>,\n}\n"
+                   "impl<T> Box<T> {\n    #track_caller\n    fun get(self) -> T {\n        return self.v.expect(\"an empty box\")\n    }\n}\n"
+                   "#track_caller\nfun pick<T>(xs: [T], i: int) -> T {\n    assert(i < xs.len(), f\"no {i}\")\n    return xs[i]\n}\n")
+        lib = "#track_caller\npub fun checked_half(n: int) -> int {\n    assert(n % 2 == 0, \"odd\")\n    return n / 2\n}\n"
+        main = "from .lib import checked_half\n" + tracked + "fun main() {\n    print(1)\n    {body}\n}\n"
+        cases = {
+            "option_expect": ("let o: Option<int> = None\n    print(o.expect(\"none here\"))", "expect(\"none here\")", "none here"),
+            "result_expect": ("let r: Result<int, str> = Err(\"e\")\n    print(r.expect(\"an error\"))", "expect(\"an error\")", "an error"),
+            "panic": ("must(1 > 2, \"no\")", "must(1 > 2", "no"),
+            "unreachable": ("print(never())", "never())", "reached unreachable code"),
+            "through_a_tracked_function": ("print(outer(None))", "outer(None)", "outer"),
+            "through_an_untracked_one": ("print(via_middle(None))", "expect(\"middle\")", "middle"),
+            "a_method_of_a_generic_type": ("let b: Box<str> = Box { v: None }\n    print(b.get())", "get())", "an empty box"),
+            "a_generic_function": ("print(pick([\"a\"], 3))", "pick([\"a\"]", "no 3"),
+            "a_module_of_its_own": ("print(checked_half(4))\n    print(checked_half(7))", "checked_half(7)", "odd"),
+            # an index's error is the function's own, and a lambda's
+            # failure its own position
+            "an_index": ("let xs: [int] = []\n    print(first(xs))", "xs[0]", "list index 0 out of bounds (len 0)"),
+            "a_lambda_inside": ("print(in_lambda(12))", "assert(y < 10", "big"),
+            # a whole program
+            "in_a_task": ("async fun work(o: Option<int>) -> int {\n    return o.expect(\"in a task\")\n}\n\n"
+                          "#main\nasync fun main() {\n    print(await work(Some(1)))\n    print(await work(None))\n}\n",
+                          "expect(\"in a task\")", "in a task"),
+            # std.args: a spec it can't read, an argument the spec doesn't
+            # declare (through `get_or`, which calls `get`; MYLA-553)
+            "an_args_spec": ("import std.args as args\n\nfun main() {\n    let s = args.spec(\"t\").option(\"out\", 'o')\n"
+                             "    print(s.flag(\"verbose\", 'o').usage())\n}\n",
+                             "flag(\"verbose\"", "args: '-o' is declared twice (--out and --verbose)"),
+            "an_undeclared_argument": ("import std.args as args\n\nfun main() {\n    let s = args.spec(\"t\").option(\"out\", 'o')\n"
+                                       "    let a = args.parse(s, [\"-o\", \"x\"]).expect(\"parsed\")\n"
+                                       "    print(a.get_or(\"out\", \"\"))\n    print(a.get_or(\"in\", \"\"))\n}\n",
+                                       "get_or(\"in\"", "args: 'in' is not an argument of the spec"),
+        }
+        for name, (body, needle, message) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                write_program(tmp, lib, "lib.my")
+                source = body if "fun main" in body else main.replace("{body}", body)
+                path = write_program(tmp, source)
+                lines = source.splitlines()
+                bracket = min(needle.index(c) for c in "([" if c in needle)
+                at = [(i + 1, line.index(needle) + bracket + 1) for i, line in enumerate(lines) if needle in line]
+                self.assertEqual(len(at), 1, needle)
+                out, err, code = selfhost_run(path)
+                self.assertEqual(code, 1, err)
+                self.assertEqual(err.splitlines()[:2], [f"runtime error: {message}", f"  --> {path}:{at[0][0]}:{at[0][1]}"])
+                self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(err.splitlines()[:2]) + "\n", 1))
+                if name in ("option_expect", "through_a_tracked_function", "in_a_task"):
+                    self.assertEqual(build_and_run_full(Program(path), entry_path=path, checked=True),
+                                     (out, "\n".join(err.splitlines()[:2]) + "\n", 1))
 
     def test_become_runs_a_million_deep(self):
         # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so
@@ -11659,6 +11797,8 @@ PINNED = {
     "format_method_on_a_builtin_type_parameter": '[5]\n[-005]\n[0x00ff]\n[ffffffffffffffff]\n[1111111111111111111111111111111111111111111111111111111111111111]\n[3.14]\n[   2.500]\n[ λ ]\n[  true]\n[ab***]\n[P!]\nV(+7)\n[V(V( c))]\n1 2  3\na b\n10\n',
     # MYLA-544: new; the same on both runners
     "literals_left_of_typed_operands": '5000000005\n4\nfalse\ntrue\n-3.75\n3\n10\n-1\n1.5\n5000000002\n3\ntrue\n-97\n',
+    # MYLA-609: new (a type error before); the same on both runners
+    "arm_literals_past_int32": '1 -5000000000 6000000000 -7000000000\n-5999999999\n5000000000 0 0 0\n5000000000\n5000000000 2 2 8000000000\n13000000004\n10000000000000000000\n5000000001\n',
     # MYLA-417 (C1): new; the same on both runners
     "actor_getter_of_a_field_s_name": '6\n11\n',
     # MYLA-415 (B1): native code segfaulted (the captured enum deep-copied as a box)

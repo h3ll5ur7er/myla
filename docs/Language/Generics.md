@@ -190,4 +190,11 @@ fun main() {
 
 Each instantiation gets its own name, whatever the type arguments are called ([[MYLA-9]], [[Architecture/Monomorphization]]).
 
-Polymorphic recursion, a generic function calling itself with a larger type (`grow<T>` calling `grow<[T]>`), runs in the interpreter, but native code would need an instance for every size: `myla build` refuses the call, `the instances of 'grow' nest without end: this call asks for one whose type arguments are 65 types deep (the limit is 64)`, as a type error ([[MYLA-415]]). A deep type the program writes, `id(x)` of a list 65 or 100 deep, is no recursion and builds: only an instance already at the limit is refused a larger one ([[MYLA-544]]). `myla check` doesn't apply the limit, since it doesn't build instances. The operators of a generic impl (`impl<T: Add> Add for Box<T>`) call its instance for the operands' types, as its methods do.
+Polymorphic recursion, a generic function calling itself with a larger type (`grow<T>` calling `grow<[T]>`), directly or through other functions, would need an instance for every size in native code, so it is a type error at the call that makes the type larger, for every command (`myla check`, `run` and `build`), whether the program calls the function or not ([[MYLA-543]]):
+
+```
+type error: the instances of 'grow' nest without end: this call, in 'grow<T>', asks for 'grow<[T]>'
+note: 'grow' calls itself with a larger type at each step (polymorphic recursion), which native code can't be built for
+```
+
+The checker sees the calls whose type arguments are written with the caller's type parameters. A recursion through a trait's method (`run<T: Tr>` calling `x.go()`, whose impl for `Box<U>` calls `run<Box<[U]>>`) it can't see, since which impl a call reaches depends on the type: the interpreter runs it and `myla build` refuses the call once the type arguments grow 65 types deep or past 4,096 parts ([[MYLA-415]]). A deep type the program writes, `id(x)` of a list 65 or 100 deep, is no recursion and builds, and so does a recursion that passes it on unchanged ([[MYLA-544]], [[MYLA-543]]). The operators of a generic impl (`impl<T: Add> Add for Box<T>`) call its instance for the operands' types, as its methods do.

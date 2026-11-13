@@ -29,7 +29,7 @@
 
 from .ioerror import IoError, from_errno
 from .fs import read_to_string
-from .io import Read, Write
+from .io import Read, Write, eprint
 import .fmt as fmt
 import .bytes as bytes_m // `from_str`, `to_str`
 import .str as str_m // `find`, `find_from`, `contains`, `to_lower`
@@ -677,17 +677,52 @@ fun failed<T>(h: int, errno: int) -> Result<T, IoError> {
     return Err(from_errno(errno))
 }
 
+// How long a blocking wait for a socket holds its worker while other tasks
+// wait before it says so, and the slices it waits in until then, in
+// milliseconds (MYLA-548).
+const HOLD_WARN_MS: int = 1000
+const HOLD_SLICE_MS: int = 100
+
 // The thread blocked until the socket `h` is ready for `events`, within
-// `ms` milliseconds (negative: no limit): `TimedOut` when they ran out.
+// `ms` milliseconds (negative: no limit): `TimedOut` when they ran out. In
+// a program with tasks the wait holds a worker, which no other task gets
+// meanwhile: with more such waits than workers, the tasks that would end
+// them never run (`io.buffered(s).read_line()` in a task). So there it
+// waits in slices, and once it has held its worker for HOLD_WARN_MS while
+// other tasks wait for one (`__tasks_waiting`), it says so on stderr,
+// once, and waits the rest in one piece (MYLA-548: the program hung
+// silently). A program without tasks waits in one piece.
 fun wait_ready(h: int, events: int, ms: int) -> Result<(), IoError> {
-    let r = __sock_poll(h, events, ms)
-    if r < 0 {
-        return Err(last_error())
+    var left = ms
+    var held = 0
+    var told = false
+    while true {
+        var slice = left
+        if !told && (left < 0 || left > HOLD_SLICE_MS) && __tasks_waiting() >= 0 {
+            slice = HOLD_SLICE_MS
+        }
+        let r = __sock_poll(h, events, slice)
+        if r < 0 {
+            return Err(last_error())
+        }
+        if r > 0 {
+            return Ok(())
+        }
+        if slice == left {
+            return Err(IoError.TimedOut)
+        }
+        if left > 0 {
+            left -= slice
+        }
+        if held < HOLD_WARN_MS {
+            held += slice
+        }
+        if held >= HOLD_WARN_MS && !told && __tasks_waiting() > 0 {
+            eprint("warning: a blocking wait for a socket has held its worker for a second while other tasks wait for one; in a task, use the async calls (lines: 'net.line_reader(s)' and 'await r.read_line_async()')\n")
+            told = true
+        }
     }
-    if r == 0 {
-        return Err(IoError.TimedOut)
-    }
-    return Ok(())
+    unreachable()
 }
 
 // The address of the socket `h`'s own end, or of its peer.

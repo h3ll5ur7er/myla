@@ -13,6 +13,7 @@
 from std.process import args, exit
 from std.io import write, eprintln
 from std.platform import TARGET
+from std.rt import heap_huge_pages
 from .checker import build_checker_lazy
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
@@ -72,6 +73,8 @@ fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
 }
 
 fun main() {
+    // huge pages for the heap: a compile touches megabytes of it (MYLA-608)
+    heap_huge_pages()
     let argv = args()
     if argv.len() < 2 {
         eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--no-inline] [--checked] [--primitives] [--ssa | --ssa-stats] [--target x86_64-linux|aarch64-linux|wasm32-wasi] [--package name=dir]... [--root dir]")
