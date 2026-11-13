@@ -6,7 +6,7 @@ status: done
 priority: low
 labels: [cli]
 ---
-`myla repl` is still the "planned for v0.0.2" stub ([[src/myla/cli.py#L202-L203]]), and the README lists it as planned.
+`myla repl` is still the "planned for v0.0.2" stub (`src/myla/cli.py#L202-L203` (removed with the Python toolchain, D101)), and the README lists it as planned.
 
 ## Done when
 
