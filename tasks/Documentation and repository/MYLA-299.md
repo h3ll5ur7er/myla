@@ -2,7 +2,7 @@
 id: MYLA-299
 title: Examples and doc blocks for the November features
 type: chore
-status: in-progress
+status: done
 priority: medium
 labels: [docs, examples]
 ---
@@ -10,7 +10,7 @@ Found by the review of 6 November 2026 ([[Project/Review-2026-11]]). No file in 
 
 - [x] One example per feature (or one per group), with `#test` cases, registered in `test_examples_run.py` and `test_examples_compile.py`; the reading order extended
 - [x] Error-corpus files for the format-spec, slice, unit and `defer`-with-`await` errors the burn tests cover; `type_var_self_on_builtin.my` renamed for what it tests
-- [ ] The tutorial and the "Why Myla" page (D114, [[MYLA-234]])
+- [ ] The tutorial and the "Why Myla" page (D114, [[MYLA-234]]) (a duplicate of [[MYLA-234]], which tracks it in `backlog`)
 
 ## Evidence (first two boxes)
 
@@ -18,3 +18,7 @@ Found by the review of 6 November 2026 ([[Project/Review-2026-11]]). No file in 
 - Adding them showed two things: the oracle gates asked the recordings about every example, so a new one failed them (fixed under [[MYLA-288]] with `RECORDED_EXAMPLES`), and the language server gave a format spec in an f-string (`{rest:02}`) no semantic token: `fstring_spans` in [[tools/lsp/semantic.my]] now gives the spec, `:` to `}`, the string's token (the lexer's `spec_colon`, now public, says where it starts). The resolution test skips the lexer's own tokens, such as the `format` an f-string expands to, which first mattered in a file declaring a `format` method.
 - Error corpus: `type_format_spec_kind.my`, `type_slice_of_a_map.my`, `type_slice_bound_not_int.my`, `type_defer_await.my`; the unit's (`type_unit_ordering.my`) was there, and `type_var_self_on_builtin.my` was renamed `type_async_var_self_on_builtin.my` with [[MYLA-221]].
 - Open: the tutorial and the "Why Myla" page.
+
+## Closed as a duplicate (2026-11-13, [[MYLA-554]])
+
+The first two boxes are done; the third is the whole of [[MYLA-234]] (the chapter plan, the chapters and the Why Myla page), so this task is closed as its duplicate and the tutorial is tracked there. `.genbeya.yml` has no state for a duplicate, so it is `done` with this note.
