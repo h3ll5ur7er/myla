@@ -14,4 +14,5 @@ labels: [platforms, windows, runtime, stdlib]
 - [ ] **`SpawnError.WorkingDir(int32)`** holds Linux's number of why (D189). Proposal: `WorkingDir(IoError)`, which needs `IoError` to be `Eq` (`SpawnError` derives it).
 - [ ] **std.http's `accept_fate`** keys EMFILE and ENFILE (`Other(24)`, `Other(23)`): Windows' `WSAEMFILE` needs a cause (`TooManyOpen`?) or its own number there.
 - [ ] **`from_errno`** stays for programs that hold a Linux errno; nothing in std calls it. Remove it, or keep it documented as Linux's.
+- [ ] **wasm32's devices.** WASI's file types name block and character devices and sockets; wasm32's module gives them `KIND_OTHER`, as its made-up modes did, so `FileKind` stays what it was. Giving WASI's own is a change programs see there.
 - [ ] **One Linux layer** ([[MYLA-265]]'s second box): `platform.my` and `platform_aarch64.my` still differ only in system-call numbers, `struct stat`'s mode offset and a few `*at` calls; the changes of MYLA-701 were made twice.
