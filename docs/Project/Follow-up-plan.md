@@ -98,3 +98,18 @@ The round filed these tasks. Five were fixed in it and wait in `review` with the
 The next design is [[MYLA-433]], private fields and methods, as the review suggests: until it, the library's own steps are public and its pages list them as such (`args.check_name`, `bitset.past`, `http.finish`, …, [[MYLA-554]]).
 
 Left for later, as before: [[MYLA-433]] (the one to start next, as a proposal), [[MYLA-434]], [[MYLA-435]], [[MYLA-504]], [[MYLA-530]], [[MYLA-531]], [[MYLA-377]], [[MYLA-317]], [[MYLA-368]]. Part 2 of the review of 9 November, the whole-codebase pass, is still to come.
+
+## Windows (2026-11-14)
+
+The owner's plan for the Windows target ([[MYLA-165]]), decisions D208 to D215. Its tasks are numbered from MYLA-700, apart from the ids other work takes meanwhile.
+
+| Wave | Tasks | Files |
+|---|---|---|
+| 1 | [[MYLA-700]] the target record (the part of [[MYLA-262]] the port needs); [[MYLA-701]] the platform interface in Myla's terms (D208) | the driver and the backends' target switches; `lib/std/platform*.my`, std.rt, std.fs, std.process, std.io, std.net, the interpreter's primitives |
+| 2 | [[MYLA-702]] hello world as a static `.exe`, Wine in CI (D209 to D211, D214) | `selfhost/ir_x86.my`, `runtime_x86.my`, a `platform_windows.my`, the harness |
+| 3 | [[MYLA-703]] memory, threads, thread-local state, stack overflow; [[MYLA-704]] files and paths; [[MYLA-705]] processes | `platform_windows.my`, std.rt's runtime, std.path |
+| 4 | [[MYLA-706]] IOCP and Winsock; [[MYLA-707]] the terminal and signals; [[MYLA-708]] the Windows runner | `platform_windows.my`, std.rt's reactor, CI |
+| later | [[MYLA-709]] bootstrapping on Windows (D213) | the scripts, a third seed |
+
+Each wave is one pull request. Wave 1 changes `lib/std/platform_wasm.my`'s interface with the others; a web application developed alongside may touch the same file, so the waves merge master often.
+
