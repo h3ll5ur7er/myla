@@ -2,8 +2,8 @@
 id: MYLA-159
 title: A website for Myla - an Angular webapp with docs, an online editor and a tutorial
 type: feature
-status: backlog
-priority: low
+status: in-progress
+priority: high
 labels: [website, docs, tutorial, wasm]
 ---
 A modern Angular webapp as the home of the Myla programming language. It comes after the platform work ([[MYLA-62]]) and WebAssembly ([[MYLA-158]]): its editor and tutorial run the real toolchain in the browser.
@@ -18,6 +18,19 @@ A modern Angular webapp as the home of the Myla programming language. It comes a
 - **A tutorial that is heavily gamified,** somewhere between rustlings and boot.dev: small exercises checked by tests (`#test`), progress, streaks, levels and achievements, hints, chapters that unlock.
 - **No backend:** everything lives in the browser (IndexedDB: progress, saved programs, settings). The site is static and can be hosted anywhere (GitHub Pages).
 
+## The owner's brief (2026-11-14)
+
+A modern Angular webapp that looks awesome with great UX: a hero landing page, downloads, quickstart, documentation, reference, learn and the usual pages; the full language documentation; a comprehensive reference including the builtins and the standard library; lots of code examples in a reusable embedded editor that lets you try everything everywhere; as many funny, nerdy pop-culture references as fit without feeling forced (The Hitchhiker's Guide to the Galaxy, One Piece, Naruto, Marvel, Silicon Valley, …); a gamification-heavy interactive learning area inspired by boot.dev and rustlings. Decided with the owner: CodeMirror 6 (not Monaco), GitHub Pages, a full first version in one pull request (D208).
+
+The work, one task each:
+
+- [[MYLA-630]] The app: shell, design system, landing, downloads, quickstart, search
+- [[MYLA-631]] The content pipeline: the wiki's language and library pages as the site's docs
+- [[MYLA-632]] The API reference generated from `lib/std` by the real parser (`tools/doc`)
+- [[MYLA-633]] The embedded editor and the playground: CodeMirror 6, a Myla mode, the toolchain in a worker
+- [[MYLA-634]] Learn: exercises checked by `#test`, XP, levels, streaks, achievements, unlocks
+- [[MYLA-635]] CI: the site built and tested, the exercises checked, deployed to GitHub Pages
+
 ## Questions to settle first
 
 - The content pipeline: generate the reference and the getting-started pages from `docs/` at build time (Markdown with `[[…]]` links and `myla` code blocks), so the wiki stays the single source; examples checked by the toolchain in CI so none goes stale.
@@ -28,7 +41,7 @@ A modern Angular webapp as the home of the Myla programming language. It comes a
 
 ## Done when
 
-- [ ] The questions above decided and recorded
+- [x] The questions above decided and recorded (D208)
 - [ ] Landing, getting started, reference, editor and tutorial pages, all static, data in IndexedDB only
 - [ ] Every code example on the site checked by the toolchain in CI
 - [ ] Deployed, with load times within the budget
