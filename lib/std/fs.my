@@ -4,7 +4,8 @@
 // contents as a `str` or an `IoError` describing why it failed. Errors are
 // carried in a `Result`, so callers compose them with `?` (D16/D36). The
 // underlying open/read/close go through the platform layer (`std.platform`),
-// natively and in the interpreter alike, with one errno-keyed error mapping.
+// natively and in the interpreter alike, with one error mapping: the cause
+// codes the primitives give (`from_cause`, D208).
 //
 // `File` (MYLA-339) is a descriptor opened by path, a stream of `std.io`'s
 // `Read`, `Write` and `Seek`, which this module imports from there; the
@@ -17,6 +18,7 @@ import .bytes as bytes_m // `from_str`, `to_str`: a `File`'s bytes
 // `IoError` and its functions are std.ioerror's (MYLA-432), re-exported
 // here, where programs have always imported them.
 pub from .ioerror import IoError, from_errno, io_error_name
+from .ioerror import from_cause, ALREADY_EXISTS, IS_A_DIRECTORY
 
 // Read the entire file at `path` into a string. On success the bytes are
 // returned verbatim (as UTF-8 text); on failure an `IoError` is returned.
@@ -26,7 +28,7 @@ pub fun read_to_string(path: str) -> Result<str, IoError> {
     if err == 0 {
         return Ok(data)
     }
-    return Err(from_errno(err))
+    return Err(from_cause(err))
 }
 
 // Write `contents` to `path`, creating or truncating the file (mode 0644). The
@@ -40,7 +42,7 @@ pub fun write_to_file(path: str, contents: str) -> Result<(), IoError> {
     if err == 0 {
         return Ok(())
     }
-    return Err(from_errno(err))
+    return Err(from_cause(err))
 }
 
 // The bytes of the file at `path`, all of them (MYLA-339's follow-up):
@@ -62,22 +64,29 @@ pub fun write_bytes(path: str, b: [uint8]) -> Result<(), IoError> {
 // `__list_dir(path)` gives every name the directory lists, each followed by a
 // NUL byte, in the file system's order ("." and ".." may be among them);
 // `__mkdir(path, mode)` makes one directory; `__stat(path)` gives the
-// `st_mode` of what the path names (symbolic links followed), or -1, and
-// `__path_stat(path, follow)` its size, mode, modification time, device and
-// number, of a symbolic link itself when not `follow`, without opening it
+// kind of what the path names (symbolic links followed), or -1, and
+// `__path_stat(path, follow)` its size, kind, permissions, modification
+// time, device and number, of a symbolic link itself when not `follow`,
+// without opening it
 // (MYLA-378, MYLA-363); `__getcwd()` gives the working directory, or ""
 // (MYLA-98); `__unlink(path)`, `__rmdir(path)` and `__rename(from, to)`
 // remove a file (or a symbolic link itself), remove an empty directory and
-// rename (MYLA-96). Each sets the errno that `__io_errno` reads.
+// rename (MYLA-96). Each sets the cause code that `__io_errno` reads
+// (std.ioerror's, D208).
 //
 // `tests/burn/test_fs.py` covers them on every target, and the test functions
 // at the end of this file use them (`myla test` runs only the cases of the
 // file it is given, not those of the modules it links).
 
-const S_IFMT: int32 = 0xF000
-const S_IFDIR: int32 = 0x4000
-const S_IFREG: int32 = 0x8000
-const S_IFLNK: int32 = 0xA000
+// The kinds `__stat` and `__path_stat` give: std.platform's KIND_FILE, …
+// (D208; tests/burn/test_platform_interface.py holds them to it).
+const KIND_FILE: int64 = 1
+const KIND_DIR: int64 = 2
+const KIND_SYMLINK: int64 = 3
+const KIND_CHAR_DEVICE: int64 = 4
+const KIND_BLOCK_DEVICE: int64 = 5
+const KIND_FIFO: int64 = 6
+const KIND_SOCKET: int64 = 7
 
 // The working directory, as an absolute path without symbolic links (the
 // kernel's getcwd, through the primitive `__getcwd`, MYLA-98). A directory
@@ -88,7 +97,7 @@ pub fun current_dir() -> Result<str, IoError> {
     if err == 0 {
         return Ok(dir)
     }
-    return Err(from_errno(err))
+    return Err(from_cause(err))
 }
 
 // The names of the entries of the directory `path`, without "." and "..",
@@ -98,7 +107,7 @@ pub fun list_dir(path: str) -> Result<[str], IoError> {
     let raw = __list_dir(path)
     let err = __io_errno()
     if err != 0 {
-        return Err(from_errno(err))
+        return Err(from_cause(err))
     }
     return Ok(sorted_names(split_names(raw)))
 }
@@ -111,7 +120,7 @@ pub fun make_dir(path: str) -> Result<(), IoError> {
     if err == 0 {
         return Ok(())
     }
-    return Err(from_errno(err))
+    return Err(from_cause(err))
 }
 
 // Make the directory `path` and the parents it lacks, like `mkdir -p`. A
@@ -133,7 +142,7 @@ pub fun make_dir_all(path: str) -> Result<(), IoError> {
     if is_dir(path) {
         return Ok(())
     }
-    return Err(from_errno(17))
+    return Err(IoError.AlreadyExists)
 }
 
 // Remove the file `path` (a symbolic link is removed itself, not what it
@@ -153,14 +162,14 @@ pub fun remove_dir(path: str) -> Result<(), IoError> {
 // Remove `path` and, for a directory, everything in it, like `rm -r`. A
 // symbolic link is removed, not followed, even one naming a directory.
 pub fun remove_dir_all(path: str) -> Result<(), IoError> {
-    // a file or a link goes at once; a directory is EISDIR
+    // a file or a link goes at once; a directory is IS_A_DIRECTORY
     __unlink(path)
     let err = __io_errno()
     if err == 0 {
         return Ok(())
     }
-    if err != 21 {
-        return Err(from_errno(err))
+    if err != IS_A_DIRECTORY {
+        return Err(from_cause(err))
     }
     for name in list_dir(path)? {
         remove_dir_all(path + "/" + name)?
@@ -181,7 +190,7 @@ fun io_result() -> Result<(), IoError> {
     if err == 0 {
         return Ok(())
     }
-    return Err(from_errno(err))
+    return Err(from_cause(err))
 }
 
 // Whether `path` names something that exists (a dangling symbolic link
@@ -192,21 +201,19 @@ pub fun exists(path: str) -> bool {
 
 // Whether `path` names a directory (or a symbolic link to one).
 pub fun is_dir(path: str) -> bool {
-    let mode = __stat(path)
-    return mode >= 0 && (mode & S_IFMT) == S_IFDIR
+    return __stat(path) as int64 == KIND_DIR
 }
 
 // Whether `path` names a regular file (or a symbolic link to one).
 pub fun is_file(path: str) -> bool {
-    let mode = __stat(path)
-    return mode >= 0 && (mode & S_IFMT) == S_IFREG
+    return __stat(path) as int64 == KIND_FILE
 }
 
 // Whether `path` names a symbolic link (itself, not what it names: a
 // dangling one too), MYLA-363.
 pub fun is_symlink(path: str) -> bool {
     let st = __path_stat(path, false)
-    return st.len() == 5 && ((st[1] as int32) & S_IFMT) == S_IFLNK
+    return st.len() == 6 && st[1] == KIND_SYMLINK
 }
 
 // The names in `raw`, each followed by a NUL byte, without "." and "..".
@@ -275,7 +282,7 @@ fun sorted_names(names: [str]) -> [str] {
 // `__open(path, flags, mode)` opens a descriptor with Myla's own flags, the
 // same on every target (the constants below); `__read`, `__write`,
 // `__seek`, `__fstat` and `__close` work on it (MYLA-336). Each sets the
-// errno `__io_errno` reads (`__close` since MYLA-378).
+// cause `__io_errno` reads (`__close` since MYLA-378).
 
 const O_READ: int32 = 1
 const O_WRITE: int32 = 2
@@ -293,7 +300,7 @@ const O_EXCLUSIVE: int32 = 32
 // is a value holding a handle into the runtime's table (D181), and a copy
 // holds the same one, the same descriptor with the same cursor (the
 // platform keeps it). `close` closes it for every copy: each later
-// operation through any of them is `Other(9)` (EBADF), also once a file
+// operation through any of them is `Other(9)` (BAD_HANDLE), also once a file
 // opened later got the descriptor, and so is one through a `File` built by
 // hand.
 pub struct File {
@@ -336,7 +343,7 @@ pub fun open_append(path: str) -> Result<File, IoError> {
 fun open_fd(path: str, flags: int32, mode: int32) -> Result<File, IoError> {
     let fd = __open(path, flags, mode)
     if fd < 0 {
-        return Err(from_errno(__io_errno()))
+        return Err(from_cause(__io_errno()))
     }
     return Ok(File { fd: fd })
 }
@@ -446,22 +453,22 @@ impl File {
     // The file's size, kind, permissions and modification time now.
     fun metadata(self) -> Result<Metadata, IoError> {
         let st = __fstat(handle_of(self))
-        if st.len() != 3 {
-            return Err(from_errno(__io_errno()))
+        if st.len() != 4 {
+            return Err(from_cause(__io_errno()))
         }
-        return Ok(metadata_of(st[0], st[1] as int32, st[2]))
+        return Ok(metadata_of(st[0], st[1], st[2] as int32, st[3]))
     }
 
     // Close the file. Every later operation on it, and a second `close`,
-    // is `Other(9)` (EBADF); data the system couldn't keep is `Other(5)`
-    // (EIO). The descriptor is closed even then.
+    // is `Other(9)` (BAD_HANDLE); data the system couldn't keep is
+    // `Other(5)` (EIO). The descriptor is closed even then.
     fun close(var self) -> Result<(), IoError> {
         let fd = handle_of(self)
         self.fd = -1
         __close(fd)
         let err = __io_errno()
         if err != 0 {
-            return Err(from_errno(err))
+            return Err(from_cause(err))
         }
         return Ok(())
     }
@@ -476,7 +483,7 @@ impl Read for File {
         let chunk = __read_bytes(handle_of(self), n)
         let err = __io_errno()
         if err != 0 {
-            return Err(from_errno(err))
+            return Err(from_cause(err))
         }
         return Ok(chunk)
     }
@@ -489,7 +496,7 @@ impl Write for File {
         __write_bytes(handle_of(self), b)
         let err = __io_errno()
         if err != 0 {
-            return Err(from_errno(err))
+            return Err(from_cause(err))
         }
         return Ok(b.len())
     }
@@ -510,7 +517,7 @@ impl Seek for File {
         }
         let r = __seek(handle_of(self), offset, whence)
         if r < 0 {
-            return Err(from_errno(__io_errno()))
+            return Err(from_cause(__io_errno()))
         }
         return Ok(r)
     }
@@ -539,7 +546,8 @@ pub enum FileKind {
 }
 
 // What the file system knows of a file: its size in bytes, its kind, its
-// permission bits (`mode & 0o7777`) and when it was last changed, in
+// permission bits (POSIX's `0o7777`; what the platform makes of its own
+// where it has none, D208) and when it was last changed, in
 // nanoseconds since 1970 (`std.time.from_unix_ns` makes a `DateTime` of it).
 #derive(Eq)
 pub struct Metadata {
@@ -551,22 +559,22 @@ pub struct Metadata {
 
 impl Metadata {
     // Whether it is a regular file.
-    #test(metadata_of(3, 0o100644, 0))[true]
-    #test(metadata_of(0, 0o40755, 0))[false]
+    #test(metadata_of(3, 1, 0o644, 0))[true]
+    #test(metadata_of(0, 2, 0o755, 0))[false]
     fun is_file(self) -> bool {
         return self.kind == FileKind.File
     }
 
     // Whether it is a directory.
-    #test(metadata_of(0, 0o40755, 0))[true]
-    #test(metadata_of(3, 0o100644, 0))[false]
+    #test(metadata_of(0, 2, 0o755, 0))[true]
+    #test(metadata_of(3, 1, 0o644, 0))[false]
     fun is_dir(self) -> bool {
         return self.kind == FileKind.Dir
     }
 
     // Whether it is a symbolic link (only `symlink_metadata` gives one).
-    #test(metadata_of(4, 0o120777, 0))[true]
-    #test(metadata_of(3, 0o100644, 0))[false]
+    #test(metadata_of(4, 3, 0o777, 0))[true]
+    #test(metadata_of(3, 1, 0o644, 0))[false]
     fun is_symlink(self) -> bool {
         return self.kind == FileKind.Symlink
     }
@@ -589,38 +597,39 @@ pub fun symlink_metadata(path: str) -> Result<Metadata, IoError> {
 // `metadata` or `symlink_metadata`, from `__path_stat`.
 fun stat_of(path: str, follow: bool) -> Result<Metadata, IoError> {
     let st = __path_stat(path, follow)
-    if st.len() != 5 {
-        return Err(from_errno(__io_errno()))
+    if st.len() != 6 {
+        return Err(from_cause(__io_errno()))
     }
-    return Ok(metadata_of(st[0], st[1] as int32, st[2]))
+    return Ok(metadata_of(st[0], st[1], st[2] as int32, st[3]))
 }
 
-// The metadata `__fstat`'s three values (`[size, mode, mtime]`) make.
-#test(5, 0o100600, 7)[Metadata { size: 5, kind: FileKind.File, permissions: 0o600, modified_ns: 7 }]
-#test(0, 0o41777, 0)[Metadata { size: 0, kind: FileKind.Dir, permissions: 0o1777, modified_ns: 0 }]
-fun metadata_of(size: int64, mode: int32, modified_ns: int64) -> Metadata {
-    return Metadata { size: size, kind: kind_of(mode), permissions: mode & 0o7777, modified_ns: modified_ns }
+// The metadata `__fstat`'s four values (`[size, kind, permissions, mtime]`)
+// make, and the first four of `__path_stat`'s.
+#test(5, 1, 0o600, 7)[Metadata { size: 5, kind: FileKind.File, permissions: 0o600, modified_ns: 7 }]
+#test(0, 2, 0o1777, 0)[Metadata { size: 0, kind: FileKind.Dir, permissions: 0o1777, modified_ns: 0 }]
+fun metadata_of(size: int64, kind: int64, permissions: int32, modified_ns: int64) -> Metadata {
+    return Metadata { size: size, kind: kind_of(kind), permissions: permissions, modified_ns: modified_ns }
 }
 
-// The kind the type bits of `mode` name (wasm32's made-up 0o644 has none:
+// The `FileKind` of the platform's kind `k` (KIND_UNKNOWN and KIND_OTHER:
 // `Other`).
-#test(0o100644)[FileKind.File]
-#test(0o40755)[FileKind.Dir]
-#test(0o20666)[FileKind.CharDevice]
-#test(0o60660)[FileKind.BlockDevice]
-#test(0o10644)[FileKind.Fifo]
-#test(0o140755)[FileKind.Socket]
-#test(0o120777)[FileKind.Symlink]
-#test(0o644)[FileKind.Other]
-fun kind_of(mode: int32) -> FileKind {
-    let t = mode & S_IFMT
-    if t == S_IFREG { return FileKind.File }
-    if t == S_IFDIR { return FileKind.Dir }
-    if t == S_IFLNK { return FileKind.Symlink }
-    if t == 0x2000 { return FileKind.CharDevice }
-    if t == 0x6000 { return FileKind.BlockDevice }
-    if t == 0x1000 { return FileKind.Fifo }
-    if t == 0xC000 { return FileKind.Socket }
+#test(1)[FileKind.File]
+#test(2)[FileKind.Dir]
+#test(4)[FileKind.CharDevice]
+#test(5)[FileKind.BlockDevice]
+#test(6)[FileKind.Fifo]
+#test(7)[FileKind.Socket]
+#test(3)[FileKind.Symlink]
+#test(8)[FileKind.Other]
+#test(0)[FileKind.Other]
+fun kind_of(k: int64) -> FileKind {
+    if k == KIND_FILE { return FileKind.File }
+    if k == KIND_DIR { return FileKind.Dir }
+    if k == KIND_SYMLINK { return FileKind.Symlink }
+    if k == KIND_CHAR_DEVICE { return FileKind.CharDevice }
+    if k == KIND_BLOCK_DEVICE { return FileKind.BlockDevice }
+    if k == KIND_FIFO { return FileKind.Fifo }
+    if k == KIND_SOCKET { return FileKind.Socket }
     return FileKind.Other
 }
 
@@ -690,7 +699,7 @@ pub fun make_temp_file_in(dir: str, prefix: str) -> Result<(str, File), IoError>
 
 // `make` tried on `dir`/`prefix` and a suffix from `suffix` (given the
 // try's number), again while the name is taken: the path made and what
-// `make` gave (at least 0; -1 with the errno for a failure).
+// `make` gave (at least 0; -1 with the cause for a failure).
 fun make_unique(dir: str, prefix: str, suffix: (int32) -> Result<str, IoError>, make: (str) -> int32) -> Result<(str, int32), IoError> {
     var k = 0
     while true {
@@ -700,15 +709,15 @@ fun make_unique(dir: str, prefix: str, suffix: (int32) -> Result<str, IoError>, 
             return Ok((path, r))
         }
         let err = __io_errno()
-        if err != 17 || k + 1 >= TEMP_TRIES {
-            return Err(from_errno(err))
+        if err != ALREADY_EXISTS || k + 1 >= TEMP_TRIES {
+            return Err(from_cause(err))
         }
         k += 1
     }
     unreachable()
 }
 
-// Make the directory `path`, mode 0700: 0, or -1 with the errno.
+// Make the directory `path`, mode 0700: 0, or -1 with the cause.
 fun mkdir_fd(path: str) -> int32 {
     __mkdir(path, 0o700)
     if __io_errno() == 0 {
@@ -718,7 +727,7 @@ fun mkdir_fd(path: str) -> int32 {
 }
 
 // Create the file `path` (it mustn't be there), mode 0600, open to read and
-// write: its descriptor, or -1 with the errno.
+// write: its descriptor, or -1 with the cause.
 fun new_file_fd(path: str) -> int32 {
     return __open(path, O_READ | O_WRITE | O_CREATE | O_EXCLUSIVE, 0o600)
 }
@@ -727,7 +736,7 @@ fun new_file_fd(path: str) -> int32 {
 fun random_suffix() -> Result<str, IoError> {
     let b = __random_bytes(8)
     if b.len() != 8 {
-        return Err(from_errno(__io_errno()))
+        return Err(from_cause(__io_errno()))
     }
     return Ok(hex_of(b))
 }

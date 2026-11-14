@@ -35,7 +35,7 @@
 
 import std.net as net
 from std.net import TcpStream, TcpListener, SocketAddr, IpAddr
-from std.ioerror import IoError, io_error_name, from_errno
+from std.ioerror import IoError, io_error_name, from_cause, WOULD_BLOCK
 from std.io import Read, Write
 import std.url as url_m
 import std.compress as compress
@@ -1794,9 +1794,6 @@ fun decode_error(e: CompressError) -> HttpError {
 // How much one read asks for.
 const READ_SIZE: int = 65536
 
-// A socket with nothing to read, or no room to send, now (Linux's number,
-// std.net's).
-const EAGAIN: int = 11
 
 // A connection and what has been read from it but not taken yet.
 struct Wire {
@@ -1889,11 +1886,11 @@ impl Wire {
     fun try_fill(var self) -> Result<int, HttpError> {
         let chunk = __sock_recv(self.stream.handle, READ_SIZE)
         let err = __io_errno()
-        if err == EAGAIN {
+        if err == WOULD_BLOCK {
             return Ok(0)
         }
         if err != 0 {
-            return Err(io_error(from_errno(err)))
+            return Err(io_error(from_cause(err)))
         }
         if chunk.len() == 0 {
             return Ok(-1)
@@ -3007,8 +3004,8 @@ impl Link {
                 at += r
             } else {
                 let err = __io_errno()
-                if err != EAGAIN {
-                    return Err(io_error(from_errno(err)))
+                if err != WOULD_BLOCK {
+                    return Err(io_error(from_cause(err)))
                 }
                 break
             }
