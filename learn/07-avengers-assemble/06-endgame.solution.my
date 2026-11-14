@@ -1,0 +1,63 @@
+trait Avenger {
+    fun name(self) -> str
+    fun power(self) -> int
+}
+
+struct Human { name: str, gear: int }
+struct Sorcerer { name: str, spells: int }
+
+impl Avenger for Human {
+    fun name(self) -> str { return self.name }
+    fun power(self) -> int { return self.gear * 2 }
+}
+
+impl Avenger for Sorcerer {
+    fun name(self) -> str { return self.name }
+    fun power(self) -> int { return self.spells * 7 }
+}
+
+fun team_power<T: Avenger>(team: [T]) -> int {
+    var total = 0
+    for a in team {
+        total += a.power()
+    }
+    return total
+}
+
+fun leader<T: Avenger>(team: [T]) -> Option<str> {
+    var best: Option<str> = None
+    var top = 0
+    for a in team {
+        if best.is_none() || a.power() > top {
+            best = Some(a.name())
+            top = a.power()
+        }
+    }
+    return best
+}
+
+#test()[30]
+fun humans_power() -> int {
+    return team_power([Human { name: "Hawkeye", gear: 5 }, Human { name: "Black Widow", gear: 10 }])
+}
+
+#test()[Some("Black Widow")]
+fun humans_leader() -> Option<str> {
+    return leader([Human { name: "Hawkeye", gear: 5 }, Human { name: "Black Widow", gear: 10 }, Human { name: "Falcon", gear: 10 }])
+}
+
+#test()[42]
+fun sorcerers_power() -> int {
+    return team_power([Sorcerer { name: "Wong", spells: 2 }, Sorcerer { name: "Strange", spells: 4 }])
+}
+
+#test()[Some("Strange")]
+fun sorcerers_leader() -> Option<str> {
+    return leader([Sorcerer { name: "Wong", spells: 2 }, Sorcerer { name: "Strange", spells: 4 }])
+}
+
+#test()[None]
+fun nobody() -> Option<str> {
+    let empty: [Human] = []
+    return leader(empty)
+}

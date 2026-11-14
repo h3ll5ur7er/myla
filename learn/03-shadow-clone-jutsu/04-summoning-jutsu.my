@@ -1,0 +1,20 @@
+// title: Summoning Jutsu
+// xp: 25
+// hint: A function can return a lambda: `return (x: int) => x * k`. The lambda keeps `k`.
+// hint: The return type is already right: `(int) -> int`, a function from an `int` to an `int`.
+//
+// A summoning jutsu makes something that keeps working on its own. Here,
+// `multiplier(k)` should make a function that multiplies whatever it gets by
+// `k`. So `multiplier(3)` is a function, and `multiplier(3)(14)` is 42.
+//
+// The lambda remembers (captures) `k`. Fill in `multiplier`.
+#test(3, 14)[42]
+#test(10, 5)[50]
+fun use_it(k: int, x: int) -> int {
+    let times = multiplier(k)
+    return times(x)
+}
+
+fun multiplier(k: int) -> (int) -> int {
+    return (x: int) => x
+}

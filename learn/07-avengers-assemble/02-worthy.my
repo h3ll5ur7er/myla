@@ -1,0 +1,34 @@
+// title: Worthy
+// xp: 20
+// hint: Inside `lift`, `T` could be any type at all, so it has no method `strength`. Say which types are allowed.
+// hint: Bound the type parameter: `fun lift<T: Mighty>(who: T) -> str`.
+//
+// Only the worthy can lift Mjölnir. `lift` works with any type that has a
+// `strength`, but the checker refuses it: nothing says `T` has one. Give the
+// type parameter a bound, so `lift` takes every `T` that implements `Mighty`.
+trait Mighty {
+    fun strength(self) -> int
+}
+
+struct Thor {}
+struct Vision {}
+
+impl Mighty for Thor {
+    fun strength(self) -> int { return 100 }
+}
+
+impl Mighty for Vision {
+    fun strength(self) -> int { return 99 }
+}
+
+fun lift<T>(who: T) -> str {
+    if who.strength() >= 99 {
+        return "worthy"
+    }
+    return "not worthy"
+}
+
+#test()[["worthy", "worthy"]]
+fun trials() -> [str] {
+    return [lift(Thor {}), lift(Vision {})]
+}

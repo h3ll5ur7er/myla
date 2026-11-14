@@ -1,0 +1,132 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 800;
+  background: rgba(3, 4, 10, 0.6);
+  backdrop-filter: blur(4px);
+  animation: fade 0.15s ease;
+}
+
+.palette {
+  position: fixed;
+  z-index: 801;
+  top: 12vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(680px, calc(100vw - 32px));
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-l);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-raised);
+  box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.7), var(--glow);
+  overflow: hidden;
+  animation: rise 0.18s ease;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  input {
+    flex: 1;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text);
+    font: 500 1.05rem var(--font-body);
+    &::-webkit-search-cancel-button {
+      display: none;
+    }
+  }
+}
+
+.results {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  overflow-y: auto;
+  li {
+    display: grid;
+    grid-template-columns: 84px auto 1fr;
+    align-items: baseline;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    cursor: pointer;
+    &.active {
+      background: var(--accent-soft);
+    }
+  }
+  .empty {
+    display: block;
+    color: var(--text-faint);
+    cursor: default;
+    padding: 18px 12px;
+  }
+}
+
+.kind {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+  &[data-k='Module'],
+  &[data-k='Docs'] {
+    color: var(--cyan);
+  }
+  &[data-k='Learn'],
+  &[data-k='Exercise'] {
+    color: var(--lime);
+  }
+  &[data-k='Function'],
+  &[data-k='Method'] {
+    color: var(--tok-function);
+  }
+  &[data-k='Struct'],
+  &[data-k='Enum'],
+  &[data-k='Trait'],
+  &[data-k='Type'] {
+    color: var(--tok-type);
+  }
+}
+
+.t {
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.d {
+  color: var(--text-faint);
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+}
+
+@media (max-width: 600px) {
+  .results li {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}

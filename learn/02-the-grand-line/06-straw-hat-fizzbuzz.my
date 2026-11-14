@@ -1,0 +1,29 @@
+// title: Straw Hat FizzBuzz (boss)
+// xp: 70
+// boss: true
+// expect: 1
+// expect: 2
+// expect: Straw
+// expect: 4
+// expect: Hat
+// expect: Straw
+// expect: 7
+// expect: 8
+// expect: Straw
+// expect: Hat
+// expect: 11
+// expect: Straw
+// expect: 13
+// expect: 14
+// expect: StrawHat
+// hint: Count with `for i in 1..16`.
+// hint: Test the multiple of both first: `if i % 15 == 0 { … } else if i % 3 == 0 { … }`.
+// hint: To print a number, `print(i)`; or put `f"{i}"` in a string.
+//
+// The crew's favourite drinking game, on the Thousand Sunny: count from 1 to
+// 15, but say `Straw` for multiples of 3, `Hat` for multiples of 5, and
+// `StrawHat` for multiples of both.
+//
+// Write `main` from scratch so it prints the fifteen lines. Gum-Gum... Pistol!
+fun main() {
+}

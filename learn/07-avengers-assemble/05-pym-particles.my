@@ -1,0 +1,23 @@
+// title: Pym Particles
+// xp: 30
+// hint: `size * k` with an `int` on the right needs `impl Mul<int> for Size`: the trait's type argument is the right operand's type.
+// hint: `impl Mul<int> for Size { fun mul(self, k: int) -> Size { return Size { cm: self.cm * k } } }`; the same with `Div<int>`.
+//
+// Pym particles make Ant-Man grow and shrink. A `Size` times an `int` grows
+// it, divided by an `int` shrinks it. That's an operator between two
+// different types: implement `Mul<int>` and `Div<int>` for `Size` (the type
+// argument is the right operand's type, and the result is a `Size`).
+#derive(Eq)
+struct Size {
+    cm: int,
+}
+
+#test(Size { cm: 180 }, 10)[Size { cm: 1800 }]
+fun giant(s: Size, k: int) -> Size {
+    return s * k
+}
+
+#test(Size { cm: 180 }, 100)[Size { cm: 1 }]
+fun ant(s: Size, k: int) -> Size {
+    return s / k
+}

@@ -1,0 +1,50 @@
+{
+  "name": "website",
+  "version": "0.0.0",
+  "scripts": {
+    "ng": "ng",
+    "prepare-site": "node scripts/prepare.mjs",
+    "start": "node scripts/prepare.mjs --skip-wasm && ng serve",
+    "build": "node scripts/prepare.mjs && ng build && node scripts/postbuild.mjs",
+    "watch": "ng build --watch --configuration development",
+    "test": "node --test scripts/test/*.test.mjs && ng test --watch=false",
+    "e2e": "playwright test",
+    "serve-dist": "node scripts/serve.mjs",
+    "build:pages": "node scripts/prepare.mjs && ng build --base-href /myla/ && node scripts/postbuild.mjs",
+    "check-course": "node scripts/check-course.mjs"
+  },
+  "private": true,
+  "packageManager": "npm@10.9.9",
+  "dependencies": {
+    "@angular/common": "^22.2.0",
+    "@angular/compiler": "^22.2.0",
+    "@angular/core": "^22.2.0",
+    "@angular/forms": "^22.2.0",
+    "@angular/platform-browser": "^22.2.0",
+    "@angular/router": "^22.2.0",
+    "@codemirror/autocomplete": "^6.20.4",
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/lint": "^6.9.8",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/space-grotesk": "^5.3.0",
+    "@lezer/highlight": "^1.2.5",
+    "rxjs": "~7.8.0",
+    "tslib": "^2.3.0"
+  },
+  "devDependencies": {
+    "@angular/build": "^22.2.7",
+    "@angular/cli": "^22.2.7",
+    "@angular/compiler-cli": "^22.2.0",
+    "@playwright/test": "^1.65.1",
+    "jsdom": "^30.0.0",
+    "marked": "^18.2.0",
+    "prettier": "^3.8.1",
+    "typescript": "~6.0.2",
+    "vitest": "^5.0.0"
+  }
+}

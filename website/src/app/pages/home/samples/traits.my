@@ -1,0 +1,30 @@
+trait Hero {
+    fun name(self) -> str
+    fun power(self) -> int
+}
+
+struct Ninja { village: str, chakra: int }
+struct Pirate { crew: str, bounty: int }
+
+impl Hero for Ninja {
+    fun name(self) -> str { return f"a ninja of the {self.village}" }
+    fun power(self) -> int { return self.chakra * 3 }
+}
+
+impl Hero for Pirate {
+    fun name(self) -> str { return f"a pirate of the {self.crew}" }
+    fun power(self) -> int { return self.bounty / 1000 }
+}
+
+// Generic over any Hero, checked once, compiled for each type it is used with.
+fun announce<H: Hero>(h: H) {
+    print(f"Behold, {h.name()}! Power level: {h.power()}")
+}
+
+fun main() {
+    announce(Ninja { village: "Hidden Leaf", chakra: 3001 })
+    announce(Pirate { crew: "Straw Hats", bounty: 3000000 })
+}
+// output:
+// Behold, a ninja of the Hidden Leaf! Power level: 9003
+// Behold, a pirate of the Straw Hats! Power level: 3000

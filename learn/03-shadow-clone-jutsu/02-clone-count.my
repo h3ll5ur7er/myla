@@ -1,0 +1,16 @@
+// title: Clone Count
+// xp: 20
+// hint: A recursive function needs a case that stops: `if level == 0 { return 1 }`.
+// hint: Otherwise each clone makes two more: `return 2 * clones(level - 1)`.
+//
+// Each shadow clone can summon two clones of its own, who summon two each,
+// and so on. With `level` rounds of summoning there are 2^level of them:
+// `clones(0)` is 1 (just Naruto), `clones(3)` is 8.
+//
+// Write `clones` recursively: it calls itself with `level - 1`.
+#test(0)[1]
+#test(3)[8]
+#test(10)[1024]
+fun clones(level: int) -> int {
+    return 0
+}

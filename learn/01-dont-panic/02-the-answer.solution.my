@@ -1,0 +1,4 @@
+fun main() {
+    let answer = 6 * 7
+    print(f"The answer is {answer}")
+}

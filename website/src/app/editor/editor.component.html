@@ -1,0 +1,130 @@
+<div class="frame" [class.busy]="busy()">
+  <div class="bar">
+    <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="file">{{ label() }}</span>
+    <span class="chip" [class.warn]="kind() === 'error'">{{ badge() }}</span>
+    <span class="spacer"></span>
+    @if (modified()) {
+      <button class="tool" type="button" (click)="reset()" title="Back to the original">Reset</button>
+    }
+    <button class="tool" type="button" (click)="copy()" [attr.aria-label]="'Copy the code'">{{ copied() ? 'Copied!' : 'Copy' }}</button>
+    @if (showOpen() && kind() !== 'fragment') {
+      <button class="tool open" type="button" (click)="open()" title="Open in the playground">Playground ↗</button>
+    }
+    @if (showRun() && kind() !== 'fragment') {
+      @if (kind() === 'error' || (kind() === 'check' && !hasTests())) {
+        <button class="run" type="button" (click)="check()" [disabled]="!!busy()" title="Check (Ctrl+Enter)">
+          <span aria-hidden="true">✓</span> Check
+        </button>
+      } @else {
+        @if (hasTests()) {
+          <button class="run alt" type="button" (click)="test()" [disabled]="!!busy() && busy() !== 'Testing…'" title="Run the #test cases">
+            <span aria-hidden="true">⚗</span> Test
+          </button>
+        }
+        @if (hasMain() || !hasTests()) {
+          <button class="run" type="button" (click)="run()" title="Run (Ctrl+Enter)">
+            @if (busy() && busy() !== 'Testing…' && busy() !== 'Checking…') {
+              <span aria-hidden="true">■</span> Stop
+            } @else {
+              <span aria-hidden="true">▶</span> Run
+            }
+          </button>
+        }
+      }
+    }
+  </div>
+  <div class="code" #host>
+    <pre class="static" aria-label="Myla code">@for (line of lines(); track $index) {<span class="ln">{{ $index + 1 }}</span>{{ line }}
+}</pre>
+  </div>
+  @if (busy(); as b) {
+    <div class="status" role="status"><span class="spinner" aria-hidden="true"></span>{{ b }}</div>
+  }
+  @if (shown(); as s) {
+    <div class="output" role="region" aria-label="Output">
+      <div class="out-head">
+        @switch (s.kind) {
+          @case ('run') {
+            @if (s.result.timedOut) {
+              <span class="badge bad">⏱ Stopped after 10 s</span><span class="note">A loop that never ends? Time is an illusion; lunchtime doubly so.</span>
+            } @else if (s.result.stopped) {
+              <span class="badge">■ Stopped</span>
+            } @else if (s.matches === true) {
+              <span class="badge good">✓ Output as expected</span>
+            } @else if (s.matches === false) {
+              <span class="badge bad">✗ Not the expected output</span>
+            } @else if (s.result.exitCode === 0) {
+              <span class="badge good">✓ Exit 0</span>
+            } @else {
+              <span class="badge bad">Exit {{ s.result.exitCode }}</span>
+            }
+            <span class="time">{{ s.result.ms | number: '1.0-0' }} ms</span>
+          }
+          @case ('test') {
+            @if (s.result.timedOut) {
+              <span class="badge bad">⏱ Stopped after 10 s</span>
+            } @else if (s.total > 0 && s.passed === s.total) {
+              <span class="badge good">✓ {{ s.passed }}/{{ s.total }} tests passed</span>
+            } @else {
+              <span class="badge bad">✗ {{ s.passed }}/{{ s.total }} tests passed</span>
+            }
+            <span class="time">{{ s.result.ms | number: '1.0-0' }} ms</span>
+          }
+          @case ('check') {
+            @if (s.result.ok && !s.expectedError) {
+              <span class="badge good">✓ It type-checks</span>
+            } @else if (!s.result.ok && s.expectedError) {
+              <span class="badge good">✓ Refused, as it should be</span>
+            } @else if (s.result.ok) {
+              <span class="badge bad">It type-checks now: the error is gone</span>
+            } @else {
+              <span class="badge bad">✗ {{ s.result.diagnostics.length }} problem{{ s.result.diagnostics.length === 1 ? '' : 's' }}</span>
+            }
+          }
+          @case ('error') {
+            <span class="badge bad">Houston, we have a problem</span>
+          }
+        }
+        <span class="spacer"></span>
+        <button class="tool" type="button" (click)="closeOutput()" aria-label="Close the output">✕</button>
+      </div>
+      @switch (s.kind) {
+        @case ('run') {
+          @if (s.result.stdout) {
+            <pre class="stdout">{{ firstLines(s.result.stdout) }}</pre>
+          }
+          @if (s.result.stderr) {
+            <pre class="stderr">{{ firstLines(s.result.stderr) }}</pre>
+          }
+          @if (!s.result.stdout && !s.result.stderr && !s.result.timedOut && !s.result.stopped) {
+            <pre class="empty">(no output)</pre>
+          }
+          @if (s.matches === false && expected(); as exp) {
+            <div class="expected"><span>Expected</span><pre>{{ exp }}</pre></div>
+          }
+        }
+        @case ('test') {
+          <pre class="stdout">{{ firstLines(s.result.stdout) }}</pre>
+          @if (s.result.stderr) {
+            <pre class="stderr">{{ firstLines(s.result.stderr) }}</pre>
+          }
+        }
+        @case ('check') {
+          @for (d of s.result.diagnostics; track $index) {
+            <div class="diag" [class.warning]="d.severity === 'warning'">
+              <span class="where">{{ d.line }}:{{ d.col }}</span>
+              <span class="what"><b>{{ d.kind }}:</b> {{ d.message }}</span>
+              @for (n of d.notes; track $index) {
+                <span class="note-line">{{ n.label }}: {{ n.message }}</span>
+              }
+            </div>
+          }
+        }
+        @case ('error') {
+          <pre class="stderr">{{ s.message }}</pre>
+        }
+      }
+    </div>
+  }
+</div>

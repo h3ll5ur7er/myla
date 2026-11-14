@@ -1,0 +1,27 @@
+// Errors are values: no exceptions, just Result and the ? operator.
+fun digit(c: char) -> Result<int, str> {
+    if !c.is_digit() {
+        return Err(f"'{c}' is not a digit")
+    }
+    return Ok((c as int) - ('0' as int))
+}
+
+fun sum_digits(text: str) -> Result<int, str> {
+    var total = 0
+    for c in text.chars() {
+        total += digit(c)?
+    }
+    return Ok(total)
+}
+
+fun main() {
+    for text in ["777777", "42x"] {
+        match sum_digits(text) {
+            Ok(n) => print(f"{text} -> {n}"),
+            Err(e) => print(f"{text} -> error: {e}"),
+        }
+    }
+}
+// output:
+// 777777 -> 42
+// 42x -> error: 'x' is not a digit

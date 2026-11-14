@@ -1,0 +1,40 @@
+// title: The Crew (boss)
+// xp: 100
+// boss: true
+// expect: Straw Hats: Luffy (3000000000), Zoro (1111000000), Nami (366000000)
+// expect: total 4477000000 berries
+// expect: Sanji joins!
+// expect: Straw Hats: Luffy (3000000000), Zoro (1111000000), Nami (366000000), Sanji (1032000000)
+// expect: total 5509000000 berries
+// hint: `impl Format for Pirate { fun format(self, spec: str) -> str { return f"{self.name} ({self.bounty})" } }` makes a pirate printable; do the same for `Crew`.
+// hint: For the crew, build the list of the pirates' texts and `join(", ")` it: `self.members.map((p: Pirate) => f"{p}")`.
+// hint: `join` needs `var self`, pushes to `self.members`; `total` walks the members adding their bounties into an `int64`.
+//
+// Build the Straw Hats! `main` is written; make it work by giving the types
+// what it uses:
+//
+// - `Pirate` printable as `Luffy (3000000000)` (an `impl Format`),
+// - `Crew` printable as `Straw Hats: ` and its members, separated by `, `,
+// - `crew.join(p)` adding a pirate, and `crew.total()` adding up the bounties.
+struct Pirate {
+    name: str,
+    bounty: int64,
+}
+
+struct Crew {
+    name: str,
+    members: [Pirate],
+}
+
+fun main() {
+    var crew = Crew { name: "Straw Hats", members: [] }
+    crew.join(Pirate { name: "Luffy", bounty: 3_000_000_000 })
+    crew.join(Pirate { name: "Zoro", bounty: 1_111_000_000 })
+    crew.join(Pirate { name: "Nami", bounty: 366_000_000 })
+    print(crew)
+    print(f"total {crew.total()} berries")
+    print("Sanji joins!")
+    crew.join(Pirate { name: "Sanji", bounty: 1_032_000_000 })
+    print(crew)
+    print(f"total {crew.total()} berries")
+}

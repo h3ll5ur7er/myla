@@ -1,0 +1,43 @@
+// title: The Mice
+// xp: 30
+// expect: The mice counted 42 questions
+// hint: Calling an actor's method waits for the actor: write `await` before it.
+// hint: `await lab.ask()` in `experiment`, and `await lab.total()` in `main`.
+//
+// The pan-dimensional mice run experiments in parallel, and all of them
+// record their questions in one `Lab`. Because `Lab` is an `actor`, its
+// methods run one at a time, so no question is lost, but calling one means
+// waiting your turn: `await lab.ask()`.
+//
+// The program doesn't compile: add the missing `await`s.
+import std.task as task
+
+actor Lab {
+    questions: int,
+}
+
+impl Lab {
+    fun ask(var self) {
+        self.questions += 1
+    }
+
+    fun total(self) -> int {
+        return self.questions
+    }
+}
+
+async fun experiment(lab: Lab, n: int) {
+    for i in 0..n {
+        lab.ask()
+    }
+}
+
+#main
+async fun main() {
+    let lab = Lab { questions: 0 }
+    async let a = experiment(lab, 20)
+    async let b = experiment(lab, 22)
+    await a
+    await b
+    print(f"The mice counted {lab.total()} questions")
+}

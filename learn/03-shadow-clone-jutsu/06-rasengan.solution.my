@@ -1,0 +1,23 @@
+#test(80, 3)[10]
+#test(7, 0)[7]
+fun compress(c: int, n: int) -> int {
+    var x = c
+    for i in 0..n {
+        x = x / 2
+    }
+    return x
+}
+
+#test(46)[42]
+#test(14)[18]
+fun rasengan(chakra: int) -> int {
+    return chakra |> spin |> compress(3) |> release
+}
+
+fun spin(c: int) -> int {
+    return c + 10
+}
+
+fun release(c: int) -> int {
+    return c * 6
+}

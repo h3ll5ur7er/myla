@@ -1,0 +1,18 @@
+#derive(Eq)
+enum UploadError {
+    Empty,
+    TooBig(int),
+}
+
+#test(500, 1000)[Ok(500)]
+#test(0, 1000)[Err(UploadError.Empty)]
+#test(1500, 1000)[Err(UploadError.TooBig(1500))]
+fun check_upload(size: int, limit: int) -> Result<int, UploadError> {
+    if size == 0 {
+        return Err(UploadError.Empty)
+    }
+    if size > limit {
+        return Err(UploadError.TooBig(size))
+    }
+    return Ok(size)
+}

@@ -1,0 +1,22 @@
+#test(["10", "20", "12"])[Ok(42)]
+#test(["10", "x2"])[Err("'x2' is not a size")]
+#test([])[Ok(0)]
+fun total_size(sizes: [str]) -> Result<int, str> {
+    var total = 0
+    for s in sizes {
+        total += parse_size(s)?
+    }
+    return Ok(total)
+}
+
+fun parse_size(s: str) -> Result<int, str> {
+    var n = 0
+    for c in s.chars() {
+        let d = match c.to_digit(10) {
+            Some(d) => d,
+            None => { return Err(f"'{s}' is not a size") },
+        }
+        n = n * 10 + d
+    }
+    return Ok(n)
+}

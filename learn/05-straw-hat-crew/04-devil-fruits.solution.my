@@ -1,0 +1,18 @@
+enum Fruit {
+    Gomu,
+    Mera,
+    Hie,
+}
+
+fun power(f: Fruit) -> str {
+    return match f {
+        Fruit.Gomu => "rubber",
+        Fruit.Mera => "fire",
+        Fruit.Hie => "ice",
+    }
+}
+
+#test()[["rubber", "fire", "ice"]]
+fun all_powers() -> [str] {
+    return [Fruit.Gomu, Fruit.Mera, Fruit.Hie].map((f: Fruit) => power(f))
+}

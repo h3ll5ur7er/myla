@@ -1,0 +1,14 @@
+// title: Measuring the Stones
+// xp: 20
+// hint: `xs.map(f)` makes a new list of `f(x)` for each `x`.
+// hint: `return stones.map((s: str) => s.len())`
+//
+// Wong catalogues the stones by the length of their names, for reasons known
+// only to the Ancient One. `lengths` should give the length of each name, in
+// order. `s.len()` is the length of the string `s`.
+#test(["Space", "Mind", "Reality"])[[5, 4, 7]]
+#test([])[[]]
+fun lengths(stones: [str]) -> [int] {
+    var out: [int] = []
+    return out
+}

@@ -1,0 +1,25 @@
+// title: The Log Pose
+// xp: 20
+// hint: A `match` must cover every possible value: add an arm for "anything else" with `_`.
+// hint: Several values can share an arm: `2 | 3 => "Whiskey Peak"`.
+//
+// A Log Pose points to the next island. Ours knows four:
+//
+// - 1: `"Reverse Mountain"`
+// - 2 and 3: `"Whiskey Peak"`
+// - 4: `"Little Garden"`
+// - anything else: `"uncharted"`
+//
+// `next_island` doesn't compile: the checker says the `match` misses cases.
+// Fix it.
+#test(1)["Reverse Mountain"]
+#test(3)["Whiskey Peak"]
+#test(4)["Little Garden"]
+#test(99)["uncharted"]
+fun next_island(log: int) -> str {
+    return match log {
+        1 => "Reverse Mountain",
+        2 => "Whiskey Peak",
+        4 => "Little Garden",
+    }
+}

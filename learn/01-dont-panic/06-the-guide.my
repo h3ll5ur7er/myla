@@ -1,0 +1,30 @@
+// title: The Guide (boss)
+// xp: 60
+// boss: true
+// expect: Earth: Mostly harmless.
+// expect: Distance: 42000 light years
+// expect: Towels needed: 3
+// hint: Each line is one `print` of an f-string. Start with the first one and run it.
+// hint: The distance is `light_years * 1000`. The towels: one per traveller, rounded up from `travellers` divided by `per_towel`... or simply `(travellers + per_towel - 1) / per_towel`.
+// hint: Integer division rounds down: `5 / 2` is `2`. Adding `per_towel - 1` first rounds up.
+//
+// Boss time! Write the Guide's entry for Earth. Using the values already in
+// `main`, make the program print exactly:
+//
+// ```
+// Earth: Mostly harmless.
+// Distance: 42000 light years
+// Towels needed: 3
+// ```
+//
+// The distance is `light_years` thousands of light years, and the towels are
+// enough for every traveller when each towel serves `per_towel` of them
+// (round up: half a towel is no towel).
+fun main() {
+    let planet = "Earth"
+    let entry = "Mostly harmless."
+    let light_years = 42
+    let travellers = 5
+    let per_towel = 2
+    // print the entry here
+}

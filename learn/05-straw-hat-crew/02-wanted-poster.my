@@ -1,0 +1,25 @@
+// title: Wanted Poster
+// xp: 20
+// hint: A method lives in an `impl Pirate { … }` block, and its first parameter is `self`.
+// hint: Move `poster` into `impl Pirate { fun poster(self) -> str { … } }` and use `self.name` and `self.bounty`.
+//
+// The Marines print wanted posters. `p.poster()` should give
+// `"WANTED: Luffy, 3000000000 berries"`, but `poster` is a free function, not
+// a method of `Pirate`, so `p.poster()` doesn't compile.
+//
+// Turn it into a method: put it in an `impl Pirate` block with `self`.
+struct Pirate {
+    name: str,
+    bounty: int64,
+}
+
+fun poster(p: Pirate) -> str {
+    return f"WANTED: {p.name}, {p.bounty} berries"
+}
+
+#test("Luffy", 3_000_000_000)["WANTED: Luffy, 3000000000 berries"]
+#test("Usopp", 500_000_000)["WANTED: Usopp, 500000000 berries"]
+fun wanted(name: str, bounty: int64) -> str {
+    let p = Pirate { name: name, bounty: bounty }
+    return p.poster()
+}

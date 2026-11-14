@@ -1,0 +1,39 @@
+// title: The Ultimate Question (boss)
+// xp: 150
+// boss: true
+// expect: Deep Thought splits the question into 6 parts...
+// expect: part 1: 7
+// expect: part 2: 7
+// expect: part 3: 7
+// expect: part 4: 7
+// expect: part 5: 7
+// expect: part 6: 7
+// expect: The Answer to the Ultimate Question of Life, the Universe, and Everything: 42
+// expect: {"answer":42,"parts":6,"question":"unknown"}
+// hint: Build a list of async closures, one per part: `var jobs: [async () -> int] = []` and `jobs.push(async () => await part(i))` (copy `i` into a `let` first).
+// hint: `await task.all(jobs)` runs them all in parallel and gives their results, in order.
+// hint: Print each result with its number, add them up, and encode a `Report` with `json.encode`. `#derive(Json)` writes the fields in their order.
+//
+// The final boss. Deep Thought computes the Answer in parallel:
+//
+// 1. Run `part(n)` for every part from 1 to 6, **all at once**: put an async
+//    closure for each in a list and give it to `task.all`, which waits for
+//    all of them and gives their results in order.
+// 2. Print each part's result, then the Answer (their sum).
+// 3. Print a JSON report: a struct `Report` with `answer`, `parts` and
+//    `question` (which nobody knows: `"unknown"`), encoded with `std.json`.
+//
+// Make the program print exactly the expected output. 42, of course.
+import std.task as task
+import std.json as json
+
+async fun part(n: int) -> int {
+    await task.sleep(10 * n)
+    return 7
+}
+
+#main
+async fun main() {
+    let parts = 6
+    print(f"Deep Thought splits the question into {parts} parts...")
+}

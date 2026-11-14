@@ -1,0 +1,23 @@
+// title: The Collatz Current
+// xp: 20
+// hint: The loop never ends because `n` never changes. Each round must give `n` its next value.
+// hint: Inside the loop: `if n % 2 == 0 { n = n / 2 } else { n = 3 * n + 1 }`, then count the step.
+//
+// A strange current flows through the Grand Line: from any island `n`, the
+// ship sails to `n / 2` when `n` is even, and to `3 * n + 1` when it is odd.
+// Sooner or later (as far as anybody knows) it reaches island 1.
+//
+// `steps(n)` should count the voyages from `n` to 1. Right now it loops for
+// ever (the editor stops it after 10 seconds). Make it sail.
+#test(1)[0]
+#test(2)[1]
+#test(6)[8]
+#test(27)[111]
+fun steps(start: int) -> int {
+    var n = start
+    var count = 0
+    while n != 1 {
+        count += 1
+    }
+    return count
+}

@@ -1,0 +1,24 @@
+// title: Stone Census
+// xp: 25
+// hint: `counts[s] = 1` forgets what was counted before. Read the old count first.
+// hint: `counts.get_or(s, 0)` is the count so far, 0 for a stone not seen yet: `counts[s] = counts.get_or(s, 0) + 1`.
+//
+// The Collector counts every stone sighting. `census` builds a map from a
+// stone's name to how often it was seen, but every count comes out as 1.
+//
+// Fix the counting. (`how_many` is only there for the tests: it looks one
+// stone up in the census.)
+#test(["Time", "Mind", "Time", "Time"], "Time")[3]
+#test(["Time", "Mind", "Time"], "Mind")[1]
+#test(["Time"], "Soul")[0]
+fun how_many(sightings: [str], stone: str) -> int {
+    return census(sightings).get_or(stone, 0)
+}
+
+fun census(sightings: [str]) -> [str: int] {
+    var counts: [str: int] = [:]
+    for s in sightings {
+        counts[s] = 1
+    }
+    return counts
+}

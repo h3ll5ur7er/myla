@@ -1,0 +1,16 @@
+// title: The Answer
+// xp: 10
+// expect: The answer is 42
+// hint: `6 + 7` is 13. Deep Thought used a different operator.
+// hint: Multiplication is `*`.
+//
+// After seven and a half million years, Deep Thought computed the Answer to the
+// Ultimate Question of Life, the Universe, and Everything. Unfortunately, this
+// copy of Deep Thought has a bug.
+//
+// Fix the computation so the program prints `The answer is 42`. The `f"…"`
+// string puts the value of `answer` where `{answer}` is.
+fun main() {
+    let answer = 6 + 7
+    print(f"The answer is {answer}")
+}

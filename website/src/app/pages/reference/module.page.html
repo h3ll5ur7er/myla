@@ -1,0 +1,143 @@
+<app-doc-layout [nav]="nav()" [toc]="toc()" [ready]="!!page.value()">
+  @if (page.value(); as p) {
+    <div class="crumbs"><a routerLink="/reference">Reference</a><span>/</span><span>{{ p.name }}</span></div>
+    <h1 class="title"><code>{{ p.name }}</code></h1>
+    @if (p.summary) {
+      <div class="lead prose" [innerHTML]="p.summary"></div>
+    }
+    <div class="meta">
+      @if (p.implicit) {
+        <span class="chip accent">implicit: no import needed</span>
+      } @else {
+        <span class="chip"><code>import {{ p.name }} as {{ p.slug }}</code></span>
+      }
+      <span class="chip">{{ p.items.length }} declaration{{ p.items.length === 1 ? '' : 's' }}</span>
+      <a class="chip" [href]="blob + '/' + p.source" target="_blank" rel="noopener">{{ p.source }} ↗</a>
+    </div>
+    @if (p.wiki; as w) {
+      <app-doc-content [html]="w.html" [examples]="w.examples" />
+    } @else if (p.moduleDoc) {
+      <pre class="module-doc">{{ p.moduleDoc }}</pre>
+    }
+
+    <h2 class="api-head" id="api">API</h2>
+    <div class="filter">
+      <input type="search" placeholder="Filter by name…" [value]="filter()" (input)="filter.set($any($event.target).value)" aria-label="Filter the API" />
+      <span class="chip">from {{ p.source }}, by the self-hosted parser</span>
+    </div>
+
+    @if (grouped(); as g) {
+      @if (g.types.length) {
+        <h3 class="kind-head" id="api-types">Types</h3>
+        @for (t of g.types; track t.item.id) {
+          <section class="item" [id]="t.item.id">
+            <div class="sig"><pre [innerHTML]="hl(t.item.signature)"></pre><a class="src" [href]="src(p, t.item.line)" target="_blank" rel="noopener">source</a></div>
+            <div class="body">
+              @if (t.item.doc) {
+                <div class="doc prose" [innerHTML]="t.item.doc"></div>
+              }
+              @if (t.item.members.length) {
+                <div class="members">
+                  @for (m of t.item.members; track $index) {
+                    <div class="member">
+                      <pre [innerHTML]="hl(m.signature)"></pre>
+                      @if (m.doc) {
+                        <div class="doc prose" [innerHTML]="m.doc"></div>
+                      }
+                    </div>
+                  }
+                </div>
+              }
+              @for (i of t.impls; track i.id) {
+                <div class="impl" [id]="i.id">
+                  <h4 class="impl-head"><span [innerHTML]="hl(i.signature)"></span></h4>
+                  @for (m of i.members; track $index) {
+                    <div class="member">
+                      <pre [innerHTML]="hl(m.signature)"></pre>
+                      @if (m.doc) {
+                        <div class="doc prose" [innerHTML]="m.doc"></div>
+                      }
+                      @if (m.tests.length) {
+                        <details class="tests"><summary>{{ m.tests.length }} example{{ m.tests.length === 1 ? '' : 's' }} (#test)</summary><pre [innerHTML]="hl(tests(m.tests))"></pre></details>
+                      }
+                    </div>
+                  }
+                </div>
+              }
+            </div>
+          </section>
+        }
+      }
+
+      @if (g.functions.length) {
+        <h3 class="kind-head" id="api-functions">Functions</h3>
+        @for (f of g.functions; track f.id) {
+          <section class="item" [id]="f.id">
+            <div class="sig"><pre [innerHTML]="hl(f.signature)"></pre><a class="src" [href]="src(p, f.line)" target="_blank" rel="noopener">source</a></div>
+            @if (f.doc || f.tests.length) {
+              <div class="body">
+                @if (f.doc) {
+                  <div class="doc prose" [innerHTML]="f.doc"></div>
+                }
+                @if (f.tests.length) {
+                  <details class="tests"><summary>{{ f.tests.length }} example{{ f.tests.length === 1 ? '' : 's' }} (#test)</summary><pre [innerHTML]="hl(tests(f.tests))"></pre></details>
+                }
+              </div>
+            }
+          </section>
+        }
+      }
+
+      @if (g.constants.length) {
+        <h3 class="kind-head" id="api-constants">Constants</h3>
+        @for (c of g.constants; track c.id) {
+          <section class="item" [id]="c.id">
+            <div class="sig"><pre [innerHTML]="hl(c.signature)"></pre><a class="src" [href]="src(p, c.line)" target="_blank" rel="noopener">source</a></div>
+            @if (c.doc) {
+              <div class="body"><div class="doc prose" [innerHTML]="c.doc"></div></div>
+            }
+          </section>
+        }
+      }
+
+      @if (g.foreign.length) {
+        <h3 class="kind-head" id="api-impls">On other types</h3>
+        @for (f of g.foreign; track f.target) {
+          <section class="item">
+            <div class="sig"><pre [innerHTML]="hl(f.target)"></pre></div>
+            <div class="body">
+              @for (i of f.impls; track i.id) {
+                <div class="impl" [id]="i.id">
+                  <h4 class="impl-head"><span [innerHTML]="hl(i.signature)"></span></h4>
+                  @if (i.doc) {
+                    <div class="doc prose" [innerHTML]="i.doc"></div>
+                  }
+                  @for (m of i.members; track $index) {
+                    <div class="member">
+                      <pre [innerHTML]="hl(m.signature)"></pre>
+                      @if (m.doc) {
+                        <div class="doc prose" [innerHTML]="m.doc"></div>
+                      }
+                      @if (m.tests.length) {
+                        <details class="tests"><summary>{{ m.tests.length }} example{{ m.tests.length === 1 ? '' : 's' }} (#test)</summary><pre [innerHTML]="hl(tests(m.tests))"></pre></details>
+                      }
+                    </div>
+                  }
+                </div>
+              }
+            </div>
+          </section>
+        }
+      }
+
+      @if (!g.types.length && !g.functions.length && !g.constants.length && !g.foreign.length) {
+        <p class="none">Nothing called “{{ filter() }}” here. Maybe in another module? Try the search (Ctrl+K).</p>
+      }
+    }
+  } @else if (page.value() === null) {
+    <h1>No such module</h1>
+    <p>There's no <code>std.{{ module() }}</code>. It may have been eaten by a Ravenous Bugblatter Beast of Traal. <a routerLink="/reference">All modules</a>.</p>
+  } @else {
+    <div class="skeleton"><i></i><i></i><i></i><i></i></div>
+  }
+</app-doc-layout>

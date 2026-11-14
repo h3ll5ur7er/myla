@@ -1,0 +1,305 @@
+:host {
+  display: block;
+  &.fill {
+    height: 100%;
+    .frame {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+    .code {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      max-height: none;
+    }
+    .output {
+      max-height: 40%;
+      overflow: auto;
+    }
+  }
+}
+
+.frame {
+  position: relative;
+  border: 1px solid var(--code-border);
+  border-radius: var(--radius);
+  background: var(--code-bg);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  &:focus-within {
+    border-color: var(--accent);
+    box-shadow: var(--glow);
+  }
+  &.busy::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 2px;
+    background: var(--gradient);
+    background-size: 200% 100%;
+    animation: slide 1.2s linear infinite;
+  }
+}
+
+@keyframes slide {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  white-space: nowrap;
+}
+
+// the toolbar fits the editor's own width, not the window's
+.frame {
+  container-type: inline-size;
+}
+
+@container (max-width: 620px) {
+  .lights,
+  .chip {
+    display: none;
+  }
+  .tool {
+    padding: 4px 6px;
+  }
+}
+
+@container (max-width: 440px) {
+  .file,
+  .tool.open {
+    display: none;
+  }
+}
+
+.lights {
+  display: inline-flex;
+  gap: 6px;
+  margin-right: 4px;
+  i {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ff5f57;
+    &:nth-child(2) {
+      background: #febc2e;
+    }
+    &:nth-child(3) {
+      background: #28c840;
+    }
+  }
+}
+
+.file {
+  font: 500 0.8rem var(--font-mono);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.chip {
+  font-size: 0.7rem;
+  padding: 0.1em 0.55em;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+  &.warn {
+    color: var(--amber);
+    border-color: color-mix(in srgb, var(--amber) 40%, transparent);
+  }
+}
+
+.spacer {
+  flex: 1;
+}
+
+.tool {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: 500 0.78rem var(--font-body);
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  &:hover {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
+}
+
+.run {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 999px;
+  padding: 5px 14px;
+  background: var(--gradient);
+  color: #fff;
+  font: 650 0.8rem var(--font-body);
+  cursor: pointer;
+  box-shadow: 0 4px 16px -6px rgba(139, 92, 246, 0.8);
+  transition: transform 0.12s ease, filter 0.12s ease;
+  &:hover {
+    transform: translateY(-1px);
+    filter: brightness(1.1);
+  }
+  &:disabled {
+    opacity: 0.6;
+    cursor: wait;
+  }
+  &.alt {
+    background: transparent;
+    color: var(--cyan);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cyan) 55%, transparent);
+  }
+}
+
+.code {
+  max-height: 560px;
+  overflow: auto;
+  min-height: 40px;
+}
+
+pre.static {
+  margin: 0;
+  padding: 14px 16px 14px 0;
+  font: 14px/1.6 var(--font-mono);
+  color: var(--code-text);
+  white-space: pre;
+  .ln {
+    display: inline-block;
+    width: 3.2em;
+    padding-right: 1em;
+    text-align: right;
+    color: var(--text-faint);
+    user-select: none;
+  }
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--cyan);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.output {
+  border-top: 1px solid var(--border);
+  background: var(--bg-sunken);
+  pre {
+    margin: 0;
+    padding: 10px 16px 14px;
+    font: 13px/1.55 var(--font-mono);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .stdout {
+    color: var(--code-text);
+  }
+  .stderr {
+    color: var(--red);
+  }
+  .empty {
+    color: var(--text-faint);
+    font-style: italic;
+  }
+}
+
+.out-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 4px 16px;
+  font-size: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.badge {
+  font-weight: 650;
+  color: var(--text-muted);
+  &.good {
+    color: var(--lime);
+  }
+  &.bad {
+    color: var(--red);
+  }
+}
+
+.time,
+.note {
+  color: var(--text-faint);
+}
+
+.expected {
+  margin: 0 16px 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  span {
+    display: block;
+    padding: 6px 12px 0;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-faint);
+  }
+  pre {
+    padding-top: 4px;
+    color: var(--lime);
+  }
+}
+
+.diag {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  padding: 6px 16px;
+  font-size: 0.85rem;
+  border-left: 3px solid var(--red);
+  margin: 4px 0 8px;
+  &.warning {
+    border-left-color: var(--amber);
+  }
+  .where {
+    font-family: var(--font-mono);
+    color: var(--text-faint);
+  }
+  .note-line {
+    grid-column: 2;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+  }
+}

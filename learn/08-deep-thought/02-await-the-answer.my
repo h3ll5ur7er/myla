@@ -1,0 +1,25 @@
+// title: Await the Answer
+// xp: 25
+// expect: Thinking...
+// expect: The answer is 42
+// hint: `ponder()` is an `async fun`: its result comes with `await ponder()`.
+// hint: A `main` that awaits is `async` and marked `#main`: `#main` above `async fun main()`.
+//
+// Deep Thought needs time to think: `ponder` is an `async` function that waits
+// a little before it answers. `main` calls it without waiting, and isn't
+// allowed to wait anyway.
+//
+// Make `main` an async entry point (`#main async fun main()`) and `await` the
+// answer.
+import std.task as task
+
+async fun ponder() -> int {
+    await task.sleep(10)
+    return 42
+}
+
+fun main() {
+    print("Thinking...")
+    let answer = ponder()
+    print(f"The answer is {answer}")
+}

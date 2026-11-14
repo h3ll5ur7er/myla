@@ -1,0 +1,30 @@
+// title: Suit Up
+// xp: 20
+// hint: `IronMan` is passed where a `Hero` is needed, but it doesn't implement `Hero`. Write `impl Hero for IronMan { … }`.
+// hint: `impl Hero for IronMan { fun catchphrase(self) -> str { return "I am Iron Man." } }`
+//
+// Every Avenger has a catchphrase. `Cap` already implements the `Hero`
+// trait; `IronMan` doesn't, so `shout(IronMan { mark: 85 })` doesn't
+// compile. Implement `Hero` for `IronMan`, whose catchphrase is
+// `"I am Iron Man."`.
+trait Hero {
+    fun catchphrase(self) -> str
+}
+
+struct Cap {}
+struct IronMan { mark: int }
+
+impl Hero for Cap {
+    fun catchphrase(self) -> str {
+        return "I can do this all day."
+    }
+}
+
+fun shout<H: Hero>(h: H) -> str {
+    return h.catchphrase()
+}
+
+#test()[["I can do this all day.", "I am Iron Man."]]
+fun lines() -> [str] {
+    return [shout(Cap {}), shout(IronMan { mark: 85 })]
+}

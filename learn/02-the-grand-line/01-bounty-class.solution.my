@@ -1,0 +1,12 @@
+#test(30_000_000)["rookie"]
+#test(300_000_000)["supernova"]
+#test(3_000_000_000)["emperor"]
+#test(1_000_000_000)["emperor"]
+fun bounty_class(berries: int64) -> str {
+    if berries < 100_000_000 {
+        return "rookie"
+    } else if berries < 1_000_000_000 {
+        return "supernova"
+    }
+    return "emperor"
+}
