@@ -15,7 +15,7 @@ function watchErrors(page: Page): string[] {
 }
 
 const PAGES: [string, RegExp][] = [
-  ['', /compiles itself/],
+  ['', /no hidden machinery/],
   ['quickstart', /Hello, Universe/],
   ['download', /Get Myla/],
   ['docs', /The Myla language/],

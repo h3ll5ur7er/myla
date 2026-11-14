@@ -11,7 +11,7 @@ import { footerLine } from '../core/lore';
       <div class="container cols">
         <div class="about">
           <a class="brand" routerLink="/"><img src="favicon.svg" alt="" width="26" height="26" /> Myla</a>
-          <p>A small, statically typed language with value semantics, whose compiler is written in Myla and compiles itself.</p>
+          <p>A statically typed language with value semantics and no hidden machinery: no implicit conversions, no garbage collector, no libc.</p>
           <p class="quip">{{ line }}</p>
         </div>
         <div>

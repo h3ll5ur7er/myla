@@ -1,7 +1,7 @@
 import { Routes } from '@angular/router';
 
 export const routes: Routes = [
-  { path: '', loadComponent: () => import('./pages/home/home.page').then((m) => m.HomePage), title: "Myla — a language that compiles itself. Don't panic." },
+  { path: '', loadComponent: () => import('./pages/home/home.page').then((m) => m.HomePage), title: 'Myla — a smart language with no hidden machinery' },
   { path: 'quickstart', loadComponent: () => import('./pages/quickstart/quickstart.page').then((m) => m.QuickstartPage), title: 'Quickstart · Myla' },
   { path: 'download', loadComponent: () => import('./pages/download/download.page').then((m) => m.DownloadPage), title: 'Download · Myla' },
   { path: 'docs', loadComponent: () => import('./pages/docs/docs.page').then((m) => m.DocsPage) },
