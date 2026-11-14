@@ -20,7 +20,7 @@ fun main() {
 | `write(fd: int32, s: str) -> Result<(), IoError>` | Writes the bytes of `s` to file descriptor `fd`, all of them, or the error that stopped it (D146); a pipe nobody reads any more is `BrokenPipe` |
 | `println(s)` | `s` and a newline to stdout |
 | `eprint(s)`, `eprintln(s)` | To stderr, without / with a newline |
-| `errno_text(code: int32) -> str` | The `<cause>` of `write failed: <cause>` below, for the errno of a failed write: `errno_text(28)` is `"no space left on device"`, an errno it doesn't name `"errno 77"` |
+| `errno_text(code: int32) -> str` | The `<cause>` of `write failed: <cause>` below, for the cause code (`__io_errno()`'s, D208) of a failed write: ENOSPC's (`256 + 28`) is `"no space left on device"`, a handle that isn't open `"bad file descriptor"`, one it doesn't name `"errno 77"` (the number std.ioerror's `code_number` gives) |
 
 Output isn't buffered: what a program wrote is out before it waits for input.
 

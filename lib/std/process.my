@@ -2,7 +2,7 @@
 // environment, termination, and child processes (D73, D129, D147).
 
 from .io import Read, Write, Pollable, buffered
-from .ioerror import IoError, from_errno
+from .ioerror import IoError, from_cause, code_number, NOT_FOUND, PERMISSION_DENIED, UNSUPPORTED, CANCELLED, INVALID_INPUT, BAD_HANDLE
 import .bytes as bytes_m
 
 // The process command-line arguments, captured at startup. `args()[0]` is the
@@ -59,8 +59,9 @@ pub struct Output {
 // `InvalidInput`: what no process can take, such as an environment variable
 // name with `=` in it (D160) or a NUL byte in the program's name, an
 // argument or the directory; `WorkingDir`: the directory `cwd` gave can't
-// be entered, its errno (2 not there, 20 not a directory, 13 denied); `Other`
-// holds the platform's own code for anything else.
+// be entered, with the number of why (Linux's errno on every target, D189,
+// D208: 2 not there, 20 not a directory, 13 denied); `Other` holds the
+// platform's own code for anything else.
 #derive(Eq)
 pub enum SpawnError {
     NotFound,
@@ -97,7 +98,7 @@ impl Format for SpawnError {
     }
 }
 
-// What a `WorkingDir` says, by its errno.
+// What a `WorkingDir` says, by its number.
 #test(20)["working directory is not a directory"]
 #test(13)["working directory: permission denied"]
 fun dir_message(code: int32) -> str {
@@ -113,27 +114,33 @@ fun dir_message(code: int32) -> str {
     return f"could not enter the working directory: errno {code}"
 }
 
-// What std.platform adds to the errno of a directory the child couldn't
-// enter, to tell it from the program's.
-const DIR_FAILED: int32 = 4096
+// What std.platform adds to the cause of a directory the child couldn't
+// enter, to tell it from the program's (its DIR_FAILED, past every cause
+// code; tests/burn/test_platform_interface.py holds them to one value).
+const DIR_FAILED: int32 = 65536
 
-// The cause of a (nonzero) spawn error code (Linux's numbers, as from
-// `std.platform`).
-#test(2)[SpawnError.NotFound]
-#test(38)[SpawnError.Unsupported]
-#test(12)[SpawnError.Other(12)]
-#test(22)[SpawnError.InvalidInput]
-#test(4098)[SpawnError.WorkingDir(2)]
-fun spawn_error_from_errno(code: int32) -> SpawnError {
+// The error of a (nonzero) spawn's cause code (std.ioerror's, D208).
+#test(1)[SpawnError.NotFound]
+#test(2)[SpawnError.PermissionDenied]
+#test(9)[SpawnError.Unsupported]
+#test(8)[SpawnError.Cancelled]
+#test(268)[SpawnError.Other(12)]
+#test(32)[SpawnError.Other(11)]
+#test(11)[SpawnError.InvalidInput]
+#test(65537)[SpawnError.WorkingDir(2)]
+#test(65540)[SpawnError.WorkingDir(20)]
+#test(65538)[SpawnError.WorkingDir(13)]
+#test(65797)[SpawnError.WorkingDir(5)]
+fun spawn_error_from_cause(code: int32) -> SpawnError {
     if code >= DIR_FAILED {
-        return SpawnError.WorkingDir(code - DIR_FAILED)
+        return SpawnError.WorkingDir(code_number(code - DIR_FAILED))
     }
-    if code == 2 { return SpawnError.NotFound }
-    if code == 13 || code == 1 { return SpawnError.PermissionDenied }
-    if code == 38 { return SpawnError.Unsupported }
-    if code == 125 { return SpawnError.Cancelled }
-    if code == 22 { return SpawnError.InvalidInput }
-    return SpawnError.Other(code)
+    if code == NOT_FOUND { return SpawnError.NotFound }
+    if code == PERMISSION_DENIED { return SpawnError.PermissionDenied }
+    if code == UNSUPPORTED { return SpawnError.Unsupported }
+    if code == CANCELLED { return SpawnError.Cancelled }
+    if code == INVALID_INPUT { return SpawnError.InvalidInput }
+    return SpawnError.Other(code_number(code))
 }
 
 // Spawn `program` with the complete argument vector `argv` (argv[0] included),
@@ -145,7 +152,7 @@ fun collect(program: str, argv: [str], opts: [str]) -> Result<Output, SpawnError
     let out = __run_with(program, argv, opts)
     let err = __run_errno()
     if err != 0 {
-        return Err(spawn_error_from_errno(err))
+        return Err(spawn_error_from_cause(err))
     }
     let errbuf = __run_stderr()
     let sig = __run_signal()
@@ -223,7 +230,7 @@ async fun collect_async(program: str, argv: [str], opts: [str]) -> Result<Output
     }
     let h = __spawn_with(program, argv, opts)
     if h[0] != 0 {
-        return Err(spawn_error_from_errno(h[0]))
+        return Err(spawn_error_from_cause(h[0]))
     }
     let pid = h[1]
     var out: [uint8] = []
@@ -604,8 +611,6 @@ const PIPE_CHUNK: int32 = 65536
 // Linux's 4096), which `ChildStdin.write_async` writes at a time.
 const PIPE_BUF: int32 = 4096
 
-// EBADF: what a stream that was closed gives.
-const CLOSED: int32 = 9
 
 // The least handle std.rt gives (D181): a child's streams and its pidfd are
 // handles, a smaller number a descriptor's own, which only a value built
@@ -617,7 +622,7 @@ const HANDLE_MIN: int32 = 8388608
 // hand is `Other(9)` (EBADF).
 fun read_fd(fd: int32, n: int32) -> Result<[uint8], IoError> {
     if fd < HANDLE_MIN {
-        return Err(from_errno(CLOSED))
+        return Err(from_cause(BAD_HANDLE))
     }
     if n <= 0 {
         return Ok([])
@@ -625,7 +630,7 @@ fun read_fd(fd: int32, n: int32) -> Result<[uint8], IoError> {
     let chunk = __read_bytes(fd, n)
     let err = __io_errno()
     if err != 0 {
-        return Err(from_errno(err))
+        return Err(from_cause(err))
     }
     return Ok(chunk)
 }
@@ -633,12 +638,12 @@ fun read_fd(fd: int32, n: int32) -> Result<[uint8], IoError> {
 // All of `b` written to `fd`: its length, or why not.
 fun write_fd(fd: int32, b: [uint8]) -> Result<int, IoError> {
     if fd < HANDLE_MIN {
-        return Err(from_errno(CLOSED))
+        return Err(from_cause(BAD_HANDLE))
     }
     __write_bytes(fd, b)
     let err = __io_errno()
     if err != 0 {
-        return Err(from_errno(err))
+        return Err(from_cause(err))
     }
     return Ok(b.len())
 }
@@ -646,12 +651,12 @@ fun write_fd(fd: int32, b: [uint8]) -> Result<int, IoError> {
 // `fd` closed, or why not (one closed already: EBADF).
 fun close_fd(fd: int32) -> Result<(), IoError> {
     if fd < HANDLE_MIN {
-        return Err(from_errno(CLOSED))
+        return Err(from_cause(BAD_HANDLE))
     }
     __close(fd)
     let err = __io_errno()
     if err != 0 {
-        return Err(from_errno(err))
+        return Err(from_cause(err))
     }
     return Ok(())
 }
@@ -698,7 +703,7 @@ impl Write for ChildStdin {
     // Nothing to do: nothing is buffered.
     fun flush(var self) -> Result<(), IoError> {
         if self.fd < 0 {
-            return Err(from_errno(CLOSED))
+            return Err(from_cause(BAD_HANDLE))
         }
         return Ok(())
     }
@@ -719,7 +724,7 @@ impl ChildStdin {
     // bytes before the piece it waited for written.
     async fun write_async(var self, b: [uint8]) -> Result<int, IoError> {
         if self.fd < 0 {
-            return Err(from_errno(CLOSED))
+            return Err(from_cause(BAD_HANDLE))
         }
         var at = 0
         while at < b.len() {
@@ -877,7 +882,7 @@ impl Child {
             let err = __io_errno()
             if err != 0 {
                 self.forget_exited()
-                return Err(from_errno(err))
+                return Err(from_cause(err))
             }
             return Ok(None)
         }
@@ -933,7 +938,7 @@ impl Child {
         __kill(self.pid, 9)
         let err = __io_errno()
         if err != 0 {
-            return Err(from_errno(err))
+            return Err(from_cause(err))
         }
         return Ok(())
     }
@@ -987,7 +992,7 @@ impl Child {
             if e != 0 {
                 if ofd >= 0 { __close(ofd) }
                 if efd >= 0 { __close(efd) }
-                return Err(from_errno(e))
+                return Err(from_cause(e))
             }
             if chunk.len() == 0 {
                 __close(fd)
@@ -1079,7 +1084,7 @@ impl Child {
                         if efd >= 0 { __close(efd) }
                         self.stdout = None
                         self.stderr = None
-                        return Err(from_errno(e))
+                        return Err(from_cause(e))
                     }
                     if chunk.len() == 0 {
                         __close(fd)
@@ -1128,7 +1133,7 @@ impl Command {
         }
         let h = __spawn_piped(self.program, self.argv, opts)
         if h[0] != 0 {
-            return Err(spawn_error_from_errno(h[0]))
+            return Err(spawn_error_from_cause(h[0]))
         }
         return Ok(child_of(h))
     }
@@ -1169,7 +1174,7 @@ struct Collected {
 
 impl Collected {
     // One read from descriptor `k` if it has bytes or has ended, waiting up
-    // to `ms` milliseconds: whether it had (or the errno).
+    // to `ms` milliseconds: whether it had (or the cause code).
     fun pull(var self, k: int, ms: int) -> Result<bool, int32> {
         let fd = self.fds[k]
         if fd < 0 || __poll(fd, ms) == 0 {
@@ -1289,7 +1294,7 @@ impl Pipeline {
         let sa = a.wait()
         let sb = b.wait()
         if failed != 0 {
-            return Err(SpawnError.Other(failed))
+            return Err(SpawnError.Other(code_number(failed)))
         }
         let none: [uint8] = []
         let first = Output { stdout: none, stderr: bytes_m.from_str(got.texts[1].build()), status: wait_status(sa) }

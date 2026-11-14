@@ -1464,7 +1464,9 @@ class Warnings(unittest.TestCase):
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class Primitives(unittest.TestCase):
     """The primitives directly: what a port to another system must give
-    (docs/Language/Standard-library/Net.md)."""
+    (docs/Language/Standard-library/Net.md). `__io_errno` gives the cause
+    codes of std.ioerror (D208): 32 would block, 33 a connect in progress, 11
+    invalid input, 9 unsupported, 34 a handle that isn't open."""
 
     PROGRAM = """#allow(primitive)
 fun e(r: int) -> str {
@@ -1485,7 +1487,7 @@ fun main() {
     let c = __sock_open(4, 1)
     print(e(__sock_set_nonblocking(c, 1)))
     let r = __sock_connect(c, me)
-    print(r == 0 || __io_errno() == 115)
+    print(r == 0 || __io_errno() == 33)
     print(__sock_poll(c, 2, 1000))
     print(e(__sock_error(c)))
     let s = __sock_accept(l)
@@ -1524,7 +1526,7 @@ fun main() {
 0 0
 7 4 127 1
 0 0
--1 11
+-1 32
 0 0
 0 0
 true
@@ -1535,24 +1537,24 @@ true
 1
 ello
 0 0
-0 11
+0 32
 7 0
 0 0
--1 22
+-1 11
 0 0
 1
 0 0
--1 22
+-1 11
 0 0
 0 0
 0 0
--1 97
--1 22
 -1 9
--1 22
+-1 11
+-1 34
+-1 11
 0 0
 0 0
-0 11
+0 32
 5 0
 22 4 dgr
 0 0

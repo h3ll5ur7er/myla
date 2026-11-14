@@ -34,7 +34,7 @@ macOS and Windows would do the same again.
   - an error as a cause ([[MYLA-190]], D113), with an "unsupported on this target" cause;
   - processes, the poller, parking and the clock as operations a target may lack.
 
-  `std.rt` and std above it adapted.
+  `std.rt` and std above it adapted. [[MYLA-701]] did all but the poller, parking and the clock ([[MYLA-716]]).
 - [ ] One Linux layer with each architecture's system-call numbers in a table
-- [ ] A test that every platform module offers the same functions with the same types
+- [x] A test that every platform module offers the same functions with the same types ([[MYLA-701]]: `tests/burn/test_platform_interface.py`)
 - [ ] Choosing the module per target through [[MYLA-245]]'s code per target, replacing the loader's text substitution (`for_target`)

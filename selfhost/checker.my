@@ -10784,10 +10784,11 @@ impl Checker {
         // `__copy_bytes(dst, src, n)` and `__equal_bytes(p, q, n)` (a bulk
         // copy and comparison each backend does natively), `__free(p)`; and
         // Linux's platform layer: `__syscall(n, a, b, c)` (the result, a
-        // negative errno on a failure), `__set_io_errno(e)` and `__environ()`
+        // negative errno on a failure, which std.platform maps to a cause
+        // code, D208), `__set_io_errno(e)` (a cause code) and `__environ()`
         // (the environment the process started with: the address of its
         // NUL-terminated `name=value` strings' addresses, a null one last);
-        // `__set_run_status(exit, signal, errno)` and `__set_run_stderr(bytes)`
+        // `__set_run_status(exit, signal, cause)` and `__set_run_stderr(bytes)`
         // (what `__run_exit_code`, `__run_signal`, `__run_errno` and
         // `__run_stderr` give next); `__argv()` (the program's arguments: the
         // address of their C strings' addresses, a null one last);
@@ -10961,7 +10962,7 @@ impl Checker {
             return Ok(Some(Type.TList(t_byte())))
         }
         // a child started and not waited for (D124, `std.process.run_async`):
-        // `[errno, pid, out, err, exited]`; then reaped (its exit code, or
+        // `[cause, pid, out, err, exited]`; then reaped (its exit code, or
         // minus its signal), signalled, its descriptors closed
         if name == "__spawn" {
             if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__spawn() takes (program: str, argv: [str])")) }
