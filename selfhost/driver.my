@@ -3,18 +3,18 @@
 // by the file commands (main.my) and the project commands (project_cmd.my,
 // MYLA-94).
 //
-// `build` type-checks and generates x86-64 assembly (with `debug`, DWARF debug
-// information for gdb: line tables and variables, MYLA-71, MYLA-66), writes it
-// to `<out>.s`, then shells out to the system assembler and linker (`as`/`ld`,
-// found on PATH, D147) to produce the executable
-// `<out>`, and removes the intermediate files.
+// `build` type-checks and generates the target's assembly (with `debug`,
+// DWARF debug information for gdb: line tables and variables, MYLA-71,
+// MYLA-66), writes it to `<out>.s`, then runs the assembler and linker the
+// target's record names (target.my, MYLA-700; found on PATH, D147) to
+// produce the executable `<out>`, and removes the intermediate files.
 
 from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
-from std.platform import TARGET
-from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports, in_stdlib, target_platform_file, normalize, is_std_module, std_tree_root
+from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports, in_stdlib, normalize, is_std_module, std_tree_root
 from .stdroot import EMBEDDED_ROOT
+from .target import Target, parse_target, host, toolchain, with_files, missing_tool, unsupported
 from .diag import render, Report
 from .checker import build_checker_lazy, Checker, CheckErr
 from .codegen import new_codegen
@@ -61,16 +61,17 @@ pub fun load_and_check(entry: str, given: LoadOptions) -> Result<Checked, str> {
 
 // Type-check `file`, then generate its assembly for `target` (`debug`: with DWARF
 // debug information, MYLA-71, MYLA-66; `checked`: integer overflow traps,
-// D175).
-fun compile_asm(entry: str, given: LoadOptions, debug: bool, checked: bool, target: str) -> Result<str, str> {
+// D175). A target the compiler doesn't build for yet is refused first.
+fun compile_asm(entry: str, given: LoadOptions, debug: bool, checked: bool, target: Target) -> Result<str, str> {
+    let refused = unsupported(target)
+    if refused != "" { return Err("myla: " + refused) }
     let (file, opts) = own_library(entry, given)
     var native = for_target(opts, target)
     native.runtime = true
     let ch = load_and_check(file, native)?
     var g = new_codegen(ch.checker)
-    if target != "x86_64-linux" && debug { return Err(format("myla: -g is not supported for {} yet", target)) }
-    if target == "aarch64-linux" { g.a64 = true }
-    if target == "wasm32-wasi" { g.wasm = true }
+    if debug && !target.debug_info { return Err(format("myla: -g is not supported for {} yet", target.name)) }
+    g.set_target(target)
     g.checked = checked
     g.set_sources(ch.prog.spans, ch.prog.next_id)
     if debug { g.enable_debug_info(read_gdb_script(opts.stdlib_root)) }
@@ -161,7 +162,7 @@ pub fun cmd_test(file: str, opts: LoadOptions, sel: TestOptions) -> int32 {
 // `myla test <file> --native [--target <t>]`: the file's own cases run
 // natively through a harness (harness.my, D162, MYLA-307), the report the
 // interpreter's; the exit status.
-pub fun cmd_test_native(file: str, opts: LoadOptions, sel: TestOptions, target: str) -> int32 {
+pub fun cmd_test_native(file: str, opts: LoadOptions, sel: TestOptions, target: Target) -> int32 {
     let r = match native_tests(file, opts, sel, target) {
         Ok(r) => r,
         Err(e) => {
@@ -188,12 +189,15 @@ pub fun cmd_test_native(file: str, opts: LoadOptions, sel: TestOptions, target: 
 // MYLA_EMULATOR names, or qemu-aarch64, for another target), its report
 // read back. A harness that ends before its summary (no child processes
 // there: a failure ended the run) reports the case it stopped at with the
-// error, and the rest as not run. On wasm32, where the harness can start
-// no process, the runs are this process's (`resumed_tests`, MYLA-370).
-pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, target: str) -> Result<TestRun, str> {
+// error, and the rest as not run. Where the harness can start no process
+// (wasm32), the runs are this process's (`resumed_tests`, MYLA-370). A
+// target the compiler doesn't build for yet is refused first.
+pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, target: Target) -> Result<TestRun, str> {
+    let refused = unsupported(target)
+    if refused != "" { return Err("myla: " + refused) }
     let (file, opts) = own_library(given_file, given)
-    if hosts_platform(file, opts.stdlib_root, target) {
-        return Err(format("myla: {} is std.platform for {}; for {} it is {}/std/{}, whose cases run there", file, TARGET, target, opts.stdlib_root, target_platform_file(target)))
+    if hosts_platform(file, opts.stdlib_root, target.platform_file) {
+        return Err(format("myla: {} is std.platform for {}; for {} it is {}/std/{}, whose cases run there", file, host().name, target.name, opts.stdlib_root, target.platform_file))
     }
     // the runtime is every native program's, a harness's too, which can't
     // hold it a second time (MYLA-547)
@@ -216,15 +220,15 @@ pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, targ
         Ok(()) => {},
         Err(e) => { return Err("myla: cannot create " + dir) },
     }
-    let out = dir + "/harness"
+    let out = dir + "/harness" + target.exe_suffix
     var nopts = opts
     // the target's own platform module is its `std.platform`, which the
     // harness imports too (through std.test): built as that module, with
     // the harness in it, it is loaded once (MYLA-397), the harness keyed
     // where `for_target` reads the module, however the file and the root
     // are written (S3)
-    let entry = harness_entry(file, opts.stdlib_root, target)
-    if entry != file { nopts.overrides[opts.stdlib_root + "/std/" + target_platform_file(target)] = h.source }
+    let entry = harness_entry(file, opts.stdlib_root, target.platform_file)
+    if entry != file { nopts.overrides[opts.stdlib_root + "/std/" + target.platform_file] = h.source }
     else { nopts.overrides[file] = h.source }
     // built checked: overflow traps under `myla test`, natively too (D175)
     if cmd_build(entry, out, nopts, false, true, target) != 0 {
@@ -240,7 +244,7 @@ pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, targ
         rest.push(argv[i])
         i = i + 1
     }
-    if target == "wasm32-wasi" {
+    if !target.spawns {
         let r = resumed_tests(h, argv[0], rest, sel.program, dir)
         let gone = remove_dir_all(dir)
         return r
@@ -261,32 +265,31 @@ pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, targ
     return Ok(harness_report(h, decode(o.stdout), err, code))
 }
 
-// The file a harness of `file`'s cases is built from for `target`: the
-// standard library's `std/platform.my` when `file` is the target's own
-// platform module (`for_target` gives that path `file`'s text, the harness
-// here), else `file` (MYLA-397).
-#test("lib/std/platform_wasm.my", "lib", "wasm32-wasi")["lib/std/platform.my"]
-#test("lib/./std/platform_aarch64.my", "lib", "aarch64-linux")["lib/std/platform.my"]
-#test("lib/std/platform_wasm.my", "lib", "aarch64-linux")["lib/std/platform_wasm.my"]
-#test("lib/std/platform.my", "lib", "x86_64-linux")["lib/std/platform.my"]
-#test("lib/std/platform_wasm.my", "", "wasm32-wasi")["lib/std/platform_wasm.my"]
-#test("tests/platform_wasm.my", "lib", "wasm32-wasi")["tests/platform_wasm.my"]
-fun harness_entry(file: str, stdlib_root: str, target: str) -> str {
-    let own = target_platform_file(target)
+// The file a harness of `file`'s cases is built from for a target whose
+// platform module is `std/<own>` ("": `std/platform.my`): the standard
+// library's `std/platform.my` when `file` is that module (`for_target`
+// gives that path `file`'s text, the harness here), else `file` (MYLA-397).
+#test("lib/std/platform_wasm.my", "lib", "platform_wasm.my")["lib/std/platform.my"]
+#test("lib/./std/platform_aarch64.my", "lib", "platform_aarch64.my")["lib/std/platform.my"]
+#test("lib/std/platform_wasm.my", "lib", "platform_aarch64.my")["lib/std/platform_wasm.my"]
+#test("lib/std/platform.my", "lib", "")["lib/std/platform.my"]
+#test("lib/std/platform_wasm.my", "", "platform_wasm.my")["lib/std/platform_wasm.my"]
+#test("tests/platform_wasm.my", "lib", "platform_wasm.my")["tests/platform_wasm.my"]
+fun harness_entry(file: str, stdlib_root: str, own: str) -> str {
     if own == "" || stdlib_root == "" { return file }
     if absolute(file) != absolute(stdlib_root + "/std/" + own) { return file }
     return stdlib_root + "/std/platform.my"
 }
 
 // Whether `file` is the host's own platform module, `std/platform.my`,
-// tested for a target with one of its own, which takes that module's place
-// there (`for_target`).
-#test("lib/std/platform.my", "lib", "wasm32-wasi")[true]
-#test("lib/./std/platform.my", "lib/", "aarch64-linux")[true]
-#test("lib/std/platform.my", "lib", "x86_64-linux")[false]
-#test("lib/std/platform_wasm.my", "lib", "wasm32-wasi")[false]
-fun hosts_platform(file: str, stdlib_root: str, target: str) -> bool {
-    if target_platform_file(target) == "" || stdlib_root == "" { return false }
+// tested for a target with one of its own, `std/<own>`, which takes that
+// module's place there (`for_target`).
+#test("lib/std/platform.my", "lib", "platform_wasm.my")[true]
+#test("lib/./std/platform.my", "lib/", "platform_aarch64.my")[true]
+#test("lib/std/platform.my", "lib", "")[false]
+#test("lib/std/platform_wasm.my", "lib", "platform_wasm.my")[false]
+fun hosts_platform(file: str, stdlib_root: str, own: str) -> bool {
+    if own == "" || stdlib_root == "" { return false }
     return absolute(file) == absolute(stdlib_root + "/std/platform.my")
 }
 
@@ -353,16 +356,20 @@ fun resumed_tests(h: Harness, exe: str, lead: [str], program: str, dir: str) -> 
 }
 
 // The command the harness runs under: none for this machine's target, else
-// MYLA_EMULATOR's words, else qemu-aarch64 for aarch64 Linux.
-#test("x86_64-linux")[[]]
-pub fun emulator(target: str) -> [str] {
-    if target == TARGET { return [] }
+// MYLA_EMULATOR's words, else the target's own (qemu-aarch64 for aarch64
+// Linux; none for wasm32).
+pub fun emulator(target: Target) -> [str] {
+    if target.name == host().name { return [] }
     match env("MYLA_EMULATOR") {
         Some(words) => { if words != "" { return split_words(words) } },
         None => {},
     }
-    if target == "aarch64-linux" { return ["qemu-aarch64"] }
-    return []
+    return target.emulator
+}
+
+#test
+fun the_host_needs_no_emulator() {
+    assert(emulator(host()).len() == 0, "the host's own programs run as they are")
 }
 
 #test(["node", "run.mjs"])["node run.mjs"]
@@ -515,43 +522,35 @@ fun removed(path: str) -> bool {
 
 // The assembler's and the linker's command lines for `target` (the
 // assembly `asm`, the object `obj`, the program `out`) on a host whose own
-// target is `host` (the toolchain's, `std.platform.TARGET`): the host's GNU
+// target is `host` (the toolchain's, `target.host()`): the tools the
+// target's record names for that host (`target.toolchain`), the host's GNU
 // `as` and `ld` for its own Linux target, as the bootstrap uses them; clang
 // and lld for another Linux target (MYLA-163) and for wasm32-wasi (a module
-// for a WASI host such as tools/wasm/run.mjs, MYLA-158; MYLA-276).
-#test("x86_64-linux", "x86_64-linux", "a.s", "a.o", "a")[(["as", "--64", "-o", "a.o", "a.s"], ["ld", "-o", "a", "a.o"])]
-#test("aarch64-linux", "aarch64-linux", "a.s", "a.o", "a")[(["as", "-o", "a.o", "a.s"], ["ld", "-o", "a", "a.o"])]
-#test("aarch64-linux", "x86_64-linux", "a.s", "a.o", "a")[(["clang", "--target=aarch64-linux-gnu", "-c", "-o", "a.o", "a.s"], ["ld.lld", "-static", "-o", "a", "a.o"])]
-#test("x86_64-linux", "aarch64-linux", "a.s", "a.o", "a")[(["clang", "--target=x86_64-linux-gnu", "-c", "-o", "a.o", "a.s"], ["ld.lld", "-static", "-o", "a", "a.o"])]
-pub fun build_commands(target: str, host: str, asm: str, obj: str, out: str) -> ([str], [str]) {
-    if target == "wasm32-wasi" {
-        // the stack below the data, so running out of it can't overwrite
-        // the data (MYLA-261)
-        return (["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext", "-c", "-o", obj, asm],
-                ["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", out, obj])
-    }
-    if target == host {
-        if target == "x86_64-linux" {
-            return (["as", "--64", "-o", obj, asm], ["ld", "-o", out, obj])
-        }
-        return (["as", "-o", obj, asm], ["ld", "-o", out, obj])
-    }
-    let triple = if target == "aarch64-linux" { "aarch64-linux-gnu" } else { "x86_64-linux-gnu" }
-    return (["clang", "--target=" + triple, "-c", "-o", obj, asm], ["ld.lld", "-static", "-o", out, obj])
+// for a WASI host such as tools/wasm/run.mjs, MYLA-158; MYLA-276). Windows'
+// import libraries (`Toolchain.imports`) come with its first programs
+// (MYLA-702).
+pub fun build_commands(target: Target, host: Target, asm: str, obj: str, out: str) -> ([str], [str]) {
+    let tools = toolchain(target, host)
+    let files = ["asm": asm, "obj": obj, "out": out]
+    return (with_files(tools.assemble, files), with_files(tools.link, files))
 }
 
-// What a failed step says: that its tool is missing when it isn't on PATH,
-// and what building for `target` needs.
-#test("clang", "aarch64-linux", "x86_64-linux")["myla: 'clang' was not found: building for aarch64-linux here needs clang and ld.lld"]
-#test("as", "x86_64-linux", "x86_64-linux")["myla: 'as' was not found: building for x86_64-linux here needs GNU as and ld (binutils)"]
-pub fun missing_tool(tool: str, target: str, host: str) -> str {
-    var needs = "clang and ld.lld"
-    if target == "wasm32-wasi" { needs = "clang and wasm-ld" } else if target == host { needs = "GNU as and ld (binutils)" }
-    return format("myla: '{}' was not found: building for {} here needs {}", tool, target, needs)
+#test
+fun each_target_has_its_tools() {
+    let x86 = parse_target("x86_64-linux").expect("x86_64-linux")
+    let a64 = parse_target("aarch64-linux").expect("aarch64-linux")
+    let wasm = parse_target("wasm32-wasi").expect("wasm32-wasi")
+    assert(build_commands(x86, x86, "a.s", "a.o", "a") == (["as", "--64", "-o", "a.o", "a.s"], ["ld", "-o", "a", "a.o"]), "x86-64 on x86-64")
+    assert(build_commands(a64, a64, "a.s", "a.o", "a") == (["as", "-o", "a.o", "a.s"], ["ld", "-o", "a", "a.o"]), "aarch64 on aarch64")
+    assert(build_commands(a64, x86, "a.s", "a.o", "a") == (["clang", "--target=aarch64-linux-gnu", "-c", "-o", "a.o", "a.s"], ["ld.lld", "-static", "-o", "a", "a.o"]), "aarch64 on x86-64")
+    assert(build_commands(x86, a64, "a.s", "a.o", "a") == (["clang", "--target=x86_64-linux-gnu", "-c", "-o", "a.o", "a.s"], ["ld.lld", "-static", "-o", "a", "a.o"]), "x86-64 on aarch64")
+    let wasm_tools = (["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext", "-c", "-o", "a.o", "a.s"], ["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", "a", "a.o"])
+    assert(build_commands(wasm, x86, "a.s", "a.o", "a") == wasm_tools && build_commands(wasm, a64, "a.s", "a.o", "a") == wasm_tools, "wasm32 on either")
 }
 
-// Run one step of a build: false when it worked; a missing tool named.
-fun build_step(argv: [str], label: str, target: str) -> bool {
+// Run one step of a build: false when it worked; a missing tool named, with
+// the target that needs it and what building for it needs (`needs`).
+fun build_step(argv: [str], label: str, target: Target, needs: str) -> bool {
     var failed = true
     var rest: [str] = []
     var i = 1
@@ -561,15 +560,15 @@ fun build_step(argv: [str], label: str, target: str) -> bool {
     }
     match run(argv[0], rest) {
         Ok(out) => { failed = step_failed(out, label) },
-        Err(SpawnError.NotFound) => { eprintln(missing_tool(argv[0], target, TARGET)) },
+        Err(SpawnError.NotFound) => { eprintln(missing_tool(argv[0], target.name, needs)) },
         Err(e) => { eprintln(label) },
     }
     return failed
 }
 
-// `target`: x86_64-linux, aarch64-linux or wasm32-wasi; its tools are
-// `build_commands`'. `checked`: integer overflow traps (`--checked`, D175).
-pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, checked: bool, target: str) -> int32 {
+// `target`'s tools are `build_commands`'. `checked`: integer overflow traps
+// (`--checked`, D175).
+pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, checked: bool, target: Target) -> int32 {
     let asm = match compile_asm(file, opts, debug, checked, target) {
         Ok(a) => a,
         Err(e) => {
@@ -586,11 +585,13 @@ pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, checke
             return 1
         },
     }
-    let tools = build_commands(target, TARGET, asm_path, obj_path, output)
-    if build_step(tools.0, "myla: assembler failed", target) {
+    let here = host()
+    let needs = toolchain(target, here).needs
+    let tools = build_commands(target, here, asm_path, obj_path, output)
+    if build_step(tools.0, "myla: assembler failed", target, needs) {
         return 1
     }
-    if build_step(tools.1, "myla: linker failed", target) {
+    if build_step(tools.1, "myla: linker failed", target, needs) {
         return 1
     }
     // the assembly and object file were only steps (MYLA-35)

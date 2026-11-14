@@ -5,7 +5,14 @@
 ## Requirements
 
 - **Linux on x86-64 or aarch64** (a PC, an ARM server, a Raspberry Pi 4 or 5 with a 64-bit OS) and its **GNU `as` and `ld`** (binutils: `sudo apt install binutils`): they build the toolchain from the machine's seed, and native programs. `just bootstrap` runs the same script as `scripts/bootstrap.sh` if `just` is installed.
-- **For the other targets** (optional): clang and `ld.lld` for `--target aarch64-linux`, clang and `wasm-ld` for `--target wasm32-wasi` (LLVM 18 or newer, with the `lld` package); to run their programs on an x86-64 machine, `qemu-aarch64` (`qemu-user`) and Node 22 or newer. The tests of those targets skip without them.
+- **For the other targets** (optional): LLVM 18 or newer with the `lld` package, and something to run their programs on this machine. The tests of those targets skip without them. Each target's tools, found on `PATH` (its record in [[selfhost/target.my]], [[MYLA-700]]; a missing one is named in the error, with the target that needs it):
+
+  | `--target` | Assembled by | Linked by | Its programs run on another machine under |
+  | --- | --- | --- | --- |
+  | `x86_64-linux` | GNU `as --64` on an x86-64 machine, else `clang --target=x86_64-linux-gnu` | `ld`, else `ld.lld -static` | (the machine) |
+  | `aarch64-linux` | GNU `as` on an aarch64 machine, else `clang --target=aarch64-linux-gnu` | `ld`, else `ld.lld -static` | `qemu-aarch64` (`qemu-user`) |
+  | `wasm32-wasi` | `clang --target=wasm32-wasi` | `wasm-ld` | Node 22 or newer (`MYLA_EMULATOR="node tools/wasm/run.mjs"` for `myla test`) |
+  | `x86_64-windows` | `clang --target=x86_64-pc-windows-msvc` | `llvm-dlltool` (the system DLLs' import libraries) and `lld-link` (D210) | Wine (D212). Not built yet: a build says `building for x86_64-windows is not supported yet` until [[MYLA-702]] |
 - **Python 3.12 or newer**, only to run the tests (standard library only; `uv` is optional).
 
 ## Build the toolchain

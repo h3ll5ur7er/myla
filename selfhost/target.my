@@ -1,0 +1,198 @@
+// target.my -- the targets the toolchain builds for, each a record (MYLA-700,
+// the part of MYLA-262 the Windows port needs). A target's name, as
+// `--target` and `std.platform.TARGET` spell it, is read here and only here
+// (`parse_target`); the driver, the code generator, the loader's choice of
+// platform module (`for_target`) and the project tool take the record.
+//
+// The tools a target is built with are in its record too, run by name from
+// PATH (std.process, D147): the machine's own GNU `as` and `ld` for its own
+// Linux target, as the bootstrap uses them (D127); clang and `ld.lld` for the
+// other Linux target (MYLA-163); clang and `wasm-ld` for wasm32 on WASI
+// (D125, MYLA-158); clang for COFF, `llvm-dlltool` and `lld-link` for Windows
+// (D210), which the compiler doesn't build for yet (MYLA-702).
+
+from std.platform import TARGET
+
+#derive(Eq)
+pub enum Os {
+    Linux
+    Wasi
+    Windows
+}
+
+#derive(Eq)
+pub enum Arch {
+    X86_64
+    Aarch64
+    Wasm32
+}
+
+#derive(Eq)
+pub enum ObjectFormat {
+    Elf
+    Coff
+    Wasm
+}
+
+// The tools that build a target's program from its assembly: each a command
+// line whose words name the files with `{asm}`, `{obj}` and `{out}` (the
+// assembly, the object, the program) and, for an import library, `{def}`
+// and `{lib}` (its list of functions and the library made of it; Windows,
+// D210, D211). `imports` is [] where there are none. `needs` names them
+// all, for the error when one isn't on PATH.
+pub struct Toolchain { assemble: [str], imports: [str], link: [str], needs: str }
+
+// A target: its name (`x86_64-linux`, the `--target` word), operating
+// system, architecture and object format; the suffix of its programs'
+// files ("" on Linux and WASI, ".exe" on Windows); the file of `std/` that
+// is its `std/platform.my` ("" for x86-64 Linux's own, `for_target`); the
+// tools that build for it from any machine (`cross`), and on a machine of
+// its own (`native`, None: `cross`'s); the command its programs run under on
+// another machine without MYLA_EMULATOR ([] for none: wasm32 needs
+// MYLA_EMULATOR); whether its programs can start processes (a test
+// harness's cases are children where they can, else runs of the harness,
+// MYLA-370); whether `-g` is supported; and whether the compiler builds for
+// it yet (`supported`; Windows: MYLA-702).
+pub struct Target {
+    name: str,
+    os: Os,
+    arch: Arch,
+    format: ObjectFormat,
+    exe_suffix: str,
+    platform_file: str,
+    cross: Toolchain,
+    native: Option<Toolchain>,
+    emulator: [str],
+    spawns: bool,
+    debug_info: bool,
+    supported: bool,
+}
+
+// A Linux target's tools from another machine: clang for its triple and
+// lld (MYLA-163).
+fun linux_cross(triple: str) -> Toolchain {
+    return Toolchain { assemble: ["clang", "--target=" + triple, "-c", "-o", "{obj}", "{asm}"], imports: [], link: ["ld.lld", "-static", "-o", "{out}", "{obj}"], needs: "clang and ld.lld" }
+}
+
+// A Linux target's tools on its own machine: GNU `as` (with `flags`) and
+// `ld`, which the bootstrap needs anyway (D127).
+fun linux_native(flags: [str]) -> Toolchain {
+    var asm = ["as"]
+    for f in flags { asm.push(f) }
+    for w in ["-o", "{obj}", "{asm}"] { asm.push(w) }
+    return Toolchain { assemble: asm, imports: [], link: ["ld", "-o", "{out}", "{obj}"], needs: "GNU as and ld (binutils)" }
+}
+
+// Every target, in the order the usage and the errors name them.
+pub fun targets() -> [Target] {
+    return [
+        Target { name: "x86_64-linux", os: Os.Linux, arch: Arch.X86_64, format: ObjectFormat.Elf, exe_suffix: "", platform_file: "",
+                 cross: linux_cross("x86_64-linux-gnu"), native: Some(linux_native(["--64"])), emulator: [], spawns: true, debug_info: true, supported: true },
+        Target { name: "aarch64-linux", os: Os.Linux, arch: Arch.Aarch64, format: ObjectFormat.Elf, exe_suffix: "", platform_file: "platform_aarch64.my",
+                 cross: linux_cross("aarch64-linux-gnu"), native: Some(linux_native([])), emulator: ["qemu-aarch64"], spawns: true, debug_info: false, supported: true },
+        // the stack below the data, so running out of it can't overwrite
+        // the data (MYLA-261)
+        Target { name: "wasm32-wasi", os: Os.Wasi, arch: Arch.Wasm32, format: ObjectFormat.Wasm, exe_suffix: "", platform_file: "platform_wasm.my",
+                 cross: Toolchain { assemble: ["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext", "-c", "-o", "{obj}", "{asm}"], imports: [],
+                                    link: ["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", "{out}", "{obj}"], needs: "clang and wasm-ld" },
+                 native: None, emulator: [], spawns: false, debug_info: false, supported: true },
+        // D210: clang reads the backend's GAS text for COFF too; the import
+        // library of each system DLL (D211) is made from the list of the
+        // functions used; no C runtime, so the entry is the program's own.
+        // Child processes come with MYLA-705, debug information later (D215)
+        Target { name: "x86_64-windows", os: Os.Windows, arch: Arch.X86_64, format: ObjectFormat.Coff, exe_suffix: ".exe", platform_file: "platform_windows.my",
+                 cross: Toolchain { assemble: ["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", "{obj}", "{asm}"], imports: ["llvm-dlltool", "-m", "i386:x86-64", "-d", "{def}", "-l", "{lib}"],
+                                    link: ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/out:{out}", "{obj}", "{lib}"], needs: "clang, llvm-dlltool and lld-link" },
+                 native: None, emulator: ["wine"], spawns: false, debug_info: false, supported: false },
+    ]
+}
+
+// The target named `name`; None for a name that is none.
+pub fun parse_target(name: str) -> Option<Target> {
+    for t in targets() { if t.name == name { return Some(t) } }
+    return None
+}
+
+// The targets' names, for a message: `x86_64-linux, aarch64-linux, …`.
+#test()["x86_64-linux, aarch64-linux, wasm32-wasi, x86_64-windows"]
+pub fun target_names() -> str {
+    var sb = StringBuilder()
+    for t in targets() {
+        if sb.len() > 0 { sb.append(", ") }
+        sb.append(t.name)
+    }
+    return sb.build()
+}
+
+// The target of the machine the toolchain runs on (it was built for it):
+// the default target (MYLA-276).
+pub fun host() -> Target {
+    return parse_target(TARGET).expect("std.platform.TARGET is a target")
+}
+
+// Why the compiler can't build for `t` yet, as an error's text after the
+// tool's name; "" when it can (D209: what isn't there yet says so).
+pub fun unsupported(t: Target) -> str {
+    if t.supported { return "" }
+    return format("building for {} is not supported yet (MYLA-702)", t.name)
+}
+
+// The tools that build for `t` on a machine whose own target is `host`.
+pub fun toolchain(t: Target, host: Target) -> Toolchain {
+    if t.name == host.name {
+        match t.native {
+            Some(n) => { return n },
+            None => {},
+        }
+    }
+    return t.cross
+}
+
+// `words` with the files put in: each `{name}` in a word replaced by
+// `files[name]`.
+#test(["ld", "-o", "{out}", "/out:{out}", "{obj}"], ["out": "a", "obj": "a.o"])[["ld", "-o", "a", "/out:a", "a.o"]]
+pub fun with_files(words: [str], files: [str: str]) -> [str] {
+    var out: [str] = []
+    for w in words {
+        var word = w
+        for (k, v) in files.items() { word = word.replace("{" + k + "}", v) }
+        out.push(word)
+    }
+    return out
+}
+
+// What a missing tool says: its name, the target that needs it and what
+// building for that target here needs.
+#test("clang", "aarch64-linux", "clang and ld.lld")["myla: 'clang' was not found: building for aarch64-linux here needs clang and ld.lld"]
+pub fun missing_tool(tool: str, target: str, needs: str) -> str {
+    return format("myla: '{}' was not found: building for {} here needs {}", tool, target, needs)
+}
+
+// Every target's name reads back as it, other words as none; only Windows
+// is refused yet.
+#test
+fun the_names_parse() {
+    for t in targets() { assert(parse_target(t.name).expect(t.name).name == t.name, t.name) }
+    for name in ["wasm32", "x86_64", ""] { assert(match parse_target(name) { Some(t) => false, None => true }, "no target " + name) }
+    assert(unsupported(parse_target("x86_64-linux").expect("x86")) == "", "x86_64-linux builds")
+    assert(unsupported(parse_target("x86_64-windows").expect("windows")) == "building for x86_64-windows is not supported yet (MYLA-702)", "windows doesn't yet")
+}
+
+// Each target's tools: one to assemble and one to link, each named in its
+// `needs`; D210's three for Windows.
+#test
+fun each_toolchain_names_its_tools() {
+    for t in targets() {
+        var chains = [t.cross]
+        match t.native { Some(n) => { chains.push(n) }, None => {} }
+        for c in chains {
+            assert(c.assemble.len() > 0 && c.link.len() > 0, t.name + ": a tool to assemble and one to link")
+            var tools = [c.assemble[0], c.link[0]]
+            if c.imports.len() > 0 { tools.push(c.imports[0]) }
+            for tool in tools { assert(c.needs.contains(tool), t.name + ": " + tool + " is named") }
+        }
+    }
+    let w = parse_target("x86_64-windows").expect("windows")
+    assert(w.format == ObjectFormat.Coff && w.exe_suffix == ".exe" && !w.supported, "windows")
+    assert(w.cross.assemble[0] == "clang" && w.cross.imports[0] == "llvm-dlltool" && w.cross.link[0] == "lld-link", "D210")
+}

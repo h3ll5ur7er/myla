@@ -23,6 +23,8 @@ Found by [[Project/Reflection-2026-11]]. The target is chosen today by:
   - its platform module.
 
   One list of targets; one `match` choosing the emitter. The default target is the host's.
+
+  The part the Windows port needs is [[MYLA-700]]'s (2026-11-14): `selfhost/target.my`'s record with the operating system, architecture, object format, file suffix, platform module and tools, one list (`targets()`), one parse (`parse_target`), the default the host's; the rest of this box (word size, registers, symbol prefix, thread state, one `match` choosing the emitter in place of `a64`/`wasm`) is still open.
 - [ ] The x86-64 code out of `codegen.my` into `ir_x86.my` (or an `x86` module), so `codegen.my` is the target-neutral monomorphizer and pools; behaviour unchanged, the bootstrap's fixed point the proof
-- [ ] A missing tool (clang, ld.lld, wasm-ld) named in the error, not left to `/usr/bin/env`; [[Getting started]] listing each target's tools
+- [x] A missing tool (clang, ld.lld, wasm-ld) named in the error, not left to `/usr/bin/env`; [[Getting started]] listing each target's tools ([[MYLA-700]])
 - [x] How a non-x86-64 host bootstraps (D101: cross-compiling, or a seed of its own): a seed of its own, D127, [[MYLA-276]]; the default target is the host's (`std.platform.TARGET`)
