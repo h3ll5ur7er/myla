@@ -1,0 +1,44 @@
+// title: Mission Passed (boss)
+// xp: 100
+// boss: true
+// hidden: wanted #test("heist, heist")[5]
+// hidden: wanted #test("speeding, pay-n-spray, carjack")[2]
+// hidden: wanted #test("bribe, speeding")[1]
+// hidden: banner #test("speeding")["★☆☆☆☆"]
+// hidden: banner #test("heist, carjack, speeding")["WASTED"]
+// hint: Split the log into events and walk them, keeping the level in a `var`; a `match` on the event's text tells how it changes the level.
+// hint: Clamp the level after every event, not once at the end: a pay-n-spray after six stars must still end at zero, and a bribe can't go below it. For the banner, strings have `repeat`.
+//
+// Los Santos keeps score. The police log for a night out is a list of
+// events separated by `", "`, and each moves your wanted level:
+//
+// - `speeding` adds one star, `carjack` two, `heist` three;
+// - `bribe` takes one away;
+// - `pay-n-spray` clears them all (a fresh coat of paint; the cops never
+//   recognise you);
+// - anything else, like `jaywalking`, the LSPD doesn't care about.
+//
+// The level never goes below zero or above five stars, after every event.
+// Write:
+//
+// - `wanted(log)`: the level at the end of the night;
+// - `banner(log)`: the level as five stars, filled `★` then empty `☆`
+//   (`"★★☆☆☆"` for two), except at five, which is `"WASTED"`.
+//
+// *Mission passed! Respect +.*
+#test("speeding, carjack")[3]
+#test("heist, heist, pay-n-spray, speeding")[1]
+#test("bribe, bribe")[0]
+#test("jaywalking")[0]
+fun wanted(log: str) -> int {
+    // TODO
+    return 0
+}
+
+#test("speeding, carjack")["★★★☆☆"]
+#test("jaywalking")["☆☆☆☆☆"]
+#test("heist, heist")["WASTED"]
+fun banner(log: str) -> str {
+    // TODO
+    return ""
+}

@@ -1,7 +1,8 @@
 // title: let or var
 // xp: 15
-// hint: The checker says `total` can't be assigned. Why not?
-// hint: A `let` never changes. Declare `total` with `var` instead.
+// hidden: triangle #test(10)[55]
+// hint: The checker says `total` can't be assigned. Read its message: why not?
+// hint: One keyword makes a name that never changes, another one that may. Swap it where `total` is declared.
 //
 // `triangle(n)` should add up the numbers from 1 to `n`: `triangle(4)` is
 // 1 + 2 + 3 + 4 = 10. But the program doesn't even compile.

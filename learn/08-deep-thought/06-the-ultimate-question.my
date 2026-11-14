@@ -10,9 +10,8 @@
 // expect: part 6: 7
 // expect: The Answer to the Ultimate Question of Life, the Universe, and Everything: 42
 // expect: {"answer":42,"parts":6,"question":"unknown"}
-// hint: Build a list of async closures, one per part: `var jobs: [async () -> int] = []` and `jobs.push(async () => await part(i))` (copy `i` into a `let` first).
-// hint: `await task.all(jobs)` runs them all in parallel and gives their results, in order.
-// hint: Print each result with its number, add them up, and encode a `Report` with `json.encode`. `#derive(Json)` writes the fields in their order.
+// hint: `task.all` takes a list of async closures and gives their results, in order.
+// hint: Build the list in a loop (copy the loop's variable into a `let` before a closure captures it), await `task.all`, then print, add up, and encode a `#derive(Json)` struct.
 //
 // The final boss. Deep Thought computes the Answer in parallel:
 //

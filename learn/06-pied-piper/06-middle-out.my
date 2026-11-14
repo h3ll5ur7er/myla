@@ -1,9 +1,11 @@
 // title: Middle-Out (boss)
 // xp: 110
 // boss: true
-// hint: Encoding: walk the characters, counting how many times the current one repeats; when a different one comes (or the text ends), write the count and the character.
-// hint: Decoding: read digits into a number (`c.to_digit(10)` gives `Some(d)` for a digit), and when a non-digit comes, repeat it that many times. A letter with no number before it is an error, and so is a number at the very end.
-// hint: To repeat a character `n` times: `f"{c}".repeat(n)`. A `StringBuilder()` with `append` collects the result.
+// hidden: encode #test("ab")["1a1b"]
+// hidden: decode #test("1z")[Ok("z")]
+// hidden: decode #test("x")[Err("no count before 'x'")]
+// hint: Encoding: count how often the current character repeats, then write the count and the character.
+// hint: Decoding: gather digits into a number (`to_digit(10)` gives `Some` for a digit); a non-digit repeats that many times. A character without a count, or a count at the very end, is an error.
 //
 // Richard's revolutionary compression algorithm (well, run-length encoding)
 // needs both directions, with a Weissman score to make Hooli weep:

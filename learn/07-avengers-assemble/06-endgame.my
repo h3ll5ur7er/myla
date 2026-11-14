@@ -1,9 +1,8 @@
 // title: Endgame (boss)
 // xp: 120
 // boss: true
-// hint: Both functions are generic: `fun team_power<T: Avenger>(team: [T]) -> int` and `fun leader<T: Avenger>(team: [T]) -> Option<str>`.
-// hint: `team_power` adds `a.power()` over the team; `leader` keeps the best so far and gives `None` for an empty team.
-// hint: For `Sorcerer`, implement `Avenger` too: Strange's power is his `spells` times 7.
+// hint: Both functions are generic over any `Avenger`.
+// hint: `team_power` adds up; `leader` remembers the best so far and has `None` for an empty team. And Strange needs his own `impl Avenger`.
 //
 // The final battle. Every Avenger has a `name` and a `power`. Write, for any
 // team of one kind of `Avenger`:

@@ -25,7 +25,7 @@ Chapters open in order: one opens when 60 % of the one before is solved. Each ha
 // xp: 10
 // expect: The answer is 42
 // hint: `6 + 7` is 13. Deep Thought used a different operator.
-// hint: Multiplication is `*`.
+// hint: Which arithmetic operator makes 42 out of 6 and 7? Change only that one character.
 //
 // The instructions, in Markdown, up to the first line that isn't a comment.
 fun main() {
@@ -35,7 +35,8 @@ fun main() {
 ```
 
 - `title`, `xp` (positive) and at least one `hint` are required; `boss: true` marks the chapter's boss.
-- With `expect` lines (one per line of output), the exercise is solved when running it prints exactly them. Without, it is solved when all its `#test` cases pass, at least one.
+- With `expect` lines (one per line of output), the exercise is solved when running it prints exactly them. Without, it is checked by its `#test` cases: Check removes the learner's cases and puts back the starter's, plus the `// hidden: <function> #test(…)[…]` ones (not shown), above their functions; all must pass. So deleting the given cases for a trivial one doesn't work. An exercise about writing tests says `// own-tests: N`: the learner's cases stay, at least N of them, and the hidden ones are added.
+- Hints come in order and cost XP, so the first is a nudge and the last points at the construct or method, never the line of code itself: the solution button is for that.
 - The code below the header is what the learner starts from: it must not be solved (it doesn't compile, fails a test, prints something else, or runs for more than 10 seconds). The solution must be.
 
 ## Checking

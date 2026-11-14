@@ -1,7 +1,8 @@
 // title: Recruit
 // xp: 20
-// hint: The struct has no field `role`. Add it, with its type, to `struct Pirate`.
-// hint: `struct Pirate { name: str, role: str, bounty: int64 }`
+// hidden: describe #test("Robin", "archaeologist")["Robin the archaeologist, bounty 0"]
+// hint: The struct has no field `role`, but `recruit` sets one.
+// hint: Add the field to `struct Pirate`, with its type.
 //
 // Luffy recruits anyone he likes. `recruit` makes a new pirate with a name, a
 // role and no bounty yet, but it doesn't compile: the struct `Pirate` has no

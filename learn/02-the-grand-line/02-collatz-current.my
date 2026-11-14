@@ -1,7 +1,8 @@
 // title: The Collatz Current
 // xp: 20
-// hint: The loop never ends because `n` never changes. Each round must give `n` its next value.
-// hint: Inside the loop: `if n % 2 == 0 { n = n / 2 } else { n = 3 * n + 1 }`, then count the step.
+// hidden: steps #test(7)[16]
+// hint: The loop never ends because `n` never changes. Each round must sail on to the next island.
+// hint: Inside the loop, tell even from odd with `%`, and give `n` its next value before counting the step.
 //
 // A strange current flows through the Grand Line: from any island `n`, the
 // ship sails to `n / 2` when `n` is even, and to `3 * n + 1` when it is odd.

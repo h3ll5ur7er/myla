@@ -1,7 +1,8 @@
 // title: The Snap
 // xp: 20
-// hint: `xs.filter(f)` keeps the values for which `f` gives `true`.
-// hint: `return population.filter((n: int) => n % 2 == 0)`
+// hidden: snap #test([10, 15, 20])[[10, 20]]
+// hint: There's a list method that keeps only the values a function approves of.
+// hint: `filter` takes a lambda that gives a `bool`; even numbers leave no remainder when divided by 2.
 //
 // *Snap.* Half of everything disappears: in this simulation, every odd
 // number. `snap` should keep only the even numbers, in their order.

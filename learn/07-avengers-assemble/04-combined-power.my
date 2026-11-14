@@ -1,7 +1,7 @@
 // title: Combined Power
 // xp: 25
-// hint: `a + b` on a struct needs the `Add` trait: `impl Add for Power { fun add(self, o: Power) -> Power { … } }`.
-// hint: Add the fields: `return Power { strength: self.strength + o.strength, speed: self.speed + o.speed }`.
+// hint: `+` on a struct needs the `Add` trait.
+// hint: An `impl Add for Power` with an `add` method that adds the fields one by one.
 //
 // Together, the Avengers are stronger. `Power` has a strength and a speed,
 // and two powers add up field by field. `team_up` uses `+`, which doesn't

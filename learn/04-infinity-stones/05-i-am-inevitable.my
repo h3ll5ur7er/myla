@@ -1,7 +1,8 @@
 // title: I Am Inevitable
 // xp: 25
-// hint: Split the sentence into words, reverse their order, join them again, then make it upper case.
-// hint: `sentence.split(" ").reversed().join(" ").to_upper()`
+// hidden: monologue #test("perfectly balanced")["BALANCED PERFECTLY"]
+// hint: Break the sentence into words, turn the words around, put them back together, then shout.
+// hint: Strings have `split` and `to_upper`; lists have `reversed`, and a list of strings has `join`. Chain them.
 //
 // Villains talk backwards when they monologue (it's in the contract).
 // `monologue` should reverse the order of the words of a sentence and shout

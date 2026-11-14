@@ -1,7 +1,8 @@
 // title: Clone Count
 // xp: 20
-// hint: A recursive function needs a case that stops: `if level == 0 { return 1 }`.
-// hint: Otherwise each clone makes two more: `return 2 * clones(level - 1)`.
+// hidden: clones #test(5)[32]
+// hint: A recursive function needs a case where it stops calling itself.
+// hint: Level 0 is just Naruto. Every other level doubles the clones of the level below: call `clones` with a smaller level.
 //
 // Each shadow clone can summon two clones of its own, who summon two each,
 // and so on. With `level` rounds of summoning there are 2^level of them:

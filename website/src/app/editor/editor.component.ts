@@ -1,5 +1,7 @@
 import {
   afterNextRender,
+  effect,
+  untracked,
   ChangeDetectionStrategy,
   Component,
   computed,
@@ -15,7 +17,7 @@ import { DecimalPipe } from '@angular/common';
 import { Router } from '@angular/router';
 import { ExampleKind } from '../core/content.types';
 import { CheckResult, Diagnostic, RunHandle, RunResult, testSummary, ToolchainService } from '../core/toolchain.service';
-import { loadingLine } from '../core/lore';
+import { loadingLine, pick, TIMEOUT } from '../core/lore';
 import type { MylaView } from './codemirror';
 
 type Shown =
@@ -75,6 +77,8 @@ export class EditorComponent {
     }
   });
 
+  readonly timeoutLine = pick(TIMEOUT);
+
   private view: MylaView | null = null;
   private handle: RunHandle | null = null;
   private observer: IntersectionObserver | null = null;
@@ -98,6 +102,22 @@ export class EditorComponent {
         );
         this.observer.observe(el);
       }
+    });
+    // a new program for the same editor (the next exercise, another
+    // example): the document and the output start over
+    let first = true;
+    effect(() => {
+      const c = this.code();
+      if (first) {
+        first = false;
+        return;
+      }
+      untracked(() => {
+        this.handle?.stop();
+        this.view?.setCode(c);
+        this.current.set(c);
+        this.shown.set(null);
+      });
     });
     destroyRef.onDestroy(() => {
       this.observer?.disconnect();

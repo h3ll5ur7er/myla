@@ -18,6 +18,13 @@ test("an exercise's header, instructions and starter", () => {
   assert.equal(ex.boss, false);
 });
 
+test("hidden cases and own tests", () => {
+  const ex = parseExercise("// title: T\n// xp: 5\n// hidden: f #test(2)[4]\n// hidden: f #test(3)[6]\n// own-tests: 2\nfun f(x: int) -> int { return x }\n");
+  assert.deepEqual(ex.hidden, [{ fn: "f", lines: ["#test(2)[4]", "#test(3)[6]"] }]);
+  assert.equal(ex.ownTests, 2);
+  assert.throws(() => parseExercise("// title: T\n// hidden: #test(1)[1]\nfun f() {}\n"), /hidden case/);
+});
+
 test("an exercise needs a title and positive xp", () => {
   assert.throws(() => parseExercise("// xp: 5\nfun main() {}\n"), /title/);
   assert.throws(() => parseExercise("// title: T\n// xp: 0\nfun main() {}\n"), /xp/);
@@ -47,6 +54,7 @@ test("a course from a directory", () => {
   assert.equal(c.chapters[0].id, "basics");
   assert.deepEqual(c.chapters[0].exercises.map((e) => [e.id, e.mode, e.boss, e.expected]), [["one", "test", false, null], ["two", "output", true, "2\n"]]);
   assert.equal(c.chapters[0].exercises[1].solution, "fun main() { print(2) }\n");
+  assert.deepEqual(c.chapters[0].exercises[0].tests, [{ fn: "one", lines: ["#test()[1]"] }]);
   fs.rmSync(path.join(dir, "01-basics", "02-two.solution.my"));
   assert.throws(() => buildCourse(dir, pages), /no solution/);
 });

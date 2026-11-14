@@ -47,7 +47,7 @@
         @switch (s.kind) {
           @case ('run') {
             @if (s.result.timedOut) {
-              <span class="badge bad">⏱ Stopped after 10 s</span><span class="note">A loop that never ends? Time is an illusion; lunchtime doubly so.</span>
+              <span class="badge bad">⏱ Stopped after 10 s</span><span class="note">{{ timeoutLine }}</span>
             } @else if (s.result.stopped) {
               <span class="badge">■ Stopped</span>
             } @else if (s.matches === true) {

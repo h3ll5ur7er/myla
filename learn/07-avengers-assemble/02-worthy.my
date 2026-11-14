@@ -1,7 +1,7 @@
 // title: Worthy
 // xp: 20
-// hint: Inside `lift`, `T` could be any type at all, so it has no method `strength`. Say which types are allowed.
-// hint: Bound the type parameter: `fun lift<T: Mighty>(who: T) -> str`.
+// hint: Inside `lift`, `T` could be any type at all, so nothing says it has a `strength`.
+// hint: Give the type parameter a bound: the trait that has `strength`.
 //
 // Only the worthy can lift Mjölnir. `lift` works with any type that has a
 // `strength`, but the checker refuses it: nothing says `T` has one. Give the

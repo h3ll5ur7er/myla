@@ -4,9 +4,8 @@
 // expect: Earth: Mostly harmless.
 // expect: Distance: 42000 light years
 // expect: Towels needed: 3
-// hint: Each line is one `print` of an f-string. Start with the first one and run it.
-// hint: The distance is `light_years * 1000`. The towels: one per traveller, rounded up from `travellers` divided by `per_towel`... or simply `(travellers + per_towel - 1) / per_towel`.
-// hint: Integer division rounds down: `5 / 2` is `2`. Adding `per_towel - 1` first rounds up.
+// hint: Each line is one `print` of an f-string. Write the first, run it, then add the next.
+// hint: Multiply inside the braces for the distance. For the towels, think about how integer division rounds, and what adding something before dividing does.
 //
 // Boss time! Write the Guide's entry for Earth. Using the values already in
 // `main`, make the program print exactly:

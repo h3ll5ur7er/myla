@@ -1,8 +1,8 @@
 // title: The Mice
 // xp: 30
 // expect: The mice counted 42 questions
-// hint: Calling an actor's method waits for the actor: write `await` before it.
-// hint: `await lab.ask()` in `experiment`, and `await lab.total()` in `main`.
+// hint: Calling an actor's method means waiting your turn.
+// hint: Two calls need an `await` in front: one in `experiment`, one in the `print`.
 //
 // The pan-dimensional mice run experiments in parallel, and all of them
 // record their questions in one `Lab`. Because `Lab` is an `actor`, its

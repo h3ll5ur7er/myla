@@ -1,7 +1,7 @@
 // title: The Guide Entry
 // xp: 30
-// hint: A struct gets its JSON form from `#derive(Json)` on the line above it.
-// hint: Put `#derive(Json)` above `struct Entry`; `json.encode` and `json.decode<Entry>` then work.
+// hint: `std.json` can only encode and decode a type that derives its trait.
+// hint: One attribute line above `struct Entry` does it.
 //
 // The Guide is stored as JSON. `std.json` turns a struct into JSON text and
 // back, once the struct derives `Json`. Add the derive so `to_text` and

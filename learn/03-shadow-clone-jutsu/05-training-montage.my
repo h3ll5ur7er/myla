@@ -1,7 +1,9 @@
 // title: Training Montage
 // xp: 25
-// hint: Call `f` on the value, `times` times, in a loop: `for i in 0..times { x = f(x) }`.
-// hint: `x` must be a `var` to change: `var x = start`.
+// hidden: doubled #test(2, 3)[12]
+// hidden: plus_one #test(0, 7)[7]
+// hint: `train` has to call `f` again and again, feeding each result back in.
+// hint: Keep the current value in a `var`, and loop `times` times, replacing it with `f` of itself.
 //
 // A training montage repeats the same exercise until it sticks.
 // `train(f, times, start)` should apply the function `f` to `start`, then to

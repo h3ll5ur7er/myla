@@ -1,7 +1,9 @@
 // title: The Log Pose
 // xp: 20
-// hint: A `match` must cover every possible value: add an arm for "anything else" with `_`.
-// hint: Several values can share an arm: `2 | 3 => "Whiskey Peak"`.
+// hidden: next_island #test(2)["Whiskey Peak"]
+// hidden: next_island #test(0)["uncharted"]
+// hint: A `match` must cover every possible value, and the checker says this one doesn't.
+// hint: Two values can share an arm with `|`, and `_` matches whatever is left.
 //
 // A Log Pose points to the next island. Ours knows four:
 //

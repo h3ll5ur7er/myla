@@ -43,18 +43,25 @@ export interface Level {
 
 export const LEVELS: Level[] = [
   { n: 1, title: 'Mostly Harmless', from: "The Hitchhiker's Guide to the Galaxy", xp: 0 },
-  { n: 2, title: 'Hoopy Frood', from: "The Hitchhiker's Guide to the Galaxy", xp: 25 },
-  { n: 3, title: 'Academy Student', from: 'Naruto', xp: 60 },
-  { n: 4, title: 'Genin', from: 'Naruto', xp: 110 },
-  { n: 5, title: 'Chūnin', from: 'Naruto', xp: 175 },
-  { n: 6, title: 'Grand Line Rookie', from: 'One Piece', xp: 260 },
-  { n: 7, title: 'Pied Piper Engineer', from: 'Silicon Valley', xp: 360 },
-  { n: 8, title: 'Jōnin', from: 'Naruto', xp: 480 },
-  { n: 9, title: 'Supernova', from: 'One Piece', xp: 620 },
-  { n: 10, title: 'Avenger', from: 'Marvel', xp: 780 },
-  { n: 11, title: 'Sannin', from: 'Naruto', xp: 960 },
-  { n: 12, title: 'Hokage', from: 'Naruto', xp: 1160 },
-  { n: 13, title: 'Pirate King', from: 'One Piece', xp: 1380 },
+  { n: 2, title: 'Muggle', from: 'Harry Potter', xp: 20 },
+  { n: 3, title: 'Hoopy Frood', from: "The Hitchhiker's Guide to the Galaxy", xp: 45 },
+  { n: 4, title: 'Academy Student', from: 'Naruto', xp: 75 },
+  { n: 5, title: 'Youngling', from: 'Star Wars', xp: 110 },
+  { n: 6, title: 'Genin', from: 'Naruto', xp: 150 },
+  { n: 7, title: 'Diamond Miner', from: 'Minecraft', xp: 200 },
+  { n: 8, title: 'Padawan', from: 'Star Wars', xp: 255 },
+  { n: 9, title: 'Grand Line Rookie', from: 'One Piece', xp: 320 },
+  { n: 10, title: 'Chūnin', from: 'Naruto', xp: 390 },
+  { n: 11, title: 'DedSec Operative', from: 'Watch Dogs', xp: 470 },
+  { n: 12, title: 'Pied Piper Engineer', from: 'Silicon Valley', xp: 560 },
+  { n: 13, title: 'Witcher of the Wolf School', from: 'The Witcher', xp: 650 },
+  { n: 14, title: 'Starship Captain', from: 'Star Trek', xp: 750 },
+  { n: 15, title: 'Supernova', from: 'One Piece', xp: 860 },
+  { n: 16, title: 'Jedi Knight', from: 'Star Wars', xp: 980 },
+  { n: 17, title: 'Avenger', from: 'Marvel', xp: 1100 },
+  { n: 18, title: 'Order of Merlin, First Class', from: 'Harry Potter', xp: 1230 },
+  { n: 19, title: 'Hokage', from: 'Naruto', xp: 1370 },
+  { n: 20, title: 'Pirate King', from: 'One Piece', xp: 1560 },
 ];
 
 export function totalXp(p: Progress): number {
@@ -92,6 +99,15 @@ export function dayOf(t: number): string {
 function prevDay(day: string): string {
   const [y, m, d] = day.split('-').map(Number);
   return dayOf(new Date(y, m - 1, d - 1, 12).getTime());
+}
+
+// Whole days from `a` to `b` (local dates).
+export function daysBetween(a: string, b: string): number {
+  const t = (d: string) => {
+    const [y, m, dd] = d.split('-').map(Number);
+    return new Date(y, m - 1, dd, 12).getTime();
+  };
+  return Math.round((t(b) - t(a)) / 86_400_000);
 }
 
 // The current streak (days in a row with a solve, ending today or
@@ -270,6 +286,89 @@ export const ACHIEVEMENTS: Achievement[] = [
     title: 'So Long, and Thanks for All the Fish',
     description: 'Finish the whole course.',
     earned: (p, c) => c.chapters.length > 0 && c.chapters.every((ch) => chapterSolved(p, ch) === ch.exercises.length),
+  },
+  {
+    id: 'diamonds',
+    icon: '⛏️',
+    title: 'Diamonds!',
+    description: 'Solve 25 exercises. Never dig straight down.',
+    earned: (p) => solves(p).length >= 25,
+  },
+  {
+    id: 'toss-a-coin',
+    icon: '🪙',
+    title: 'Toss a Coin to Your Witcher',
+    description: 'Earn 500 XP. O valley of plenty.',
+    earned: (p) => totalXp(p) >= 500,
+  },
+  {
+    id: 'mission-passed',
+    icon: '🚗',
+    title: 'Mission Passed',
+    description: 'Solve ten exercises at the first check, without a hint. Respect +.',
+    earned: (p) => solves(p).filter((s) => s.attempts === 0 && s.hints === 0 && !s.withSolution).length >= 10,
+  },
+  {
+    id: 'wasted',
+    icon: '💀',
+    title: 'Wasted',
+    description: 'Fail ten checks on one exercise. Respawning at the hospital…',
+    earned: (p) => solves(p).some((s) => s.attempts >= 10) || Object.values(p.attempts).some((n) => n >= 10),
+  },
+  {
+    id: 'hakuna-matata',
+    icon: '🦁',
+    title: 'Hakuna Matata',
+    description: 'Solve an exercise after reading every one of its hints. It means no worries.',
+    earned: (p, c) => c.chapters.some((ch) => ch.exercises.some((e) => {
+      const s = p.solved[key(ch.id, e.id)];
+      return !!s && e.hints.length > 0 && s.hints >= e.hints.length && !s.withSolution;
+    })),
+  },
+  {
+    id: 'im-batman',
+    icon: '🦇',
+    title: "I'm Batman",
+    description: 'Defeat three bosses without a single hint. Gotham needs you.',
+    earned: (p, c) => c.chapters.filter((ch) => ch.exercises.some((e) => {
+      const s = p.solved[key(ch.id, e.id)];
+      return e.boss && s && s.hints === 0 && !s.withSolution;
+    })).length >= 3,
+  },
+  {
+    id: 'hack-the-planet',
+    icon: '💻',
+    title: 'Hack the Planet',
+    description: 'Turn on sudo mode and open every chapter. DedSec would be proud.',
+    earned: (p) => p.sudo,
+  },
+  {
+    id: 'to-infinity',
+    icon: '🚀',
+    title: 'To Infinity and Beyond',
+    description: 'Run 50 programs in the playground.',
+    earned: (p) => p.playgroundRuns >= 50,
+  },
+  {
+    id: 'expecto-patronum',
+    icon: '🦌',
+    title: 'Expecto Patronum',
+    description: 'Come back after a week away and solve something. The Dementors of forgetting are no match.',
+    earned: (p) => p.days.some((d, i) => i > 0 && daysBetween(p.days[i - 1], d) >= 7),
+  },
+  {
+    id: 'live-long',
+    icon: '🖖',
+    title: 'Live Long and Prosper',
+    description: 'Solve something on 30 different days.',
+    earned: (p) => new Set(p.days).size >= 30,
+  },
+  {
+    id: 'chevron-seven',
+    icon: '🌀',
+    title: 'Chevron Seven Locked',
+    description: 'Complete seven chapters. The gate is open.',
+    earned: (p, c) => c.chapters.filter((ch) => ch.exercises.length > 0 && chapterSolved(p, ch) === ch.exercises.length).length >= 7,
   },
   {
     id: 'pirate-king',

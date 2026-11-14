@@ -1,7 +1,7 @@
 // title: Suit Up
 // xp: 20
-// hint: `IronMan` is passed where a `Hero` is needed, but it doesn't implement `Hero`. Write `impl Hero for IronMan { … }`.
-// hint: `impl Hero for IronMan { fun catchphrase(self) -> str { return "I am Iron Man." } }`
+// hint: `IronMan` is used as a `Hero`, but doesn't implement the trait.
+// hint: Write an `impl Hero for IronMan` block with the trait's one method, like `Cap`'s.
 //
 // Every Avenger has a catchphrase. `Cap` already implements the `Hero`
 // trait; `IronMan` doesn't, so `shout(IronMan { mark: 85 })` doesn't

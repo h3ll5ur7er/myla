@@ -15,7 +15,7 @@ function watchErrors(page: Page): string[] {
 }
 
 const PAGES: [string, RegExp][] = [
-  ['', /compiles itself/],
+  ['', /no hidden machinery/],
   ['quickstart', /Hello, Universe/],
   ['download', /Get Myla/],
   ['docs', /The Myla language/],
@@ -74,11 +74,35 @@ test('an exercise is solved, earns XP, and stays solved', async ({ page }) => {
   await expect(page.locator('app-header .xp')).toContainText('Lv 1');
 });
 
+test('the next exercise opens with its own code', async ({ page }) => {
+  await page.goto('learn/dont-panic/hello-galaxy');
+  const content = page.locator('myla-editor .cm-content');
+  await content.click();
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.insertText('fun main() {\n    print("Hello, Galaxy!")\n}\n');
+  await page.getByRole('button', { name: /Check/ }).click();
+  await page.getByRole('button', { name: /Next exercise/ }).click();
+  await expect(page).toHaveURL(/learn\/dont-panic\/the-answer/);
+  await expect(page.locator('h1')).toContainText('The Answer');
+  await expect(content).toContainText('let answer = 6 + 7');
+  await expect(content).not.toContainText('Hello, Galaxy!');
+});
+
 test('a wrong answer is not accepted', async ({ page }) => {
   await page.goto('learn/dont-panic/the-answer');
   await page.getByRole('button', { name: /Check/ }).click();
   await expect(page.locator('.verdict:not(.ok)')).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('.verdict .detail')).toContainText('The answer is 13');
+});
+
+test("replacing the given cases with a trivial one doesn't pass", async ({ page }) => {
+  await page.goto('learn/dont-panic/let-or-var');
+  const content = page.locator('myla-editor .cm-content');
+  await content.click();
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.insertText('#test(0)[0]\nfun triangle(n: int) -> int {\n    return 0\n}\n');
+  await page.getByRole('button', { name: /Check/ }).click();
+  await expect(page.locator('.verdict:not(.ok)')).toBeVisible({ timeout: 30_000 });
 });
 
 test('the search finds a method and goes to it', async ({ page }) => {

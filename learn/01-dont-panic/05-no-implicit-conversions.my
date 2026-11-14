@@ -1,7 +1,8 @@
 // title: No Implicit Conversions
 // xp: 20
-// hint: `total / count` divides two `int`s and gives an `int`. The function returns a `float`.
-// hint: Convert both with `as`: `(total as float) / (count as float)`.
+// hidden: average #test(1, 4)[0.25]
+// hint: Dividing two `int`s gives an `int`, but the function promises a `float`.
+// hint: Convert each operand with `as` before dividing; converting the result would be too late (`7 / 2` is already 3).
 //
 // Myla never converts a number from one type to another behind your back:
 // an `int` stays an `int` until you say otherwise with `as`.

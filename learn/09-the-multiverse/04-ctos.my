@@ -1,0 +1,20 @@
+// title: Hack the ctOS
+// xp: 25
+// hidden: profile #test(0)["ctOS-00000000"]
+// hidden: profile #test(255)["ctOS-000000FF"]
+// hint: The id is shown in decimal. ctOS speaks hexadecimal, eight digits of it, in capitals.
+// hint: Everything goes in the spec of one hole: the fill, the width and the kind of number. The kind for capital hex digits is a capital letter.
+//
+// In Chicago one operating system runs everything: traffic lights,
+// bridges, your fridge. Every citizen has a ctOS profile, and Aiden Pearce
+// wants to read them all. A profile's name is `ctOS-` and its id as eight
+// hexadecimal digits, in capitals, with zeros in front.
+//
+// `profile` gets the prefix right and nothing else. *Hack the planet!*
+// (Wrong franchise, same spirit.)
+#test(48879)["ctOS-0000BEEF"]
+#test(3735928559)["ctOS-DEADBEEF"]
+#test(1)["ctOS-00000001"]
+fun profile(id: uint32) -> str {
+    return f"ctOS-{id}"
+}

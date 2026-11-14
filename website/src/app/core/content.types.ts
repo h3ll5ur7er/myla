@@ -87,6 +87,11 @@ export interface Exercise {
   boss: boolean;
   mode: 'test' | 'output';
   expected: string | null;
+  // the exercise's own #test cases and its hidden ones, by function, and
+  // how many cases of their own an exercise about writing tests needs
+  tests: { fn: string; lines: string[] }[];
+  hidden: { fn: string; lines: string[] }[];
+  ownTests: number;
   hints: string[];
   instructions: string;
   starter: string;
