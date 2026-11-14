@@ -30,6 +30,7 @@ The work, one task each:
 - [[MYLA-633]] The embedded editor and the playground: CodeMirror 6, a Myla mode, the toolchain in a worker
 - [[MYLA-634]] Learn: exercises checked by `#test`, XP, levels, streaks, achievements, unlocks
 - [[MYLA-635]] CI: the site built and tested, the exercises checked, deployed to GitHub Pages
+- [[MYLA-636]] The academy after the first review: hidden cases, better hints, chapter 9 and a wider multiverse of references
 
 ## Questions to settle first
 

@@ -56,15 +56,15 @@ The app's `DocContentComponent` sets the HTML and mounts an editor on each examp
 
 ## The course
 
-`learn/<NN-chapter>/` holds a chapter: `chapter.md` (`title`, `emoji`, `tagline`, then its introduction) and its exercises. An exercise is `<NN-name>.my`, with its solution beside it as `<NN-name>.solution.my`. Its header comment gives its `title`, `xp`, optionally `boss: true`, its `hint`s, and `expect` lines when it is checked by its output. The rest of the header is the instructions, in Markdown; the code below the header is what the learner starts from (`learn/README.md` has the details).
+`learn/<NN-chapter>/` holds a chapter: `chapter.md` (`title`, `emoji`, `tagline`, then its introduction) and its exercises. An exercise is `<NN-name>.my`, with its solution beside it as `<NN-name>.solution.my`. Its header comment gives its `title`, `xp`, optionally `boss: true`, its `hint`s, `expect` lines when it is checked by its output, and `hidden` cases and `own-tests` when by its tests. The rest of the header is the instructions, in Markdown; the code below the header is what the learner starts from (`learn/README.md` has the details).
 
-**The Check button:** an exercise with `expect` lines is solved when running it prints exactly them; any other is solved when all its `#test` cases pass (at least one). Both have a time limit of 10 seconds.
+**The Check button:** an exercise with `expect` lines is solved when running it prints exactly them. Any other is checked by `core/exercise-check.ts`: the learner's `#test` cases are replaced by the starter's and the exercise's hidden ones (`// hidden:`), so deleting the given cases for a trivial one fails; with `// own-tests: N` the learner's stay (at least N) and the hidden ones are added. All must pass. Both have a time limit of 10 seconds. `scripts/check-course.mjs` uses the same module (Node strips its types), and `tests/burn/test_website.py` mirrors it in Python.
 
 The rules are pure functions in `core/gamification.ts`, tested in `gamification.spec.ts`:
 - **XP:** each hint takes 15 % off an exercise's XP, down to half; showing the solution first makes it worth nothing.
-- **Levels:** 13, from Mostly Harmless to Pirate King.
+- **Levels:** 20, from Mostly Harmless to Pirate King, by way of Muggle, Padawan, DedSec Operative, the Wolf School and the bridge of a starship. The top needs about 83 % of the course's XP, so it is reachable with some hints.
 - **Streaks:** days in a row with at least one solve.
-- **Achievements:** 17.
+- **Achievements:** 28, from Don't Panic to Expecto Patronum (back after a week away) and Wasted (ten failed checks on one exercise).
 - **Unlocks:** a chapter opens at 60 % of the one before; a boss once the rest of its chapter is solved. "sudo mode" opens everything.
 
 `ProgressService` keeps the progress in `localStorage` (`myla.progress.v1`): the site has no backend. The profile page exports and imports it as a file.

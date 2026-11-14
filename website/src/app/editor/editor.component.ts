@@ -17,7 +17,7 @@ import { DecimalPipe } from '@angular/common';
 import { Router } from '@angular/router';
 import { ExampleKind } from '../core/content.types';
 import { CheckResult, Diagnostic, RunHandle, RunResult, testSummary, ToolchainService } from '../core/toolchain.service';
-import { loadingLine } from '../core/lore';
+import { loadingLine, pick, TIMEOUT } from '../core/lore';
 import type { MylaView } from './codemirror';
 
 type Shown =
@@ -76,6 +76,8 @@ export class EditorComponent {
         return 'runs';
     }
   });
+
+  readonly timeoutLine = pick(TIMEOUT);
 
   private view: MylaView | null = null;
   private handle: RunHandle | null = null;

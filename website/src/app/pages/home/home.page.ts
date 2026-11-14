@@ -32,7 +32,7 @@ export class HomePage {
   readonly site = resource({ loader: () => this.content.site().catch(() => null) });
   readonly hero = splitOutput(hero);
   readonly exercises = computed(() => this.site.value()?.chapters.reduce((n, c) => n + c.exercises, 0) ?? 0);
-  readonly levels = LEVELS.filter((l) => [1, 4, 7, 10, 13].includes(l.n));
+  readonly levels = LEVELS.filter((l) => [1, 5, 11, 16, 20].includes(l.n));
 
   readonly tastes = [
     { id: 'errors', label: 'Errors as values', file: 'digits.my', ...splitOutput(errors), blurb: 'No exceptions: Result, Option and the ? operator, checked before anything runs.' },
@@ -68,7 +68,7 @@ export class HomePage {
     {
       icon: '🔁',
       title: 'It compiles itself',
-      body: "The compiler, the interpreter and the language server are written in Myla. The bootstrap reaches a byte-identical fixed point: Myla builds Myla builds Myla.",
+      body: "The compiler, the interpreter and the language server are written in Myla. The bootstrap reaches a byte-identical fixed point: Myla builds Myla builds Myla. Turtles all the way down.",
       code: '$ scripts/bootstrap.sh\nstage 2 == stage 3   ✓ fixed point',
       link: '/quickstart',
     },
@@ -82,7 +82,7 @@ export class HomePage {
     {
       icon: '🔋',
       title: 'Batteries included',
-      body: 'JSON, TOML, YAML, regexes, HTTP with a router, compression, archives, big integers, vectors and quaternions: 60 modules, documented down to each method.',
+      body: 'JSON, TOML, YAML, regexes, HTTP with a router, compression, archives, big integers, vectors and quaternions: 60 modules, documented down to each method. More gadgets than a certain utility belt.',
       code: 'import std.json as json\nlet text = json.encode(user)',
       link: '/reference',
     },

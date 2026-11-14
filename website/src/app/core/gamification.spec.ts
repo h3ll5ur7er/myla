@@ -39,8 +39,9 @@ function solve(p: ReturnType<typeof emptyProgress>, k: string, t: number, extra:
 describe('levels', () => {
   it('starts mostly harmless and ends as the pirate king', () => {
     expect(levelOf(0).title).toBe('Mostly Harmless');
-    expect(levelOf(24).n).toBe(1);
-    expect(levelOf(25).title).toBe('Hoopy Frood');
+    expect(levelOf(19).n).toBe(1);
+    expect(levelOf(20).title).toBe('Muggle');
+    expect(levelOf(45).title).toBe('Hoopy Frood');
     expect(levelOf(1_000_000).title).toBe('Pirate King');
   });
 
@@ -52,7 +53,7 @@ describe('levels', () => {
     const p = levelProgress(40);
     expect(p.level.n).toBe(2);
     expect(p.next?.n).toBe(3);
-    expect(p.fraction).toBeCloseTo((40 - 25) / (60 - 25));
+    expect(p.fraction).toBeCloseTo((40 - 20) / (45 - 20));
     expect(levelProgress(5000).fraction).toBe(1);
   });
 });
@@ -121,7 +122,7 @@ describe('achievements', () => {
     solve(p, key('a', '1'), at(2026, 5, 25, 3), { ms: 30_000, attempts: 6 });
     solve(p, key('a', 'boss'), at(2026, 6, 1), { xp: 50 });
     const got = ids(newAchievements(p, course, at(2026, 6, 1), key('a', 'boss')));
-    expect(got).toEqual(['believe-it', 'boss-fight', 'dont-panic', 'gilfoyle', 'middle-out', 'night-owl', 'towel-day']);
+    expect(got).toEqual(['believe-it', 'boss-fight', 'dont-panic', 'expecto-patronum', 'gilfoyle', 'middle-out', 'night-owl', 'towel-day']);
   });
 
   it('give no speed or persistence badge for a solve with the solution shown', () => {
@@ -142,5 +143,26 @@ describe('achievements', () => {
     expect(got).toContain('thanks-for-the-fish');
     expect(got).not.toContain('infinity-gauntlet');
     expect(totalXp(p)).toBe(70);
+  });
+
+  it('see a week away, sudo, the playground, every hint and ten failed checks', () => {
+    const c: Course = { chapters: [{ ...course.chapters[0], exercises: [{ ...ex('1'), hints: ['a', 'b'] }, ex('2')] }], totalXp: 20 };
+    const p = emptyProgress();
+    solve(p, key('a', '1'), at(2026, 11, 1), { hints: 2 });
+    solve(p, key('a', '2'), at(2026, 11, 8), { attempts: 10 });
+    p.sudo = true;
+    p.playgroundRuns = 50;
+    const got = ids(newAchievements(p, c, at(2026, 11, 8), key('a', '2')));
+    for (const id of ['expecto-patronum', 'hack-the-planet', 'to-infinity', 'hakuna-matata', 'wasted']) expect(got).toContain(id);
+    const q = emptyProgress();
+    solve(q, key('a', '1'), at(2026, 11, 1), { hints: 1 });
+    solve(q, key('a', '2'), at(2026, 11, 7));
+    const none = ids(newAchievements(q, c, at(2026, 11, 7), key('a', '2')));
+    for (const id of ['expecto-patronum', 'hack-the-planet', 'to-infinity', 'hakuna-matata', 'wasted']) expect(none).not.toContain(id);
+  });
+
+  it('can all be earned in the real course', () => {
+    // the top level is reachable with some hints: 83 % of the course's XP
+    expect(LEVELS[LEVELS.length - 1].xp).toBeLessThan(1875 * 0.85);
   });
 });

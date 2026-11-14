@@ -1,0 +1,30 @@
+#test("speeding, carjack")[3]
+#test("heist, heist, pay-n-spray, speeding")[1]
+#test("bribe, bribe")[0]
+#test("jaywalking")[0]
+fun wanted(log: str) -> int {
+    var level = 0
+    for event in log.split(", ") {
+        let change = match event {
+            "speeding" => 1
+            "carjack" => 2
+            "heist" => 3
+            "bribe" => -1
+            "pay-n-spray" => -level
+            _ => 0
+        }
+        level = (level + change).clamp(0, 5)
+    }
+    return level
+}
+
+#test("speeding, carjack")["★★★☆☆"]
+#test("jaywalking")["☆☆☆☆☆"]
+#test("heist, heist")["WASTED"]
+fun banner(log: str) -> str {
+    let n = wanted(log)
+    if n == 5 {
+        return "WASTED"
+    }
+    return "★".repeat(n) + "☆".repeat(5 - n)
+}

@@ -6,7 +6,7 @@ import { ProgressService } from '../../core/progress.service';
 import { chapterUnlocked, exerciseUnlocked } from '../../core/gamification';
 import { ToolchainService, testSummary } from '../../core/toolchain.service';
 import { EditorComponent } from '../../editor/editor.component';
-import { FAILED, loadingLine, pick, SOLVED } from '../../core/lore';
+import { FAILED, loadingLine, pick, SOLVED, TIMEOUT } from '../../core/lore';
 import { nextExercise } from './course';
 import { checkedProgram } from '../../core/exercise-check';
 
@@ -131,11 +131,11 @@ export class ExercisePage {
       const r = await (ex.mode === 'test' ? this.toolchain.test(source) : this.toolchain.run(source)).result;
       let ok = false;
       let detail = '';
-      if (r.timedOut) detail = 'It ran for 10 seconds without finishing. A loop that never ends?';
+      if (r.timedOut) detail = `It ran for 10 seconds without finishing. ${pick(TIMEOUT)}`;
       else if (ex.mode === 'test') {
         const s = testSummary(r.stdout);
         ok = r.exitCode === 0 && !!s && s.total >= cases && s.total > 0 && s.passed === s.total;
-        detail = s ? `${s.passed}/${s.total} of the exercise's tests pass (its own cases count, not ones you add; a few are hidden).` : '';
+        detail = s ? `${s.passed}/${s.total} of the exercise's tests pass (${ex.ownTests > 0 ? 'yours and a few hidden ones' : `its own cases count, not ones you add${ex.hidden.length ? '; a few are hidden' : ''}`}).` : '';
         if (!ok) detail += '\n' + (r.stdout + r.stderr).trim();
       } else {
         ok = r.exitCode === 0 && r.stdout === ex.expected;
