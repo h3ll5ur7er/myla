@@ -1,9 +1,10 @@
 // title: Rasengan (boss)
 // xp: 80
 // boss: true
+// hidden: compress #test(100, 2)[25]
+// hidden: rasengan #test(6)[12]
 // hint: `x |> f` is `f(x)`, and `x |> f(a)` is `f(x, a)`: the left value becomes the first argument.
-// hint: The chakra goes through `spin`, then `compress(…, 3)`, then `release`: `chakra |> spin |> compress(3) |> release`.
-// hint: `compress(c, n)` halves `c`, `n` times; `spin` adds 10; `release` multiplies by 6.
+// hint: `compress` is a loop that halves; `rasengan` chains the three steps in order, with 3 as `compress`'s extra argument.
 //
 // The Rasengan takes three steps, in order: **spin** the chakra (+10),
 // **compress** it (halve it a number of times), then **release** it (x6).

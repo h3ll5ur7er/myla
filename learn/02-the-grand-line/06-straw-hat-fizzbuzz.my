@@ -16,9 +16,8 @@
 // expect: 13
 // expect: 14
 // expect: StrawHat
-// hint: Count with `for i in 1..16`.
-// hint: Test the multiple of both first: `if i % 15 == 0 { … } else if i % 3 == 0 { … }`.
-// hint: To print a number, `print(i)`; or put `f"{i}"` in a string.
+// hint: Count from 1 to 15 with a `for` over a range (a range never includes its end).
+// hint: Order matters: test the multiple of both before the single ones. `%` tells you about multiples.
 //
 // The crew's favourite drinking game, on the Thousand Sunny: count from 1 to
 // 15, but say `Straw` for multiples of 3, `Hat` for multiples of 5, and

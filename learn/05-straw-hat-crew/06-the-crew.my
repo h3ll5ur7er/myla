@@ -6,9 +6,8 @@
 // expect: Sanji joins!
 // expect: Straw Hats: Luffy (3000000000), Zoro (1111000000), Nami (366000000), Sanji (1032000000)
 // expect: total 5509000000 berries
-// hint: `impl Format for Pirate { fun format(self, spec: str) -> str { return f"{self.name} ({self.bounty})" } }` makes a pirate printable; do the same for `Crew`.
-// hint: For the crew, build the list of the pirates' texts and `join(", ")` it: `self.members.map((p: Pirate) => f"{p}")`.
-// hint: `join` needs `var self`, pushes to `self.members`; `total` walks the members adding their bounties into an `int64`.
+// hint: A type becomes printable with an `impl Format`: its `format(self, spec: str) -> str` gives the text.
+// hint: For the crew, turn each member into text, `join` them, put the crew's name in front. Adding a member changes the crew (`var self`); the total is an `int64`.
 //
 // Build the Straw Hats! `main` is written; make it work by giving the types
 // what it uses:

@@ -1,7 +1,8 @@
 // title: Bounty Raise
 // xp: 20
-// hint: A method that changes its value takes `var self` instead of `self`.
-// hint: `fun raise(var self, amount: int64)`; the caller's value must be a `var` too (it is).
+// hidden: after_adventure #test(1, 1)[2]
+// hint: The checker says `self` can't change in this method.
+// hint: A method that changes its value says so in its receiver, with a keyword you already know for things that change.
 //
 // After every adventure, the World Government raises the crew's bounties.
 // `raise` should add `amount` to the pirate's bounty, but the checker refuses:

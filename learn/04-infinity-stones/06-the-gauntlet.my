@@ -1,9 +1,9 @@
 // title: The Gauntlet (boss)
 // xp: 90
 // boss: true
-// hint: First drop the duplicates: build a new list, pushing each stone only when it doesn't `contains` it yet.
-// hint: Then walk the unique stones once: count them, add up their lengths, and keep the longest (a stone only replaces it when strictly longer, so the first one wins a tie).
-// hint: The result is one f-string: `f"{n} stones, longest {longest}, total {letters} letters"`.
+// hidden: report #test(["Soul", "Mind", "Soul"])["2 stones, longest Soul, total 8 letters"]
+// hint: First drop the duplicates: build a new list, adding each stone only when it isn't there yet (`contains`).
+// hint: Then walk the unique stones once, counting, adding up lengths and remembering the longest. Only a strictly longer name replaces it, so the first wins a tie.
 //
 // The final fight. Thanos's gauntlet reports what it holds:
 //

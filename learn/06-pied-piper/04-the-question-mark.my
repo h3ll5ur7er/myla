@@ -1,7 +1,9 @@
 // title: The Question Mark
 // xp: 25
-// hint: `parse_size(s)` gives a `Result<int, str>`, which you can't add to an `int`. Put `?` after it.
-// hint: `total += parse_size(s)?` adds the value of an `Ok`, and returns an `Err` from `total_size` at once.
+// hidden: total_size #test(["40", "2"])[Ok(42)]
+// hidden: total_size #test(["?"])[Err("'?' is not a size")]
+// hint: `parse_size(s)` gives a `Result<int, str>`, which can't be added to an `int`.
+// hint: One character after the call takes the value out of an `Ok`, or returns the `Err` from `total_size` at once.
 //
 // The upload page sums the sizes of the files, given as text. `parse_size`
 // is written; `total_size` should add up every size, and give the first

@@ -1,7 +1,10 @@
 // title: Write the Test
 // xp: 25
-// hint: A test case goes right above the function: `#test(6, 7)[42]` says `question(6, 7)` must give `42`.
-// hint: Add at least two lines like `#test(6, 7)[42]` and `#test(2, 21)[42]` above `fun question`.
+// hidden: question #test(3, 5)[15]
+// hidden: question #test(-2, 21)[-42]
+// own-tests: 2
+// hint: A test case sits right above its function: `#test(args)[expected]`.
+// hint: Each case calls `question` with its arguments and says what it gives. Write at least two, one of them for 6 and 7.
 //
 // This time the code is right and the tests are missing: the exercise passes
 // when `question` has test cases, and they all pass.

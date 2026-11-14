@@ -1,7 +1,7 @@
 // title: Quantum Pair
 // xp: 25
-// hint: The struct only holds `int`s. Make it generic: `struct Pair<T> { first: T, second: T }`.
-// hint: Its methods then live in `impl<T> Pair<T> { … }`, and `swap` gives a `Pair<T>`.
+// hint: `Pair` only holds `int`s, and the tests swap strings too.
+// hint: Give the struct a type parameter, use it for both fields, and make the `impl` generic the same way.
 //
 // The quantum realm swaps things around. `Pair` holds two values and `swap`
 // exchanges them, but it only works for `int`s, and the tests swap strings

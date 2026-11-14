@@ -2,8 +2,8 @@
 // xp: 25
 // expect: Thinking...
 // expect: The answer is 42
-// hint: `ponder()` is an `async fun`: its result comes with `await ponder()`.
-// hint: A `main` that awaits is `async` and marked `#main`: `#main` above `async fun main()`.
+// hint: `ponder()` is `async`: its result comes with `await`.
+// hint: A `main` that awaits must be `async` too, and marked as the entry point with an attribute above it.
 //
 // Deep Thought needs time to think: `ponder` is an `async` function that waits
 // a little before it answers. `main` calls it without waiting, and isn't

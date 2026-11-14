@@ -1,8 +1,8 @@
 // title: Hello, Galaxy
 // xp: 10
 // expect: Hello, Galaxy!
-// hint: `print` takes one value, a string in double quotes, and adds the newline itself.
-// hint: Replace the comment in `main` with `print("Hello, Galaxy!")`.
+// hint: `print` takes one value and adds the newline itself.
+// hint: A string goes in double quotes and must match the expected output exactly, capitals and punctuation included.
 //
 // Every journey starts with a greeting. This program prints nothing at all:
 // make it print exactly

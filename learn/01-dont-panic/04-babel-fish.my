@@ -1,7 +1,8 @@
 // title: Babel Fish
 // xp: 15
-// hint: Inside an `f"…"` string, `{name}` is replaced by the value of `name`.
-// hint: `return f"{name} says hello in {language}"`
+// hidden: translate #test("Zaphod", "Betelgeusian")["Zaphod says hello in Betelgeusian"]
+// hint: The function returns the same sentence whatever it gets: its parameters are never used.
+// hint: In an `f"…"` string, a name in braces is replaced by its value.
 //
 // The Babel fish translates any language. Our `translate` function, sadly,
 // only returns a fixed sentence.

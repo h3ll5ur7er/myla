@@ -17,7 +17,7 @@ import {
 } from './gamification';
 
 function ex(id: string, xp = 10, boss = false) {
-  return { id, file: '', title: id, xp, boss, mode: 'test' as const, expected: null, hints: [], instructions: '', starter: '', solution: '' };
+  return { id, file: '', title: id, xp, boss, mode: 'test' as const, expected: null, tests: [], hidden: [], ownTests: 0, hints: [], instructions: '', starter: '', solution: '' };
 }
 
 const course: Course = {

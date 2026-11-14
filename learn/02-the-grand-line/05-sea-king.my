@@ -1,7 +1,8 @@
 // title: Sea King Ahead
 // xp: 20
-// hint: `continue` skips the rest of this round; `break` leaves the loop.
-// hint: `if depth < 0 { continue }` and `if depth > 9000 { break }`, before adding.
+// hidden: safe_depth #test([5, -1, 9000, 9001])[9005]
+// hint: Two situations: one means "skip this reading", the other "stop reading now".
+// hint: Myla has a keyword for each: one goes on with the next round, the other leaves the loop. Test for them before adding.
 //
 // The ship's sonar reports depths. A negative reading is noise: skip it. A
 // reading over 9000 means a Sea King: stop reading at once. Add up the depths

@@ -1,7 +1,8 @@
 // title: Over Nine Thousand
 // xp: 15
-// hint: A parameter gets a default with `= value` after its type.
-// hint: `fun power_level(name: str, level: int = 9001) -> str`
+// hidden: power_level #test("Vegeta", 18000)["Vegeta: 18000"]
+// hint: A parameter can have a default, used when the caller leaves it out.
+// hint: The default goes in the parameter list after the parameter's type, with `=`.
 //
 // Scouters everywhere agree: unless told otherwise, a power level is over
 // nine thousand. Give `level` a default of `9001`, so `power_level("Goku")`

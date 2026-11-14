@@ -1,7 +1,9 @@
 // title: Compression Ratio
 // xp: 25
-// hint: Check the bad inputs first and return an `Err(…)` for each, before computing the ratio.
-// hint: `if original < 0 || compressed < 0 { return Err("negative size") }` and `if compressed == 0 { return Err("cannot compress to zero bytes") }`.
+// hidden: ratio #test(9, 3)[Ok(3.0)]
+// hidden: ratio #test(0, 0)[Err("cannot compress to zero bytes")]
+// hint: Check the bad inputs first and return an `Err` for each, before computing anything.
+// hint: Negative sizes first (either one), then a compressed size of zero; only then the `Ok` with the division.
 //
 // Pied Piper's middle-out algorithm reports its compression ratio,
 // `original / compressed`. But some inputs make no sense, and the ratio

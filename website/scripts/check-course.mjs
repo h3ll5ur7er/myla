@@ -11,6 +11,7 @@ import path from "node:path";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { buildCourse } from "./lib/learn.mjs";
+import { checkedProgram } from "../src/app/core/exercise-check.ts";
 
 const SITE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const course = buildCourse(path.resolve(SITE, "../learn"), { byPath: new Set(), byTitle: new Map(), tasks: new Map() });
@@ -50,9 +51,13 @@ async function solved(ex, source) {
     const r = await run("run", source);
     return r.exitCode === 0 && r.stdout === ex.expected;
   }
-  const r = await run("test", source);
+  // as the Check button: the exercise's own cases and its hidden ones
+  const prog = checkedProgram(source, ex.tests, ex.hidden, ex.ownTests);
+  if ("missing" in prog) return false;
+  if (ex.ownTests > 0 && source.split("\n").filter((l) => l.trim().startsWith("#test")).length < ex.ownTests) return false;
+  const r = await run("test", prog.source);
   const m = /(\d+)\/(\d+) passed\./.exec(r.stdout);
-  return r.exitCode === 0 && !!m && m[1] === m[2] && +m[2] > 0;
+  return r.exitCode === 0 && !!m && m[1] === m[2] && +m[2] > 0 && +m[2] >= prog.cases;
 }
 
 let bad = 0;

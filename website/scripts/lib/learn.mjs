@@ -9,6 +9,8 @@
 //   // xp: 10
 //   // boss: true                  (optional: the chapter's final exercise)
 //   // expect: Hello, Galaxy!      (optional, one line each: what it prints)
+//   // hidden: greet #test("Ford")["Hello, Ford"]   (optional: a case Check runs, not shown)
+//   // own-tests: 2                (optional: the learner writes the cases, at least 2)
 //   // hint: print adds the newline itself
 //   //
 //   // The instructions, in Markdown, to the header's end.
@@ -21,13 +23,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { convertPage, inlineDoc } from "./markdown.mjs";
+// the same reading of #test cases as the Check button (types stripped by Node)
+import { testsOf } from "../../src/app/core/exercise-check.ts";
 
-const KEYS = new Set(["title", "xp", "boss", "expect", "hint"]);
+const KEYS = new Set(["title", "xp", "boss", "expect", "hint", "hidden", "own-tests"]);
 
 // An exercise's header and its code (the starter shown in the editor).
 export function parseExercise(text) {
   const lines = text.split("\n");
-  const ex = { title: "", xp: 10, boss: false, expect: [], hints: [], instructions: "", starter: "" };
+  const ex = { title: "", xp: 10, boss: false, expect: [], hints: [], hidden: [], ownTests: 0, instructions: "", starter: "" };
   const prose = [];
   let i = 0;
   let inProse = false;
@@ -35,7 +39,7 @@ export function parseExercise(text) {
     const m = /^\/\/ ?(.*)$/.exec(lines[i]);
     if (!m) break;
     const body = m[1];
-    const kv = /^([a-z]+): ?(.*)$/.exec(body);
+    const kv = /^([a-z-]+): ?(.*)$/.exec(body);
     if (!inProse && kv && KEYS.has(kv[1])) {
       const [, k, v] = kv;
       if (k === "title") ex.title = v.trim();
@@ -43,6 +47,14 @@ export function parseExercise(text) {
       else if (k === "boss") ex.boss = v.trim() === "true";
       else if (k === "expect") ex.expect.push(v);
       else if (k === "hint") ex.hints.push(v.trim());
+      else if (k === "own-tests") ex.ownTests = parseInt(v, 10);
+      else if (k === "hidden") {
+        const h = /^([A-Za-z_][A-Za-z0-9_]*)\s+(#test.*)$/.exec(v.trim());
+        if (!h) throw new Error(`a hidden case is \`// hidden: <function> #test(…)[…]\`, not: ${v}`);
+        const block = ex.hidden.find((b) => b.fn === h[1]);
+        if (block) block.lines.push(h[2]);
+        else ex.hidden.push({ fn: h[1], lines: [h[2]] });
+      }
     } else {
       inProse = true;
       prose.push(body);
@@ -94,6 +106,9 @@ export function buildCourse(dir, pages) {
         boss: ex.boss,
         mode: ex.expect.length ? "output" : "test",
         expected: ex.expect.length ? ex.expect.join("\n") + "\n" : null,
+        tests: testsOf(ex.starter),
+        hidden: ex.hidden,
+        ownTests: ex.ownTests,
         hints: ex.hints.map((h) => inlineDoc(h, pages).replace(/^<p>|<\/p>\n?$/g, "")),
         instructions: inlineDoc(ex.instructions, pages),
         starter: ex.starter,

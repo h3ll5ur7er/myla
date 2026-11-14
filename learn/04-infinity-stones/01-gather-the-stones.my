@@ -1,7 +1,8 @@
 // title: Gather the Stones
 // xp: 20
-// hint: Parameters can't change. Copy the list into a `var` and push to the copy.
-// hint: `var all = stones`, then `all.push(found)`, then `return all`.
+// hidden: gather #test(["Mind"], "Soul")[["Mind", "Soul"]]
+// hint: Parameters can't change. You need a list of your own.
+// hint: Copy the parameter into a `var`, push to the copy and return it. Lists are values: the caller's stays as it was.
 //
 // Thanos has some stones and finds another. `gather` should give the list
 // with the new stone at its end, but it doesn't compile: `stones` is a

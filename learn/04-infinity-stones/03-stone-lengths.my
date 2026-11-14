@@ -1,7 +1,8 @@
 // title: Measuring the Stones
 // xp: 20
-// hint: `xs.map(f)` makes a new list of `f(x)` for each `x`.
-// hint: `return stones.map((s: str) => s.len())`
+// hidden: lengths #test(["Soul"])[[4]]
+// hint: There's a list method that turns each value into another.
+// hint: `map`, with a lambda that takes a `str` and gives its length.
 //
 // Wong catalogues the stones by the length of their names, for reasons known
 // only to the Ancient One. `lengths` should give the length of each name, in

@@ -1,7 +1,8 @@
 // title: Default Gilfoyle
 // xp: 15
-// hint: An `Option<str>` isn't a `str`. Take it apart with `match`, or use `unwrap_or`.
-// hint: `return nickname.unwrap_or("Gilfoyle")`
+// hidden: server_name #test(Some("Dinesh"))["Dinesh"]
+// hint: An `Option<str>` isn't a `str`: you must say what happens when there's nothing.
+// hint: `Option` has a method that gives its value, or a default of your choosing.
 //
 // Every server in the Hacker Hostel is named after its admin, unless it has a
 // nickname. `server_name` doesn't compile: it returns an `Option<str>` where

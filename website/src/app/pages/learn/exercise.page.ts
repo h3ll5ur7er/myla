@@ -8,6 +8,7 @@ import { ToolchainService, testSummary } from '../../core/toolchain.service';
 import { EditorComponent } from '../../editor/editor.component';
 import { FAILED, loadingLine, pick, SOLVED } from '../../core/lore';
 import { nextExercise } from './course';
+import { checkedProgram } from '../../core/exercise-check';
 
 type Verdict = { ok: true; line: string; xp: number } | { ok: false; line: string; detail: string };
 
@@ -95,7 +96,10 @@ export class ExercisePage {
   changed(code: string): void {
     this.code = code;
     const v = this.view();
-    if (v) this.progress.saveDraft(v.chapter.id, v.ex.id, code);
+    if (!v) return;
+    // only what the learner wrote is a draft, not the starter itself
+    if (code === v.ex.starter) this.progress.clearDraft(v.chapter.id, v.ex.id);
+    else this.progress.saveDraft(v.chapter.id, v.ex.id, code);
   }
 
   async check(): Promise<void> {
@@ -105,14 +109,33 @@ export class ExercisePage {
     this.verdict.set(null);
     try {
       const ex = v.ex;
-      const r = await (ex.mode === 'test' ? this.toolchain.test(this.code) : this.toolchain.run(this.code)).result;
+      // the exercise's own cases and its hidden ones, not the learner's
+      let source = this.code;
+      let cases = 0;
+      if (ex.mode === 'test') {
+        const prog = checkedProgram(this.code, ex.tests, ex.hidden, ex.ownTests);
+        if ('missing' in prog) {
+          this.progress.failed(v.chapter.id, ex.id);
+          this.verdict.set({ ok: false, line: pick(FAILED), detail: `The tests need the function \`${prog.missing}\`, and it's gone. Renamed it? (These aren't the droids you're looking for.)` });
+          return;
+        }
+        const mine = this.code.split('\n').filter((l) => l.trim().startsWith('#test')).length;
+        if (ex.ownTests > 0 && mine < ex.ownTests) {
+          this.progress.failed(v.chapter.id, ex.id);
+          this.verdict.set({ ok: false, line: pick(FAILED), detail: `Write at least ${ex.ownTests} #test cases of your own (there ${mine === 1 ? 'is' : 'are'} ${mine}).` });
+          return;
+        }
+        source = prog.source;
+        cases = prog.cases;
+      }
+      const r = await (ex.mode === 'test' ? this.toolchain.test(source) : this.toolchain.run(source)).result;
       let ok = false;
       let detail = '';
       if (r.timedOut) detail = 'It ran for 10 seconds without finishing. A loop that never ends?';
       else if (ex.mode === 'test') {
         const s = testSummary(r.stdout);
-        ok = r.exitCode === 0 && !!s && s.total > 0 && s.passed === s.total;
-        detail = s ? `${s.passed}/${s.total} tests pass.` : '';
+        ok = r.exitCode === 0 && !!s && s.total >= cases && s.total > 0 && s.passed === s.total;
+        detail = s ? `${s.passed}/${s.total} of the exercise's tests pass (its own cases count, not ones you add; a few are hidden).` : '';
         if (!ok) detail += '\n' + (r.stdout + r.stderr).trim();
       } else {
         ok = r.exitCode === 0 && r.stdout === ex.expected;

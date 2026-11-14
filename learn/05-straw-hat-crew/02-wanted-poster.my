@@ -1,7 +1,8 @@
 // title: Wanted Poster
 // xp: 20
-// hint: A method lives in an `impl Pirate { … }` block, and its first parameter is `self`.
-// hint: Move `poster` into `impl Pirate { fun poster(self) -> str { … } }` and use `self.name` and `self.bounty`.
+// hidden: wanted #test("Franky", 394_000_000)["WANTED: Franky, 394000000 berries"]
+// hint: `p.poster()` calls a method, but `poster` is a free function.
+// hint: Methods live in an `impl Pirate { … }` block and take `self`; inside, the fields are `self.name` and `self.bounty`.
 //
 // The Marines print wanted posters. `p.poster()` should give
 // `"WANTED: Luffy, 3000000000 berries"`, but `poster` is a free function, not

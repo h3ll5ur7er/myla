@@ -1,7 +1,9 @@
 // title: Bounty Class
 // xp: 15
-// hint: Check the biggest bounties first, or use `<` in the right order: the first `if` that holds wins.
-// hint: `if berries < 100_000_000 { return "rookie" } else if berries < 1_000_000_000 { return "supernova" }` and the rest.
+// hidden: bounty_class #test(99_999_999)["rookie"]
+// hidden: bounty_class #test(999_999_999)["supernova"]
+// hint: The function only ever answers "rookie" or "supernova". Which answer never comes?
+// hint: Add an `else if` for the middle range, and let everything else fall through to the last answer.
 //
 // The Marines rank pirates by their bounty, in berries:
 //
