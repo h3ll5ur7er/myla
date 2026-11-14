@@ -22,6 +22,8 @@ SUITES = [
     "tests.burn.test_stdio",
     "tests.burn.test_process",
     "tests.burn.test_platform_primitives",
+    # every platform module the same interface, in Myla's terms (MYLA-701)
+    "tests.burn.test_platform_interface",
     "tests.burn.test_net",
     "tests.burn.test_term",
     "tests.burn.test_http",
