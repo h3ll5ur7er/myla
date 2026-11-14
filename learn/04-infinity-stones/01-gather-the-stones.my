@@ -1,0 +1,17 @@
+// title: Gather the Stones
+// xp: 20
+// hint: Parameters can't change. Copy the list into a `var` and push to the copy.
+// hint: `var all = stones`, then `all.push(found)`, then `return all`.
+//
+// Thanos has some stones and finds another. `gather` should give the list
+// with the new stone at its end, but it doesn't compile: `stones` is a
+// parameter, and parameters never change.
+//
+// Lists are values in Myla: `var all = stones` makes your own copy, which you
+// may change as you like (the caller's list stays as it was).
+#test(["Space", "Mind"], "Time")[["Space", "Mind", "Time"]]
+#test([], "Soul")[["Soul"]]
+fun gather(stones: [str], found: str) -> [str] {
+    stones.push(found)
+    return stones
+}

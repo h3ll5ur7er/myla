@@ -1,0 +1,23 @@
+// title: Recruit
+// xp: 20
+// hint: The struct has no field `role`. Add it, with its type, to `struct Pirate`.
+// hint: `struct Pirate { name: str, role: str, bounty: int64 }`
+//
+// Luffy recruits anyone he likes. `recruit` makes a new pirate with a name, a
+// role and no bounty yet, but it doesn't compile: the struct `Pirate` has no
+// `role`. Give it one.
+struct Pirate {
+    name: str,
+    bounty: int64,
+}
+
+#test("Zoro", "swordsman")["Zoro the swordsman, bounty 0"]
+#test("Nami", "navigator")["Nami the navigator, bounty 0"]
+fun describe(name: str, role: str) -> str {
+    let p = recruit(name, role)
+    return f"{p.name} the {p.role}, bounty {p.bounty}"
+}
+
+fun recruit(name: str, role: str) -> Pirate {
+    return Pirate { name: name, role: role, bounty: 0 }
+}

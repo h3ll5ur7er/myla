@@ -1,0 +1,14 @@
+#test(["Time", "Mind", "Time", "Time"], "Time")[3]
+#test(["Time", "Mind", "Time"], "Mind")[1]
+#test(["Time"], "Soul")[0]
+fun how_many(sightings: [str], stone: str) -> int {
+    return census(sightings).get_or(stone, 0)
+}
+
+fun census(sightings: [str]) -> [str: int] {
+    var counts: [str: int] = [:]
+    for s in sightings {
+        counts[s] = counts.get_or(s, 0) + 1
+    }
+    return counts
+}

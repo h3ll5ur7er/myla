@@ -1,0 +1,23 @@
+import std.float as float
+from std.vector import Vec3, vec3
+from std.matrix import rotation_z
+from std.quaternion import from_axis_angle
+
+fun main() {
+    var pos = Vec3.zero()
+    let vel = vec3(1.0, 2.0, 0.0)
+    for step in 0..3 {
+        pos += vel * 0.5
+    }
+    print(pos)
+    let turn = rotation_z(float.PI / 2.0)
+    let r = (turn * pos.extend(1.0)).truncate()
+    print(f"turned: ({r.x:.1}, {r.y:.1}, {r.z:.1})")
+    let q = from_axis_angle(vec3(0.0, 0.0, 1.0), float.PI / 2.0)
+    let v = q * vec3(1.0, 0.0, 0.0)
+    print(f"rotated x axis: ({v.x:.1}, {v.y:.1}, {v.z:.1})")
+}
+// output:
+// (1.5, 3, 0)
+// turned: (-3.0, 1.5, 0.0)
+// rotated x axis: (0.0, 1.0, 0.0)

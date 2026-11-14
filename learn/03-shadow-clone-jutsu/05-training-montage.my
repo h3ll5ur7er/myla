@@ -1,0 +1,25 @@
+// title: Training Montage
+// xp: 25
+// hint: Call `f` on the value, `times` times, in a loop: `for i in 0..times { x = f(x) }`.
+// hint: `x` must be a `var` to change: `var x = start`.
+//
+// A training montage repeats the same exercise until it sticks.
+// `train(f, times, start)` should apply the function `f` to `start`, then to
+// the result, and so on, `times` times: `train(double, 3, 1)` is
+// double(double(double(1))) = 8.
+//
+// Functions are values: `f` is a parameter of type `(int) -> int`.
+#test(3, 1)[8]
+#test(0, 5)[5]
+fun doubled(times: int, start: int) -> int {
+    return train((x: int) => x * 2, times, start)
+}
+
+#test(4, 10)[14]
+fun plus_one(times: int, start: int) -> int {
+    return train((x: int) => x + 1, times, start)
+}
+
+fun train(f: (int) -> int, times: int, start: int) -> int {
+    return start
+}

@@ -1,0 +1,34 @@
+// title: The Question Mark
+// xp: 25
+// hint: `parse_size(s)` gives a `Result<int, str>`, which you can't add to an `int`. Put `?` after it.
+// hint: `total += parse_size(s)?` adds the value of an `Ok`, and returns an `Err` from `total_size` at once.
+//
+// The upload page sums the sizes of the files, given as text. `parse_size`
+// is written; `total_size` should add up every size, and give the first
+// error when a size isn't a number. It doesn't compile: a `Result` isn't an
+// `int`.
+//
+// The `?` operator was made for this: `r?` is the value inside `Ok`, or it
+// returns the `Err` from the function right away.
+#test(["10", "20", "12"])[Ok(42)]
+#test(["10", "x2"])[Err("'x2' is not a size")]
+#test([])[Ok(0)]
+fun total_size(sizes: [str]) -> Result<int, str> {
+    var total = 0
+    for s in sizes {
+        total += parse_size(s)
+    }
+    return Ok(total)
+}
+
+fun parse_size(s: str) -> Result<int, str> {
+    var n = 0
+    for c in s.chars() {
+        let d = match c.to_digit(10) {
+            Some(d) => d,
+            None => { return Err(f"'{s}' is not a size") },
+        }
+        n = n * 10 + d
+    }
+    return Ok(n)
+}

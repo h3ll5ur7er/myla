@@ -1,0 +1,16 @@
+// title: I Am Inevitable
+// xp: 25
+// hint: Split the sentence into words, reverse their order, join them again, then make it upper case.
+// hint: `sentence.split(" ").reversed().join(" ").to_upper()`
+//
+// Villains talk backwards when they monologue (it's in the contract).
+// `monologue` should reverse the order of the words of a sentence and shout
+// it: `"i am inevitable"` becomes `"INEVITABLE AM I"`.
+//
+// Strings have `split(sep)`, which gives a `[str]`; lists have `reversed()`
+// and, for strings, `join(sep)`; and strings have `to_upper()`. Chain them.
+#test("i am inevitable")["INEVITABLE AM I"]
+#test("snap")["SNAP"]
+fun monologue(sentence: str) -> str {
+    return sentence
+}

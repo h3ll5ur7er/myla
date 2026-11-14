@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Myla — a language that compiles itself. Don't panic.</title>
+    <base href="/" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Myla is a small, statically typed programming language with value semantics. Its compiler is written in Myla and compiles itself; programs build to native x86-64 and aarch64 binaries and to WebAssembly. Try it in your browser." />
+    <meta name="theme-color" content="#07080f" />
+    <meta property="og:title" content="The Myla programming language" />
+    <meta property="og:description" content="Statically typed, value semantics, self-hosted. Learn it in your browser, one exercise at a time." />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <script>
+      // the theme before the first paint: the visitor's choice, else the system's
+      try {
+        var t = localStorage.getItem("myla.theme");
+        if (!t) t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <app-root></app-root>
+    <noscript><p style="padding:2rem;font-family:sans-serif">The Myla website runs its examples in your browser and needs JavaScript. The documentation is also in the repository: https://github.com/h3ll5ur7er/myla/tree/master/docs</p></noscript>
+  </body>
+</html>

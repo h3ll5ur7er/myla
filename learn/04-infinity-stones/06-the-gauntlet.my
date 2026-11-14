@@ -1,0 +1,23 @@
+// title: The Gauntlet (boss)
+// xp: 90
+// boss: true
+// hint: First drop the duplicates: build a new list, pushing each stone only when it doesn't `contains` it yet.
+// hint: Then walk the unique stones once: count them, add up their lengths, and keep the longest (a stone only replaces it when strictly longer, so the first one wins a tie).
+// hint: The result is one f-string: `f"{n} stones, longest {longest}, total {letters} letters"`.
+//
+// The final fight. Thanos's gauntlet reports what it holds:
+//
+// `report(stones)` gives `"<n> stones, longest <name>, total <letters> letters"`, where
+//
+// - duplicates count once (a stone is a stone),
+// - `<n>` is the number of different stones,
+// - `<name>` is the stone with the longest name (the first one, on a tie),
+// - `<letters>` adds up the lengths of the different stones' names.
+//
+// Use everything from this chapter. Perfectly balanced.
+#test(["Space", "Mind", "Reality", "Power", "Time", "Soul"])["6 stones, longest Reality, total 29 letters"]
+#test(["Time", "Time", "Mind"])["2 stones, longest Time, total 8 letters"]
+#test([])["0 stones, longest nothing, total 0 letters"]
+fun report(stones: [str]) -> str {
+    return ""
+}

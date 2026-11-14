@@ -1,0 +1,17 @@
+// title: Hello, Galaxy
+// xp: 10
+// expect: Hello, Galaxy!
+// hint: `print` takes one value, a string in double quotes, and adds the newline itself.
+// hint: Replace the comment in `main` with `print("Hello, Galaxy!")`.
+//
+// Every journey starts with a greeting. This program prints nothing at all:
+// make it print exactly
+//
+// ```
+// Hello, Galaxy!
+// ```
+//
+// Run it with **Run** (or Ctrl+Enter) to see what it prints, then press **Check**.
+fun main() {
+    // say hello here
+}

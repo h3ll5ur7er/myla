@@ -1,0 +1,49 @@
+struct Pirate {
+    name: str,
+    bounty: int64,
+}
+
+struct Crew {
+    name: str,
+    members: [Pirate],
+}
+
+impl Format for Pirate {
+    fun format(self, spec: str) -> str {
+        return f"{self.name} ({self.bounty})"
+    }
+}
+
+impl Format for Crew {
+    fun format(self, spec: str) -> str {
+        let names = self.members.map((p: Pirate) => f"{p}")
+        return f"{self.name}: {names.join(", ")}"
+    }
+}
+
+impl Crew {
+    fun join(var self, p: Pirate) {
+        self.members.push(p)
+    }
+
+    fun total(self) -> int64 {
+        var sum: int64 = 0
+        for p in self.members {
+            sum += p.bounty
+        }
+        return sum
+    }
+}
+
+fun main() {
+    var crew = Crew { name: "Straw Hats", members: [] }
+    crew.join(Pirate { name: "Luffy", bounty: 3_000_000_000 })
+    crew.join(Pirate { name: "Zoro", bounty: 1_111_000_000 })
+    crew.join(Pirate { name: "Nami", bounty: 366_000_000 })
+    print(crew)
+    print(f"total {crew.total()} berries")
+    print("Sanji joins!")
+    crew.join(Pirate { name: "Sanji", bounty: 1_032_000_000 })
+    print(crew)
+    print(f"total {crew.total()} berries")
+}

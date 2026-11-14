@@ -1,0 +1,16 @@
+enum Haki {
+    Observation,
+    Armament(int),
+    Conqueror(str),
+}
+
+#test(Haki.Observation)["observation"]
+#test(Haki.Armament(5))["armament level 5"]
+#test(Haki.Conqueror("Shanks"))["Shanks's conqueror's haki"]
+fun describe(h: Haki) -> str {
+    return match h {
+        Haki.Observation => "observation",
+        Haki.Armament(level) => f"armament level {level}",
+        Haki.Conqueror(name) => f"{name}'s conqueror's haki",
+    }
+}

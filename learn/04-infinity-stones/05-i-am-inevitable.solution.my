@@ -1,0 +1,5 @@
+#test("i am inevitable")["INEVITABLE AM I"]
+#test("snap")["SNAP"]
+fun monologue(sentence: str) -> str {
+    return sentence.split(" ").reversed().join(" ").to_upper()
+}

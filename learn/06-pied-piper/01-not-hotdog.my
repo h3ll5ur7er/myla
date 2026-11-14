@@ -1,0 +1,14 @@
+// title: Not Hotdog
+// xp: 20
+// hint: `xs.position(pred)` gives `Some(index)` of the first value for which `pred` holds, or `None`.
+// hint: `return foods.position((f: str) => f == "hotdog")`
+//
+// Jian-Yang's app finds the hotdog in a list of foods. `find_hotdog` should
+// give the index of the first `"hotdog"` as `Some(index)`, or `None` when
+// there is none. Not hotdog.
+#test(["pizza", "hotdog", "hotdog"])[Some(1)]
+#test(["salad", "octopus"])[None]
+#test([])[None]
+fun find_hotdog(foods: [str]) -> Option<int> {
+    return Some(0)
+}

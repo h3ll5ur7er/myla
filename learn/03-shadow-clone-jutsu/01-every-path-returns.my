@@ -1,0 +1,16 @@
+// title: Every Path Returns
+// xp: 15
+// hint: The checker complains that the function may end without returning. Which case is missing?
+// hint: Add `return "ramen"` after the `if`, for every other day.
+//
+// Naruto eats ramen every day, except on Sundays, when it's double ramen.
+// `lunch` doesn't compile: in Myla every path through a function must
+// `return` a value, and this one forgets the other six days.
+#test("Sunday")["double ramen"]
+#test("Monday")["ramen"]
+#test("Friday")["ramen"]
+fun lunch(day: str) -> str {
+    if day == "Sunday" {
+        return "double ramen"
+    }
+}

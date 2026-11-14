@@ -1,0 +1,19 @@
+// title: Compression Ratio
+// xp: 25
+// hint: Check the bad inputs first and return an `Err(…)` for each, before computing the ratio.
+// hint: `if original < 0 || compressed < 0 { return Err("negative size") }` and `if compressed == 0 { return Err("cannot compress to zero bytes") }`.
+//
+// Pied Piper's middle-out algorithm reports its compression ratio,
+// `original / compressed`. But some inputs make no sense, and the ratio
+// should say so instead of computing nonsense:
+//
+// - a negative size: `Err("negative size")`
+// - a compressed size of 0: `Err("cannot compress to zero bytes")`
+// - otherwise: `Ok(original / compressed)`, as a float.
+#test(100, 25)[Ok(4.0)]
+#test(10, 0)[Err("cannot compress to zero bytes")]
+#test(-5, 2)[Err("negative size")]
+#test(5, -2)[Err("negative size")]
+fun ratio(original: int, compressed: int) -> Result<float, str> {
+    return Ok((original as float) / (compressed as float))
+}

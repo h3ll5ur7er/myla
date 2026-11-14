@@ -1,0 +1,18 @@
+struct Pirate {
+    name: str,
+    bounty: int64,
+}
+
+impl Pirate {
+    fun raise(var self, amount: int64) {
+        self.bounty += amount
+    }
+}
+
+#test(30_000_000, 70_000_000)[100_000_000]
+#test(0, 50)[50]
+fun after_adventure(start: int64, amount: int64) -> int64 {
+    var p = Pirate { name: "Chopper", bounty: start }
+    p.raise(amount)
+    return p.bounty
+}

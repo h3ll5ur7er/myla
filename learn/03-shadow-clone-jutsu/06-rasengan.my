@@ -1,0 +1,32 @@
+// title: Rasengan (boss)
+// xp: 80
+// boss: true
+// hint: `x |> f` is `f(x)`, and `x |> f(a)` is `f(x, a)`: the left value becomes the first argument.
+// hint: The chakra goes through `spin`, then `compress(…, 3)`, then `release`: `chakra |> spin |> compress(3) |> release`.
+// hint: `compress(c, n)` halves `c`, `n` times; `spin` adds 10; `release` multiplies by 6.
+//
+// The Rasengan takes three steps, in order: **spin** the chakra (+10),
+// **compress** it (halve it a number of times), then **release** it (x6).
+//
+// 1. Write `compress(c, n)`: `c` halved `n` times (`compress(80, 3)` is 10).
+// 2. Write `rasengan(chakra)` as one pipeline with `|>`, compressing 3 times:
+//    `rasengan(46)` is ((46 + 10) halved three times) x 6 = 42.
+#test(80, 3)[10]
+#test(7, 0)[7]
+fun compress(c: int, n: int) -> int {
+    return c
+}
+
+#test(46)[42]
+#test(14)[18]
+fun rasengan(chakra: int) -> int {
+    return chakra
+}
+
+fun spin(c: int) -> int {
+    return c + 10
+}
+
+fun release(c: int) -> int {
+    return c * 6
+}

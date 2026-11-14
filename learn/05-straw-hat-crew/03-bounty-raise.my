@@ -1,0 +1,26 @@
+// title: Bounty Raise
+// xp: 20
+// hint: A method that changes its value takes `var self` instead of `self`.
+// hint: `fun raise(var self, amount: int64)`; the caller's value must be a `var` too (it is).
+//
+// After every adventure, the World Government raises the crew's bounties.
+// `raise` should add `amount` to the pirate's bounty, but the checker refuses:
+// `self` can't be changed in a method that takes plain `self`.
+struct Pirate {
+    name: str,
+    bounty: int64,
+}
+
+impl Pirate {
+    fun raise(self, amount: int64) {
+        self.bounty += amount
+    }
+}
+
+#test(30_000_000, 70_000_000)[100_000_000]
+#test(0, 50)[50]
+fun after_adventure(start: int64, amount: int64) -> int64 {
+    var p = Pirate { name: "Chopper", bounty: start }
+    p.raise(amount)
+    return p.bounty
+}

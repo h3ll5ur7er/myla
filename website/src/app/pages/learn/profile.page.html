@@ -1,0 +1,94 @@
+<div class="container">
+  <header class="page-head">
+    <div class="crumbs"><a routerLink="/learn">Learn</a><span>/</span><span>Profile</span></div>
+    <h1>Your <span class="gradient-text">journey</span></h1>
+  </header>
+
+  <div class="profile-grid">
+    <div class="card level-card">
+      <div class="lvl-ring large" [style.--p]="progress.level().fraction"><span>{{ progress.level().level.n }}</span></div>
+      <div>
+        <b class="lvl-title">{{ progress.level().level.title }}</b>
+        <span class="src">as seen in {{ progress.level().level.from }}</span>
+        <span class="xpline">{{ progress.xp() }} XP</span>
+        @if (progress.level().next; as nx) {
+          <span class="bar wide"><i [style.width.%]="progress.level().fraction * 100"></i></span>
+          <span class="src">{{ nx.xp - progress.xp() }} XP to {{ nx.title }}</span>
+        } @else {
+          <span class="src">The top. The One Piece is real.</span>
+        }
+      </div>
+    </div>
+    <div class="card streak-card">
+      <span class="flame" aria-hidden="true">🔥</span>
+      <div>
+        <b>{{ progress.streak().current }}-day streak</b>
+        <span class="src">best {{ progress.streak().best }} · solve one a day to keep it</span>
+      </div>
+      <div class="heat" aria-label="Exercises solved in the last twelve weeks">
+        @for (w of weeks(); track $index) {
+          <div class="wk">
+            @for (d of w; track d.day) {
+              <i [class.future]="d.future" [attr.data-n]="d.n > 3 ? 3 : d.n" [title]="d.day + ': ' + d.n"></i>
+            }
+          </div>
+        }
+      </div>
+    </div>
+  </div>
+
+  <h2 class="section-h">Achievements <span class="count">{{ earned() }}/{{ achievements().length }}</span></h2>
+  <div class="ach-grid">
+    @for (a of achievements(); track a.id) {
+      <div class="card ach" [class.got]="a.at">
+        <span class="ach-icon" aria-hidden="true">{{ a.at ? a.icon : '❔' }}</span>
+        <b>{{ a.title }}</b>
+        <span>{{ a.description }}</span>
+      </div>
+    }
+  </div>
+
+  <h2 class="section-h">Chapters</h2>
+  <div class="ch-list">
+    @for (c of chapters(); track c.id) {
+      <a class="card interactive ch-row" [routerLink]="['/learn', c.id]">
+        <span class="emoji" aria-hidden="true">{{ c.unlocked ? c.emoji : '🔒' }}</span>
+        <span class="name">{{ c.title }}</span>
+        <span class="bar"><i [style.width.%]="c.total ? (c.solved / c.total) * 100 : 0"></i></span>
+        <span class="frac">{{ c.solved }}/{{ c.total }}</span>
+      </a>
+    }
+  </div>
+
+  <h2 class="section-h">The levels</h2>
+  <div class="levels">
+    @for (l of levels; track l.n) {
+      <div class="lv-row" [class.here]="l.n === progress.level().level.n" [class.past]="l.n < progress.level().level.n">
+        <span class="n">{{ l.n }}</span><span class="name">{{ l.title }}</span><span class="from">{{ l.from }}</span><span class="xp">{{ l.xp }} XP</span>
+      </div>
+    }
+  </div>
+
+  <h2 class="section-h">Settings</h2>
+  <div class="card settings">
+    <label class="toggle">
+      <input type="checkbox" [checked]="progress.progress().sudo" (change)="sudo($any($event.target).checked)" />
+      <span><b>sudo mode</b>: unlock every chapter and boss. For those who already know what they're doing (or say so).</span>
+    </label>
+    <div class="row">
+      <button class="btn small" type="button" (click)="export()">Export progress</button>
+      <label class="btn small">Import progress<input type="file" accept="application/json" hidden (change)="import($any($event.target))" /></label>
+      @if (confirmReset()) {
+        <span class="confirm">Forget everything? This can't be undone.</span>
+        <button class="btn small danger" type="button" (click)="reset()">Yes, reset</button>
+        <button class="btn small ghost" type="button" (click)="confirmReset.set(false)">Keep it</button>
+      } @else {
+        <button class="btn small ghost" type="button" (click)="confirmReset.set(true)">Reset progress</button>
+      }
+    </div>
+    @if (message()) {
+      <p class="msg">{{ message() }}</p>
+    }
+    <p class="fine">Your progress lives only in this browser (the site has no server). Export it to move it to another one.</p>
+  </div>
+</div>

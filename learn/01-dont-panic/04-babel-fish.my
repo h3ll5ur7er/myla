@@ -1,0 +1,15 @@
+// title: Babel Fish
+// xp: 15
+// hint: Inside an `f"…"` string, `{name}` is replaced by the value of `name`.
+// hint: `return f"{name} says hello in {language}"`
+//
+// The Babel fish translates any language. Our `translate` function, sadly,
+// only returns a fixed sentence.
+//
+// Make it build its answer from its parameters with an f-string, so
+// `translate("Arthur", "Vogon")` gives `"Arthur says hello in Vogon"`.
+#test("Arthur", "Vogon")["Arthur says hello in Vogon"]
+#test("Ford", "Betelgeusian")["Ford says hello in Betelgeusian"]
+fun translate(name: str, language: str) -> str {
+    return "name says hello in language"
+}

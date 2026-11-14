@@ -1,0 +1,6 @@
+#test(["pizza", "hotdog", "hotdog"])[Some(1)]
+#test(["salad", "octopus"])[None]
+#test([])[None]
+fun find_hotdog(foods: [str]) -> Option<int> {
+    return foods.position((f: str) => f == "hotdog")
+}

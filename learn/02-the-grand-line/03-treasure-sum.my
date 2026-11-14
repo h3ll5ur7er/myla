@@ -1,0 +1,20 @@
+// title: Treasure Sum
+// xp: 20
+// hint: A number is a multiple of 3 when `n % 3 == 0`. "Or" is `||`.
+// hint: In the loop: `if i % 3 == 0 || i % 5 == 0 { total += i }`.
+//
+// Nami counts treasure: every coin numbered below `limit` that is a multiple
+// of 3 or of 5. Below 10 those are 3, 5, 6 and 9, worth 23 together.
+//
+// Finish `treasure` so its tests pass. `for i in 1..limit` counts from 1 to
+// `limit - 1`.
+#test(10)[23]
+#test(16)[60]
+#test(1000)[233168]
+fun treasure(limit: int) -> int {
+    var total = 0
+    for i in 1..limit {
+        // add i when it counts
+    }
+    return total
+}

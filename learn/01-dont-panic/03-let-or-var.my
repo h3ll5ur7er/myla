@@ -1,0 +1,23 @@
+// title: let or var
+// xp: 15
+// hint: The checker says `total` can't be assigned. Why not?
+// hint: A `let` never changes. Declare `total` with `var` instead.
+//
+// `triangle(n)` should add up the numbers from 1 to `n`: `triangle(4)` is
+// 1 + 2 + 3 + 4 = 10. But the program doesn't even compile.
+//
+// In Myla, `let` makes a value that never changes, and `var` one that may.
+// Fix `triangle` so its tests pass. The `#test` lines above the function are
+// its tests: `#test(4)[10]` means `triangle(4)` must give `10`.
+//
+// (`1..(n + 1)` counts from 1 up to `n`: a range never includes its end.)
+#test(4)[10]
+#test(1)[1]
+#test(0)[0]
+fun triangle(n: int) -> int {
+    let total = 0
+    for i in 1..(n + 1) {
+        total += i
+    }
+    return total
+}

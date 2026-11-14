@@ -1,0 +1,115 @@
+<section class="hero">
+  <app-starfield />
+  <div class="glow g1"></div>
+  <div class="glow g2"></div>
+  <div class="container hero-grid">
+    <div class="pitch">
+      <a class="pill" routerLink="/learn"><span class="dot"></span>New: the course is live, {{ exercises() || 'dozens of' }} exercises. Don't panic.</a>
+      <h1>The language that <span class="gradient-text">compiles itself.</span></h1>
+      <p class="lead">
+        Myla is a small, statically typed language with value semantics. It reads like Swift, thinks a little like Rust, builds native binaries
+        without libc and runs right here in your browser.
+      </p>
+      <div class="ctas">
+        <a class="btn primary" routerLink="/quickstart">Get started <span aria-hidden="true">→</span></a>
+        <a class="btn" routerLink="/learn">Learn by doing</a>
+        <a class="btn ghost" routerLink="/playground">Open the playground</a>
+      </div>
+      <dl class="facts">
+        <div><dt>3</dt><dd>targets</dd></div>
+        <div><dt>0</dt><dd>libc</dd></div>
+        <div><dt>{{ site.value()?.reference?.length ?? 62 }}</dt><dd>std modules</dd></div>
+        <div><dt>1</dt><dd>fixed point</dd></div>
+      </dl>
+    </div>
+    <div class="live">
+      <myla-editor [code]="hero.source" [expected]="hero.output" label="hello_universe.my" />
+      <p class="hint">Edit it, then press <kbd>Ctrl</kbd> <kbd>Enter</kbd>. The checker and the interpreter run in your browser.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <span class="eyebrow">Why Myla</span>
+    <h2 class="section-title">Small language, <span class="gradient-text">no surprises.</span></h2>
+    <p class="section-lead">Everything is checked before anything runs, values behave like values, and the whole toolchain is written in the language itself.</p>
+    <div class="features">
+      @for (f of features; track f.title) {
+        <a class="card interactive feature" [routerLink]="f.link">
+          <span class="icon" aria-hidden="true">{{ f.icon }}</span>
+          <h3>{{ f.title }}</h3>
+          <p>{{ f.body }}</p>
+          <pre class="mini" [innerHTML]="hl(f.code)"></pre>
+        </a>
+      }
+    </div>
+  </div>
+</section>
+
+<section class="section taste">
+  <div class="container">
+    <span class="eyebrow">A taste</span>
+    <h2 class="section-title">Pick a flavour, <span class="gradient-text">run it.</span></h2>
+    <div class="tabs" role="tablist">
+      @for (t of tastes; track t.id) {
+        <button type="button" role="tab" [attr.aria-selected]="tab() === t.id" [class.on]="tab() === t.id" (click)="tab.set(t.id)">{{ t.label }}</button>
+      }
+    </div>
+    <p class="blurb">{{ taste().blurb }}</p>
+    @for (t of tastes; track t.id) {
+      @if (tab() === t.id) {
+        <myla-editor [code]="t.source" [expected]="t.output" [label]="t.file" />
+      }
+    }
+  </div>
+</section>
+
+<section class="section">
+  <div class="container learn-band">
+    <div class="learn-copy">
+      <span class="eyebrow">Learn</span>
+      <h2 class="section-title">From <em>Mostly Harmless</em> to <span class="gradient-text">Pirate King.</span></h2>
+      <p>
+        A course of small exercises, rustlings-style: each one is a broken program and the tests that pass once you fix it. Earn XP, keep your
+        streak, unlock chapters, beat the bosses and collect achievements like Infinity Stones. Your progress stays in your browser.
+      </p>
+      <a class="btn primary" routerLink="/learn">Start chapter 1: Don't Panic <span aria-hidden="true">→</span></a>
+    </div>
+    <div class="ladder" aria-label="Some of the levels">
+      @for (l of levels; track l.n; let last = $last) {
+        <div class="rung" [class.top]="last">
+          <span class="lv">Lv {{ l.n }}</span>
+          <span class="name">{{ l.title }}</span>
+          <span class="from">{{ l.from }}</span>
+          <span class="need">{{ l.xp }} XP</span>
+        </div>
+      }
+      <div class="badges" aria-hidden="true"><span>🌌</span><span>🍥</span><span>📈</span><span>⚔️</span><span>💎</span><span>🐬</span><span>👑</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <span class="eyebrow">Under the hood</span>
+    <h2 class="section-title">One toolchain, <span class="gradient-text">written in Myla.</span></h2>
+    <ol class="pipeline">
+      @for (p of pipeline; track p.step; let i = $index) {
+        <li [style.--i]="i"><b>{{ p.step }}</b><span>{{ p.what }}</span></li>
+      }
+    </ol>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container final">
+    <h2>The answer is 42. <span class="gradient-text">The question is: what will you build?</span></h2>
+    <p>Install it in a minute, or don't install anything and start the course right now.</p>
+    <div class="ctas center">
+      <a class="btn primary" routerLink="/quickstart">Quickstart</a>
+      <a class="btn" routerLink="/download">Download</a>
+      <a class="btn ghost" routerLink="/docs">Read the docs</a>
+    </div>
+  </div>
+</section>

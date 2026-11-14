@@ -1,0 +1,15 @@
+// title: The Snap
+// xp: 20
+// hint: `xs.filter(f)` keeps the values for which `f` gives `true`.
+// hint: `return population.filter((n: int) => n % 2 == 0)`
+//
+// *Snap.* Half of everything disappears: in this simulation, every odd
+// number. `snap` should keep only the even numbers, in their order.
+//
+// Use `filter` with a lambda `(n: int) => …` that says which ones stay.
+#test([1, 2, 3, 4, 5, 6])[[2, 4, 6]]
+#test([7, 9])[[]]
+#test([42])[[42]]
+fun snap(population: [int]) -> [int] {
+    return population
+}

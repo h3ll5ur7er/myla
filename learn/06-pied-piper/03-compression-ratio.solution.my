@@ -1,0 +1,13 @@
+#test(100, 25)[Ok(4.0)]
+#test(10, 0)[Err("cannot compress to zero bytes")]
+#test(-5, 2)[Err("negative size")]
+#test(5, -2)[Err("negative size")]
+fun ratio(original: int, compressed: int) -> Result<float, str> {
+    if original < 0 || compressed < 0 {
+        return Err("negative size")
+    }
+    if compressed == 0 {
+        return Err("cannot compress to zero bytes")
+    }
+    return Ok((original as float) / (compressed as float))
+}

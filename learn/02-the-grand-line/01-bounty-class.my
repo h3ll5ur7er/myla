@@ -1,0 +1,23 @@
+// title: Bounty Class
+// xp: 15
+// hint: Check the biggest bounties first, or use `<` in the right order: the first `if` that holds wins.
+// hint: `if berries < 100_000_000 { return "rookie" } else if berries < 1_000_000_000 { return "supernova" }` and the rest.
+//
+// The Marines rank pirates by their bounty, in berries:
+//
+// - below 100 million: `"rookie"`
+// - below a billion: `"supernova"`
+// - a billion or more: `"emperor"`
+//
+// `bounty_class` gets it wrong for everybody but rookies. Fix it.
+// (`int64` holds big numbers; `_` in a number is only for reading.)
+#test(30_000_000)["rookie"]
+#test(300_000_000)["supernova"]
+#test(3_000_000_000)["emperor"]
+#test(1_000_000_000)["emperor"]
+fun bounty_class(berries: int64) -> str {
+    if berries < 100_000_000 {
+        return "rookie"
+    }
+    return "supernova"
+}

@@ -1,0 +1,14 @@
+// title: Default Gilfoyle
+// xp: 15
+// hint: An `Option<str>` isn't a `str`. Take it apart with `match`, or use `unwrap_or`.
+// hint: `return nickname.unwrap_or("Gilfoyle")`
+//
+// Every server in the Hacker Hostel is named after its admin, unless it has a
+// nickname. `server_name` doesn't compile: it returns an `Option<str>` where
+// a `str` is promised. Give the nickname when there is one, and `"Gilfoyle"`
+// when there isn't.
+#test(Some("Anton"))["Anton"]
+#test(None)["Gilfoyle"]
+fun server_name(nickname: Option<str>) -> str {
+    return nickname
+}

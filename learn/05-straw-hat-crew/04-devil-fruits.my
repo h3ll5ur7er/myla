@@ -1,0 +1,25 @@
+// title: Devil Fruits
+// xp: 25
+// hint: The checker says the `match` doesn't cover `Hie`. Add an arm for it.
+// hint: `Fruit.Hie => "ice"`
+//
+// Every Devil Fruit gives one power. `power` matches on the fruit, but forgot
+// one: Aokiji's Hie Hie no Mi gives `"ice"`. A `match` must cover every
+// variant, so this doesn't compile. Add the missing arm.
+enum Fruit {
+    Gomu,
+    Mera,
+    Hie,
+}
+
+fun power(f: Fruit) -> str {
+    return match f {
+        Fruit.Gomu => "rubber",
+        Fruit.Mera => "fire",
+    }
+}
+
+#test()[["rubber", "fire", "ice"]]
+fun all_powers() -> [str] {
+    return [Fruit.Gomu, Fruit.Mera, Fruit.Hie].map((f: Fruit) => power(f))
+}

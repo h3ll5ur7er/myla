@@ -1,0 +1,21 @@
+// title: Sea King Ahead
+// xp: 20
+// hint: `continue` skips the rest of this round; `break` leaves the loop.
+// hint: `if depth < 0 { continue }` and `if depth > 9000 { break }`, before adding.
+//
+// The ship's sonar reports depths. A negative reading is noise: skip it. A
+// reading over 9000 means a Sea King: stop reading at once. Add up the depths
+// read before that.
+//
+// `safe_depth` adds every reading. Use `continue` and `break` to fix it.
+#test([10, -5, 20, 9001, 30])[30]
+#test([1, 2, 3])[6]
+#test([9500, 1])[0]
+#test([-1, -2])[0]
+fun safe_depth(readings: [int]) -> int {
+    var total = 0
+    for depth in readings {
+        total += depth
+    }
+    return total
+}

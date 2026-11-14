@@ -1,0 +1,104 @@
+@if (view(); as v) {
+  <div class="ex-page">
+    <section class="brief">
+      <div class="crumbs">
+        <a routerLink="/learn">Learn</a><span>/</span><a [routerLink]="['/learn', v.chapter.id]">{{ v.chapter.emoji }} {{ v.chapter.title }}</a>
+      </div>
+      <h1>
+        {{ v.ex.title }}
+        @if (v.ex.boss) {
+          <span class="chip boss-chip">⚔️ boss</span>
+        }
+      </h1>
+      <div class="ex-meta">
+        <span class="chip accent">{{ v.ex.xp }} XP</span>
+        <span class="chip">{{ v.ex.mode === 'test' ? 'make the #test cases pass' : 'print exactly the expected output' }}</span>
+        @if (solved()) {
+          <span class="chip good">✓ solved</span>
+        }
+        <span class="chip">{{ v.ei + 1 }} of {{ v.chapter.exercises.length }}</span>
+      </div>
+      @if (!unlocked()) {
+        <div class="card locked-note">🔒 Not unlocked yet: beat the rest of the chapter first. You can still read it, and peeking is free.</div>
+      }
+      <div class="prose instructions" [innerHTML]="v.ex.instructions"></div>
+      @if (v.ex.mode === 'output' && v.ex.expected) {
+        <div class="expected-box"><span>Expected output</span><pre>{{ v.ex.expected }}</pre></div>
+      }
+
+      <div class="helpers">
+        <h3>Stuck?</h3>
+        @for (h of v.ex.hints.slice(0, hintsShown()); track $index; let i = $index) {
+          <div class="hint"><b>Hint {{ i + 1 }}</b> <span [innerHTML]="h"></span></div>
+        }
+        <div class="helper-actions">
+          @if (hintsShown() < v.ex.hints.length) {
+            <button class="btn small" type="button" (click)="hint()">
+              🧣 Hint {{ hintsShown() + 1 }} of {{ v.ex.hints.length }} @if (!solved()) {<span class="cost">(−15% XP)</span>}
+            </button>
+          }
+          @if (revealed() || solved()) {
+            <button class="btn small ghost" type="button" (click)="useSolution()">Put the solution in the editor</button>
+          } @else if (confirmSolution()) {
+            <span class="confirm">Reveal it? Solving it then earns no XP.</span>
+            <button class="btn small" type="button" (click)="showSolution()">Yes, show me</button>
+            <button class="btn small ghost" type="button" (click)="confirmSolution.set(false)">I'll try more</button>
+          } @else {
+            <button class="btn small ghost" type="button" (click)="confirmSolution.set(true)">Show the solution</button>
+          }
+        </div>
+        @if (revealed() || solved()) {
+          <details class="solution" [open]="revealed() && !solved()">
+            <summary>The solution</summary>
+            <pre>{{ v.ex.solution }}</pre>
+          </details>
+        }
+      </div>
+    </section>
+
+    <section class="work">
+      <myla-editor
+        [code]="startCode()"
+        [kind]="v.ex.mode === 'test' ? 'test' : 'run'"
+        [label]="v.ex.file.split('/').pop()!"
+        height="fill"
+        [showOpen]="false"
+        (codeChange)="changed($event)"
+      />
+      <div class="checkbar">
+        <button class="btn ghost small" type="button" (click)="reset()">Start over</button>
+        <span class="spacer"></span>
+        @if (v.prev) {
+          <a class="btn ghost small" [routerLink]="['/learn', v.chapter.id, v.prev.id]">← Back</a>
+        }
+        <button class="btn primary check" type="button" (click)="check()" [disabled]="!!checking()">
+          @if (checking(); as c) {
+            {{ c }}
+          } @else {
+            ✓ Check
+          }
+        </button>
+      </div>
+      @if (verdict(); as vd) {
+        <div class="verdict" [class.ok]="vd.ok" role="status">
+          @if (vd.ok) {
+            <div class="vline"><span class="big">🎉</span><div><b>{{ vd.line }}</b><span>{{ vd.xp > 0 ? '+' + vd.xp + ' XP' : 'Solved.' }}</span></div></div>
+            <button class="btn primary small" type="button" (click)="goNext()">{{ next() ? 'Next exercise →' : 'See your profile →' }}</button>
+          } @else {
+            <div class="vline"><span class="big">🤔</span><div><b>{{ vd.line }}</b><span>Not quite yet.</span></div></div>
+            @if (vd.detail) {
+              <pre class="detail">{{ vd.detail }}</pre>
+            }
+          }
+        </div>
+      }
+    </section>
+  </div>
+} @else if (course.value()) {
+  <div class="container narrow">
+    <h1>No such exercise</h1>
+    <p><a routerLink="/learn">Back to the map</a></p>
+  </div>
+} @else {
+  <div class="container narrow"><p class="loading">Loading the exercise…</p></div>
+}
