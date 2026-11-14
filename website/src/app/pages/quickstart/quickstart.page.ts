@@ -45,7 +45,7 @@ import { EditorComponent } from '../../editor/editor.component';
 })
 export class QuickstartPage {
   private readonly content = inject(ContentService);
-  readonly page = resource({ loader: () => this.content.quickstart() });
+  readonly page = resource({ loader: () => this.content.quickstart().catch(() => null) });
   readonly copied = signal<number | null>(null);
   readonly nav = [
     { title: 'Start', links: [{ label: 'Quickstart', route: '/quickstart' }, { label: 'Download', route: '/download' }, { label: 'Playground', route: '/playground' }] },

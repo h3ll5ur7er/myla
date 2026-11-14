@@ -59,8 +59,8 @@ export class ModulePageComponent {
   private readonly content = inject(ContentService);
   readonly blob = BLOB;
   readonly filter = signal('');
-  readonly site = resource({ loader: () => this.content.site() });
-  readonly page = resource({ params: () => this.module(), loader: ({ params }) => this.content.module(params) });
+  readonly site = resource({ loader: () => this.content.site().catch(() => null) });
+  readonly page = resource({ params: () => this.module(), loader: ({ params }) => this.content.module(params).catch(() => null) });
   readonly nav = computed(() => referenceNav(this.site.value()));
   readonly grouped = computed(() => (this.page.value() ? groupItems(this.page.value()!.items, this.filter()) : null));
   readonly toc = computed<TocEntry[]>(() => {

@@ -1,0 +1,31 @@
+// title: In Parallel
+// xp: 30
+// expect: 6 x 7 = 42
+// hint: `async let six = compute(6)` starts the computation and goes on at once; `await six` waits for it.
+// hint: Start both with `async let` first, then `await` both: the two computations overlap.
+//
+// Deep Thought splits the work: one part computes 6, another 7, at the same
+// time. `main` computes them one after the other, which works, but takes
+// twice as long: this exercise passes only when it runs in under 350 ms.
+//
+// Start both computations as child tasks with `async let`, then `await`
+// them.
+import std.task as task
+import std.time as time
+
+async fun compute(n: int) -> int {
+    await task.sleep(200)
+    return n
+}
+
+#main
+async fun main() {
+    let start = time.now_ms()
+    let six = await compute(6)
+    let seven = await compute(7)
+    let ms = time.now_ms() - start
+    if ms > 350 {
+        panic(f"too slow: {ms} ms")
+    }
+    print(f"{six} x {seven} = {six * seven}")
+}

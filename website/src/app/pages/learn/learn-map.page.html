@@ -10,7 +10,7 @@
       <div class="ctas">
         @if (next(); as n) {
           <a class="btn primary" [routerLink]="['/learn', n.chapter, n.exercise]">{{ progress.solvedCount() ? 'Continue' : 'Start the course' }} →</a>
-        } @else if (course.value()) {
+        } @else if (total() > 0) {
           <span class="chip accent">Course complete. So long, and thanks for all the fish! 🐬</span>
         }
         <a class="btn ghost" routerLink="/learn/profile">Your profile & achievements</a>
@@ -57,7 +57,7 @@
         </li>
       }
     </ol>
-  } @else if (course.error()) {
+  } @else if (course.value() === null) {
     <p>The course couldn't be loaded. The Infinite Improbability Drive must be acting up.</p>
   } @else {
     <p class="loading">Charting the course…</p>

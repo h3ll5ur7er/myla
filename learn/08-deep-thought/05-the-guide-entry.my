@@ -1,0 +1,28 @@
+// title: The Guide Entry
+// xp: 30
+// hint: A struct gets its JSON form from `#derive(Json)` on the line above it.
+// hint: Put `#derive(Json)` above `struct Entry`; `json.encode` and `json.decode<Entry>` then work.
+//
+// The Guide is stored as JSON. `std.json` turns a struct into JSON text and
+// back, once the struct derives `Json`. Add the derive so `to_text` and
+// `from_text` compile and their tests pass.
+import std.json as json
+
+struct Entry {
+    planet: str,
+    harmless: bool,
+    towels: int,
+}
+
+#test()["{\"planet\":\"Earth\",\"harmless\":true,\"towels\":1}"]
+fun to_text() -> str {
+    return json.encode(Entry { planet: "Earth", harmless: true, towels: 1 })
+}
+
+#test("{\"planet\": \"Vogsphere\", \"harmless\": false, \"towels\": 0}")["Vogsphere"]
+fun from_text(text: str) -> str {
+    return match json.decode<Entry>(text) {
+        Ok(e) => e.planet,
+        Err(err) => f"{err}",
+    }
+}

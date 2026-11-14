@@ -57,11 +57,33 @@
 .bar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 8px 10px 8px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
-  flex-wrap: wrap;
+  white-space: nowrap;
+}
+
+// the toolbar fits the editor's own width, not the window's
+.frame {
+  container-type: inline-size;
+}
+
+@container (max-width: 620px) {
+  .lights,
+  .chip {
+    display: none;
+  }
+  .tool {
+    padding: 4px 6px;
+  }
+}
+
+@container (max-width: 440px) {
+  .file,
+  .tool.open {
+    display: none;
+  }
 }
 
 .lights {
@@ -85,6 +107,9 @@
 .file {
   font: 500 0.8rem var(--font-mono);
   color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .chip {

@@ -28,7 +28,7 @@ import { BLOB } from '../../core/links';
           }
         </div>
         <p class="edit"><a [href]="blob + '/' + p.source" target="_blank" rel="noopener">Edit this page on GitHub</a> · the site's docs are the repository's wiki.</p>
-      } @else if (page.error()) {
+      } @else if (page.value() === null) {
         <h1>Lost in hyperspace</h1>
         <p>This page couldn't be loaded. <a routerLink="/docs">Back to the docs</a>.</p>
       } @else {
@@ -42,8 +42,8 @@ export class DocsPage {
   readonly slug = input<string>('');
   private readonly content = inject(ContentService);
   readonly blob = BLOB;
-  readonly site = resource({ loader: () => this.content.site() });
-  readonly page = resource({ params: () => this.slug() ?? '', loader: ({ params }) => this.content.doc(params) });
+  readonly site = resource({ loader: () => this.content.site().catch(() => null) });
+  readonly page = resource({ params: () => this.slug() ?? '', loader: ({ params }) => this.content.doc(params).catch(() => null) });
   readonly nav = computed<NavGroup[]>(() => {
     const s = this.site.value();
     if (!s) return [];

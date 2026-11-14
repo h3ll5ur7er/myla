@@ -1,0 +1,13 @@
+import std.task as task
+
+async fun ponder() -> int {
+    await task.sleep(10)
+    return 42
+}
+
+#main
+async fun main() {
+    print("Thinking...")
+    let answer = await ponder()
+    print(f"The answer is {answer}")
+}

@@ -30,7 +30,7 @@ import { referenceNav } from './nav';
             <a class="card interactive mod" [routerLink]="m.route">
               <span class="name">{{ m.name }}</span>
               <span class="sum">{{ m.summary }}</span>
-              <span class="count">{{ m.items }} items</span>
+              <span class="count">{{ m.items }} {{ m.items === 1 ? 'entry' : 'entries' }}</span>
             </a>
           }
         </div>
@@ -45,8 +45,8 @@ import { referenceNav } from './nav';
 })
 export class ReferenceIndexPage {
   private readonly content = inject(ContentService);
-  readonly site = resource({ loader: () => this.content.site() });
-  readonly lib = resource({ loader: () => this.content.library() });
+  readonly site = resource({ loader: () => this.content.site().catch(() => null) });
+  readonly lib = resource({ loader: () => this.content.library().catch(() => null) });
   readonly nav = computed(() => referenceNav(this.site.value()));
   readonly groups = computed(() => {
     const s = this.site.value();

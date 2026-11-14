@@ -44,7 +44,7 @@ import { DocContentComponent } from '../../content/doc-content.component';
             </li>
           }
         </ol>
-      } @else if (course.error()) {
+      } @else if (course.value() === null) {
         <p>The course couldn't be loaded.</p>
       } @else if (course.value()) {
         <h1>No such chapter</h1>
@@ -58,7 +58,7 @@ export class ChapterPage {
   readonly chapter = input.required<string>();
   private readonly content = inject(ContentService);
   private readonly progress = inject(ProgressService);
-  readonly course = resource({ loader: () => this.content.course() });
+  readonly course = resource({ loader: () => this.content.course().catch(() => null) });
   readonly view = computed(() => {
     const c = this.course.value();
     if (!c) return null;

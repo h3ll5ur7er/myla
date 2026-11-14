@@ -16,7 +16,7 @@ import { chapterViews, nextExercise } from './course';
 export class LearnMapPage {
   private readonly content = inject(ContentService);
   readonly progress = inject(ProgressService);
-  readonly course = resource({ loader: () => this.content.course() });
+  readonly course = resource({ loader: () => this.content.course().catch(() => null) });
   readonly chapters = computed(() => (this.course.value() ? chapterViews(this.course.value()!, this.progress.progress()) : []));
   readonly next = computed(() => (this.course.value() ? nextExercise(this.course.value()!, this.progress.progress()) : null));
   readonly total = computed(() => this.chapters().reduce((s, c) => s + c.total, 0));

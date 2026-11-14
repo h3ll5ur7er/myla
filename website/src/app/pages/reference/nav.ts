@@ -3,7 +3,7 @@ import { NavGroup } from '../../content/doc-layout.component';
 
 // The reference's sidebar: the front page and the builtins, then the
 // modules by group (scripts/content.mjs's GROUPS).
-export function referenceNav(s: SiteIndex | undefined): NavGroup[] {
+export function referenceNav(s: SiteIndex | null | undefined): NavGroup[] {
   if (!s) return [];
   const byName = new Map(s.reference.map((m) => [m.slug, m]));
   return [

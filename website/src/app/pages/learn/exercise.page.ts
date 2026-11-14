@@ -3,7 +3,7 @@ import { Title } from '@angular/platform-browser';
 import { Router, RouterLink } from '@angular/router';
 import { ContentService } from '../../core/content.service';
 import { ProgressService } from '../../core/progress.service';
-import { exerciseUnlocked } from '../../core/gamification';
+import { chapterUnlocked, exerciseUnlocked } from '../../core/gamification';
 import { ToolchainService, testSummary } from '../../core/toolchain.service';
 import { EditorComponent } from '../../editor/editor.component';
 import { FAILED, loadingLine, pick, SOLVED } from '../../core/lore';
@@ -29,7 +29,7 @@ export class ExercisePage {
   private readonly router = inject(Router);
   readonly progress = inject(ProgressService);
   private readonly editor = viewChild(EditorComponent);
-  readonly course = resource({ loader: () => this.content.course() });
+  readonly course = resource({ loader: () => this.content.course().catch(() => null) });
   readonly checking = signal<string | null>(null);
   readonly verdict = signal<Verdict | null>(null);
   readonly confirmSolution = signal(false);
@@ -44,6 +44,10 @@ export class ExercisePage {
     const ei = ch.exercises.findIndex((e) => e.id === this.exercise());
     if (ei < 0) return null;
     return { course: c, ci, ei, chapter: ch, ex: ch.exercises[ei], prev: ch.exercises[ei - 1] ?? null, nextInChapter: ch.exercises[ei + 1] ?? null };
+  });
+  readonly chapterOpen = computed(() => {
+    const v = this.view();
+    return v ? chapterUnlocked(this.progress.progress(), v.course, v.ci) : false;
   });
   readonly unlocked = computed(() => {
     const v = this.view();
@@ -114,7 +118,10 @@ export class ExercisePage {
         ok = r.exitCode === 0 && r.stdout === ex.expected;
         if (!ok) detail = r.exitCode !== 0 ? (r.stderr || r.stdout).trim() : `It printed:\n${r.stdout || '(nothing)'}\nExpected:\n${ex.expected}`;
       }
-      if (ok) {
+      if (ok && !this.unlocked()) {
+        // a locked exercise solved early: right, but it counts once it opens
+        this.verdict.set({ ok: true, line: 'It works! It counts once this exercise opens.', xp: 0 });
+      } else if (ok) {
         const outcome = this.progress.solve(v.course, v.chapter.id, ex);
         this.verdict.set({ ok: true, line: pick(SOLVED), xp: outcome.xp });
       } else {

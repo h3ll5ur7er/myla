@@ -29,7 +29,7 @@ interface Feature {
 })
 export class HomePage {
   private readonly content = inject(ContentService);
-  readonly site = resource({ loader: () => this.content.site() });
+  readonly site = resource({ loader: () => this.content.site().catch(() => null) });
   readonly hero = splitOutput(hero);
   readonly exercises = computed(() => this.site.value()?.chapters.reduce((n, c) => n + c.exercises, 0) ?? 0);
   readonly levels = LEVELS.filter((l) => [1, 4, 7, 10, 13].includes(l.n));

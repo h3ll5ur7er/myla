@@ -11,7 +11,7 @@
       } @else {
         <span class="chip"><code>import {{ p.name }} as {{ p.slug }}</code></span>
       }
-      <span class="chip">{{ p.items.length }} items</span>
+      <span class="chip">{{ p.items.length }} declaration{{ p.items.length === 1 ? '' : 's' }}</span>
       <a class="chip" [href]="blob + '/' + p.source" target="_blank" rel="noopener">{{ p.source }} ↗</a>
     </div>
     @if (p.wiki; as w) {
@@ -134,7 +134,7 @@
         <p class="none">Nothing called “{{ filter() }}” here. Maybe in another module? Try the search (Ctrl+K).</p>
       }
     }
-  } @else if (page.error()) {
+  } @else if (page.value() === null) {
     <h1>No such module</h1>
     <p>There's no <code>std.{{ module() }}</code>. It may have been eaten by a Ravenous Bugblatter Beast of Traal. <a routerLink="/reference">All modules</a>.</p>
   } @else {

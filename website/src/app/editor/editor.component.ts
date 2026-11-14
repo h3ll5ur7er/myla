@@ -71,7 +71,7 @@ export class EditorComponent {
       case 'test':
         return 'tests';
       default:
-        return this.expected() ? 'runs' : 'runs';
+        return 'runs';
     }
   });
 

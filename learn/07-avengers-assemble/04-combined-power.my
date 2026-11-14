@@ -1,0 +1,18 @@
+// title: Combined Power
+// xp: 25
+// hint: `a + b` on a struct needs the `Add` trait: `impl Add for Power { fun add(self, o: Power) -> Power { … } }`.
+// hint: Add the fields: `return Power { strength: self.strength + o.strength, speed: self.speed + o.speed }`.
+//
+// Together, the Avengers are stronger. `Power` has a strength and a speed,
+// and two powers add up field by field. `team_up` uses `+`, which doesn't
+// compile for a struct until it implements the `Add` trait. Implement it.
+#derive(Eq)
+struct Power {
+    strength: int,
+    speed: int,
+}
+
+#test(Power { strength: 10, speed: 1 }, Power { strength: 3, speed: 7 })[Power { strength: 13, speed: 8 }]
+fun team_up(a: Power, b: Power) -> Power {
+    return a + b
+}

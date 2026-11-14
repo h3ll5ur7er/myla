@@ -22,9 +22,12 @@ export class DownloadPage {
   readonly repo = REPO;
   readonly manifest = resource({
     loader: async () => {
-      const r = await fetch('downloads/manifest.json');
-      if (!r.ok) throw new Error('no manifest');
-      return (await r.json()) as Manifest;
+      try {
+        const r = await fetch('downloads/manifest.json');
+        return r.ok ? ((await r.json()) as Manifest) : null;
+      } catch {
+        return null;
+      }
     },
   });
   readonly files = computed(() => this.manifest.value()?.files ?? []);

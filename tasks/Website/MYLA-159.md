@@ -42,6 +42,6 @@ The work, one task each:
 ## Done when
 
 - [x] The questions above decided and recorded (D208)
-- [ ] Landing, getting started, reference, editor and tutorial pages, all static, data in IndexedDB only
-- [ ] Every code example on the site checked by the toolchain in CI
+- [x] Landing, getting started, reference, editor and tutorial pages, all static, data in the browser only (localStorage, D208)
+- [x] Every code example on the site checked by the toolchain in CI (the wiki's blocks by test_doc_blocks, the samples and the course by test_website and check-course)
 - [ ] Deployed, with load times within the budget

@@ -71,7 +71,7 @@ export class PlaygroundPage {
   private readonly progress = inject(ProgressService);
   private readonly fragment = toSignal(inject(ActivatedRoute).fragment);
   private readonly editor = viewChild(EditorComponent);
-  readonly examples = resource({ loader: () => this.content.playground() });
+  readonly examples = resource({ loader: () => this.content.playground().catch(() => null) });
   readonly code = signal<string | null>(null);
   readonly picked = signal('');
   readonly stdin = signal('');

@@ -9,7 +9,9 @@
     "watch": "ng build --watch --configuration development",
     "test": "node --test scripts/test/*.test.mjs && ng test --watch=false",
     "e2e": "playwright test",
-    "serve-dist": "node scripts/serve.mjs"
+    "serve-dist": "node scripts/serve.mjs",
+    "build:pages": "node scripts/prepare.mjs && ng build --base-href /myla/ && node scripts/postbuild.mjs",
+    "check-course": "node scripts/check-course.mjs"
   },
   "private": true,
   "packageManager": "npm@10.9.9",

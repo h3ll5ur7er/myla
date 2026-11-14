@@ -1,59 +1,15 @@
-# Website
+# The Myla website
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 22.2.7.
-
-## Development server
-
-To start a local development server, run:
+Myla's home on the web (D208): the landing page, the language docs and the standard library's reference generated from this repository, a playground, and the course of `../learn/`, all running the real checker and interpreter in the browser.
 
 ```bash
-ng serve
+../scripts/bootstrap.sh        # the toolchain the build uses (build/myla)
+npm ci
+npm start                      # http://localhost:4200
+npm test                       # the content pipeline's tests and the app's unit tests
+npm run build:pages            # dist/ for GitHub Pages (/myla/)
+npm run e2e                    # the built site in Chromium
+npm run check-course           # every exercise through play.wasm
 ```
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
-
-## Code scaffolding
-
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
-
-```bash
-ng generate component component-name
-```
-
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
-
-```bash
-ng generate --help
-```
-
-## Building
-
-To build the project run:
-
-```bash
-ng build
-```
-
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
-
-## Running unit tests
-
-To execute unit tests with the [Vitest](https://vitest.dev/) test runner, use the following command:
-
-```bash
-ng test
-```
-
-## Running end-to-end tests
-
-For end-to-end (e2e) testing, run:
-
-```bash
-ng e2e
-```
-
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
-
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+How it is built, where its content comes from and how it is tested and deployed: [docs/Architecture/Website.md](../docs/Architecture/Website.md).

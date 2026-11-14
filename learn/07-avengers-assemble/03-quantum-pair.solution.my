@@ -1,0 +1,22 @@
+struct Pair<T> {
+    first: T,
+    second: T,
+}
+
+impl<T> Pair<T> {
+    fun swap(self) -> Pair<T> {
+        return Pair { first: self.second, second: self.first }
+    }
+}
+
+#test(1, 2)[(2, 1)]
+fun swap_ints(a: int, b: int) -> (int, int) {
+    let p = Pair { first: a, second: b }.swap()
+    return (p.first, p.second)
+}
+
+#test("Scott", "Hope")[("Hope", "Scott")]
+fun swap_names(a: str, b: str) -> (str, str) {
+    let p = Pair { first: a, second: b }.swap()
+    return (p.first, p.second)
+}

@@ -1,0 +1,54 @@
+// title: Endgame (boss)
+// xp: 120
+// boss: true
+// hint: Both functions are generic: `fun team_power<T: Avenger>(team: [T]) -> int` and `fun leader<T: Avenger>(team: [T]) -> Option<str>`.
+// hint: `team_power` adds `a.power()` over the team; `leader` keeps the best so far and gives `None` for an empty team.
+// hint: For `Sorcerer`, implement `Avenger` too: Strange's power is his `spells` times 7.
+//
+// The final battle. Every Avenger has a `name` and a `power`. Write, for any
+// team of one kind of `Avenger`:
+//
+// - `team_power(team)`: their powers added up;
+// - `leader(team)`: `Some(name)` of the most powerful (the first, on a tie),
+//   `None` for an empty team.
+//
+// And recruit Doctor Strange: implement `Avenger` for `Sorcerer`, whose power
+// is its `spells` times 7. (He saw 14,000,605 futures. In one, you pass.)
+trait Avenger {
+    fun name(self) -> str
+    fun power(self) -> int
+}
+
+struct Human { name: str, gear: int }
+struct Sorcerer { name: str, spells: int }
+
+impl Avenger for Human {
+    fun name(self) -> str { return self.name }
+    fun power(self) -> int { return self.gear * 2 }
+}
+
+#test()[30]
+fun humans_power() -> int {
+    return team_power([Human { name: "Hawkeye", gear: 5 }, Human { name: "Black Widow", gear: 10 }])
+}
+
+#test()[Some("Black Widow")]
+fun humans_leader() -> Option<str> {
+    return leader([Human { name: "Hawkeye", gear: 5 }, Human { name: "Black Widow", gear: 10 }, Human { name: "Falcon", gear: 10 }])
+}
+
+#test()[42]
+fun sorcerers_power() -> int {
+    return team_power([Sorcerer { name: "Wong", spells: 2 }, Sorcerer { name: "Strange", spells: 4 }])
+}
+
+#test()[Some("Strange")]
+fun sorcerers_leader() -> Option<str> {
+    return leader([Sorcerer { name: "Wong", spells: 2 }, Sorcerer { name: "Strange", spells: 4 }])
+}
+
+#test()[None]
+fun nobody() -> Option<str> {
+    let empty: [Human] = []
+    return leader(empty)
+}

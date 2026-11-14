@@ -145,7 +145,6 @@ export class ProgressService {
       if (!p.days.includes(d)) p.days = [...p.days, d].sort();
     });
     const levelUp = levelOf(this.xp()).n > levelBefore;
-    const achievements = this.award(course, k);
     confetti(levelUp ? 220 : 120);
     this.toasts.show({
       icon: ex.boss ? '⚔️' : '✨',
@@ -157,6 +156,8 @@ export class ProgressService {
       const l = this.level().level;
       this.toasts.show({ icon: '🚀', title: `Level ${l.n}: ${l.title}`, body: `As seen in ${l.from}.`, tone: 'level' }, 6500);
     }
+    // the solve first, then what it unlocked
+    const achievements = this.award(course, k);
     return { xp, first: true, levelUp, achievements };
   }
 

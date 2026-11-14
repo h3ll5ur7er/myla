@@ -197,7 +197,9 @@ export function buildContent(apiPath, outDir) {
       source: m.path.replace(/^.*?(lib\/std\/)/, "$1"),
     });
     const summary = summaries.get(name) ?? m.doc.split("\n")[0].replace(/^std\.[a-z0-9_]+:\s*/, "");
-    site.reference.push({ name: `std.${name}`, slug: name, route, summary: plainText(inlineDoc(summary, pages), 140), items: items.length, implicit: IMPLICIT.includes(name) });
+    // what the module offers: its declarations and their members, an impl counting its methods only
+    const count = items.reduce((n, it) => n + (it.kind === "impl" ? 0 : 1) + it.members.length, 0);
+    site.reference.push({ name: `std.${name}`, slug: name, route, summary: plainText(inlineDoc(summary, pages), 140), items: count, implicit: IMPLICIT.includes(name) });
     search.push({ t: `std.${name}`, u: route, k: "Module", d: plainText(inlineDoc(summary, pages), 110) });
     for (const it of items) {
       if (it.kind === "impl") {

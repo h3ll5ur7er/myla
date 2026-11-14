@@ -13,7 +13,8 @@ fun area(s: Shape) -> int {
 
 fun main() {
     let shapes = [Shape.Square(4), Shape.Rect(2, 13)]
-    let total = shapes.map((s: Shape) => area(s)).fold(0, (a: int, b: int) => a + b)
+    let areas = shapes.map((s: Shape) => area(s))
+    let total = areas.fold(0, (a: int, b: int) => a + b)
     print(f"Life, the universe and everything: {total}")
 }
 // output:

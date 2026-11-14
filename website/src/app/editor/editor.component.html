@@ -9,7 +9,7 @@
     }
     <button class="tool" type="button" (click)="copy()" [attr.aria-label]="'Copy the code'">{{ copied() ? 'Copied!' : 'Copy' }}</button>
     @if (showOpen() && kind() !== 'fragment') {
-      <button class="tool" type="button" (click)="open()" title="Open in the playground">Playground ↗</button>
+      <button class="tool open" type="button" (click)="open()" title="Open in the playground">Playground ↗</button>
     }
     @if (showRun() && kind() !== 'fragment') {
       @if (kind() === 'error' || (kind() === 'check' && !hasTests())) {

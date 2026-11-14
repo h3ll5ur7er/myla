@@ -19,7 +19,15 @@
         <span class="chip">{{ v.ei + 1 }} of {{ v.chapter.exercises.length }}</span>
       </div>
       @if (!unlocked()) {
-        <div class="card locked-note">🔒 Not unlocked yet: beat the rest of the chapter first. You can still read it, and peeking is free.</div>
+        <div class="card locked-note">
+          🔒 Not unlocked yet:
+          @if (!chapterOpen()) {
+            this chapter opens once you've solved most of the one before.
+          } @else {
+            a boss waits until the rest of its chapter is beaten.
+          }
+          You can still read it and try it, but it earns nothing until it opens. (Or turn on sudo mode in your <a routerLink="/learn/profile">profile</a>.)
+        </div>
       }
       <div class="prose instructions" [innerHTML]="v.ex.instructions"></div>
       @if (v.ex.mode === 'output' && v.ex.expected) {

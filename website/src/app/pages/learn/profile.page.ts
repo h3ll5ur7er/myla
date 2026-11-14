@@ -17,7 +17,7 @@ import { chapterViews } from './course';
 export class ProfilePage {
   private readonly content = inject(ContentService);
   readonly progress = inject(ProgressService);
-  readonly course = resource({ loader: () => this.content.course() });
+  readonly course = resource({ loader: () => this.content.course().catch(() => null) });
   readonly chapters = computed(() => (this.course.value() ? chapterViews(this.course.value()!, this.progress.progress()) : []));
   readonly levels = LEVELS;
   readonly message = signal('');
