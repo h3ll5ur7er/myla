@@ -1,0 +1,259 @@
+// doc.my: the API of a module of the standard library, for the website's
+// reference (MYLA-632, D208).
+//
+// The declarations and their signatures are the language server's outline
+// (tools/lsp/symbols.my), which the self-hosted parser gives; a declaration's
+// documentation is the `//` comment right above it, and its examples the
+// `#test` cases between that comment and the declaration. Only the public
+// API: the `pub` declarations, and the impls of every type but a private one
+// of the module (with all their methods, which are public with their type).
+
+import std.json as json
+from ...selfhost.parser import parse_source
+from ...selfhost.lexer import lex
+from ...selfhost.ast import Decl, DeclKind, TypeExpr, TypeKind
+from ..lsp.symbols import Symbol, SymKind, outline_parsed, type_str, kind_eq
+from ..lsp.text import lines_of
+
+// One documented declaration: `kind` is function, struct, enum, trait,
+// impl, constant or type; a member's method, field or variant. `line`
+// counts from 1. An impl names its `target` type (without type arguments)
+// and its trait, if any.
+#derive(Json)
+pub struct Item {
+    name: str,
+    kind: str,
+    signature: str,
+    doc: str,
+    tests: [str],
+    line: int,
+    target: str,
+    trait_name: str,
+    members: [Item],
+}
+
+// A module: `std.vector`, its file, its header comment and its API.
+#derive(Json)
+pub struct Module {
+    name: str,
+    path: str,
+    doc: str,
+    items: [Item],
+}
+
+// The text of a comment line without its `//` and the one space after it;
+// None for a line that isn't a comment.
+#test("  // a b")[Some("a b")]
+#test("//")[Some("")]
+#test("//  indented")[Some(" indented")]
+#test("let x = 1")[None]
+pub fun comment_text(line: str) -> Option<str> {
+    let t = line.trim()
+    if !t.starts_with("//") { return None }
+    let rest = t[2:]
+    if rest.starts_with(" ") { return Some(rest[1:]) }
+    return Some(rest)
+}
+
+// The module's header: the comment lines it starts with, up to the first
+// line that isn't one.
+#test(["// std.x: things.", "//", "// More.", "", "import std.y"])["std.x: things.\n\nMore."]
+#test(["import std.y"])[""]
+pub fun module_doc(lines: [str]) -> str {
+    var out: [str] = []
+    for line in lines {
+        match comment_text(line) {
+            Some(t) => out.push(t),
+            None => { return out.join("\n") },
+        }
+    }
+    return out.join("\n")
+}
+
+// The documentation above the declaration on the 0-based line `at`: the
+// comment right above it (above its attributes), and its `#test` cases in
+// their order. A blank line ends the comment.
+#test(["// Adds.", "// Twice.", "#test(1)[2]", "#test(2)[4]", "fun f(x: int) -> int {"], 4)[("Adds.\nTwice.", ["#test(1)[2]", "#test(2)[4]"])]
+#test(["// Not this one.", "", "fun f() {"], 2)[("", [])]
+#test(["    // A method.", "    #inline", "    fun m(self) {"], 2)[("A method.", [])]
+#test(["fun f() {"], 0)[("", [])]
+#test(["// Reads.", "#test(f(\"ab\" +", "    \"cd\"), 1)[2]", "#test(x)[y]", "pub fun r() {"], 4)[("Reads.", ["#test(f(\"ab\" +\n    \"cd\"), 1)[2]", "#test(x)[y]"])]
+#test(["let x = 1", "fun f() {"], 1)[("", [])]
+pub fun doc_above(lines: [str], at: int) -> (str, [str]) {
+    var tests: [str] = []
+    // the attributes, each from its `#` line to the line before the next
+    // one (an attribute may span lines: a long `#test`)
+    var pending: [str] = []
+    var i = at - 1
+    while i >= 0 && lines[i].trim() != "" && comment_text(lines[i]).is_none() {
+        let t = lines[i].trim()
+        pending.insert(0, lines[i])
+        if t.starts_with("#") {
+            if t.starts_with("#test") {
+                var text = pending.join("\n")
+                tests.insert(0, text.trim())
+            }
+            pending = []
+        }
+        i -= 1
+    }
+    // lines above the declaration that aren't attributes: no documentation
+    if pending.len() > 0 { return ("", []) }
+    var doc: [str] = []
+    while i >= 0 {
+        match comment_text(lines[i]) {
+            Some(t) => doc.insert(0, t),
+            None => { break },
+        }
+        i -= 1
+    }
+    return (doc.join("\n"), tests)
+}
+
+// A signature as the reference shows it: without `pub`.
+#test("pub fun f() -> int")["fun f() -> int"]
+#test("struct P")["struct P"]
+pub fun shown(signature: str) -> str {
+    if signature.starts_with("pub ") { return signature[4:] }
+    return signature
+}
+
+// The bare name of a type: `Vec3` for `Vec3`, `Option` for `Option<T>`,
+// `[T]` for a list.
+fun head_of(t: TypeExpr) -> str {
+    return match t.kind {
+        TypeKind.TRef(name, args) => name,
+        _ => type_str(t),
+    }
+}
+
+fun kind_name(k: SymKind) -> str {
+    return match k {
+        SymKind.Struct => "struct",
+        SymKind.Function => "function",
+        SymKind.Method => "method",
+        SymKind.Enum => "enum",
+        SymKind.EnumMember => "variant",
+        SymKind.Interface => "trait",
+        SymKind.Impl => "impl",
+        SymKind.Field => "field",
+        SymKind.Constant => "constant",
+        SymKind.TypeAlias => "type",
+    }
+}
+
+// Whether the declaration is public, and an impl's target and trait.
+fun visibility(d: Decl) -> (bool, str, str) {
+    return match d.kind {
+        DeclKind.StructDecl(name, fields, attrs, tps, is_pub, act) => (is_pub, "", ""),
+        DeclKind.FunDecl(fd) => (fd.is_pub, "", ""),
+        DeclKind.EnumDecl(name, variants, attrs, tps, is_pub) => (is_pub, "", ""),
+        DeclKind.TypeAliasDecl(name, target, attrs, is_pub) => (is_pub, "", ""),
+        DeclKind.TraitDecl(name, methods, tps, is_pub, attrs) => (is_pub, "", ""),
+        DeclKind.ConstDecl(name, ty, value, attrs, is_pub) => (is_pub, "", ""),
+        DeclKind.ImplDecl(target, methods, tps, tr, targs, attrs) => {
+            let t = match tr {
+                Some(name) => name,
+                None => "",
+            }
+            return (true, head_of(target), t)
+        },
+        DeclKind.ImportDecl(p, items, alias, is_pub) => (false, "", ""),
+    }
+}
+
+fun is_import(d: Decl) -> bool {
+    return match d.kind {
+        DeclKind.ImportDecl(p, items, alias, is_pub) => true,
+        _ => false,
+    }
+}
+
+fun item_of(lines: [str], s: Symbol, target: str, trait_name: str, members: [Item]) -> Item {
+    let at = s.range.start.line as int
+    let (doc, tests) = doc_above(lines, at)
+    var signature = shown(s.detail)
+    match s.kind {
+        SymKind.Field => { signature = f"{s.name}: {s.detail}" },
+        SymKind.EnumMember => { signature = s.name + s.detail },
+        SymKind.Constant => { signature = f"const {s.name}: {s.detail}" },
+        SymKind.TypeAlias => { signature = f"typealias {s.name} = {s.detail}" },
+        _ => {},
+    }
+    return Item { name: s.name, kind: kind_name(s.kind), signature: signature, doc: doc, tests: tests, line: at + 1, target: target, trait_name: trait_name, members: members }
+}
+
+// The documented API of the module `name` in `path`, whose text is
+// `source`; an error message when it doesn't parse.
+pub fun document(name: str, path: str, source: str) -> Result<Module, str> {
+    let toks = match lex(source) {
+        Ok(t) => t,
+        Err(d) => { return Err(f"{path}:{d.line}: {d.msg}") },
+    }
+    let parsed = match parse_source(source, 0) {
+        Ok(p) => p,
+        Err(d) => { return Err(f"{path}:{d.line}: {d.msg}") },
+    }
+    let lines = lines_of(source)
+    let symbols = outline_parsed(source, toks, parsed.program)
+    // the top-level symbols, one for each declaration but an import, in order
+    var tops: [int] = []
+    var i = 0
+    while i < symbols.len() {
+        if symbols[i].parent < 0 { tops.push(i) }
+        i += 1
+    }
+    var decls: [Decl] = []
+    for d in parsed.program.decls {
+        if !is_import(d) { decls.push(d) }
+    }
+    if decls.len() != tops.len() { return Err(f"{path}: {decls.len()} declarations but {tops.len()} outline symbols") }
+    // the types this module keeps private: their impls aren't API
+    var private_types: [str] = []
+    i = 0
+    while i < decls.len() {
+        let (is_pub, target, tr) = visibility(decls[i])
+        let k = symbols[tops[i]].kind
+        if !is_pub && (kind_eq(k, SymKind.Struct) || kind_eq(k, SymKind.Enum)) { private_types.push(symbols[tops[i]].name) }
+        i += 1
+    }
+    var items: [Item] = []
+    i = 0
+    while i < tops.len() {
+        let (is_pub, target, tr) = visibility(decls[i])
+        let top = tops[i]
+        let s = symbols[top]
+        if is_pub && !(kind_eq(s.kind, SymKind.Impl) && private_types.contains(target)) {
+            var members: [Item] = []
+            for m in symbols[top + 1:] {
+                if m.parent == top { members.push(item_of(lines, m, "", "", [])) }
+            }
+            items.push(item_of(lines, s, target, tr, members))
+        }
+        i += 1
+    }
+    return Ok(Module { name: name, path: path, doc: module_doc(lines), items: items })
+}
+
+#test()[true]
+fun documents_a_small_module() -> bool {
+    let src = "// std.demo: a demo.\n\nimport std.str as s\n\n// A point.\npub struct P {\n    // across\n    x: int,\n}\n\nstruct Hidden { a: int }\n\nimpl Hidden {\n    fun h(self) -> int { return self.a }\n}\n\nimpl P {\n    // Its double.\n    #test(P { x: 1 })[2]\n    fun twice(self) -> int { return self.x * 2 }\n}\n\nfun helper() {}\n\n// One.\npub const ONE: int = 1\n"
+    let m = match document("std.demo", "demo.my", src) {
+        Ok(m) => m,
+        Err(e) => { panic(e) },
+    }
+    assert(m.doc == "std.demo: a demo.")
+    assert(m.items.len() == 3, f"{m.items.len()}")
+    assert(m.items[0].name == "P" && m.items[0].doc == "A point." && m.items[0].signature == "struct P")
+    assert(m.items[0].members[0].signature == "x: int" && m.items[0].members[0].doc == "across")
+    assert(m.items[1].kind == "impl" && m.items[1].target == "P" && m.items[1].trait_name == "")
+    assert(m.items[1].members[0].name == "twice" && m.items[1].members[0].doc == "Its double.")
+    assert(m.items[1].members[0].tests == ["#test(P { x: 1 })[2]"])
+    assert(m.items[2].signature == "const ONE: int" && m.items[2].line == 26)
+    return true
+}
+
+// The modules as the JSON the website reads.
+pub fun to_json(modules: [Module]) -> str {
+    return json.encode(modules)
+}
