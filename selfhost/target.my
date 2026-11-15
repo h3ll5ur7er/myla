@@ -101,12 +101,12 @@ pub fun targets() -> [Target] {
         // library of each system DLL (D212) is made from the list of the
         // functions used; no C runtime, so the entry is the program's own.
         // The main thread's stack reserved as large as Linux's grows
-        // (120 MiB, MYLA-182). Child processes come with MYLA-705, debug
-        // information later (D216)
+        // (120 MiB, MYLA-182). A test harness's cases run as children
+        // (MYLA-705); debug information later (D216)
         Target { name: "x86_64-windows", os: Os.Windows, arch: Arch.X86_64, format: ObjectFormat.Coff, exe_suffix: ".exe", platform_file: "platform_windows.my",
                  cross: Toolchain { assemble: ["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", "{obj}", "{asm}"], imports: ["llvm-dlltool", "-m", "i386:x86-64", "-d", "{def}", "-l", "{lib}"],
                                     link: ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:{out}", "{obj}", "{lib}"], needs: "clang, llvm-dlltool and lld-link" },
-                 native: None, emulator: ["wine"], spawns: false, debug_info: false, supported: true },
+                 native: None, emulator: ["wine"], spawns: true, debug_info: false, supported: true },
     ]
 }
 
@@ -199,6 +199,6 @@ fun each_toolchain_names_its_tools() {
         }
     }
     let w = parse_target("x86_64-windows").expect("windows")
-    assert(w.format == ObjectFormat.Coff && w.exe_suffix == ".exe" && w.supported && !w.spawns, "windows")
+    assert(w.format == ObjectFormat.Coff && w.exe_suffix == ".exe" && w.supported && w.spawns, "windows: its cases run as children (MYLA-705)")
     assert(w.cross.assemble[0] == "clang" && w.cross.imports[0] == "llvm-dlltool" && w.cross.link[0] == "lld-link", "D211")
 }

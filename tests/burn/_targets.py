@@ -77,6 +77,7 @@ _X86_TESTS = [
 ]
 
 _WIN_FILES = "Windows' files and directories come with MYLA-704"
+_WIN_LINUX_TOOLS = "it runs Linux's tools, which a Windows program can't (test_process.WindowsChildren runs Windows' own)"
 
 _BOTH = {
     **{t: _X86_CODE for t in _X86_TESTS},
@@ -119,8 +120,9 @@ SKIP: dict[str, dict[str, str]] = {
     },
     # MYLA-702: Windows' first step has the standard streams, the heap, the
     # clocks, the arguments and the environment, and tasks on one worker;
-    # what its later steps bring is `Unsupported` until then (D210), which
-    # NetOnWasm, PipesOnWasm, TermOnWasm and HttpOnWasm check there too
+    # the sixth (MYLA-705) child processes; what its later steps bring is
+    # `Unsupported` until then (D210), which NetOnWasm, TermOnWasm and
+    # HttpOnWasm check there too
     "x86_64-windows": {
         **_BOTH,
         **{t: _WIN_FILES for t in [
@@ -135,8 +137,22 @@ SKIP: dict[str, dict[str, str]] = {
         "test_stdio.BrokenPipe.test_a_write_to_another_descriptor_reports_it":
             "a Windows program has the standard streams only, until its files (MYLA-704)",
         "test_platform_primitives.Entropy": "random bytes (bcrypt, D212) come with Windows' files (MYLA-704)",
-        "test_process": "Windows' child processes come with MYLA-705 (PipesOnWasm checks they are Unsupported)",
-        "test_platform_primitives.Pipes": "Windows' child processes come with MYLA-705 (PipesOnWasm checks they are Unsupported)",
+        # MYLA-705: Windows' children are Windows programs; Linux's tools
+        # (/bin/sh, echo, cat) aren't on its PATH, and Wine starts one
+        # without its standard handles or its exit code
+        **{t: _WIN_LINUX_TOOLS for t in [
+            "test_process.TestSubprocessExample",
+            "test_process.TestSubprocessParity.test_captures_stdout",
+            "test_process.TestSubprocessParity.test_captures_stderr_and_exit_code",
+            "test_process.TestSubprocessParity.test_command_builder_matches_run",
+            "test_process.TestSubprocessParity.test_a_child_s_path_directory_environment_and_input",
+            "test_process.TestSubprocessParity.test_an_environment_name_no_variable_can_have",
+            "test_process.TestSubprocessParity.test_a_child_waited_for_in_a_task",
+            "test_platform_primitives.Pipes",
+        ]},
+        "test_process.TestSubprocessParity.test_reports_terminating_signal":
+            "Windows has no signals: `kill` ends a child with the exit code 1 (WindowsChildren checks it)",
+        "test_process.TestSubprocessParity.test_a_child_gets_sigpipe_back": "Windows has no SIGPIPE",
         **{f"test_net.{c}": "Windows' sockets come with MYLA-706 (NetOnWasm checks they are Unsupported)"
            for c in ["Tcp", "Udp", "Dns", "Errors", "Primitives"]},
         **{f"test_reactor_scaling.{c}": "Windows' sockets come with MYLA-706 (its Readers run)"
@@ -163,9 +179,11 @@ SKIP_PROGRAMS: dict[str, dict[str, str]] = {
         "io_through_the_ir": "it runs a child process, which WASI has none of",
     },
     "x86_64-windows": {
-        "io_through_the_ir": "it runs a child process and opens files, which Windows has none of until MYLA-704 and MYLA-705",
+        "io_through_the_ir": "it opens files, which Windows has none of until MYLA-704, and runs Linux's /bin/echo",
         **{f"std.{m}": _WIN_FILES for m in ["fs", "glob", "io", "test"]},
         **{f"std.{m}": "random bytes (bcrypt, D212) come with Windows' files (MYLA-704)" for m in ["random", "uuid"]},
+        # its children are cat, sh and head (MYLA-705)
+        "std.process": _WIN_LINUX_TOOLS,
     },
 }
 

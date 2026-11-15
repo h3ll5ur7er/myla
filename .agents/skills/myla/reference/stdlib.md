@@ -666,8 +666,9 @@ Import: `import std.process as process`.
 - Gotchas:
   - **`Output.stdout` and `Output.stderr` are `[uint8]`**: use `bytes.to_str(out.stdout)`.
   - A program that can't start gives a `SpawnError`, but a nonzero exit is `Ok` with `status == ExitStatus.Exited(n)`.
-  - The program is looked up in `PATH` unless it contains a `/`.
+  - The program is looked up in `PATH` unless it contains a `/`; on Windows (MYLA-705) in `PATH`'s `;`-separated entries with `PATHEXT`'s extensions, unless it has a `/`, a `\` or a drive.
   - Everything is `Unsupported` on wasm32.
+  - On Windows there are no signals: `kill` ends a child with `Exited(1)`, never `Signaled`, and an exit code has 32 bits (`Exited(70000)`, D216).
   - A `Command` is an immutable value (D147).
 - Prose: `docs/Language/Standard-library/Process.md`
 

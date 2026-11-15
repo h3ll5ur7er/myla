@@ -18,10 +18,10 @@
 //
 // What this step has (D210): the standard streams (descriptors 0, 1 and 2,
 // the process's standard handles), the heap's memory (VirtualAlloc), the
-// clocks and sleeping, the arguments, the environment and the exit. What
-// comes with the later steps fails with UNSUPPORTED (std.ioerror's
-// `Unsupported`, D129): files, directories and the working directory
-// (MYLA-704), processes (MYLA-705, PROCESSES), sockets and the poller
+// clocks and sleeping, the arguments, the environment and the exit; child
+// processes (MYLA-705). What comes with the later steps fails with
+// UNSUPPORTED (std.ioerror's `Unsupported`, D129): files, directories and
+// the working directory (MYLA-704), sockets and the poller on IOCP
 // (MYLA-706, SOCKETS), the terminal and signals (MYLA-707), random bytes
 // (bcrypt, D212). Threads, thread-local state and a stack overflow's report
 // are MYLA-703's: one worker runs the tasks, as on wasm32 (D125), so
@@ -79,11 +79,10 @@ pub const KIND_FIFO: int64 = 6
 pub const KIND_SOCKET: int64 = 7
 pub const KIND_OTHER: int64 = 8
 
-// What a target may lack (D209, D210): without processes, `run`, `spawn`,
-// `spawn_with`, `spawn_piped`, `try_reap` and `kill` fail with UNSUPPORTED
-// (and `reap` gives -1); without sockets every `sock_` function does. Both
-// come with their steps (MYLA-705, MYLA-706).
-pub const PROCESSES: bool = false
+// What a target may lack (D209, D210): processes are there (MYLA-705);
+// without sockets every `sock_` function fails with UNSUPPORTED, until
+// their step (MYLA-706).
+pub const PROCESSES: bool = true
 pub const SOCKETS: bool = false
 // Whether memory unmapped goes back to the system (VirtualFree).
 pub const RETURNS_MEMORY: bool = true
@@ -454,10 +453,14 @@ fun environment_strings(block: [int]) -> [str] {
 // --- the standard streams ---------------------------------------------------------
 
 // The handle of the standard stream `fd` (0 input, 1 output, 2 error:
-// `GetStdHandle`), 0 for none; the descriptors of files come with
-// MYLA-704.
+// `GetStdHandle`), 0 for none; a larger descriptor is a handle itself (a
+// child's pipe or its process, MYLA-705; the descriptors of files come
+// with MYLA-704).
 fun std_handle(fd: int64) -> int64 {
-    if fd < 0 || fd > 2 {
+    if fd > 2 {
+        return fd
+    }
+    if fd < 0 {
         return 0
     }
     let h = __syscall(__rt_get("__imp_GetStdHandle"), -10 - fd, 0, 0)
@@ -516,14 +519,16 @@ pub fun write(fd: int64, buf: int64, n: int64) -> int64 {
 
 // The descriptor `fd` closed: one of the standard streams' handle closed,
 // and the stream left without one (a write to it then BAD_HANDLE, as
-// Linux's EBADF).
+// Linux's EBADF); another descriptor's handle closed.
 pub fun close(fd: int64) -> int64 {
     let h = std_handle(fd)
     if h == 0 {
         return -BAD_HANDLE
     }
     let r = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
-    let none = __syscall(__rt_get("__imp_SetStdHandle"), -10 - fd, 0, 0)
+    if fd <= 2 {
+        let none = __syscall(__rt_get("__imp_SetStdHandle"), -10 - fd, 0, 0)
+    }
     if !ok(r) {
         return failed()
     }
@@ -534,13 +539,25 @@ pub fun close(fd: int64) -> int64 {
 // `timeout_ms` (negative: none) ran out: a pipe asked how much it holds
 // (`PeekNamedPipe`), every millisecond; anything else (a file, the
 // console, and under Wine a Linux pipe handed over, which isn't a named
-// pipe) is taken for ready (MYLA-708 checks the limit on Windows).
+// pipe) is taken for ready (MYLA-708 checks the limit on Windows). A
+// child's process (`spawn_piped`'s `exited`) is ready once it ended,
+// waited for (`WaitForSingleObject`) as a pidfd is polled on Linux.
 pub fun poll_read(fd: int64, timeout_ms: int64) -> int64 {
-    if timeout_ms < 0 {
-        return 1
-    }
     let h = std_handle(fd)
     if h == 0 {
+        return 1
+    }
+    if handle_kind(h) == WATCH_WAITABLE {
+        var limit = timeout_ms
+        if limit < 0 {
+            limit = WAIT_INFINITE
+        }
+        if (__syscall(__rt_get("__imp_WaitForSingleObject"), h, limit, 0) & LOW32) == WAITED_OUT {
+            return 0
+        }
+        return 1
+    }
+    if timeout_ms < 0 {
         return 1
     }
     let avail = __alloc(8)
@@ -687,41 +704,1181 @@ pub fun dir_entry_kind(rec: int64) -> int64 {
     return KIND_UNKNOWN
 }
 
-// --- processes: MYLA-705 ----------------------------------------------------------
+// --- processes (MYLA-705) -----------------------------------------------------------
+// A child is `CreateProcessW`'s: its program found here, through PATH and
+// PATHEXT (`program_candidates`; std.rt hands the name over as it is), its
+// arguments one command line its C runtime splits back
+// (`command_line`, the inverse of `split_command_line`), a batch file run
+// by cmd with its arguments quoted for cmd (`bat_command_line`), its
+// standard handles those of `STARTUPINFO` (the only handles it inherits:
+// PROC_THREAD_ATTRIBUTE_HANDLE_LIST). Its process ID is the `pid` std.rt
+// and std.process know; its process handle is the descriptor `exited`,
+// which is ready once it ended (for `poll_read` and the poller, as a pidfd
+// is on Linux) and, while it is open, keeps the ID the child's, so `reap`,
+// `try_reap` and `kill` open the child again by its ID. Windows has no
+// signals: a child's status is its exit code's 32 bits (D216), and `kill`
+// ends it with the code 1.
 
+// Added to the cause of a directory the child can't be started in (past
+// every cause code and OTHER plus any system's code; std.process's
+// `SpawnError.WorkingDir`), as on Linux.
+const DIR_FAILED: int64 = 65536
+// WaitForSingleObject's limit for none, and its answers
+const WAIT_INFINITE: int64 = 4294967295i64
+const WAITED_OUT: int64 = 258
+// PROC_THREAD_ATTRIBUTE_HANDLE_LIST, EXTENDED_STARTUPINFO_PRESENT,
+// CREATE_UNICODE_ENVIRONMENT, STARTF_USESTDHANDLES
+const HANDLE_LIST: int64 = 131074
+const EXTENDED_STARTUP: int64 = 524288
+const UNICODE_ENVIRONMENT: int64 = 1024
+const USE_STD_HANDLES: int64 = 256
+// OpenProcess's rights: SYNCHRONIZE, PROCESS_QUERY_LIMITED_INFORMATION,
+// PROCESS_TERMINATE
+const CHILD_RIGHTS: int64 = 1052673
+// what PATHEXT is without one (Windows' own)
+const DEFAULT_PATHEXT: str = ".COM;.EXE;.BAT;.CMD"
+
+// The kernel32 function at the import slot `f` called with `args` (up to
+// ten) through the runtime's `__win_call` (selfhost/runtime_x86.my), for
+// the functions `__syscall5` has too few arguments for.
+fun win_call(f: int64, args: [int64]) -> int64 {
+    let b = __alloc(88)
+    __store64(b, f)
+    var k: int64 = 0
+    while k < 10 {
+        var v: int64 = 0
+        if k < args.len() as int64 {
+            v = args[k as int]
+        }
+        __store64(b + 8 + 8 * k, v)
+        k += 1
+    }
+    let r = __syscall(__rt_addr("__win_call"), b, 0, 0)
+    __free(b)
+    return r
+}
+
+// The UTF-16 code units `units` in memory of their own (to `__free`).
+fun units_mem(units: [int]) -> int64 {
+    let n = units.len() as int64
+    let p = __alloc(2 * n + 2)
+    var i: int64 = 0
+    while i < n {
+        let u = units[i as int] as int64
+        __store8(p + 2 * i, (u & 255) as uint8)
+        __store8(p + 2 * i + 1, ((u >> 8) & 255) as uint8)
+        i += 1
+    }
+    return p
+}
+
+// `s` as NUL-terminated UTF-16 (D215), in memory of its own (to `__free`).
+fun spawn_wide(s: str) -> int64 {
+    var units = units_of(s)
+    units.push(0)
+    return units_mem(units)
+}
+
+// Whether the byte `b` is in `s`.
+#test("a\"b", 34u8)[true]
+#test("ab", 34u8)[false]
+fun has_byte(s: str, b: uint8) -> bool {
+    var i = 0
+    while i < s.len() {
+        if s[i] == b {
+            return true
+        }
+        i += 1
+    }
+    return false
+}
+
+// `b` in upper case, if it is an ASCII letter.
+fun upper(b: uint8) -> uint8 {
+    if b >= 97u8 && b <= 122u8 {
+        return b - 32u8
+    }
+    return b
+}
+
+// Whether `a` ends with `tail`, ASCII's case ignored.
+#test("x.BaT", ".bat")[true]
+#test("x.bat.exe", ".bat")[false]
+#test("t", ".bat")[false]
+fun ends_with_ci(a: str, tail: str) -> bool {
+    if a.len() < tail.len() {
+        return false
+    }
+    let at = a.len() - tail.len()
+    var i = 0
+    while i < tail.len() {
+        if upper(a[at + i]) != upper(tail[i]) {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// The decimal digits of `n` (not negative).
+#test(0)["0"]
+#test(4096)["4096"]
+fun decimal(n: int64) -> str {
+    var digits: [uint8] = []
+    var v = n
+    while true {
+        digits.push(48u8 + (v % 10) as uint8)
+        v = v / 10
+        if v == 0 {
+            break
+        }
+    }
+    var sb = StringBuilder()
+    var i = digits.len() - 1
+    while i >= 0 {
+        sb.append_byte(digits[i])
+        i -= 1
+    }
+    return sb.build()
+}
+
+// --- the command line
+
+// `argv` as the command line Windows' C runtime splits back into it
+// (`split_command_line`, its inverse; Rust's and Python's quoting): the
+// program's name between quotes, as it is (it can't hold one: the caller
+// refuses that), each argument after a blank as it is unless it is empty
+// or holds a blank, then between quotes; inside, a quote after `n`
+// backslashes is `2n + 1` backslashes and the quote, and the `n`
+// backslashes before a closing quote are `2n`.
+#test(["p", "a b", ""])["\"p\" \"a b\" \"\""]
+#test(["C:\\x y\\p.exe", "quo\"te", "back\\slash", "tail\\"])["\"C:\\x y\\p.exe\" quo\\\"te back\\slash tail\\"]
+#test(["p", "a b\\", "a\\\"b", "\tx"])["\"p\" \"a b\\\\\" a\\\\\\\"b \"\tx\""]
+#test([])[""]
+fun command_line(argv: [str]) -> str {
+    var sb = StringBuilder()
+    var k = 0
+    for a in argv {
+        if k == 0 {
+            sb.append("\"")
+            sb.append(a)
+            sb.append("\"")
+        } else {
+            sb.append(" ")
+            sb.append(quoted_arg(a))
+        }
+        k += 1
+    }
+    return sb.build()
+}
+
+// Whether `command_line(argv)` splits back into `argv`.
+#test(["p", "plain", "two words", "quo\"te", "back\\slash", "tail\\", "", "\u{e9}\u{4e2d} \u{1f600}", "a\\\\\"b", "\tx", "x\\\\", "\"", "\\\"\\", "\"\"", "a\\\\ b\\\\"])[true]
+#test(["C:\\My Dir\\p.exe"])[true]
+fun splits_back(argv: [str]) -> bool {
+    return split_command_line(units_of(command_line(argv))) == argv
+}
+
+// One argument as `command_line` writes it.
+fun quoted_arg(a: str) -> str {
+    let quote = a.len() == 0 || has_byte(a, 32u8) || has_byte(a, 9u8)
+    var sb = StringBuilder()
+    if quote {
+        sb.append_byte(34u8)
+    }
+    var backslashes = 0
+    var i = 0
+    while i < a.len() {
+        let b = a[i]
+        if b == 92u8 {
+            backslashes += 1
+        } else {
+            if b == 34u8 {
+                for k in 0..backslashes + 1 {
+                    sb.append_byte(92u8)
+                }
+            }
+            backslashes = 0
+        }
+        sb.append_byte(b)
+        i += 1
+    }
+    if quote {
+        for k in 0..backslashes {
+            sb.append_byte(92u8)
+        }
+        sb.append_byte(34u8)
+    }
+    return sb.build()
+}
+
+// The command line that runs the batch file `script` with the arguments
+// `args` through cmd (`cmd.exe /c`, which CreateProcess would start for it
+// without quoting the arguments for cmd: Rust's quoting since CVE-2024-24576,
+// which cmd's own rules read back): `/e:ON /v:OFF /d`, the whole command
+// between quotes, the script's path between quotes of its own, each
+// argument as `bat_quoted_arg` gives it. "" when it can't be: a quote in
+// the path or a backslash at its end, which no file name has, a carriage
+// return or a newline in an argument, which would end cmd's line.
+#test("C:\\t\\e.bat", ["a b", "c&d", "50%", "", "x\\", "q\"q", "ok-1.2/x"])["cmd.exe /e:ON /v:OFF /d /c \"\"C:\\t\\e.bat\" \"a b\" \"c&d\" \"50%%cd:~,%\" \"\" \"x\\\\\" \"q\"\"q\" ok-1.2/x\""]
+#test("C:\\t\\e\".bat", ["a"])[""]
+#test("C:\\t\\e.bat", ["a\nb"])[""]
+fun bat_command_line(script: str, args: [str]) -> str {
+    if has_byte(script, 34u8) || (script.len() > 0 && script[script.len() - 1] == 92u8) {
+        return ""
+    }
+    var sb = StringBuilder()
+    sb.append("cmd.exe /e:ON /v:OFF /d /c \"\"")
+    sb.append(script)
+    sb.append("\"")
+    for a in args {
+        if has_byte(a, 13u8) || has_byte(a, 10u8) {
+            return ""
+        }
+        sb.append(" ")
+        sb.append(bat_quoted_arg(a))
+    }
+    sb.append("\"")
+    return sb.build()
+}
+
+// One argument of a batch file's command line: between quotes unless it
+// is only letters, digits and `#$*+-./:?@\_` (and not empty, nor ending
+// with a backslash, which would take the closing quote); inside, a quote
+// doubled (after its backslashes doubled) and each `%` written
+// `%%cd:~,%`, which cmd reads as a `%` that names no variable.
+fun bat_quoted_arg(a: str) -> str {
+    var quote = a.len() == 0 || a[a.len() - 1] == 92u8
+    for c in a {
+        let v = c as int
+        if v < 128 {
+            let alnum = (v >= 48 && v <= 57) || (v >= 65 && v <= 90) || (v >= 97 && v <= 122)
+            let plain = v == 35 || v == 36 || v == 42 || v == 43 || v == 45 || v == 46 || v == 47 || v == 58 || v == 63 || v == 64 || v == 92 || v == 95
+            if !alnum && !plain {
+                quote = true
+            }
+        } else if v < 160 {
+            quote = true      // a C1 control
+        }
+    }
+    var sb = StringBuilder()
+    if quote {
+        sb.append_byte(34u8)
+    }
+    var backslashes = 0
+    var i = 0
+    while i < a.len() {
+        let b = a[i]
+        if b == 92u8 {
+            backslashes += 1
+        } else {
+            if b == 34u8 {
+                for k in 0..backslashes {
+                    sb.append_byte(92u8)
+                }
+                sb.append_byte(34u8)
+            } else if b == 37u8 {
+                sb.append("%%cd:~,")
+            }
+            backslashes = 0
+        }
+        sb.append_byte(b)
+        i += 1
+    }
+    if quote {
+        for k in 0..backslashes {
+            sb.append_byte(92u8)
+        }
+        sb.append_byte(34u8)
+    }
+    return sb.build()
+}
+
+// --- the program: PATH and PATHEXT
+
+// The files `program` may be, in the order they are tried (D147, as Windows'
+// shell looks, without its working directory first): a name with a
+// directory (a `/`, a `\` or a drive) is itself and then itself with each of
+// PATHEXT's extensions (`pathext`, Windows' own list without one); a name
+// alone the same in each directory of PATH (`path`, its `;`-separated
+// entries, quotes taken off, empty ones skipped), itself first only when it
+// has an extension, as a file without one isn't run from PATH.
+#test("C:\\bin\\p.exe", "C:\\a", ".EXE")[["C:\\bin\\p.exe", "C:\\bin\\p.exe.EXE"]]
+#test("./helper", "", ".COM;.EXE")[["./helper", "./helper.COM", "./helper.EXE"]]
+#test("D:x", "", ".EXE")[["D:x", "D:x.EXE"]]
+#test("helper", "C:\\a;;\"C:\\b c\";D:\\d\\", ".COM;.EXE")[["C:\\a\\helper.COM", "C:\\a\\helper.EXE", "C:\\b c\\helper.COM", "C:\\b c\\helper.EXE", "D:\\d\\helper.COM", "D:\\d\\helper.EXE"]]
+#test("run.bat", "C:\\a", ".COM;.BAT")[["C:\\a\\run.bat", "C:\\a\\run.bat.COM", "C:\\a\\run.bat.BAT"]]
+#test("p", "C:\\a", "")[["C:\\a\\p.COM", "C:\\a\\p.EXE", "C:\\a\\p.BAT", "C:\\a\\p.CMD"]]
+#test("p", "", ".EXE")[[]]
+#test("", "C:\\a", ".EXE")[[""]]
+fun program_candidates(program: str, path: str, pathext: str) -> [str] {
+    if program == "" {
+        return [program]
+    }
+    var exts = list_entries(pathext)
+    if exts.len() == 0 {
+        exts = list_entries(DEFAULT_PATHEXT)
+    }
+    var dirs: [str] = []
+    var name_start = 0
+    var i = 0
+    while i < program.len() {
+        if program[i] == 47u8 || program[i] == 92u8 {   // '/', '\'
+            name_start = i + 1
+        }
+        i += 1
+    }
+    let with_dir = name_start > 0 || (program.len() >= 2 && program[1] == 58u8)   // a drive's ':'
+    var has_ext = false
+    i = name_start
+    while i < program.len() {
+        if program[i] == 46u8 {      // '.'
+            has_ext = true
+        }
+        i += 1
+    }
+    var out: [str] = []
+    if with_dir {
+        out.push(program)
+        for e in exts {
+            out.push(program + e)
+        }
+        return out
+    }
+    for d in list_entries(path) {
+        var dir = d
+        if dir[dir.len() - 1] != 92u8 && dir[dir.len() - 1] != 47u8 {
+            dir = dir + "\\"
+        }
+        if has_ext {
+            out.push(dir + program)
+        }
+        for e in exts {
+            out.push(dir + program + e)
+        }
+    }
+    return out
+}
+
+// The non-empty entries of the `;`-separated list `s`, without quotes.
+#test("a;;\"b c\";")[["a", "b c"]]
+#test("")[[]]
+fun list_entries(s: str) -> [str] {
+    var out: [str] = []
+    var sb = StringBuilder()
+    var i = 0
+    while i <= s.len() {
+        if i == s.len() || s[i] == 59u8 {   // ';'
+            let e = sb.build()
+            if e != "" {
+                out.push(e)
+            }
+            sb = StringBuilder()
+        } else if s[i] != 34u8 {
+            sb.append_byte(s[i])
+        }
+        i += 1
+    }
+    return out
+}
+
+// Whether `path` names a batch file, which cmd runs.
+fun is_batch(path: str) -> bool {
+    return ends_with_ci(path, ".bat") || ends_with_ci(path, ".cmd")
+}
+
+// The attributes of the file at `path` (`GetFileAttributesW`), or minus the
+// cause.
+fun attributes_of(path: str) -> int64 {
+    let w = spawn_wide(path)
+    let a = __syscall(__rt_get("__imp_GetFileAttributesW"), w, 0, 0) & LOW32
+    var r = a
+    if a == LOW32 {
+        r = failed()
+    }
+    __free(w)
+    return r
+}
+
+// cmd's path: `cmd.exe` in the system's directory.
+fun cmd_path() -> str {
+    let buf = __alloc(1040)
+    let n = __syscall(__rt_get("__imp_GetSystemDirectoryW"), buf, 520, 0) & LOW32
+    var dir = "C:\\Windows\\System32"
+    if n > 0 && n < 520 {
+        dir = utf8_of(units_at(buf, n), 0, n as int)
+    }
+    __free(buf)
+    return dir + "\\cmd.exe"
+}
+
+// --- the environment
+
+// The entries of this process's environment (`name=value`, UTF-8, as
+// `windows_start` made them).
+fun this_environment() -> [str] {
+    var out: [str] = []
+    var entry = __environ()
+    while __load64(entry) != 0 {
+        let e = __load64(entry)
+        var len: int64 = 0
+        while __load8(e + len) != 0u8 {
+            len += 1
+        }
+        let p = __alloc(len + 8)
+        __store64(p, len)
+        __copy_bytes(p + 8, e, len)
+        out.push(__str_of(p))
+        entry += 8
+    }
+    return out
+}
+
+// How long the name of the entry (or bare name) `e` is: up to its `=`.
+fun name_len(e: str) -> int {
+    var n = 0
+    while n < e.len() && e[n] != 61u8 {   // '='
+        n += 1
+    }
+    return n
+}
+
+// Whether the entries (or names) `a` and `b` have the same name, its case
+// ignored as Windows ignores it.
+#test("Path=x", "PATH")[true]
+#test("PATHEXT=x", "PATH")[false]
+fun same_name(a: str, b: str) -> bool {
+    let n = name_len(a)
+    if name_len(b) != n {
+        return false
+    }
+    var i = 0
+    while i < n {
+        if upper(a[i]) != upper(b[i]) {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// Whether the name of `a` sorts before the name of `b`, the case ignored
+// (the order CreateProcess wants an environment block in).
+fun name_before(a: str, b: str) -> bool {
+    let n = name_len(a)
+    let m = name_len(b)
+    var i = 0
+    while i < n && i < m {
+        let x = upper(a[i])
+        let y = upper(b[i])
+        if x != y {
+            return x < y
+        }
+        i += 1
+    }
+    return n < m
+}
+
+// The value of this process's variable `name` ("" without one).
+fun env_value(name: str) -> str {
+    for e in this_environment() {
+        if same_name(e, name) && name_len(e) < e.len() {
+            // (no slice: std.platform loads no std.slice)
+            var sb = StringBuilder()
+            sb.append(e, name_len(e) + 1, e.len())
+            return sb.build()
+        }
+    }
+    return ""
+}
+
+// The environment `opts` gives a child (`std.rt.run_with`'s `opts[3]` on:
+// "keep" this process's with the changes after it, "clear" only what they
+// set; a change `NAME=value` sets NAME in place of the variable of that
+// name in any case, a bare `NAME` removes it), sorted by name.
+#test(["A=1", "b=2"], ["", "", "", "keep", "B=3", "C=4", "a"])[["B=3", "C=4"]]
+#test(["A=1"], ["", "", "", "clear", "Z=1", "Y=2"])[["Y=2", "Z=1"]]
+fun child_environment(base: [str], opts: [str]) -> [str] {
+    var entries: [str] = []
+    if opts[3] != "clear" {
+        entries = base
+    }
+    var i = 4
+    while i < opts.len() {
+        let change = opts[i]
+        var kept: [str] = []
+        for e in entries {
+            if !same_name(e, change) {
+                kept.push(e)
+            }
+        }
+        if name_len(change) < change.len() {
+            kept.push(change)
+        }
+        entries = kept
+        i += 1
+    }
+    // sorted, by insertion: an environment is short
+    var k = 1
+    while k < entries.len() {
+        let e = entries[k]
+        var j = k - 1
+        while j >= 0 && name_before(e, entries[j]) {
+            entries[j + 1] = entries[j]
+            j -= 1
+        }
+        entries[j + 1] = e
+        k += 1
+    }
+    return entries
+}
+
+// The environment block of `entries` (UTF-16, each ending with a NUL,
+// then a NUL), in memory of its own.
+fun environment_block(entries: [str]) -> int64 {
+    var units: [int] = []
+    for e in entries {
+        for u in units_of(e) {
+            units.push(u)
+        }
+        units.push(0)
+    }
+    if entries.len() == 0 {
+        units.push(0)
+    }
+    units.push(0)
+    return units_mem(units)
+}
+
+// --- the standard streams
+
+// What a child's three standard streams are, from `stdio_mode`'s letters:
+// its handles (0: none), this process's end of each that is a pipe (-1:
+// none), a descriptor handed over (`d`, closed once the child has it; -1:
+// none), and the cause when one couldn't be made (0: none).
+struct Streams {
+    child: [int64],
+    ours: [int64],
+    given: int64,
+    cause: int64,
+}
+
+// How a child's standard streams are made, from `opts` (`std.rt.run_with`'s
+// and `spawn_piped`'s): three letters, for stdin, stdout and stderr, each
+// `p` (a pipe this process holds the other end of), `i` (this process's),
+// `n` (nothing: NUL), and for stdin also `t` (the text `opts[2]`) or `d`
+// (the descriptor `opts[2]` names, MYLA-378). `opts[1]` gives them; else
+// "1" there is a text input, and the input is a pipe when `piped` and this
+// process's otherwise, the output and the error pipes (as on Linux).
+#test(["", "1", "x"], false)["tpp"]
+#test(["", "", ""], false)["ipp"]
+#test([], true)["ppp"]
+#test(["", "din", "5"], true)["din"]
+fun stdio_mode(opts: [str], piped: bool) -> str {
+    if opts.len() > 1 && opts[1].len() == 3 {
+        return opts[1]
+    }
+    if opts.len() > 2 && opts[1] == "1" {
+        return "tpp"
+    }
+    if piped {
+        return "ppp"
+    }
+    return "ipp"
+}
+
+// The descriptor the decimal `s` names (-1 for none).
+#test("17")[17]
+#test("")[-1]
+#test("x")[-1]
+fun descriptor_of(s: str) -> int64 {
+    if s.len() == 0 || s.len() > 18 {
+        return -1
+    }
+    var n: int64 = 0
+    var i = 0
+    while i < s.len() {
+        let c = s[i]
+        if c < 48u8 || c > 57u8 {
+            return -1
+        }
+        n = n * 10 + (c - 48u8) as int64
+        i += 1
+    }
+    return n
+}
+
+// The handle `h` made one a child inherits (`SetHandleInformation`'s
+// HANDLE_FLAG_INHERIT): 0, or minus the cause.
+fun inheritable(h: int64) -> int64 {
+    if !ok(__syscall(__rt_get("__imp_SetHandleInformation"), h, 1, 1)) {
+        return failed()
+    }
+    return 0
+}
+
+// A copy of the handle `h` a child inherits (`DuplicateHandle`, the same
+// access), or minus the cause.
+fun inheritable_copy(h: int64) -> int64 {
+    let out = __alloc(8)
+    __store64(out, 0)
+    let r = win_call(__rt_get("__imp_DuplicateHandle"), [-1, h, -1, out, 0, 1, 2])   // this process, DUPLICATE_SAME_ACCESS
+    var c = __load64(out)
+    if !ok(r) {
+        c = failed()
+    }
+    __free(out)
+    return c
+}
+
+// The NUL device open for reading and writing, inheritable: its handle, or
+// minus the cause.
+fun null_device() -> int64 {
+    let w = spawn_wide("NUL")
+    // GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING
+    let h = win_call(__rt_get("__imp_CreateFileW"), [w, 3221225472i64, 3, 0, 3, 0, 0])
+    __free(w)
+    if h == -1 {
+        return failed()
+    }
+    let r = inheritable(h)
+    if r < 0 {
+        let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+        return r
+    }
+    return h
+}
+
+// A file holding `text`, read from its start, which the child inherits and
+// which goes when the last handle of it is closed (a temporary file deleted
+// on close: what Linux's `memfd_create` gives, so that a large input can't
+// stop the child against its output, D147): its handle, or minus the cause.
+fun input_file(text: str) -> int64 {
+    let buf = __alloc(1040)
+    let n = __syscall(__rt_get("__imp_GetTempPathW"), 520, buf, 0) & LOW32
+    if n == 0 || n >= 520 {
+        __free(buf)
+        return failed()
+    }
+    let dir = utf8_of(units_at(buf, n), 0, n as int)
+    __free(buf)
+    let pid = __syscall(__rt_get("__imp_GetCurrentProcessId"), 0, 0, 0) & LOW32
+    var tries: int64 = 0
+    while true {
+        let w = spawn_wide(dir + "myla-input-" + decimal(pid) + "-" + decimal(clock_ns() & 4294967295i64) + "-" + decimal(tries) + ".tmp")
+        // GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | _WRITE | _DELETE,
+        // CREATE_NEW, FILE_FLAG_DELETE_ON_CLOSE | FILE_ATTRIBUTE_TEMPORARY
+        let h = win_call(__rt_get("__imp_CreateFileW"), [w, 3221225472i64, 7, 0, 1, 67109120, 0])
+        __free(w)
+        if h != -1 {
+            var r = write_all(h, __addr_of(text) + 8, text.len() as int64)
+            if r == 0 && !ok(__syscall5(__rt_get("__imp_SetFilePointerEx"), h, 0, 0, 0, 0)) {
+                r = failed()
+            }
+            if r == 0 {
+                r = inheritable(h)
+            }
+            if r < 0 {
+                let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+                return r
+            }
+            return h
+        }
+        let e = last_error()
+        tries += 1
+        if (e != 80 && e != 183) || tries > 100 {   // FILE_EXISTS, ALREADY_EXISTS: another name
+            return -cause(e)
+        }
+    }
+    return -OTHER
+}
+
+// The child's three streams as `how` (three letters of `stdio_mode`) and
+// `opts` say.
+fun child_streams(how: str, opts: [str]) -> Streams {
+    var s = Streams { child: [0, 0, 0], ours: [-1, -1, -1], given: -1, cause: 0 }
+    var null_h: int64 = 0
+    let pipe = __alloc(16)
+    var k = 0
+    while k < 3 && s.cause == 0 {
+        let c = how[k]
+        var h: int64 = 0
+        if c == 'p' {
+            // both ends this process's only, the child's made inheritable
+            if ok(__syscall5(__rt_get("__imp_CreatePipe"), pipe, pipe + 8, 0, 65536, 0)) {
+                if k == 0 {
+                    h = __load64(pipe)
+                    s.ours[0] = __load64(pipe + 8)
+                } else {
+                    h = __load64(pipe + 8)
+                    s.ours[k] = __load64(pipe)
+                }
+                let r = inheritable(h)
+                if r < 0 {
+                    s.cause = -r
+                }
+            } else {
+                s.cause = -failed()
+            }
+        } else if c == 'n' || (c == 't' && (opts.len() < 3 || opts[2] == "")) {
+            if null_h == 0 {
+                null_h = null_device()
+                if null_h < 0 {
+                    s.cause = -null_h
+                    null_h = 0
+                }
+            }
+            h = null_h
+        } else if c == 't' {
+            h = input_file(opts[2])
+            if h < 0 {
+                s.cause = -h
+                h = 0
+            }
+        } else if c == 'd' {
+            // the descriptor handed over: one that isn't open is BAD_HANDLE
+            // here, as on Linux
+            let fd = descriptor_of(opts[2])
+            var given: int64 = 0
+            if fd >= 0 {
+                given = std_handle(fd)
+            }
+            let flags = __alloc(8)
+            if given == 0 || !ok(__syscall(__rt_get("__imp_GetHandleInformation"), given, flags, 0)) {
+                s.cause = BAD_HANDLE
+            } else {
+                h = inheritable_copy(given)
+                s.given = fd
+                if h < 0 {
+                    s.cause = -h
+                    h = 0
+                }
+            }
+            __free(flags)
+        } else {
+            // this process's: a copy the child inherits (none without one)
+            let mine = std_handle(k as int64)
+            if mine != 0 {
+                h = inheritable_copy(mine)
+                if h < 0 {
+                    h = 0
+                }
+            }
+        }
+        s.child[k] = h
+        k += 1
+    }
+    __free(pipe)
+    return s
+}
+
+// The child's handles, each once (two streams may share the NUL device).
+fun distinct_handles(child: [int64]) -> [int64] {
+    var out: [int64] = []
+    for h in child {
+        var seen = h == 0
+        for o in out {
+            if o == h {
+                seen = true
+            }
+        }
+        if !seen {
+            out.push(h)
+        }
+    }
+    return out
+}
+
+// The child's handles closed here, and this process's ends too when
+// `all` (nothing was started), the descriptor handed over in any case.
+fun close_streams(s: Streams, all: bool) {
+    for h in distinct_handles(s.child) {
+        let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+    }
+    if all {
+        for h in s.ours {
+            if h >= 0 {
+                let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+            }
+        }
+    }
+    if s.given >= 0 {
+        let c = close(s.given)
+    }
+}
+
+// --- starting it
+
+// A child started as `spawn_piped` describes, its streams as `how` (three
+// letters of `stdio_mode`) says: `[cause, pid, in, out, err, process]`.
+fun start_child(paths: [str], argv: [str], opts: [str], how: str) -> [int] {
+    if argv.len() > 0 && has_byte(argv[0], 34u8) {
+        // no quote in a program's name on its command line
+        return [INVALID_INPUT as int, 0, -1, -1, -1, -1]
+    }
+    var dir: int64 = 0
+    if opts.len() > 0 && opts[0] != "" {
+        let a = attributes_of(opts[0])
+        if a < 0 {
+            return [(DIR_FAILED - a) as int, 0, -1, -1, -1, -1]
+        }
+        if (a & 16) == 0 {      // FILE_ATTRIBUTE_DIRECTORY
+            return [(DIR_FAILED + NOT_A_DIRECTORY) as int, 0, -1, -1, -1, -1]
+        }
+        dir = spawn_wide(opts[0])
+    }
+    var env: int64 = 0
+    if opts.len() > 3 && opts[3] != "" {
+        env = environment_block(child_environment(this_environment(), opts))
+    }
+    let s = child_streams(how, opts)
+    var failure = s.cause
+    var pid: int64 = 0
+    var process: int64 = -1
+    if failure == 0 {
+        let pi = __alloc(24)
+        failure = create_child(paths, argv, s, env, dir, pi)
+        if failure == 0 {
+            process = __load64(pi)
+            pid = __load64(pi + 16) & LOW32
+            let t = __syscall(__rt_get("__imp_CloseHandle"), __load64(pi + 8), 0, 0)
+        }
+        __free(pi)
+    }
+    close_streams(s, failure != 0)
+    if dir != 0 {
+        __free(dir)
+    }
+    if env != 0 {
+        __free(env)
+    }
+    if failure != 0 {
+        return [failure as int, 0, -1, -1, -1, -1]
+    }
+    return [0, pid as int, s.ours[0] as int, s.ours[1] as int, s.ours[2] as int, process as int]
+}
+
+// The child created (`CreateProcessW`, into `pi`) from the first of the
+// candidates of `paths` that starts: 0, or the cause. A candidate not
+// there (or no program: ERROR_BAD_EXE_FORMAT) gives way to the next; one
+// that may not be run is remembered, as `execvp` remembers EACCES, and a
+// file that isn't a program is "exec format error" if none starts.
+fun create_child(paths: [str], argv: [str], s: Streams, env: int64, dir: int64, pi: int64) -> int64 {
+    let handles = distinct_handles(s.child)
+    // the startup information (STARTUPINFOEXW), its handles the only ones
+    // the child inherits when the attribute list can be made
+    let si = __alloc(112)
+    zero_bytes(si, 112)
+    __store64(si + 60, USE_STD_HANDLES)         // dwFlags (and wShowWindow 0)
+    __store64(si + 80, s.child[0])
+    __store64(si + 88, s.child[1])
+    __store64(si + 96, s.child[2])
+    var flags = UNICODE_ENVIRONMENT
+    var list: int64 = 0
+    var array: int64 = 0
+    let n = handles.len() as int64
+    __store32(si, 104u32)                       // cb: STARTUPINFOW alone
+    if n > 0 {
+        let size = __alloc(8)
+        __store64(size, 0)
+        let first = __syscall5(__rt_get("__imp_InitializeProcThreadAttributeList"), 0, 1, 0, size, 0)
+        list = __alloc(__load64(size) + 8)
+        array = __alloc(8 * n)
+        var k: int64 = 0
+        for h in handles {
+            __store64(array + 8 * k, h)
+            k += 1
+        }
+        var made = ok(__syscall5(__rt_get("__imp_InitializeProcThreadAttributeList"), list, 1, 0, size, 0))
+        if made {
+            made = ok(win_call(__rt_get("__imp_UpdateProcThreadAttribute"), [list, 0, HANDLE_LIST, array, 8 * n, 0, 0]))
+            if !made {
+                let gone = __syscall(__rt_get("__imp_DeleteProcThreadAttributeList"), list, 0, 0)
+            }
+        }
+        if made {
+            __store32(si, 112u32)
+            __store64(si + 104, list)
+            flags = flags | EXTENDED_STARTUP
+        } else {
+            // (inheriting every inheritable handle: only the child's are,
+            // while it starts)
+            __free(list)
+            list = 0
+        }
+        __free(size)
+    }
+    var inherit: int64 = 0
+    if n > 0 {
+        inherit = 1
+    }
+    let line = command_line(argv)
+    var rest: [str] = []
+    var i = 1
+    while i < argv.len() {
+        rest.push(argv[i])
+        i += 1
+    }
+    var failure = NOT_FOUND           // no candidate to try
+    var denied = false
+    var not_a_program = false
+    let path = env_value("PATH")
+    let pathext = env_value("PATHEXT")
+    var found = false
+    for p in paths {
+        for cand in program_candidates(p, path, pathext) {
+            if found || (failure != NOT_FOUND && failure != 0) {
+                break
+            }
+            var app = cand
+            var cl = line
+            var tried = true
+            if is_batch(cand) {
+                // cmd runs any name: only one that is a file is tried
+                let a = attributes_of(cand)
+                if a < 0 || (a & 16) != 0 {
+                    tried = false
+                } else {
+                    cl = bat_command_line(cand, rest)
+                    if cl == "" {
+                        failure = INVALID_INPUT
+                        tried = false
+                    }
+                    app = cmd_path()
+                }
+            }
+            if tried {
+                let wa = spawn_wide(app)
+                let wl = spawn_wide(cl)
+                let r = win_call(__rt_get("__imp_CreateProcessW"), [wa, wl, 0, 0, inherit, flags, env, dir, si, pi])
+                let e = last_error()
+                __free(wa)
+                __free(wl)
+                if ok(r) {
+                    found = true
+                    failure = 0
+                } else if e == 5 {
+                    denied = true            // ACCESS_DENIED: kept unless one runs
+                } else if e == 193 || e == 216 {
+                    not_a_program = true     // BAD_EXE_FORMAT, EXE_MACHINE_TYPE_MISMATCH
+                } else if e != 2 && e != 3 && e != 123 && e != 267 {
+                    failure = cause(e)       // not FILE_, PATH_NOT_FOUND, INVALID_NAME, DIRECTORY
+                }
+            }
+        }
+    }
+    if !found && failure == NOT_FOUND {
+        if denied {
+            failure = PERMISSION_DENIED
+        } else if not_a_program {
+            failure = OTHER + 8              // ENOEXEC's "exec format error"
+        }
+    }
+    if list != 0 {
+        let gone = __syscall(__rt_get("__imp_DeleteProcThreadAttributeList"), list, 0, 0)
+        __free(list)
+    }
+    if array != 0 {
+        __free(array)
+    }
+    __free(si)
+    return failure
+}
+
+// The `n` bytes at `p` zeroed.
+fun zero_bytes(p: int64, n: int64) {
+    var i: int64 = 0
+    while i < n {
+        __store8(p + i, 0u8)
+        i += 1
+    }
+}
+
+// --- what the platform interface asks for
+
+// `program` (not searched for) run with the argument vector `argv` and the
+// environment the process started with, its stdout and stderr read as they
+// come, and waited for. Gives what it wrote to stdout; `__set_run_stderr`
+// and `__set_run_status` (its exit code's 32 bits, or the cause of a failed
+// spawn) record the rest.
 pub fun run(program: str, argv: [str]) -> [uint8] {
-    let none: [uint8] = []
-    __set_run_stderr(none)
-    __set_run_status(-1, 0, UNSUPPORTED)
-    return none
+    return run_with([program], argv, [])
 }
 
-pub fun spawn(program: str, argv: [str]) -> [int] {
-    return [UNSUPPORTED as int, 0, -1, -1, -1]
-}
-
+// `run` with the paths to try, in turn (each looked for on PATH, with
+// PATHEXT's extensions), and the options of `std.rt.run_with` (D147). The
+// two pipes are read as either has bytes (`PeekNamedPipe`, a millisecond's
+// nap while neither has: anonymous pipes can't be waited for, MYLA-706's
+// overlapped reads will), the last one left with plain reads.
 pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
-    return run("", argv)
+    var out: [uint8] = []
+    var err: [uint8] = []
+    let h = start_child(paths, argv, opts, stdio_mode(opts, false))
+    if h[0] != 0 {
+        __set_run_status(0, 0, h[0] as int64)
+        __set_run_stderr(err)
+        return out
+    }
+    if h[2] >= 0 {
+        // (an input pipe nobody writes: its end at once)
+        let c = __syscall(__rt_get("__imp_CloseHandle"), h[2] as int64, 0, 0)
+    }
+    var o = h[3] as int64
+    var e = h[4] as int64
+    let buf = __alloc(65536)
+    while o >= 0 || e >= 0 {
+        var src: int64 = -1
+        if o >= 0 && e >= 0 {
+            if pipe_ready(o) {
+                src = o
+            } else if pipe_ready(e) {
+                src = e
+            } else {
+                let s = __syscall(__rt_get("__imp_Sleep"), 1, 0, 0)
+                continue
+            }
+        } else if o >= 0 {
+            src = o
+        } else {
+            src = e
+        }
+        let got = read(src, buf, 65536)
+        if got <= 0 {
+            let c = __syscall(__rt_get("__imp_CloseHandle"), src, 0, 0)
+            if src == o {
+                o = -1
+            } else {
+                e = -1
+            }
+        } else {
+            var i: int64 = 0
+            while i < got {
+                if src == o {
+                    out.push(__load8(buf + i))
+                } else {
+                    err.push(__load8(buf + i))
+                }
+                i += 1
+            }
+        }
+    }
+    __free(buf)
+    let process = h[5] as int64
+    let w = __syscall(__rt_get("__imp_WaitForSingleObject"), process, WAIT_INFINITE, 0)
+    let code = exit_code_of(process)
+    let c = __syscall(__rt_get("__imp_CloseHandle"), process, 0, 0)
+    __set_run_status(code, 0, 0)
+    __set_run_stderr(err)
+    return out
 }
 
+// Whether a read of the pipe `h` won't wait: it holds bytes, or its writer
+// closed it (or it fails).
+fun pipe_ready(h: int64) -> bool {
+    let avail = __alloc(8)
+    __store64(avail, 0)
+    let r = __syscall5(__rt_get("__imp_PeekNamedPipe"), h, 0, 0, 0, avail)
+    let ready = !ok(r) || (__load64(avail) & LOW32) != 0
+    __free(avail)
+    return ready
+}
+
+// The exit code of the process `h` that ended (`GetExitCodeProcess`), its
+// 32 bits (D216).
+fun exit_code_of(h: int64) -> int64 {
+    let w = __alloc(8)
+    __store64(w, 0)
+    let r = __syscall(__rt_get("__imp_GetExitCodeProcess"), h, w, 0)
+    let code = __load64(w) & LOW32
+    __free(w)
+    return code
+}
+
+// `program` started with the argument vector `argv` (as `run` starts it)
+// and not waited for (D124, `std.process.run_async`): `[cause, pid, out,
+// err, exited]`, `out` and `err` the read ends of its stdout's and
+// stderr's pipes and `exited` its process's handle (ready once it ended),
+// or `[cause, 0, -1, -1, -1]` when it couldn't be started.
+pub fun spawn(program: str, argv: [str]) -> [int] {
+    return spawn_with([program], argv, [])
+}
+
+// `spawn` with the paths to try, in turn, and the options of
+// `std.rt.run_with` (D147).
 pub fun spawn_with(paths: [str], argv: [str], opts: [str]) -> [int] {
-    return spawn("", argv)
+    let h = start_child(paths, argv, opts, stdio_mode(opts, false))
+    return [h[0], h[1], h[3], h[4], h[5]]
 }
 
+// `spawn_with` with each standard stream as `opts[1]` says (`stdio_mode`:
+// a pipe, this process's, nothing, a text, a descriptor; all three pipes
+// unless it says otherwise, MYLA-336, MYLA-378): `[cause, pid, in, out,
+// err, exited]`, `in` the write end of its stdin's pipe and `out` and `err`
+// the read ends of its stdout's and stderr's (-1 for a stream that isn't a
+// pipe), or `[cause, 0, -1, -1, -1, -1]`.
 pub fun spawn_piped(paths: [str], argv: [str], opts: [str]) -> [int] {
-    return [UNSUPPORTED as int, 0, -1, -1, -1, -1]
+    return start_child(paths, argv, opts, stdio_mode(opts, true))
 }
 
+// The child `pid` opened again by its ID (its handle `exited` still open
+// keeps the ID its own), or 0.
+fun open_child(pid: int64) -> int64 {
+    if pid <= 0 {
+        return 0
+    }
+    return __syscall(__rt_get("__imp_OpenProcess"), CHILD_RIGHTS, 0, pid)
+}
+
+// The child `pid` (from `spawn`) waited for: its exit code's 32 bits (no
+// signal ends a process on Windows), 0 when it can't be found.
 pub fun reap(pid: int64) -> int64 {
-    return -1
+    let h = open_child(pid)
+    if h == 0 {
+        return 0
+    }
+    let w = __syscall(__rt_get("__imp_WaitForSingleObject"), h, WAIT_INFINITE, 0)
+    let code = exit_code_of(h)
+    let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+    return code
 }
 
+// The child `pid`'s status if it has ended, not waited for (MYLA-336): 0
+// while it runs, 1 when it ended, with what `reap` would give as the word
+// at `out`, or minus the cause (ECHILD's `Other` when there is no such
+// process).
 pub fun try_reap(pid: int64, out: int64) -> int64 {
-    return ENOSYS
+    let h = open_child(pid)
+    if h == 0 {
+        return -(OTHER + 10)
+    }
+    var r: int64 = 1
+    if (__syscall(__rt_get("__imp_WaitForSingleObject"), h, 0, 0) & LOW32) == WAITED_OUT {
+        r = 0
+    } else {
+        __store64(out, exit_code_of(h))
+    }
+    let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+    return r
 }
 
+// The process `pid` ended (`TerminateProcess`, with the exit code 1, as
+// Rust's and Python's `kill` end one: Windows has no signal to send, and
+// any `sig` but 0 ends it); `sig` 0 only asks whether it is there. 0 (one
+// that ended already too), or minus the cause (ESRCH's `Other`: no such
+// process).
 pub fun kill(pid: int64, sig: int64) -> int64 {
-    return ENOSYS
+    let h = open_child(pid)
+    if h == 0 {
+        return -(OTHER + 3)
+    }
+    var r: int64 = 0
+    if sig != 0 && (__syscall(__rt_get("__imp_WaitForSingleObject"), h, 0, 0) & LOW32) == WAITED_OUT {
+        if !ok(__syscall(__rt_get("__imp_TerminateProcess"), h, 1, 0)) {
+            r = failed()
+        }
+    }
+    let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+    return r
 }
 
 // --- sockets: MYLA-706 (ws2_32, D212) --------------------------------------------------
@@ -920,37 +2077,209 @@ pub fun sleep_ns(n: int64) {
     let r = __syscall(__rt_get("__imp_Sleep"), ms, 0, 0)
 }
 
-// --- the poller (D124): timers only until MYLA-706 ---------------------------------------
-// One worker runs the tasks (MYLA-703), so nothing wakes it from another
-// thread: its poller only waits for the nearest timer (`poller_wait`
-// sleeps). Watching a descriptor or a socket (IOCP) comes with MYLA-706.
+// --- the poller (D124): timers, pipes and processes until MYLA-706 ----------------------
+// What a task waits for besides a timer, for now: a pipe (a child's stream,
+// the standard input when it is one) until it holds bytes or its writer
+// closed it, and a process (a child's `exited`) until it ended (MYLA-705).
+// The poller is a block of its own: `[cap][count][wake event][watches]
+// [events][their count][handles]`, each watch `[fd][token][armed][kind]`,
+// armed once (a watch that fired waits for `poller_watch` again, as
+// EPOLLONESHOT's). A wait looks at each armed watch (`PeekNamedPipe`, a
+// process's handle), then waits for the processes and the wake-up event
+// (`WaitForMultipleObjects`), a millisecond at a time while a pipe is
+// watched (an anonymous pipe can't be waited for). MYLA-706 puts it on an
+// I/O completion port, with sockets. Anything else (the console, a file)
+// can't be watched: ready at once, as a regular file is on Linux.
 
-pub fun poller_new() -> int64 {
-    return 1
-}
+// What a watch watches: a pipe, or a handle waited for.
+const WATCH_PIPE: int64 = 1
+const WATCH_WAITABLE: int64 = 2
+// a watch's bytes
+const WATCH: int64 = 32
 
-// Asleep for `timeout_ms` milliseconds: no events (a negative timeout, which
-// waits for a watched descriptor, none can be: at once).
-pub fun poller_wait(p: int64, timeout_ms: int64) -> int64 {
-    if timeout_ms > 0 {
-        let r = __syscall(__rt_get("__imp_Sleep"), timeout_ms, 0, 0)
+// How the poller watches the handle `h` (`GetFileType`): a pipe as one,
+// one of no file's type (a process) as a handle waited for, anything else
+// not at all (0).
+fun handle_kind(h: int64) -> int64 {
+    let t = __syscall(__rt_get("__imp_GetFileType"), h, 0, 0) & LOW32
+    if t == 3 {           // FILE_TYPE_PIPE
+        return WATCH_PIPE
+    }
+    if t == 0 {           // FILE_TYPE_UNKNOWN
+        return WATCH_WAITABLE
     }
     return 0
 }
 
+// A new poller: its block, or minus the cause.
+pub fun poller_new() -> int64 {
+    let wake = __syscall5(__rt_get("__imp_CreateEventW"), 0, 0, 0, 0, 0)
+    if wake == 0 {
+        return failed()
+    }
+    let p = __alloc(56)
+    __store64(p, 16)
+    __store64(p + 8, 0)
+    __store64(p + 16, wake)
+    __store64(p + 24, __alloc(16 * WATCH))
+    __store64(p + 32, 0)
+    __store64(p + 40, __alloc(16 * 8))
+    __store64(p + 48, __alloc(64 * 8))
+    return p
+}
+
+// The watch of `fd` in the poller `p`, or 0.
+fun watch_of(p: int64, fd: int64) -> int64 {
+    let ws = __load64(p + 24)
+    var k: int64 = 0
+    while k < __load64(p + 8) {
+        if __load64(ws + WATCH * k) == fd {
+            return ws + WATCH * k
+        }
+        k += 1
+    }
+    return 0
+}
+
+// The armed watches of `p` that are ready now disarmed, their tokens the
+// events of this wait: how many.
+fun poller_ready(p: int64) -> int64 {
+    let ws = __load64(p + 24)
+    let events = __load64(p + 40)
+    var n: int64 = 0
+    var k: int64 = 0
+    while k < __load64(p + 8) {
+        let w = ws + WATCH * k
+        if __load64(w + 16) != 0 {
+            let h = std_handle(__load64(w))
+            var ready = true
+            if __load64(w + 24) == WATCH_PIPE {
+                ready = pipe_ready(h)
+            } else {
+                ready = (__syscall(__rt_get("__imp_WaitForSingleObject"), h, 0, 0) & LOW32) != WAITED_OUT
+            }
+            if ready {
+                __store64(events + 8 * n, __load64(w + 8))
+                __store64(w + 16, 0)
+                n += 1
+            }
+        }
+        k += 1
+    }
+    __store64(p + 32, n)
+    return n
+}
+
+// Waiting in the poller `p` (from `poller_new`) for at most `timeout_ms`
+// milliseconds (negative: no limit), or until `poller_wake`: how many
+// events (0 when the time ran out, or for a wake-up). Without a watch and
+// without a limit, at once (no event can come).
+pub fun poller_wait(p: int64, timeout_ms: int64) -> int64 {
+    let start = clock_ns()
+    let ws = __load64(p + 24)
+    let handles = __load64(p + 48)
+    while true {
+        let n = poller_ready(p)
+        if n > 0 || timeout_ms == 0 {
+            return n
+        }
+        // the wake-up event and the processes, the pipes looked at again
+        // a millisecond later
+        __store64(handles, __load64(p + 16))
+        var count: int64 = 1
+        var pipes = false
+        var k: int64 = 0
+        while k < __load64(p + 8) {
+            let w = ws + WATCH * k
+            if __load64(w + 16) != 0 {
+                if __load64(w + 24) == WATCH_PIPE || count == 64 {
+                    pipes = true
+                } else {
+                    __store64(handles + 8 * count, std_handle(__load64(w)))
+                    count += 1
+                }
+            }
+            k += 1
+        }
+        if count == 1 && !pipes && timeout_ms < 0 {
+            return 0
+        }
+        var left = WAIT_INFINITE
+        if timeout_ms > 0 {
+            left = timeout_ms - (clock_ns() - start) / 1000000
+            if left <= 0 {
+                return 0
+            }
+        }
+        if pipes && (left == WAIT_INFINITE || left > 1) {
+            left = 1
+        }
+        let r = __syscall5(__rt_get("__imp_WaitForMultipleObjects"), count, handles, 0, left, 0) & LOW32
+        if r == 0 {
+            return 0       // woken
+        }
+    }
+    return 0
+}
+
+// The token of event `i` of the last `poller_wait` (of the program's
+// poller, std.rt's `__exec_poller`, as Linux's are in its `__poll_buf`).
 pub fun poller_event(i: int64) -> int64 {
-    return 0
+    return __load64(__load64(__rt_get("__exec_poller") + 40) + 8 * i)
 }
 
+// What event `i` found its descriptor ready for: to read (a pipe that holds
+// bytes or ended, a process that ended).
 pub fun poller_event_ready(i: int64) -> int64 {
+    return 1
+}
+
+// The descriptor `fd` watched by the poller `p` until it is readable (a
+// pipe) or has ended (a process), once: the next wait gives `token`; `again`
+// changes nothing here (a watch that fired is armed again either way).
+// UNSUPPORTED for one it can't watch, which is ready now.
+pub fun poller_watch(p: int64, fd: int64, token: int64, again: bool) -> int64 {
+    let h = std_handle(fd)
+    var kind: int64 = 0
+    if h != 0 {
+        kind = handle_kind(h)
+    }
+    if kind == 0 {
+        return -UNSUPPORTED
+    }
+    var w = watch_of(p, fd)
+    if w == 0 {
+        var cap = __load64(p)
+        let n = __load64(p + 8)
+        if n == cap {
+            // twice the room: the watches, the events
+            let ws = __alloc(2 * cap * WATCH)
+            __copy_bytes(ws, __load64(p + 24), cap * WATCH)
+            __free(__load64(p + 24))
+            __store64(p + 24, ws)
+            __free(__load64(p + 40))
+            __store64(p + 40, __alloc(2 * cap * 8))
+            cap = 2 * cap
+            __store64(p, cap)
+        }
+        w = __load64(p + 24) + WATCH * n
+        __store64(w, fd)
+        __store64(p + 8, n + 1)
+    }
+    __store64(w + 8, token)
+    __store64(w + 16, 1)
+    __store64(w + 24, kind)
     return 0
 }
 
-pub fun poller_watch(p: int64, fd: int64, token: int64, again: bool) -> int64 {
-    return ENOSYS
-}
-
+// The descriptor `fd` no longer watched by the poller `p`.
 pub fun poller_forget(p: int64, fd: int64) {
+    let w = watch_of(p, fd)
+    if w != 0 {
+        let n = __load64(p + 8) - 1
+        __copy_bytes(w, __load64(p + 24) + WATCH * n, WATCH)
+        __store64(p + 8, n)
+    }
 }
 
 pub fun poller_watch_socket(p: int64, h: int64, events: int64, token: int64, again: bool) -> int64 {
@@ -960,7 +2289,10 @@ pub fun poller_watch_socket(p: int64, h: int64, events: int64, token: int64, aga
 pub fun poller_forget_socket(p: int64, h: int64) {
 }
 
+// The worker waiting in the poller `p` woken (or the next wait returns at
+// once): its event set.
 pub fun poller_wake(p: int64) {
+    let r = __syscall(__rt_get("__imp_SetEvent"), __load64(p + 16), 0, 0)
 }
 
 // --- workers: one until MYLA-703 ------------------------------------------------------
