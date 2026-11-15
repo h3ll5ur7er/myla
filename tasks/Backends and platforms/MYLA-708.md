@@ -14,4 +14,4 @@ A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 20
 ## What MYLA-702 couldn't check under Wine
 
 - A read of the standard input with a time limit (`Reader.ready(ms)`, std.platform's `poll_read`) asks a pipe how much it holds (`PeekNamedPipe`) until the limit. Under Wine the pipe a Linux parent hands over isn't a named pipe, so the call fails and the read is taken for ready (it then blocks): the limit is to be checked on the runner.
-- A frame larger than a page ([[MYLA-717]]): Wine maps the whole stack.
+- A frame larger than a page ([[MYLA-717]]): Wine maps the whole stack. `tests/burn/test_windows.py`'s `FramesOnWindows` (a recursion through a 64 KiB frame on the main thread and a worker) is skipped under Wine and runs where `sys.platform` is `win32`.

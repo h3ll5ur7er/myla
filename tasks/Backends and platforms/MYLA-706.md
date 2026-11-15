@@ -10,3 +10,8 @@ A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 20
 
 - [ ] Descriptor waits, timers and tasks on IOCP
 - [ ] TCP, UDP and name lookup; test_net and test_http pass under Wine
+
+## What MYLA-703 left for this step
+
+- The poller has timers only: `poller_new` gives a word in a cell of its own, `poller_wait` waits on it with `WaitOnAddress` for the nearest timer's time limit, and `poller_wake` (a frame pushed, a nearer timer) sets it and wakes the waiter with `WakeByAddressSingle` ([[lib/std/platform_windows.my]]). IOCP replaces the word: `PostQueuedCompletionStatus` is the wake.
+- A read of the standard input that would suspend a task (`read_line_async`) blocks its worker; the other workers run the other tasks meanwhile.

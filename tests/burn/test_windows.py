@@ -4,9 +4,18 @@ importing only kernel32.dll, D212), assembled by clang, its import library
 made by llvm-dlltool and linked by lld-link (D211), which runs under Wine
 (D213): it prints what the program prints, the same bytes as on Linux (UTF-8,
 `\\n` as is, D215), ends with its exit code (D216) and reports a runtime error
-as on Linux. What isn't there yet says so (D210): a file is `Unsupported`;
-tasks run on one worker until MYLA-703. Children (MYLA-705) runs std.process
-there, and a test harness's cases as children.
+as on Linux. What isn't there yet says so (D210): random bytes are
+`Unsupported`. MYLA-703: tasks run on `MYLA_THREADS` workers,
+threads of their own, and a stack overflow is reported as on Linux
+(`Workers`); MYLA-717: a frame of a page or more is probed (`StackProbes`,
+and `FramesOnWindows` on Windows itself, MYLA-708's runner).
+
+Files, directories and paths (MYLA-704): std.fs over kernel32 in UTF-16,
+Windows' errors as Linux's causes where a program sees them, and std.path
+on Windows' paths (`std/path_windows.my`, the loader's copy for the target).
+
+Child processes (MYLA-705): `Children` runs std.process with a Windows
+program of its own as the child, and a test harness's cases as children.
 
 Skipped where clang, llvm-dlltool, lld-link or Wine is missing (CI installs
 them, and MYLA_REQUIRE_TARGETS makes a missing one fail there).
@@ -17,6 +26,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -191,20 +201,112 @@ class HelloWorld(unittest.TestCase):
         self.assertEqual((ran.stdout.decode(), ran.stderr, ran.returncode), ("<one>\n<tw\u00f6>\n", b"", 0))
 
     def test_what_isnt_there_yet_says_so(self):
-        # D210: a file is `Unsupported` until MYLA-704
-        src = ('from std.fs import read_to_string\n'
+        # D210: random bytes are `Unsupported` until MYLA-722, and with them
+        # a temporary directory's name
+        src = ('import std.fs as fs\n'
                'fun main() {\n'
-               '    match read_to_string("main.my") {\n'
-               '        Ok(t) => { print("read") },\n'
+               '    match fs.make_temp_dir() {\n'
+               '        Ok(d) => { print("made") },\n'
                '        Err(e) => { print(f"{e}") },\n'
                '    }\n'
                '}\n')
         ran = self.build_and_run(src)
         self.assertEqual((ran.stdout, ran.returncode), (b"unsupported (Unsupported)\n", 0))
 
-    def test_tasks_on_one_worker(self):
-        # one worker until MYLA-703, as on wasm32 (D125): children, an
-        # actor, a sleep through the poller's timers, and the clock
+    def test_files_and_directories(self):
+        # MYLA-704: names in UTF-8 made UTF-16, an append at the end, a
+        # listing, metadata, renames and removals, and the errors as Linux
+        # gives them (D219, D220)
+        src = r'''import std.fs as fs
+import std.bytes as bytes
+from std.io import Write, Seek, SeekFrom
+fun unit(r: Result<(), fs.IoError>) -> str {
+    return match r {
+        Ok(()) => "ok"
+        Err(e) => fs.io_error_name(e)
+    }
+}
+fun text(r: Result<str, fs.IoError>) -> str {
+    return match r {
+        Ok(s) => s
+        Err(e) => fs.io_error_name(e)
+    }
+}
+fun main() {
+    print(unit(fs.make_dir_all("d\u{e9}/sub")))
+    print(unit(fs.write_to_file("d\u{e9}/\u{4e2d}.txt", "h\u{e9}llo")))
+    var f = match fs.open_append("d\u{e9}/\u{4e2d}.txt") {
+        Ok(f) => f
+        Err(e) => panic(f"{e}")
+    }
+    let s = f.seek(SeekFrom.Start(0))
+    let w = f.write(bytes.from_str("!"))
+    let c = f.close()
+    print(text(fs.read_to_string("d\u{e9}\\\u{4e2d}.txt")))
+    print(match fs.list_dir("d\u{e9}") {
+        Ok(ns) => ns.join(",")
+        Err(e) => fs.io_error_name(e)
+    })
+    print(match fs.metadata("d\u{e9}/\u{4e2d}.txt") {
+        Ok(m) => f"{m.size} {m.is_file()} {m.permissions:o} {m.modified_ns > 0}"
+        Err(e) => fs.io_error_name(e)
+    })
+    print(fs.is_dir("d\u{e9}/sub") && !fs.is_file("d\u{e9}/sub") && !fs.exists("nothing"))
+    print(text(fs.read_to_string("d\u{e9}")))
+    print(unit(fs.remove_file("d\u{e9}/sub")))
+    print(unit(fs.remove_dir("d\u{e9}")))
+    print(unit(fs.make_dir("d\u{e9}/\u{4e2d}.txt/x")))
+    print(unit(fs.make_dir("d\u{e9}/sub")))
+    print(unit(fs.rename("d\u{e9}/\u{4e2d}.txt", "d\u{e9}/b.txt")))
+    print(text(fs.read_to_string("d\u{e9}/\u{4e2d}.txt")))
+    print(unit(fs.remove_dir_all("d\u{e9}")))
+    print(fs.exists("d\u{e9}"))
+}
+'''
+        ran = self.build_and_run(src)
+        want = ("ok\nok\nh\u00e9llo!\nsub,\u4e2d.txt\n7 true 666 true\ntrue\nIsADirectory\nIsADirectory\nNotEmpty\n"
+                "NotADirectory\nAlreadyExists\nok\nNotFound\nok\nfalse\n")
+        self.assertEqual((ran.stdout.decode(), ran.stderr, ran.returncode), (want, b"", 0))
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["main.my", "prog.exe"])
+
+    def test_windows_paths(self):
+        # D215: std.path is Windows' there (a `\` separates, a drive or a
+        # UNC share starts a path) and writes `/`; the working directory is
+        # Windows' own path (Wine's drive Z: is the root)
+        src = r'''import std.path as path
+import std.fs as fs
+import std.glob as glob
+fun main() {
+    print(path.join("a\\", "b"))
+    print(path.join("C:\\x", "\\y"))
+    print(path.parent("C:\\a\\b").unwrap_or("none"))
+    print(path.file_name("\\\\srv\\share").unwrap_or("none"))
+    print(path.normalize("C:\\a\\..\\b\\.\\c"))
+    print(path.is_absolute("C:/a") && !path.is_absolute("/a") && path.is_absolute("//srv/share"))
+    print(path.relative("C:\\a\\b", "c:/a/d").unwrap_or("none"))
+    let cwd = match fs.current_dir() {
+        Ok(d) => d
+        Err(e) => panic(f"{e}")
+    }
+    print(cwd)
+    print(path.is_absolute(cwd) && path.anchor(cwd) == "Z:\\")
+    print(fs.is_file(path.join(cwd, "main.my")))
+    print(glob.matches("*/*.my", "src\\main.my"))
+    match fs.make_dir_all(cwd + "\\deep\\er") {
+        Ok(()) => print(fs.is_dir("deep/er"))
+        Err(e) => print(f"{e}")
+    }
+}
+'''
+        ran = self.build_and_run(src)
+        work = "Z:" + os.path.realpath(self.tmp).replace("/", "\\")
+        want = f"a\\b\nC:\\y\nC:\\a\nnone\nC:/b/c\ntrue\n../d\n{work}\ntrue\ntrue\ntrue\ntrue\n"
+        self.assertEqual((ran.stdout.decode(), ran.stderr, ran.returncode), (want, b"", 0))
+
+    def test_tasks(self):
+        # children, an actor, a sleep through the poller's timers, and the
+        # clock (on one worker in MYLA-702, D221; on every CPU's since
+        # MYLA-703)
         src = ('import std.task as task\n'
                'import std.time as time\n'
                'actor Counter {\n    n: int\n}\n'
@@ -421,6 +523,48 @@ async fun ticking() -> int {
 }
 """
 
+# Children waited for in tasks on many workers (MYLA-705 with MYLA-703's
+# threads): 2 rounds of 200 children at once, each a task, its output read
+# and its end awaited through the poller while other workers watch, forget
+# and wake; it prints how many gave what they should (400).
+MANY_CHILDREN = """import std.task as task
+from std.process import run_async, command, ExitStatus
+import std.bytes as bytes
+
+// One child, its output read and its end awaited in a task: 1 when it gave
+// what it should have.
+async fun one(k: int) -> int {
+    var want = f"{k}\\n"
+    var r = await command("./helper.exe").arg("cat").stdin(want).output_async()
+    if k % 3 == 0 {
+        want = f"[{k}]\\n"
+        r = await run_async("./helper.exe", ["args", f"{k}"])
+    } else if k % 3 == 1 {
+        want = ""
+        r = await command("./helper.exe").args(["sleep", f"{k % 7 * 5}"]).output_async()
+    }
+    return match r {
+        Ok(o) => if bytes.to_str(o.stdout) == want && o.status == ExitStatus.Exited(0) { 1 } else { 0 }
+        Err(e) => 0
+    }
+}
+
+#main
+async fun main() {
+    var ok = 0
+    for round in 0..2 {
+        var fs: [async () -> int] = []
+        for k in 0..200 {
+            fs.push(async () => await one(k))
+        }
+        for x in await task.all(fs) {
+            ok += x
+        }
+    }
+    print(ok)
+}
+"""
+
 CHILDREN_OUT = (
     '[plain]\n[two words]\n[quo"te]\n[back\\slash]\n[tail\\]\n[]\n[\u00e9\u4e2d]\n[a\\\\"b]\n[\tx]\n||exit 0\n'
     "[found on PATH]\n||exit 0\n"
@@ -449,6 +593,45 @@ CHILDREN_OUT = (
     "waited exit 0\n"
     "ticked true\n"
 )
+
+# a recursion with no end (natively it runs out of stack long before n wraps)
+DEEP = "fun deep(n: int) -> int {\n    if n == 0 { return 0 }\n    return deep(n + 1) + 1\n}\n\n"
+
+# the entry's worker busy for good once it started a child: only another
+# worker can run the child
+BUSY_ENTRY = ("async fun main() {\n    async let a = child()\n    var i = 0\n"
+              "    while i >= 0 {\n        i = (i + 1) % 7\n    }\n    print(await a)\n}\n")
+
+
+def big_frame_program(main: str) -> str:
+    """A program whose function `down` has a frame of 64 KiB (a struct of
+    that size and its copy), recursing `n` deep, and then `main`."""
+    levels = [("A", None, 8), ("B", "A", 8), ("C", "B", 8), ("D", "C", 16)]
+    out = []
+    for name, inner, n in levels:
+        fields = ", ".join(f"f{i}: {inner or 'int64'}" for i in range(n))
+        out.append(f"struct {name} {{ {fields} }}\n")
+    for name, inner, n in levels:
+        make = (lambda i: f"x + {i}") if inner is None else (lambda i, inner=inner: f"make_{inner.lower()}(x + {i})")
+        vals = ", ".join(f"f{i}: {make(i)}" for i in range(n))
+        out.append(f"fun make_{name.lower()}(x: int64) -> {name} {{\n    return {name} {{ {vals} }}\n}}\n")
+    out.append("fun down(n: int, x: int64) -> int64 {\n    var d = make_d(x)\n    if n == 0 {\n        return d.f15.f7.f7.f7\n    }\n"
+               "    d.f0.f0.f0.f0 = d.f15.f7.f7.f7 + 1\n    return down(n - 1, d.f0.f0.f0.f0) + 1\n}\n\n")
+    return "".join(out) + main
+
+
+def reserved_bytes(pid: int) -> int:
+    """How much of the address space of the process `pid` is reserved with
+    nothing behind it (Linux's `---p` mappings: under Wine, the reserved
+    or decommitted part of a Windows process's mappings)."""
+    total = 0
+    with open(f"/proc/{pid}/maps", encoding="ascii") as fh:
+        for line in fh:
+            span, perms = line.split()[:2]
+            if perms == "---p":
+                lo, hi = (int(x, 16) for x in span.split("-"))
+                total += hi - lo
+    return total
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -492,6 +675,18 @@ class Children(unittest.TestCase):
         self.maxDiff = None
         self.assertEqual((ran.stdout.decode(), ran.stderr.decode(), ran.returncode), (CHILDREN_OUT, "", 0))
 
+    def test_many_children_on_many_workers(self):
+        # the poller watched, forgotten and woken by any worker while one
+        # waits in it: on the merge of MYLA-703's threads with the poller's
+        # first, lock-free block, a run in three on 4 workers crashed
+        # (a grow freed the arrays a wait read)
+        self.build("helper", HELPER)
+        self.build("prog", MANY_CHILDREN)
+        for threads in ["4", "4", "4", "4", "16"]:
+            ran = subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe")], capture_output=True, cwd=self.tmp,
+                                 timeout=300, env=dict(os.environ, MYLA_THREADS=threads))
+            self.assertEqual((ran.stdout, ran.returncode), (b"400\n", 0), f"{threads} workers: {ran.stderr[:300]!r}")
+
     def test_a_harness_runs_its_cases_as_children(self):
         # D217's `spawns` now true: `myla test --target x86_64-windows` runs
         # the harness once, which starts a child of itself for each case
@@ -512,6 +707,172 @@ class Children(unittest.TestCase):
         want = ("PASS  f #1\nPASS  f #2\nPASS  f #3\nFAIL  f #4: expected 5, got 4\n      | f 4\n"
                 "PASS  g #1\nPASS  last\nPASS  case_dir #1\n\n6/7 passed.\n")
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (want, "", 1))
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class Workers(unittest.TestCase):
+    """MYLA-703 (D216, ending D221's one worker): the workers are threads
+    (`CreateThread`), as many as MYLA_THREADS says, each with its state
+    block in a TLS slot of its TEB; they park on WaitOnAddress; a stack
+    overflow is reported as on Linux, on the main thread or a worker's; the
+    heap's aligned mappings go back whole; std's concurrency stress programs
+    print what they print on Linux."""
+
+    setUpClass = HelloWorld.setUpClass
+    setUp = HelloWorld.setUp
+    build = HelloWorld.build
+    build_and_run = HelloWorld.build_and_run
+
+    def run_exe(self, *args: str, threads: str = "", timeout: float = 120) -> subprocess.CompletedProcess:
+        env = dict(os.environ, MYLA_THREADS=threads) if threads else dict(os.environ)
+        return subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe"), *args], capture_output=True,
+                              cwd=self.tmp, timeout=timeout, env=env)
+
+    def test_a_stack_overflow_is_reported_as_on_linux(self):
+        ran = self.build_and_run(DEEP + "fun main() {\n    print(deep(1))\n}\n")
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"", b"runtime error: stack overflow\n", 1))
+
+    def test_a_workers_stack_overflow_too(self):
+        # the child overflows on the second worker, the entry's busy
+        built = self.build(DEEP + "async fun child() -> int {\n    return deep(1)\n}\n\n" + BUSY_ENTRY)
+        self.assertEqual((built.stderr, built.returncode), ("", 0))
+        ran = self.run_exe(threads="2", timeout=60)
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"", b"runtime error: stack overflow\n", 1))
+
+    def test_as_many_workers_as_myla_threads_says(self):
+        # two workers: the child runs beside the busy entry and ends the
+        # program (D97); one: it never runs
+        built = self.build("from std.process import exit\n\nasync fun child() -> int {\n    print(\"child\")\n"
+                           "    exit(3)\n    return 0\n}\n\n" + BUSY_ENTRY)
+        self.assertEqual((built.stderr, built.returncode), ("", 0))
+        ran = self.run_exe(threads="2", timeout=60)
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"child\n", b"", 3))
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.run_exe(threads="1", timeout=3)
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "it reads Wine's mappings in /proc")
+    def test_big_cells_go_back_whole_with_tasks(self):
+        # a cell bigger than a chunk is a mapping of its own, aligned with
+        # tasks: mapped larger, its ends given back, then the rest when it
+        # is freed; the whole mapping goes back then (it stayed reserved:
+        # 100 GiB more after 100 cells of 1 GiB)
+        src = ('from std.io import stdin\n\n'
+               'async fun churn(rounds: int) -> int {\n'
+               '    var total = 0\n'
+               '    var i = 0\n'
+               '    while i < rounds {\n'
+               '        var sb = StringBuilder(1073741824)\n'
+               '        sb.append("x", 0, 1)\n'
+               '        total += sb.build().len()\n'
+               '        i += 1\n'
+               '    }\n'
+               '    return total\n'
+               '}\n\n'
+               'async fun main() {\n'
+               '    var r = stdin()\n'
+               '    async let first = churn(10)\n'
+               '    print(await first)\n'
+               '    let a = r.read_line()\n'
+               '    async let second = churn(100)\n'
+               '    print(await second)\n'
+               '    let b = r.read_line()\n'
+               '}\n')
+        built = self.build(src)
+        self.assertEqual((built.stderr, built.returncode), ("", 0))
+        proc = subprocess.Popen([*wine(), os.path.join(self.tmp, "prog.exe")], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, cwd=self.tmp)
+        try:
+            self.assertEqual(proc.stdout.readline(), b"10\n")
+            before = reserved_bytes(proc.pid)
+            proc.stdin.write(b"\n")
+            proc.stdin.flush()
+            self.assertEqual(proc.stdout.readline(), b"100\n")
+            after = reserved_bytes(proc.pid)
+            proc.stdin.write(b"\n")
+            proc.stdin.close()
+            self.assertEqual(proc.wait(timeout=60), 0)
+        finally:
+            proc.kill()
+            proc.wait()
+            proc.stdout.close()
+        self.assertLess(after - before, 1 << 30, f"{(after - before) >> 20} MiB more reserved")
+
+    def test_the_concurrency_stress_programs(self):
+        # what they print on Linux, on 1, 4 and 16 workers (t27's children
+        # are Linux's `echo`, which a Windows program can't start:
+        # Children.test_many_children_on_many_workers is its ground there)
+        from .test_concurrency_stress import _DIR, EXPECTED, EXPECTED_STDERR
+        for name, (want_out, want_code) in sorted(EXPECTED.items()):
+            if name == "t27_children_read_as_they_write":
+                continue
+            with self.subTest(program=name):
+                with open(os.path.join(_DIR, name + ".my"), encoding="utf-8") as fh:
+                    built = self.build(fh.read())
+                self.assertEqual((built.stderr, built.returncode), ("", 0))
+                for threads in ["1", "4", "16"]:
+                    ran = self.run_exe(threads=threads, timeout=120)
+                    got = (ran.stdout.decode(), ran.returncode)
+                    self.assertEqual(got, (want_out, want_code), f"{threads} workers")
+                    if name in EXPECTED_STDERR:
+                        self.assertEqual(ran.stderr.decode(), EXPECTED_STDERR[name], f"{threads} workers")
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class StackProbes(unittest.TestCase):
+    """MYLA-717: Windows commits a thread's stack a page at a time below a
+    guard page, so a prologue taking a page or more touches each page from
+    the top down before it moves the stack pointer; Linux's is unchanged."""
+
+    def asm(self, target: str) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "main.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(big_frame_program("fun main() {\n    print(down(100, 0))\n}\n"))
+            return subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT, "--target", target],
+                                  capture_output=True, text=True, check=True, timeout=300).stdout
+
+    def test_a_frame_of_a_page_or_more_is_probed(self):
+        lines = self.asm("x86_64-windows").split("\n")
+        at = lines.index("myla_down:") + 1
+        probes = []
+        while lines[at].startswith("\torq $0, "):
+            probes.append(lines[at])
+            at += 1
+        self.assertEqual(lines[at:at + 2], ["\tpushq %rbp", "\tmovq %rsp, %rbp"])
+        frame = int(lines[at + 2].split("$")[1].split(",")[0])
+        self.assertGreaterEqual(frame, 65536)
+        # each page down to the lowest byte the push and the frame take
+        bytes_taken = frame + 8
+        want = [f"\torq $0, -{k}(%rsp)" for k in range(4096, bytes_taken, 4096)] + [f"\torq $0, -{bytes_taken}(%rsp)"]
+        self.assertEqual(probes, want)
+
+    def test_linux_has_none(self):
+        lines = self.asm("x86_64-linux").split("\n")
+        at = lines.index("myla_down:") + 1
+        self.assertEqual(lines[at:at + 2], ["\tpushq %rbp", "\tmovq %rsp, %rbp"])
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(sys.platform == "win32", "Wine commits a thread's whole stack, so a frame past its guard page "
+                     "works there anyway: MYLA-708's Windows runner runs this")
+class FramesOnWindows(unittest.TestCase):
+    """MYLA-717 on Windows itself: a recursion through a function with a
+    64 KiB frame, on the main thread and on a worker, whose stacks Windows
+    commits as they grow."""
+
+    def test_a_recursion_through_a_64_kib_frame(self):
+        main = ("async fun work() -> int64 {\n    return down(60, 0)\n}\n\n"
+                "async fun main() {\n    async let a = work()\n    async let b = work()\n"
+                "    print(down(100, 0))\n    print(await a + await b)\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "main.my"), "w", encoding="utf-8") as fh:
+                fh.write(big_frame_program(main))
+            subprocess.run([selfhost_tool("main"), "build", "main.my", "--target", "x86_64-windows", "--stdlib",
+                            STDLIB_ROOT, "-o", "prog.exe"], cwd=tmp, check=True, timeout=300)
+            ran = subprocess.run([os.path.join(tmp, "prog.exe")], capture_output=True, timeout=120,
+                                 env=dict(os.environ, MYLA_THREADS="2"))
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"3836\n4632\n", b"", 0))
 
 
 if __name__ == "__main__":

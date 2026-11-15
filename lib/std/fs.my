@@ -14,6 +14,7 @@
 
 from .io import Read, Write, Seek, SeekFrom, Pollable, buffered, buffered_writer, copy
 import .bytes as bytes_m // `from_str`, `to_str`: a `File`'s bytes
+import .path_style as style // `WINDOWS` (D215)
 
 // `IoError` and its functions are std.ioerror's (MYLA-432), re-exported
 // here, where programs have always imported them.
@@ -89,8 +90,8 @@ const KIND_FIFO: int64 = 6
 const KIND_SOCKET: int64 = 7
 
 // The working directory, as an absolute path without symbolic links (the
-// kernel's getcwd, through the primitive `__getcwd`, MYLA-98). A directory
-// that was removed is `NotFound`.
+// kernel's getcwd, through the primitive `__getcwd`, MYLA-98; Windows' own
+// path there, `C:\Users\me`). A directory that was removed is `NotFound`.
 pub fun current_dir() -> Result<str, IoError> {
     let dir = __getcwd()
     let err = __io_errno()
@@ -126,10 +127,15 @@ pub fun make_dir(path: str) -> Result<(), IoError> {
 // Make the directory `path` and the parents it lacks, like `mkdir -p`. A
 // directory that exists already is fine; a file at `path` is
 // `AlreadyExists`, and a file where a parent should be is `NotADirectory`.
+// On Windows a `\` separates too, and a UNC share is where it starts
+// (`share_end`).
 pub fun make_dir_all(path: str) -> Result<(), IoError> {
     var i = 1
+    if style.WINDOWS {
+        i = share_end(path)
+    }
     while i <= path.len() {
-        if i == path.len() || path[i] == '/' {
+        if i == path.len() || path[i] == '/' || (style.WINDOWS && path[i] == '\\') {
             var sb = StringBuilder()
             sb.append(path, 0, i)
             let prefix = sb.build()
@@ -143,6 +149,45 @@ pub fun make_dir_all(path: str) -> Result<(), IoError> {
         return Ok(())
     }
     return Err(IoError.AlreadyExists)
+}
+
+// Where the directories of the Windows path `p` start that `make_dir_all`
+// may make: after its UNC server and share (`\\srv\share`, `\\?\C:`,
+// `\\?\UNC\srv\share`), which are none, as std.path's prefix reads them;
+// else at 1 (a drive's `C:` is one: its working directory). std.path itself
+// isn't imported, for what it would add to checking every program that
+// imports this module.
+#test("C:\\a\\b")[1]
+#test("\\\\srv\\share\\a")[11]
+#test("//srv/share")[11]
+#test("\\\\?\\C:\\a")[6]
+#test("\\\\?\\unc\\srv\\share\\a")[17]
+#test("\\\\srv")[5]
+fun share_end(p: str) -> int {
+    let n = p.len()
+    if n < 2 || !is_sep(p[0]) || !is_sep(p[1]) {
+        return 1
+    }
+    // `\\?\UNC\` has two separators more before its server
+    var want = 2
+    if n >= 8 && p[2] == '?' && is_sep(p[3]) && (p[4] | 32) == 'u' && (p[5] | 32) == 'n' && (p[6] | 32) == 'c' && is_sep(p[7]) {
+        want = 4
+    }
+    var seen = 0
+    for i in 2..n {
+        if is_sep(p[i]) {
+            seen += 1
+            if seen == want {
+                return i
+            }
+        }
+    }
+    return n
+}
+
+// Whether `c` is one of Windows' separators.
+fun is_sep(c: uint8) -> bool {
+    return c == '/' || c == '\\'
 }
 
 // Remove the file `path` (a symbolic link is removed itself, not what it
@@ -646,22 +691,43 @@ fun kind_of(k: int64) -> FileKind {
 const TEMP_TRIES: int32 = 100
 
 // The directory for temporary files: `$TMPDIR` when it is set and not
-// empty, else `/tmp`, without a trailing `/`.
+// empty, else `/tmp`, without a trailing `/`. On Windows the first of
+// `%TMPDIR%`, `%TEMP%` and `%TMP%` set, else the working directory (`.`),
+// without a trailing `/` or `\`.
 pub fun temp_root() -> str {
-    return root_of(__getenv("TMPDIR"))
+    if style.WINDOWS {
+        for name in ["TMPDIR", "TEMP", "TMP"] {
+            let dir = __getenv(name)
+            if dir != "" {
+                return root_of(dir, true)
+            }
+        }
+        return root_of("", true)
+    }
+    return root_of(__getenv("TMPDIR"), false)
 }
 
-// The temporary root `$TMPDIR` names.
-#test("")["/tmp"]
-#test("/var/tmp")["/var/tmp"]
-#test("/var/tmp//")["/var/tmp"]
-#test("/")["/"]
-fun root_of(env: str) -> str {
+// The temporary root the variable's value `env` names (Windows' when
+// `win`).
+#test("", false)["/tmp"]
+#test("/var/tmp", false)["/var/tmp"]
+#test("/var/tmp//", false)["/var/tmp"]
+#test("/", false)["/"]
+#test("C:\\Temp\\", false)["C:\\Temp\\"]
+#test("C:\\Temp\\/", true)["C:\\Temp"]
+#test("C:\\", true)["C:\\"]
+#test("", true)["."]
+fun root_of(env: str, win: bool) -> str {
     if env == "" {
-        return "/tmp"
+        return if win { "." } else { "/tmp" }
+    }
+    // the root stays: `/`, a drive's `C:\`
+    var floor = 1
+    if win && env.len() >= 3 && env[1] == ':' && (env[2] == '/' || env[2] == '\\') {
+        floor = 3
     }
     var end = env.len()
-    while end > 1 && env[end - 1] == '/' {
+    while end > floor && (env[end - 1] == '/' || (win && env[end - 1] == '\\')) {
         end -= 1
     }
     // not a slice, which links `std.slice`: its own harness links this
@@ -756,7 +822,7 @@ fun hex_of(b: [uint8]) -> str {
     return sb.build()
 }
 
-// `name` in the directory `dir`.
+// `name` in the directory `dir` (on Windows one ending in `\` too).
 #test("/tmp", "a")["/tmp/a"]
 #test("/", "a")["/a"]
 #test("", "a")["a"]
@@ -764,7 +830,7 @@ fun joined(dir: str, name: str) -> str {
     if dir == "" {
         return name
     }
-    if dir[dir.len() - 1] == '/' {
+    if dir[dir.len() - 1] == '/' || (style.WINDOWS && dir[dir.len() - 1] == '\\') {
         return dir + name
     }
     return dir + "/" + name

@@ -1,6 +1,6 @@
 # std.path
 
-Paths as strings ([[MYLA-326]]). Every function works on the text alone and never looks at the file system. The separator is `/` on every target.
+Paths as strings ([[MYLA-326]]). Every function works on the text alone and never looks at the file system. The separator is `/` on every target; on Windows `\` is one too, and a path may start with a drive or a UNC share ([see below](#on-windows), D215).
 
 ```myla
 import std.path as path
@@ -35,6 +35,7 @@ A path that starts with `/` is absolute. A run of slashes counts as one, and so 
 | `file_name(p: str) -> Option<str>` | The last component. None for the root, `""`, `.` and a path that ends in `..` |
 | `components(p: str) -> [str]` | `/` first for an absolute path, then each name. Empty components and `.` are left out, `..` is kept: `/a/./b/../c` gives `["/", "a", "b", "..", "c"]` |
 | `is_absolute(p: str) -> bool` | Whether `p` starts with `/` |
+| `anchor(p: str) -> str` | Where `p` starts: `/` for an absolute path (a run of slashes is one), `""` for a relative one; on Windows its drive or UNC share and root, `C:\`, `C:`, `\`, `\\srv\share\`. `p` is its anchor, maybe more separators, and its components ([[MYLA-704]]) |
 
 Trailing slashes don't count, and neither does a trailing `.`: `a/b/` and `a/b/.` both have the parent `a` and the file name `b`. Nothing else is resolved: the parent of `a/b/../c` is `a/b/..`.
 
@@ -56,3 +57,16 @@ Trailing slashes don't count, and neither does a trailing `.`: `a/b/` and `a/b/.
 `normalize` doesn't look at the file system, so it doesn't follow symbolic links: if `a` is a link, `a/..` may not be where `normalize` says. Use it on paths you build, not to find where a path leads.
 
 `relative` gives None when only the file system could tell the answer: a relative `to` from an absolute `from_dir` (the working directory is needed), or a `from_dir` whose `..` climb above where `to` starts (`relative("..", "a")` needs the name of the working directory). Python's `relpath` reads the working directory in both cases.
+
+## On Windows
+
+On x86-64 Windows std.path reads Windows' paths (D215, [[MYLA-704]]): the loader takes `std/path_windows.my` for `std/path.my` there, as Python's `os.path` is `ntpath` on Windows. A program on any target can import it as `std.path_windows` to work on Windows' paths; it has the same functions with the same types (`tests/burn/test_platform_interface.py` holds it to them). What differs:
+
+- **Separators.** `\` separates components as `/` does: `parent("a\\b")` is `a` (on Linux `""`: `a\b` is one name there).
+- **A prefix before the root**, read as Python's `ntpath.splitroot` reads it: a drive (`C:`), or a UNC path's server and share (`\\srv\share`; `\\?\UNC\srv\share`, and `\\?\` or `\\.\` with the name after it, `\\?\C:`, `\\.\pipe`). `//a` is a UNC server there, not the root.
+- **Absolute** is a drive with a root (`C:\a`) or a UNC prefix, as `ntpath.isabs`: `\a` is on the working directory's drive and `C:a` in that drive's working directory, neither absolute. `anchor` gives the prefix and root as written (`C:\`, `C:`, `\`, `\\srv\share\`); `components` gives it first.
+- **`join`** is `ntpath.join`'s: a `b` with a root replaces `a` but keeps `a`'s drive when it has none of its own (`join("C:\\x", "\\y")` is `C:\y`), one with another drive replaces it all (`join("C:\\x", "D:y")` is `D:y`), one on the same drive, of either case, goes on from `a`; a UNC share and a relative part get a separator between them.
+- **What std.path writes is `/`** on every target, which Windows reads: `join`'s separator, and those of what `normalize` and `relative` build (`normalize("C:\\a\\..\\b")` is `C:/b`), so a program builds the same paths everywhere; a prefix stays as written, and what is taken out of a path (`parent`, `file_name`) keeps its own separators. Python's `ntpath` writes `\`.
+- **`relative`** compares anchors, a drive's letter of either case alike: from one anchor to another (`C:\` and `D:\`, or `C:\` and `\`) is None; names are compared as written, as the file system isn't asked whether it ignores their case.
+
+A verbatim path (`\\?\C:\…`) is read as `ntpath` reads one, `/` a separator too, though Windows takes a `/` there as part of a name: join one with `\` yourself.

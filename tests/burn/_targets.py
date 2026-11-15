@@ -76,7 +76,8 @@ _X86_TESTS = [
     "test_selfhost_codegen.SelfHostedCodegenParity.test_derived_eq_on_a_plain_enum_compares_tags",
 ]
 
-_WIN_FILES = "Windows' files and directories come with MYLA-704"
+_WIN_RANDOM = "random bytes (bcrypt, D212, a second import library) come with MYLA-722"
+_WINE_LINKS = "Wine shows a Unix symbolic link as what it names, not as a link (a reparse point)"
 _WIN_LINUX_TOOLS = "it runs Linux's tools, which a Windows program can't (test_process.WindowsChildren runs Windows' own)"
 
 _BOTH = {
@@ -119,24 +120,25 @@ SKIP: dict[str, dict[str, str]] = {
            for c in ["Terminal", "Signals", "Primitives", "RawModeEnds"]},
     },
     # MYLA-702: Windows' first step has the standard streams, the heap, the
-    # clocks, the arguments and the environment, and tasks on one worker;
-    # the sixth (MYLA-705) child processes; what its later steps bring is
+    # clocks, the arguments and the environment, and tasks (on as many
+    # workers as on Linux since MYLA-703); files, directories and paths
+    # (MYLA-704); child processes (MYLA-705); what its later steps bring is
     # `Unsupported` until then (D210), which NetOnWasm, TermOnWasm and
     # HttpOnWasm check there too
     "x86_64-windows": {
         **_BOTH,
-        **{t: _WIN_FILES for t in [
-            "test_fs",
-            "test_compiler_parity.TestCompilerParity.test_io_error_text",
-            "test_platform_interface.Behaviour",
-            "test_platform_primitives.Bytes",
-            "test_platform_primitives.Descriptors",
-            "test_platform_primitives.Paths",
-            "test_net.Hosts",
-        ]},
         "test_stdio.BrokenPipe.test_a_write_to_another_descriptor_reports_it":
-            "a Windows program has the standard streams only, until its files (MYLA-704)",
-        "test_platform_primitives.Entropy": "random bytes (bcrypt, D212) come with Windows' files (MYLA-704)",
+            "a Windows descriptor is a handle: Wine hands a program no Unix descriptor 3",
+        "test_platform_primitives.Entropy": _WIN_RANDOM,
+        "test_platform_primitives.Descriptors.test_the_mode_given":
+            "Windows has no permission bits but the read-only attribute (D218): the mode given isn't used",
+        # MYLA-704: Windows' links are reparse points, which Wine doesn't
+        # make of a Unix link: it shows one as what it names (MYLA-708 runs
+        # these on Windows)
+        **{t: _WINE_LINKS for t in ["test_platform_primitives.Paths",
+                                    "test_fs.DirectoryParity.test_symbolic_links"]},
+        "test_fs.DirectoryParity.test_current_dir_removed":
+            "Windows can't remove a working directory, and Wine starts a program whose one is gone in C:\\windows",
         # MYLA-705: Windows' children are Windows programs; Linux's tools
         # (/bin/sh, echo, cat) aren't on its PATH, and Wine starts one
         # without its standard handles or its exit code
@@ -160,8 +162,6 @@ SKIP: dict[str, dict[str, str]] = {
         "test_router.Router": "Windows' sockets come with MYLA-706",
         **{f"test_term.{c}": "Windows' console and signals come with MYLA-707 (TermOnWasm checks they are Unsupported)"
            for c in ["Terminal", "Signals", "Primitives", "RawModeEnds"]},
-        "test_selfhost_codegen.SelfHostedCodegenParity.test_children_run_in_parallel":
-            "one worker until Windows' threads (MYLA-703)",
         # the start makes the command line and the environment UTF-8 in
         # the heap, so a cell freed then is taken again before a new one
         "test_selfhost_codegen.SelfHostedCodegenParity.test_a_runtime_variable_is_its_own_operand":
@@ -179,9 +179,10 @@ SKIP_PROGRAMS: dict[str, dict[str, str]] = {
         "io_through_the_ir": "it runs a child process, which WASI has none of",
     },
     "x86_64-windows": {
-        "io_through_the_ir": "it opens files, which Windows has none of until MYLA-704, and runs Linux's /bin/echo",
-        **{f"std.{m}": _WIN_FILES for m in ["fs", "glob", "io", "test"]},
-        **{f"std.{m}": "random bytes (bcrypt, D212) come with Windows' files (MYLA-704)" for m in ["random", "uuid"]},
+        "io_through_the_ir": "it runs Linux's /bin/echo, which a Windows program can't (MYLA-705)",
+        **{f"std.{m}": _WIN_RANDOM for m in ["random", "uuid"]},
+        # their cases' temporary directories are named with random bytes
+        **{f"std.{m}": _WIN_RANDOM + " (the temporary directories' names)" for m in ["fs", "test"]},
         # its children are cat, sh and head (MYLA-705)
         "std.process": _WIN_LINUX_TOOLS,
     },
