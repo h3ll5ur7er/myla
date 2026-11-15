@@ -12,7 +12,7 @@ agree; `scripts/test-target.py` runs the suite for aarch64 (qemu) and wasm32
 (Node), where WASI has no processes and the pipes' programs are excused
 (`_targets.py`): `PipesOnWasm` checks that each of their primitives is
 `Unsupported` there instead. What a primitive leaves for `__io_errno` is a
-cause code (std.ioerror's, D208): 1 not found, 3 already exists, 5 a
+cause code (std.ioerror's, D209): 1 not found, 3 already exists, 5 a
 directory, 11 invalid input, 34 a handle that isn't open, and from 256 on
 256 plus the system's own code (285 ESPIPE, 266 ECHILD, 259 ESRCH); a kind
 is std.platform's (1 a file, 2 a directory, 3 a link). A program's call of one is the

@@ -277,3 +277,90 @@ jobs:
           name: myla-vscode-extension
           path: vscode-extension/myla/*.vsix
           if-no-files-found: error
+
+  website:
+    # the website (D208, MYLA-159): play.wasm, the docs from the wiki, the
+    # reference from lib/std (tools/doc) and the course from learn/, built
+    # for GitHub Pages (/myla/); the content pipeline's and the app's unit
+    # tests; the built site in Chromium. On a push to master the pages job
+    # deploys it. The course's exercises are checked by the burn job
+    # (tests/burn/test_website.py).
+    name: Website (unit tests, build, the site in a browser)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v7
+      - name: clang and lld (wasm-ld, for play.wasm)
+        working-directory: .
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld
+      - name: Bootstrap build/myla
+        working-directory: .
+        run: scripts/bootstrap.sh build
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Unit tests (the content pipeline, the gamification, the editor's Myla mode)
+        run: npm test
+      - name: Build for GitHub Pages
+        run: npm run build:pages
+      - name: Every exercise in play.wasm, as the learner's browser runs it
+        run: npm run check-course
+      - name: Playwright's Chromium
+        run: npx playwright install --with-deps chromium
+      - name: The built site in Chromium
+        env:
+          CI: "1"
+        run: npm run e2e
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: website
+          path: website/dist
+          retention-days: 7
+
+  pages:
+    # master only: the site of the website job, with the master build's tools
+    # and the VS Code extension under downloads/ (MYLA-635)
+    name: Deploy the website to GitHub Pages
+    if: github.event_name == 'push'
+    needs: [website, bootstrap, bootstrap-arm64, vscode-extension]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: website
+          path: site
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: myla-*-linux-${{ github.sha }}
+          path: artifacts
+      - uses: actions/download-artifact@v7
+        with:
+          name: myla-vscode-extension
+          path: artifacts
+      - name: The downloads and their manifest
+        run: node website/scripts/downloads.mjs artifacts site/downloads ${{ github.sha }}
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

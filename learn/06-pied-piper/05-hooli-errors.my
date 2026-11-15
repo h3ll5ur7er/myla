@@ -1,0 +1,27 @@
+// title: Hooli Errors
+// xp: 25
+// hidden: check_upload #test(1000, 1000)[Ok(1000)]
+// hidden: check_upload #test(1001, 1000)[Err(UploadError.TooBig(1001))]
+// hint: Your own enum can be the error of a `Result`, as in `Err(UploadError.Empty)`.
+// hint: Check the empty file first, then the one over the limit (which carries its size); anything else is fine.
+//
+// Errors can be more than strings. Hooli's upload service reports its errors
+// as an enum, so callers can `match` on them:
+//
+// - an empty file: `Err(UploadError.Empty)`
+// - a file over the limit: `Err(UploadError.TooBig(size))`
+// - otherwise: `Ok(size)`
+//
+// Write `check_upload`. (`#derive(Eq)` on the enum lets tests compare errors.)
+#derive(Eq)
+enum UploadError {
+    Empty,
+    TooBig(int),
+}
+
+#test(500, 1000)[Ok(500)]
+#test(0, 1000)[Err(UploadError.Empty)]
+#test(1500, 1000)[Err(UploadError.TooBig(1500))]
+fun check_upload(size: int, limit: int) -> Result<int, UploadError> {
+    return Ok(size)
+}

@@ -1,0 +1,7 @@
+#test("Never odd or even")[true]
+#test("Was it a car or a cat I saw?")[true]
+#test("Riddle me this")[false]
+fun is_palindrome(s: str) -> bool {
+    let cs = s.chars().filter((c: char) => c.is_alpha()).map((c: char) => c.to_lower())
+    return cs == cs.reversed()
+}

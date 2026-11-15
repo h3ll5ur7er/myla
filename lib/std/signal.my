@@ -151,7 +151,7 @@ fun signal_of(n: int, cause: int) -> Result<Signal, SignalError> {
     return Err(SignalError.Other(n))
 }
 
-// The error of the cause code `e` (std.ioerror's, D208; UNSUPPORTED: the
+// The error of the cause code `e` (std.ioerror's, D209; UNSUPPORTED: the
 // target has no signals), `Other` of the number `code_number` gives.
 #test(9)[SignalError.Unsupported]
 #test(280)[SignalError.Other(24)]

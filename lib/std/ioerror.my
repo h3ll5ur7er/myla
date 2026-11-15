@@ -41,7 +41,7 @@ pub enum IoError {
     Other(int32),
 }
 
-// --- cause codes (D208) ----------------------------------------------------------
+// --- cause codes (D209) ----------------------------------------------------------
 //
 // What a primitive's failure leaves for `__io_errno` (and `__run_errno`, a
 // spawn's first word): a cause code, never a system's own number. Each
@@ -84,7 +84,7 @@ pub const BAD_HANDLE: int32 = 34
 pub const NOT_A_TERMINAL: int32 = 35
 pub const OTHER: int32 = 256
 
-// The cause of the (nonzero) cause code `code` a primitive left (D208).
+// The cause of the (nonzero) cause code `code` a primitive left (D209).
 #test(1)[IoError.NotFound]
 #test(2)[IoError.PermissionDenied]
 #test(3)[IoError.AlreadyExists]

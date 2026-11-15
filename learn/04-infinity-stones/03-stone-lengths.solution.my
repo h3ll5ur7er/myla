@@ -1,0 +1,5 @@
+#test(["Space", "Mind", "Reality"])[[5, 4, 7]]
+#test([])[[]]
+fun lengths(stones: [str]) -> [int] {
+    return stones.map((s: str) => s.len())
+}

@@ -1,0 +1,16 @@
+#derive(Eq)
+struct Power {
+    strength: int,
+    speed: int,
+}
+
+impl Add for Power {
+    fun add(self, o: Power) -> Power {
+        return Power { strength: self.strength + o.strength, speed: self.speed + o.speed }
+    }
+}
+
+#test(Power { strength: 10, speed: 1 }, Power { strength: 3, speed: 7 })[Power { strength: 13, speed: 8 }]
+fun team_up(a: Power, b: Power) -> Power {
+    return a + b
+}

@@ -1,0 +1,35 @@
+import std.task as task
+import std.json as json
+
+async fun part(n: int) -> int {
+    await task.sleep(10 * n)
+    return 7
+}
+
+#derive(Json)
+struct Report {
+    answer: int,
+    parts: int,
+    question: str,
+}
+
+#main
+async fun main() {
+    let parts = 6
+    print(f"Deep Thought splits the question into {parts} parts...")
+    var jobs: [async () -> int] = []
+    for i in 1..(parts + 1) {
+        let n = i
+        jobs.push(async () => await part(n))
+    }
+    let results = await task.all(jobs)
+    var answer = 0
+    var k = 1
+    for r in results {
+        print(f"part {k}: {r}")
+        answer += r
+        k += 1
+    }
+    print(f"The Answer to the Ultimate Question of Life, the Universe, and Everything: {answer}")
+    print(json.encode(Report { answer: answer, parts: parts, question: "unknown" }))
+}

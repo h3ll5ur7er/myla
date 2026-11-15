@@ -1,0 +1,20 @@
+// title: Riddle Me This
+// xp: 25
+// hidden: is_palindrome #test("Gotham")[false]
+// hidden: is_palindrome #test("A Toyota")[true]
+// hint: The check is right for "abba", but the Riddler's riddles have capitals, spaces and punctuation.
+// hint: Keep only the letters, all in one case, before comparing. `char` has a method that tells a letter, and lists have `filter` and `map`.
+//
+// The Riddler has left Gotham a stack of riddles, and every answer is a
+// palindrome: a phrase that reads the same backwards, if you ignore
+// capitals, spaces and punctuation. "Never odd or even" is one.
+//
+// `is_palindrome` only works on bare lowercase words. Fix it before
+// Batman has to say it. (He will. He's Batman.)
+#test("Never odd or even")[true]
+#test("Was it a car or a cat I saw?")[true]
+#test("Riddle me this")[false]
+fun is_palindrome(s: str) -> bool {
+    let cs = s.chars()
+    return cs == cs.reversed()
+}

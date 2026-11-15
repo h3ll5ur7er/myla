@@ -123,7 +123,7 @@ The generated code reaches the runtime four ways, the same on every target ([[MY
 | Floats | std.rt's `float_to_str` with `two_prod` and `fscale`, its `fmod`, and the tables of powers of ten `__pow10_hi`/`__pow10_lo` it reads |
 | Function values | `__compose_call` and `__compose_env_drop` (IR, [[MYLA-263]]) |
 
-The system calls are `std.platform`'s, one module per target: [[lib/std/platform.my]] (x86-64's numbers), [[lib/std/platform_aarch64.my]] (the generic table) and [[lib/std/platform_wasm.my]] (WASI's imports). Its interface is Myla's (D208, [[MYLA-701]]): a failure is minus a cause code of std.ioerror's, which each module maps from its system's codes (`cause`), a file its kind, size, permissions and time, a directory's entries names and kinds through `dir_entry_*` over the module's own records, and what a target lacks a constant it declares (`PROCESSES`, `SOCKETS`) and the cause UNSUPPORTED. `tests/burn/test_platform_interface.py` holds the three modules to the same functions, types and constants.
+The system calls are `std.platform`'s, one module per target: [[lib/std/platform.my]] (x86-64's numbers), [[lib/std/platform_aarch64.my]] (the generic table) and [[lib/std/platform_wasm.my]] (WASI's imports). Its interface is Myla's (D209, [[MYLA-701]]): a failure is minus a cause code of std.ioerror's, which each module maps from its system's codes (`cause`), a file its kind, size, permissions and time, a directory's entries names and kinds through `dir_entry_*` over the module's own records, and what a target lacks a constant it declares (`PROCESSES`, `SOCKETS`) and the cause UNSUPPORTED. `tests/burn/test_platform_interface.py` holds the three modules to the same functions, types and constants.
 
 ## Runtime-error positions
 

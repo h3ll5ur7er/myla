@@ -98,7 +98,7 @@ A `LineEdit` is a line being edited, a value with no input or output, so it is t
 
 ## Primitives
 
-The module rests on these ([[MYLA-350]]), each a function of `std.rt` over `std.platform`'s of the same name, and in the interpreter the host's own. Each sets `__io_errno()`, 0 on success, to a cause code of std.ioerror's (D208): NOT_A_TERMINAL (35) for a descriptor that isn't a terminal, BAD_HANDLE (34) for a negative one, UNSUPPORTED (9) on wasm32. The tables below name the system's errors, which the platform module maps.
+The module rests on these ([[MYLA-350]]), each a function of `std.rt` over `std.platform`'s of the same name, and in the interpreter the host's own. Each sets `__io_errno()`, 0 on success, to a cause code of std.ioerror's (D209): NOT_A_TERMINAL (35) for a descriptor that isn't a terminal, BAD_HANDLE (34) for a negative one, UNSUPPORTED (9) on wasm32. The tables below name the system's errors, which the platform module maps.
 
 | Primitive | x86-64 and aarch64 Linux | wasm32 |
 | --- | --- | --- |
@@ -119,4 +119,4 @@ A port gives `std.platform`'s terminal functions again: `term_is_tty(fd)`, `term
 - **Mode.** `term_get_mode` writes the handle's console mode (`GetConsoleMode`, a 32-bit word) into the block, and `term_set_mode` gives it back (`SetConsoleMode`). The block is the port's own: `std.term` keeps it and hands it back unread. Raw mode is the input's, so restoring it leaves the output's escape sequences on.
 - **Raw mode.** `term_make_raw` clears `ENABLE_LINE_INPUT`, `ENABLE_ECHO_INPUT` and `ENABLE_PROCESSED_INPUT` (so Ctrl-C is a key, as without ISIG) and sets `ENABLE_VIRTUAL_TERMINAL_INPUT`, so the arrows and the other special keys arrive as the same escape sequences `parse_key` decodes. The input is read as UTF-8 bytes (the console's input code page 65001, or `ReadConsoleW` converted), through `__read` as on Linux.
 - **Escape sequences.** `term_enable_vt` sets `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the output handle's mode: 0 when the console accepts it, NOT_A_TERMINAL for a handle that isn't a console. Without it a Windows console prints the escapes, which is why `colors` asks first.
-- **Errors.** `ERROR_INVALID_HANDLE` maps to the cause BAD_HANDLE, a handle that isn't a console to NOT_A_TERMINAL; another code to OTHER plus it (D208).
+- **Errors.** `ERROR_INVALID_HANDLE` maps to the cause BAD_HANDLE, a handle that isn't a console to NOT_A_TERMINAL; another code to OTHER plus it (D209).

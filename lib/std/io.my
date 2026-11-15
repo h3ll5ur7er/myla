@@ -54,7 +54,7 @@ fun put(fd: int32, s: str) {
     }
 }
 
-// What the cause code `code` (`__io_errno`'s, D208) of a failed write means
+// What the cause code `code` (`__io_errno`'s, D209) of a failed write means
 // (std.rt's `errno_text`): a handle that isn't open, the system's codes
 // Linux and wasm32 give, else `errno` and the number `code_number` gives.
 #test(284)["no space left on device"]

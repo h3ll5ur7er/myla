@@ -1,0 +1,74 @@
+// Shared by the docs and reference pages.
+
+.crumbs {
+  display: flex;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--text-faint);
+  margin-bottom: 10px;
+  a {
+    color: var(--text-muted);
+  }
+}
+
+.title {
+  font-size: clamp(2rem, 4vw, 2.8rem);
+  margin-bottom: 0.6em;
+}
+
+.pager {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 64px;
+  max-width: var(--prose-w);
+  a {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    text-decoration: none;
+    color: var(--text);
+    span {
+      font-size: 0.8rem;
+      color: var(--text-faint);
+    }
+  }
+  .next {
+    text-align: right;
+    grid-column: 2;
+  }
+}
+
+.edit {
+  margin-top: 28px;
+  font-size: 0.85rem;
+  color: var(--text-faint);
+}
+
+.skeleton {
+  display: grid;
+  gap: 14px;
+  max-width: var(--prose-w);
+  i {
+    display: block;
+    height: 18px;
+    border-radius: 6px;
+    background: linear-gradient(90deg, var(--surface) 0%, var(--surface-hover) 50%, var(--surface) 100%);
+    background-size: 200% 100%;
+    animation: shimmer 1.2s linear infinite;
+    &:first-child {
+      height: 42px;
+      width: 50%;
+      margin-bottom: 12px;
+    }
+    &:nth-child(3) {
+      width: 85%;
+    }
+  }
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}

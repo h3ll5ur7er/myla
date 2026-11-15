@@ -1,0 +1,27 @@
+trait Hero {
+    fun catchphrase(self) -> str
+}
+
+struct Cap {}
+struct IronMan { mark: int }
+
+impl Hero for Cap {
+    fun catchphrase(self) -> str {
+        return "I can do this all day."
+    }
+}
+
+impl Hero for IronMan {
+    fun catchphrase(self) -> str {
+        return "I am Iron Man."
+    }
+}
+
+fun shout<H: Hero>(h: H) -> str {
+    return h.catchphrase()
+}
+
+#test()[["I can do this all day.", "I am Iron Man."]]
+fun lines() -> [str] {
+    return [shout(Cap {}), shout(IronMan { mark: 85 })]
+}

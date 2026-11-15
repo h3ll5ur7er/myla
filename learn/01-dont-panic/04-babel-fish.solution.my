@@ -1,0 +1,5 @@
+#test("Arthur", "Vogon")["Arthur says hello in Vogon"]
+#test("Ford", "Betelgeusian")["Ford says hello in Betelgeusian"]
+fun translate(name: str, language: str) -> str {
+    return f"{name} says hello in {language}"
+}

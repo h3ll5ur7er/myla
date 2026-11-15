@@ -10785,7 +10785,7 @@ impl Checker {
         // copy and comparison each backend does natively), `__free(p)`; and
         // Linux's platform layer: `__syscall(n, a, b, c)` (the result, a
         // negative errno on a failure, which std.platform maps to a cause
-        // code, D208), `__set_io_errno(e)` (a cause code) and `__environ()`
+        // code, D209), `__set_io_errno(e)` (a cause code) and `__environ()`
         // (the environment the process started with: the address of its
         // NUL-terminated `name=value` strings' addresses, a null one last);
         // `__set_run_status(exit, signal, cause)` and `__set_run_stderr(bytes)`

@@ -27,7 +27,7 @@ Options valid with every command, before or after the file:
 - `--package name=dir` (repeatable): `import name…` resolves in `dir`. The project commands pass these themselves (`name=<dep>/src`).
 - `--root <dir>`: the root absolute imports (`from util.strs import f`) resolve in; default the file's directory, `src/` in a project.
 
-`--target T` is `x86_64-linux`, `aarch64-linux`, `wasm32-wasi` or `x86_64-windows` (anything else: `myla: unknown target 'T' (…)`, exit 1; each target is a record in `selfhost/target.my`, `parse_target`, MYLA-700); the default is the machine's. `x86_64-windows` is refused until MYLA-702: `myla: building for x86_64-windows is not supported yet (MYLA-702)`, exit 1. With `test` it implies `--native`. Tools per target, found on `PATH`: own Linux target `as --64`/`as` + `ld`; the other Linux target `clang --target=<triple>-linux-gnu -c` + `ld.lld -static`; wasm32 `clang --target=wasm32-wasi -mtail-call -mbulk-memory -mnontrapping-fptoint -msign-ext` + `wasm-ld --stack-first -z stack-size=8388608`; Windows (not used yet, D210) `clang --target=x86_64-pc-windows-msvc`, `llvm-dlltool`, `lld-link`. A missing tool: `myla: 'clang' was not found: building for aarch64-linux here needs clang and ld.lld`. `-g` is x86-64 only (`myla: -g is not supported for aarch64-linux yet`). Run a wasm module with `node tools/wasm/run.mjs prog.wasm [args…]` (exit code passed on; a trap is `runtime error: …`, exit 1); an aarch64 binary on x86-64 with `qemu-aarch64 ./prog`.
+`--target T` is `x86_64-linux`, `aarch64-linux`, `wasm32-wasi` or `x86_64-windows` (anything else: `myla: unknown target 'T' (…)`, exit 1; each target is a record in `selfhost/target.my`, `parse_target`, MYLA-700); the default is the machine's. `x86_64-windows` is refused until MYLA-702: `myla: building for x86_64-windows is not supported yet (MYLA-702)`, exit 1. With `test` it implies `--native`. Tools per target, found on `PATH`: own Linux target `as --64`/`as` + `ld`; the other Linux target `clang --target=<triple>-linux-gnu -c` + `ld.lld -static`; wasm32 `clang --target=wasm32-wasi -mtail-call -mbulk-memory -mnontrapping-fptoint -msign-ext` + `wasm-ld --stack-first -z stack-size=8388608`; Windows (not used yet, D211) `clang --target=x86_64-pc-windows-msvc`, `llvm-dlltool`, `lld-link`. A missing tool: `myla: 'clang' was not found: building for aarch64-linux here needs clang and ld.lld`. `-g` is x86-64 only (`myla: -g is not supported for aarch64-linux yet`). Run a wasm module with `node tools/wasm/run.mjs prog.wasm [args…]` (exit code passed on; a trap is `runtime error: …`, exit 1); an aarch64 binary on x86-64 with `qemu-aarch64 ./prog`.
 
 ### Exit status and diagnostics
 
@@ -270,6 +270,8 @@ The compiler itself: `build/stage3 <file.my> <stdlib-dir> [--target T] [-g] [--c
 | `bootstrap` | `scripts/bootstrap.sh build`, `scripts/check-seed.sh build`, stage3 builds `examples/hello.my`; on a push to master uploads the seeds and the x86-64 `myla`/`myla-lsp` as artifacts (90 days) |
 | `bootstrap-arm64` | `just bootstrap` on arm64 (the aarch64 seed), check-seed, every example built vs interpreted, stress runs; on a push to master uploads the aarch64 `myla`/`myla-lsp` |
 | `vscode-extension` | typecheck, lint, tests (debugger against gdb), `.vsix` |
+| `website` | the website (`website/`, D208): `npm test`, `npm run build:pages` (play.wasm, content from the wiki, `lib/std` via `tools/doc` and `learn/`), `npm run check-course` (every exercise in play.wasm), `npm run e2e` (Playwright) |
+| `pages` | master only: the site plus the tools and the `.vsix` under `downloads/`, deployed to GitHub Pages |
 
 ## `tools/`
 
@@ -278,9 +280,10 @@ The compiler itself: `build/stage3 <file.my> <stdlib-dir> [--target T] [-g] [--c
 | `tools/lsp/` | language server (stdin/stdout LSP): diagnostics, document symbols, definition, hover, references, completion, semantic tokens; projects resolved with their packages. `--stdlib d`; `--resolve f…` prints what each identifier refers to | `build/myla-lsp` by `bootstrap.sh`; used by `vscode-extension/myla` |
 | `tools/embed/` | `embed <lib dir> <module> [--check]`: writes `selfhost/embedded_std.my` (library text plus pre-parsed declarations) | by `bootstrap.sh` |
 | `tools/grammar/` | `grammar canon <file>`, `grammar treesitter <ebnf> <highlights> <dir>`, `grammar sample <ebnf> <seed> <n> [parse]` | `build/myla build tools/grammar/main.my -o build/grammar` |
+| `tools/doc/` | `doc [-o out.json] <lib/std/m.my>...`: each module's public API (signatures from the LSP outline, doc comments, `#test` cases) as JSON, for the website's reference | `build/myla build tools/doc/main.my -o build/website/doc` (by `website/scripts/prepare.mjs`) |
 | `tools/wasm/` | `run.mjs` (Node WASI runner, `--argv0 NAME`), `wasi.mjs`, `node_fs.mjs`, `mem_fs.mjs`, `myla.mjs` (`loadMyla(...)` → `check`, `run`, `test` in a page), `page.html` | JavaScript, no build; `scripts/build-page.sh` |
 
-There is **no formatter** and no `myla fmt`; the tree-sitter grammar is `editor/tree-sitter-myla`, the VS Code extension `vscode-extension/myla` (runs, tests, builds, debugs with gdb).
+`website/` is the Angular site (docs and reference generated from `docs/` and `lib/std`, the editor running `play.wasm` in a worker, the course from `learn/`: each exercise `NN-name.my` with a header of `// title:`, `// xp:`, `// hint:`, optional `// expect:` lines and `// boss: true`, and `NN-name.solution.my`; `docs/Architecture/Website.md`). There is **no formatter** and no `myla fmt`; the tree-sitter grammar is `editor/tree-sitter-myla`, the VS Code extension `vscode-extension/myla` (runs, tests, builds, debugs with gdb).
 
 ## Repository test conventions (`tests/burn/`)
 

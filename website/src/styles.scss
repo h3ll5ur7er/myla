@@ -1,0 +1,473 @@
+// The design system of the Myla website (MYLA-630, D208): tokens on :root,
+// dark first, a light theme by [data-theme="light"], the base, the prose of
+// the docs pages, and a few shared pieces (buttons, cards, chips).
+
+@use "@fontsource-variable/space-grotesk";
+@use "@fontsource-variable/inter";
+@use "@fontsource-variable/jetbrains-mono";
+
+:root {
+  color-scheme: dark;
+  // surfaces
+  --bg: #07080f;
+  --bg-raised: #0d0f1c;
+  --bg-sunken: #05060b;
+  --surface: rgba(255, 255, 255, 0.035);
+  --surface-hover: rgba(255, 255, 255, 0.07);
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  // text
+  --text: #e8e9f3;
+  --text-muted: #a2a5bd;
+  --text-faint: #6d7090;
+  // brand: hyperspace, from magenta through violet to cyan
+  --magenta: #ff4ecd;
+  --violet: #8b5cf6;
+  --cyan: #22d3ee;
+  --lime: #a3e635;
+  --amber: #fbbf24;
+  --red: #fb7185;
+  --accent: var(--violet);
+  --accent-strong: #a78bfa;
+  --accent-soft: rgba(139, 92, 246, 0.16);
+  --gradient: linear-gradient(120deg, var(--magenta) 0%, var(--violet) 45%, var(--cyan) 100%);
+  --gradient-soft: linear-gradient(120deg, rgba(255, 78, 205, 0.18), rgba(139, 92, 246, 0.14), rgba(34, 211, 238, 0.18));
+  // code
+  --code-bg: #0b0d18;
+  --code-border: rgba(139, 92, 246, 0.25);
+  --code-text: #e4e6f5;
+  --tok-keyword: #c792ea;
+  --tok-type: #7fdbca;
+  --tok-function: #82aaff;
+  --tok-string: #c3e88d;
+  --tok-number: #f78c6c;
+  --tok-comment: #6b7394;
+  --tok-attribute: #ffcb6b;
+  --tok-operator: #89ddff;
+  --tok-constant: #ff9cac;
+  // shape
+  --radius-s: 8px;
+  --radius: 14px;
+  --radius-l: 22px;
+  --shadow: 0 10px 40px -12px rgba(0, 0, 0, 0.6);
+  --glow: 0 0 0 1px rgba(139, 92, 246, 0.35), 0 12px 48px -12px rgba(139, 92, 246, 0.45);
+  // type
+  --font-display: "Space Grotesk Variable", "Space Grotesk", system-ui, sans-serif;
+  --font-body: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  // layout
+  --header-h: 64px;
+  --content-w: 1200px;
+  --prose-w: 780px;
+  --gutter: clamp(16px, 4vw, 32px);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f8f7fc;
+  --bg-raised: #ffffff;
+  --bg-sunken: #efedf7;
+  --surface: rgba(20, 16, 60, 0.035);
+  --surface-hover: rgba(20, 16, 60, 0.07);
+  --border: rgba(20, 16, 60, 0.1);
+  --border-strong: rgba(20, 16, 60, 0.2);
+  --text: #16142b;
+  --text-muted: #504d6e;
+  --text-faint: #7f7c9c;
+  --accent: #7c3aed;
+  --accent-strong: #6d28d9;
+  --accent-soft: rgba(124, 58, 237, 0.1);
+  --magenta: #db2777;
+  --cyan: #0891b2;
+  --lime: #4d7c0f;
+  --amber: #b45309;
+  --red: #e11d48;
+  --code-bg: #fbfaff;
+  --code-border: rgba(124, 58, 237, 0.22);
+  --code-text: #1e1b3a;
+  --tok-keyword: #8b2fc9;
+  --tok-type: #0f766e;
+  --tok-function: #2952cc;
+  --tok-string: #3f7d1a;
+  --tok-number: #c2410c;
+  --tok-comment: #8a87a8;
+  --tok-attribute: #a16207;
+  --tok-operator: #0e7490;
+  --tok-constant: #be185d;
+  --shadow: 0 10px 30px -14px rgba(40, 20, 90, 0.25);
+  --glow: 0 0 0 1px rgba(124, 58, 237, 0.25), 0 12px 40px -16px rgba(124, 58, 237, 0.35);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-padding-top: calc(var(--header-h) + 16px);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.5em;
+}
+
+a {
+  color: var(--accent-strong);
+  text-decoration: none;
+  &:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: rgba(139, 92, 246, 0.35);
+}
+
+code,
+kbd,
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+// --- shared pieces -------------------------------------------------------------------------
+
+.container {
+  width: 100%;
+  max-width: var(--content-w);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+.gradient-text {
+  background: var(--gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5em;
+  padding: 0.7em 1.25em;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font: 600 0.95rem/1 var(--font-body);
+  cursor: pointer;
+  text-decoration: none !important;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.2s ease;
+  white-space: nowrap;
+  &:hover {
+    background: var(--surface-hover);
+    border-color: var(--accent);
+    transform: translateY(-1px);
+  }
+  &:active {
+    transform: translateY(0);
+  }
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+  }
+  &.primary {
+    border: 0;
+    background: var(--gradient);
+    color: #fff;
+    box-shadow: 0 8px 30px -10px rgba(139, 92, 246, 0.7);
+    &:hover {
+      box-shadow: 0 10px 36px -8px rgba(255, 78, 205, 0.6);
+    }
+  }
+  &.small {
+    padding: 0.45em 0.9em;
+    font-size: 0.82rem;
+  }
+  &.ghost {
+    border-color: transparent;
+    background: transparent;
+    &:hover {
+      background: var(--surface-hover);
+    }
+  }
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.4rem;
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  &.interactive:hover {
+    border-color: var(--accent);
+    background: var(--surface-hover);
+    transform: translateY(-2px);
+    box-shadow: var(--glow);
+  }
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  padding: 0.2em 0.65em;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+  &.accent {
+    color: var(--accent-strong);
+    border-color: rgba(139, 92, 246, 0.4);
+    background: var(--accent-soft);
+  }
+}
+
+kbd {
+  display: inline-block;
+  padding: 0.05em 0.45em;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  background: var(--surface);
+  font-size: 0.78em;
+  color: var(--text-muted);
+}
+
+.eyebrow {
+  display: inline-block;
+  font: 700 0.78rem/1 var(--font-body);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  margin-bottom: 0.9rem;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.page-head {
+  padding: clamp(40px, 7vw, 80px) 0 clamp(24px, 4vw, 40px);
+  h1 {
+    font-size: clamp(2.2rem, 5vw, 3.4rem);
+  }
+  p.lead {
+    font-size: 1.15rem;
+    color: var(--text-muted);
+    max-width: 680px;
+    margin: 0;
+  }
+}
+
+// --- the prose of docs pages -------------------------------------------------------------
+
+.prose {
+  max-width: var(--prose-w);
+  color: var(--text);
+  overflow-wrap: break-word;
+  > :first-child {
+    margin-top: 0;
+  }
+  h2 {
+    font-size: 1.65rem;
+    margin-top: 2.4em;
+    padding-top: 0.4em;
+  }
+  h3 {
+    font-size: 1.25rem;
+    margin-top: 1.8em;
+  }
+  h4 {
+    font-size: 1.05rem;
+    margin-top: 1.5em;
+  }
+  h2,
+  h3,
+  h4 {
+    position: relative;
+    .anchor {
+      position: absolute;
+      left: -1.1em;
+      opacity: 0;
+      color: var(--text-faint);
+      text-decoration: none;
+      transition: opacity 0.15s ease;
+    }
+    &:hover .anchor {
+      opacity: 1;
+    }
+  }
+  p,
+  ul,
+  ol {
+    margin: 0 0 1.1em;
+  }
+  ul,
+  ol {
+    padding-left: 1.4em;
+  }
+  li {
+    margin: 0.3em 0;
+  }
+  li::marker {
+    color: var(--accent);
+  }
+  strong {
+    color: var(--text);
+    font-weight: 650;
+  }
+  :not(pre) > code {
+    padding: 0.12em 0.4em;
+    border-radius: 6px;
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    font-size: 0.86em;
+    white-space: break-spaces;
+  }
+  a code {
+    color: inherit;
+  }
+  blockquote {
+    margin: 1.4em 0;
+    padding: 0.8em 1.2em;
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    border-radius: 0 var(--radius-s) var(--radius-s) 0;
+    color: var(--text-muted);
+  }
+  hr {
+    border: 0;
+    height: 1px;
+    background: var(--border);
+    margin: 2.5em 0;
+  }
+  .table-wrap {
+    overflow-x: auto;
+    margin: 1.4em 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+  th,
+  td {
+    padding: 0.6em 0.85em;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: var(--surface);
+    font-weight: 650;
+    white-space: nowrap;
+  }
+  tr:last-child td {
+    border-bottom: 0;
+  }
+  pre.code-block {
+    margin: 1.2em 0;
+    padding: 1em 1.2em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    overflow-x: auto;
+    color: var(--code-text);
+    line-height: 1.55;
+  }
+  .myla-example {
+    margin: 1.4em 0;
+  }
+  img {
+    max-width: 100%;
+  }
+}
+
+// --- static highlighting (editor/highlight.ts) ----------------------------------------------
+
+.tok-keyword,
+.tok-self {
+  color: var(--tok-keyword);
+}
+.tok-typeName {
+  color: var(--tok-type);
+}
+.tok-function,
+.tok-standard {
+  color: var(--tok-function);
+}
+.tok-string,
+.tok-string-special {
+  color: var(--tok-string);
+}
+.tok-number {
+  color: var(--tok-number);
+}
+.tok-atom {
+  color: var(--tok-constant);
+}
+.tok-comment {
+  color: var(--tok-comment);
+  font-style: italic;
+}
+.tok-meta {
+  color: var(--tok-attribute);
+}
+.tok-operator {
+  color: var(--tok-operator);
+}
+.tok-punctuation {
+  color: var(--text-muted);
+}

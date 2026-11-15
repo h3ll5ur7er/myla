@@ -1,0 +1,22 @@
+#test(["Space", "Mind", "Reality", "Power", "Time", "Soul"])["6 stones, longest Reality, total 29 letters"]
+#test(["Time", "Time", "Mind"])["2 stones, longest Time, total 8 letters"]
+#test([])["0 stones, longest nothing, total 0 letters"]
+fun report(stones: [str]) -> str {
+    var unique: [str] = []
+    for s in stones {
+        if !unique.contains(s) {
+            unique.push(s)
+        }
+    }
+    var longest = "nothing"
+    var best = 0
+    var letters = 0
+    for s in unique {
+        letters += s.len()
+        if s.len() > best {
+            best = s.len()
+            longest = s
+        }
+    }
+    return f"{unique.len()} stones, longest {longest}, total {letters} letters"
+}

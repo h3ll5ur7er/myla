@@ -7,7 +7,7 @@
 // dispatcher (selfhost/runtime_wasm.my) calls the import of that number
 // with the words in the block `__wasi_args` as its arguments, and gives
 // its errno (or, for `W_MEMORY_GROW`, `memory.grow`'s result). WASI's
-// errnos are given back as Myla's causes, negative (D208).
+// errnos are given back as Myla's causes, negative (D209).
 //
 // WASI has no working directory and no processes: paths are resolved
 // against the first directory the host opened for the program (descriptor
@@ -21,7 +21,7 @@
 // own build of it is its default target, the host's.
 pub const TARGET: str = "wasm32-wasi"
 
-// What a function that fails gives: minus a cause code (D129, D208), never
+// What a function that fails gives: minus a cause code (D129, D209), never
 // WASI's errno, which `call` maps here (through Linux's numbers, so that an
 // `Other` reads the same on every target, MYLA-426), so nothing above this
 // module knows WASI's numbers. The codes are std.ioerror's, the same in every
@@ -69,7 +69,7 @@ pub const KIND_FIFO: int64 = 6
 pub const KIND_SOCKET: int64 = 7
 pub const KIND_OTHER: int64 = 8
 
-// What a target may lack (D208, D209): without processes, `run`, `spawn`,
+// What a target may lack (D209, D210): without processes, `run`, `spawn`,
 // `spawn_with`, `spawn_piped`, `try_reap` and `kill` fail with UNSUPPORTED
 // (and `reap` gives -1); without sockets every `sock_` function does.
 pub const PROCESSES: bool = false
@@ -425,7 +425,7 @@ pub fun path_kind(path: str) -> int64 {
 
 // The kind of WASI's file type `t` (3 a directory, 4 a regular file, 7 a
 // symbolic link, 0 unknown); its devices and sockets (1, 2, 5, 6) are
-// KIND_OTHER, as the made-up modes before D208 gave them (MYLA-716).
+// KIND_OTHER, as the made-up modes before D209 gave them (MYLA-716).
 #test(3)[2]
 #test(4)[1]
 #test(7)[3]

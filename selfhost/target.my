@@ -9,7 +9,7 @@
 // Linux target, as the bootstrap uses them (D127); clang and `ld.lld` for the
 // other Linux target (MYLA-163); clang and `wasm-ld` for wasm32 on WASI
 // (D125, MYLA-158); clang for COFF, `llvm-dlltool` and `lld-link` for Windows
-// (D210), which the compiler doesn't build for yet (MYLA-702).
+// (D211), which the compiler doesn't build for yet (MYLA-702).
 
 from std.platform import TARGET
 
@@ -38,7 +38,7 @@ pub enum ObjectFormat {
 // line whose words name the files with `{asm}`, `{obj}` and `{out}` (the
 // assembly, the object, the program) and, for an import library, `{def}`
 // and `{lib}` (its list of functions and the library made of it; Windows,
-// D210, D211). `imports` is [] where there are none. `needs` names them
+// D211, D212). `imports` is [] where there are none. `needs` names them
 // all, for the error when one isn't on PATH.
 pub struct Toolchain { assemble: [str], imports: [str], link: [str], needs: str }
 
@@ -96,10 +96,10 @@ pub fun targets() -> [Target] {
                  cross: Toolchain { assemble: ["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext", "-c", "-o", "{obj}", "{asm}"], imports: [],
                                     link: ["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", "{out}", "{obj}"], needs: "clang and wasm-ld" },
                  native: None, emulator: [], spawns: false, debug_info: false, supported: true },
-        // D210: clang reads the backend's GAS text for COFF too; the import
-        // library of each system DLL (D211) is made from the list of the
+        // D211: clang reads the backend's GAS text for COFF too; the import
+        // library of each system DLL (D212) is made from the list of the
         // functions used; no C runtime, so the entry is the program's own.
-        // Child processes come with MYLA-705, debug information later (D215)
+        // Child processes come with MYLA-705, debug information later (D216)
         Target { name: "x86_64-windows", os: Os.Windows, arch: Arch.X86_64, format: ObjectFormat.Coff, exe_suffix: ".exe", platform_file: "platform_windows.my",
                  cross: Toolchain { assemble: ["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", "{obj}", "{asm}"], imports: ["llvm-dlltool", "-m", "i386:x86-64", "-d", "{def}", "-l", "{lib}"],
                                     link: ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/out:{out}", "{obj}", "{lib}"], needs: "clang, llvm-dlltool and lld-link" },
@@ -131,7 +131,7 @@ pub fun host() -> Target {
 }
 
 // Why the compiler can't build for `t` yet, as an error's text after the
-// tool's name; "" when it can (D209: what isn't there yet says so).
+// tool's name; "" when it can (D210: what isn't there yet says so).
 pub fun unsupported(t: Target) -> str {
     if t.supported { return "" }
     return f"building for {t.name} is not supported yet (MYLA-702)"
@@ -179,7 +179,7 @@ fun the_names_parse() {
 }
 
 // Each target's tools: one to assemble and one to link, each named in its
-// `needs`; D210's three for Windows.
+// `needs`; D211's three for Windows.
 #test
 fun each_toolchain_names_its_tools() {
     for t in targets() {
@@ -194,5 +194,5 @@ fun each_toolchain_names_its_tools() {
     }
     let w = parse_target("x86_64-windows").expect("windows")
     assert(w.format == ObjectFormat.Coff && w.exe_suffix == ".exe" && !w.supported, "windows")
-    assert(w.cross.assemble[0] == "clang" && w.cross.imports[0] == "llvm-dlltool" && w.cross.link[0] == "lld-link", "D210")
+    assert(w.cross.assemble[0] == "clang" && w.cross.imports[0] == "llvm-dlltool" && w.cross.link[0] == "lld-link", "D211")
 }

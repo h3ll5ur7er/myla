@@ -120,6 +120,10 @@ In a project, `build/myla` also has `build`, `test`, `check`, `fetch` (Git depen
 
 More in [Getting started](docs/Getting-started.md), including an examples reading order: every file in `examples/` is a runnable program.
 
+## The website
+
+[`website/`](website/) is Myla's home on the web: a landing page, the language docs and the standard library's reference generated from this repository, a playground, and a gamified course of 48 exercises in [`learn/`](learn/README.md), all running the real checker and interpreter in the browser (WebAssembly). CI deploys it to GitHub Pages from master. See [Website](docs/Architecture/Website.md).
+
 ## Editor support
 
 The VS Code extension in [`vscode-extension/myla`](vscode-extension/myla/README.md) starts the language server (diagnostics as you type, hover, go to definition, references, completion, semantic highlighting), runs and tests files, and debugs them with gdb through its own debug adapter; it uses the `build/myla` and `build/myla-lsp` of the repository that `scripts/bootstrap.sh` builds. A tree-sitter grammar, generated from [`grammar/myla.ebnf`](grammar/myla.ebnf), is in `editor/`. See [Editor tooling](docs/Architecture/Editor-tooling.md).

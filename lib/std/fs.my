@@ -5,7 +5,7 @@
 // carried in a `Result`, so callers compose them with `?` (D16/D36). The
 // underlying open/read/close go through the platform layer (`std.platform`),
 // natively and in the interpreter alike, with one error mapping: the cause
-// codes the primitives give (`from_cause`, D208).
+// codes the primitives give (`from_cause`, D209).
 //
 // `File` (MYLA-339) is a descriptor opened by path, a stream of `std.io`'s
 // `Read`, `Write` and `Seek`, which this module imports from there; the
@@ -72,14 +72,14 @@ pub fun write_bytes(path: str, b: [uint8]) -> Result<(), IoError> {
 // (MYLA-98); `__unlink(path)`, `__rmdir(path)` and `__rename(from, to)`
 // remove a file (or a symbolic link itself), remove an empty directory and
 // rename (MYLA-96). Each sets the cause code that `__io_errno` reads
-// (std.ioerror's, D208).
+// (std.ioerror's, D209).
 //
 // `tests/burn/test_fs.py` covers them on every target, and the test functions
 // at the end of this file use them (`myla test` runs only the cases of the
 // file it is given, not those of the modules it links).
 
 // The kinds `__stat` and `__path_stat` give: std.platform's KIND_FILE, …
-// (D208; tests/burn/test_platform_interface.py holds them to it).
+// (D209; tests/burn/test_platform_interface.py holds them to it).
 const KIND_FILE: int64 = 1
 const KIND_DIR: int64 = 2
 const KIND_SYMLINK: int64 = 3
@@ -547,7 +547,7 @@ pub enum FileKind {
 
 // What the file system knows of a file: its size in bytes, its kind, its
 // permission bits (POSIX's `0o7777`; what the platform makes of its own
-// where it has none, D208) and when it was last changed, in
+// where it has none, D209) and when it was last changed, in
 // nanoseconds since 1970 (`std.time.from_unix_ns` makes a `DateTime` of it).
 #derive(Eq)
 pub struct Metadata {

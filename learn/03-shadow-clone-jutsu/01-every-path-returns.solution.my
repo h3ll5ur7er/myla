@@ -1,0 +1,9 @@
+#test("Sunday")["double ramen"]
+#test("Monday")["ramen"]
+#test("Friday")["ramen"]
+fun lunch(day: str) -> str {
+    if day == "Sunday" {
+        return "double ramen"
+    }
+    return "ramen"
+}

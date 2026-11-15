@@ -1,0 +1,18 @@
+// title: Over Nine Thousand
+// xp: 15
+// hidden: power_level #test("Vegeta", 18000)["Vegeta: 18000"]
+// hint: A parameter can have a default, used when the caller leaves it out.
+// hint: The default goes in the parameter list after the parameter's type, with `=`.
+//
+// Scouters everywhere agree: unless told otherwise, a power level is over
+// nine thousand. Give `level` a default of `9001`, so `power_level("Goku")`
+// works without the second argument, as `goku` calls it.
+#test()["Goku: 9001"]
+fun goku() -> str {
+    return power_level("Goku")
+}
+
+#test("Krillin", 1770)["Krillin: 1770"]
+fun power_level(name: str, level: int) -> str {
+    return f"{name}: {level}"
+}

@@ -60,7 +60,7 @@ pub struct Output {
 // name with `=` in it (D160) or a NUL byte in the program's name, an
 // argument or the directory; `WorkingDir`: the directory `cwd` gave can't
 // be entered, with the number of why (Linux's errno on every target, D189,
-// D208: 2 not there, 20 not a directory, 13 denied); `Other` holds the
+// D209: 2 not there, 20 not a directory, 13 denied); `Other` holds the
 // platform's own code for anything else.
 #derive(Eq)
 pub enum SpawnError {
@@ -119,7 +119,7 @@ fun dir_message(code: int32) -> str {
 // code; tests/burn/test_platform_interface.py holds them to one value).
 const DIR_FAILED: int32 = 65536
 
-// The error of a (nonzero) spawn's cause code (std.ioerror's, D208).
+// The error of a (nonzero) spawn's cause code (std.ioerror's, D209).
 #test(1)[SpawnError.NotFound]
 #test(2)[SpawnError.PermissionDenied]
 #test(9)[SpawnError.Unsupported]

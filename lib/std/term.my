@@ -82,7 +82,7 @@ impl Format for TermError {
     }
 }
 
-// The error of the cause code `e` (std.ioerror's, D208): `Other` of the
+// The error of the cause code `e` (std.ioerror's, D209): `Other` of the
 // number `code_number` gives one that isn't a terminal's.
 #test(35)[TermError.NotATerminal]
 #test(34)[TermError.NotATerminal]

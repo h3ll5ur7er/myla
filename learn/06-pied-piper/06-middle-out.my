@@ -1,0 +1,41 @@
+// title: Middle-Out (boss)
+// xp: 110
+// boss: true
+// hidden: encode #test("ab")["1a1b"]
+// hidden: decode #test("1z")[Ok("z")]
+// hidden: decode #test("x")[Err("no count before 'x'")]
+// hint: Encoding: count how often the current character repeats, then write the count and the character.
+// hint: Decoding: gather digits into a number (`to_digit(10)` gives `Some` for a digit); a non-digit repeats that many times. A character without a count, or a count at the very end, is an error.
+//
+// Richard's revolutionary compression algorithm (well, run-length encoding)
+// needs both directions, with a Weissman score to make Hooli weep:
+//
+// - `encode("aaabcc")` gives `"3a1b2c"`: each run of a character as its count
+//   and the character.
+// - `decode("3a1b2c")` gives `Ok("aaabcc")`, and an `Err` for text that isn't
+//   an encoding: `Err("no count before 'b'")` when a character has no count,
+//   `Err("a count without a character")` when the text ends with digits.
+//
+// Counts can have more than one digit: `"12x"` is twelve `x`.
+#test("aaabcc")["3a1b2c"]
+#test("")[""]
+#test("xxxxxxxxxxxx")["12x"]
+fun encode(text: str) -> str {
+    return text
+}
+
+#test("3a1b2c")[Ok("aaabcc")]
+#test("12x")[Ok("xxxxxxxxxxxx")]
+#test("3ab")[Err("no count before 'b'")]
+#test("2a7")[Err("a count without a character")]
+fun decode(code: str) -> Result<str, str> {
+    return Ok(code)
+}
+
+#test("tip-to-tip efficiency")[true]
+fun round_trip(text: str) -> bool {
+    return match decode(encode(text)) {
+        Ok(back) => back == text,
+        Err(e) => false,
+    }
+}

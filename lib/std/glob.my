@@ -470,7 +470,7 @@ pub fun walk_with(dir: str, follow_links: bool) -> Result<[str], IoError> {
     return Ok(out)
 }
 
-// `__path_stat`'s kind of a directory: std.platform's KIND_DIR (D208).
+// `__path_stat`'s kind of a directory: std.platform's KIND_DIR (D209).
 const KIND_DIR: int64 = 2
 
 // Whether `p` is a directory itself, not a symbolic link to one.

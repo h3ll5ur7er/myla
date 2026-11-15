@@ -1465,7 +1465,7 @@ class Warnings(unittest.TestCase):
 class Primitives(unittest.TestCase):
     """The primitives directly: what a port to another system must give
     (docs/Language/Standard-library/Net.md). `__io_errno` gives the cause
-    codes of std.ioerror (D208): 32 would block, 33 a connect in progress, 11
+    codes of std.ioerror (D209): 32 would block, 33 a connect in progress, 11
     invalid input, 9 unsupported, 34 a handle that isn't open."""
 
     PROGRAM = """#allow(primitive)

@@ -23,9 +23,9 @@ A target of [[MYLA-62]] after [[MYLA-162]]: Windows x64 through the x86-64 backe
 
 - [ ] [[MYLA-262]], [[MYLA-265]] and [[MYLA-269]] (or their parts this target needs) before the port
 
-## The plan (accepted 2026-11-14, D208 to D215)
+## The plan (accepted 2026-11-14, D209 to D216)
 
-The owner took the eight recommendations of the Windows plan ([[Project/Follow-up-plan#windows-2026-11-14]]): the platform interface in Myla's terms first (D208), the port in steps with what isn't there yet `Unsupported` (D209), LLVM's assembler and linker (D210), system libraries only (D211), Wine and a Windows runner (D212), cross-built first and bootstrapped on Windows later (D213), UTF-8 in Myla with UTF-16 at the API (D214), and what Windows defines differently (D215). [[MYLA-269]]'s object model isn't needed first: clang reads GAS text for COFF too.
+The owner took the eight recommendations of the Windows plan ([[Project/Follow-up-plan#windows-2026-11-14]]): the platform interface in Myla's terms first (D209), the port in steps with what isn't there yet `Unsupported` (D210), LLVM's assembler and linker (D211), system libraries only (D212), Wine and a Windows runner (D213), cross-built first and bootstrapped on Windows later (D214), UTF-8 in Myla with UTF-16 at the API (D215), and what Windows defines differently (D216). [[MYLA-269]]'s object model isn't needed first: clang reads GAS text for COFF too.
 
 - [ ] [[MYLA-700]] a target record, each target's tools named by it
 - [ ] [[MYLA-701]] the platform interface in Myla's terms

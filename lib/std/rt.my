@@ -13,7 +13,7 @@
 // does natively; addresses are `int64`. A string's cell holds its length
 // (8 bytes), then its bytes. What it needs from the operating system goes
 // through the platform layer, `std.platform` (`os.`), in Myla's terms
-// (D208); `__set_io_errno` records the cause code (std.ioerror's) `std.io`
+// (D209); `__set_io_errno` records the cause code (std.ioerror's) `std.io`
 // reports and `__environ()` gives the environment.
 
 import .platform as os
@@ -357,7 +357,7 @@ pub fun write_file(path: str, contents: str) {
 // `__list_dir`: the name of every entry of the directory at `path`, each
 // followed by a NUL byte, in the file system's order ("." and ".." included),
 // or "" with the cause. The platform's records are its own: their names and
-// sizes come through `os.dir_entry_*` (D208).
+// sizes come through `os.dir_entry_*` (D209).
 pub fun list_dir(path: str) -> str {
     __set_io_errno(0)
     if nul_in(path) {

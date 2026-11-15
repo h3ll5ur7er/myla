@@ -1068,7 +1068,7 @@ fun main() {
     print(e(__signal_listen(h)))
 }
 """
-# the cause codes (std.ioerror's, D208): 35 not a terminal, 34 a handle
+# the cause codes (std.ioerror's, D209): 35 not a terminal, 34 a handle
 # that isn't open, 11 invalid input
 PRIMITIVES_OUT = """0 0
 -1 35

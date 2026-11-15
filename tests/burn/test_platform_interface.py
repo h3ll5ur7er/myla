@@ -1,5 +1,5 @@
 """Burn test: every platform module offers the same interface, in Myla's
-terms (MYLA-701, D208).
+terms (MYLA-701, D209).
 
 `std.platform` is one module per target (`lib/std/platform.my` for x86-64
 Linux, `platform_aarch64.my`, `platform_wasm.my`; Windows' next), which the

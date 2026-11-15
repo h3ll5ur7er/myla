@@ -1,0 +1,30 @@
+import std.task as task
+
+// An actor's methods run one at a time; child tasks run in parallel.
+actor Counter {
+    n: int,
+}
+
+impl Counter {
+    fun add(var self, k: int) -> int {
+        self.n += k
+        return self.n
+    }
+}
+
+async fun work(c: Counter, k: int) -> int {
+    await task.sleep(5)
+    return await c.add(k)
+}
+
+#main
+async fun main() {
+    let c = Counter { n: 0 }
+    async let a = work(c, 20)
+    async let b = work(c, 22)
+    let x = await a
+    let y = await b
+    print(f"the counter reached {await c.add(0)}")
+}
+// output:
+// the counter reached 42

@@ -12,7 +12,7 @@
   | `x86_64-linux` | GNU `as --64` on an x86-64 machine, else `clang --target=x86_64-linux-gnu` | `ld`, else `ld.lld -static` | (the machine) |
   | `aarch64-linux` | GNU `as` on an aarch64 machine, else `clang --target=aarch64-linux-gnu` | `ld`, else `ld.lld -static` | `qemu-aarch64` (`qemu-user`) |
   | `wasm32-wasi` | `clang --target=wasm32-wasi` | `wasm-ld` | Node 22 or newer (`MYLA_EMULATOR="node tools/wasm/run.mjs"` for `myla test`) |
-  | `x86_64-windows` | `clang --target=x86_64-pc-windows-msvc` | `llvm-dlltool` (the system DLLs' import libraries) and `lld-link` (D210) | Wine (D212). Not built yet: a build says `building for x86_64-windows is not supported yet` until [[MYLA-702]] |
+  | `x86_64-windows` | `clang --target=x86_64-pc-windows-msvc` | `llvm-dlltool` (the system DLLs' import libraries) and `lld-link` (D211) | Wine (D213). Not built yet: a build says `building for x86_64-windows is not supported yet` until [[MYLA-702]] |
 - **Python 3.12 or newer**, only to run the tests (standard library only; `uv` is optional).
 
 ## Build the toolchain

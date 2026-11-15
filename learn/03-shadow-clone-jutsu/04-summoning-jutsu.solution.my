@@ -1,0 +1,10 @@
+#test(3, 14)[42]
+#test(10, 5)[50]
+fun use_it(k: int, x: int) -> int {
+    let times = multiplier(k)
+    return times(x)
+}
+
+fun multiplier(k: int) -> (int) -> int {
+    return (x: int) => x * k
+}

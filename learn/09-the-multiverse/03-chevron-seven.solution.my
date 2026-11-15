@@ -1,0 +1,6 @@
+#test([27, 7, 15, 32, 12, 30, 1])["27-07-15-32-12-30-01"]
+#test([10, 11, 12, 13, 14, 15, 16])["10-11-12-13-14-15-16"]
+fun address(glyphs: [int]) -> str {
+    let parts = glyphs.map((g: int) => f"{g:02}")
+    return parts.join("-")
+}

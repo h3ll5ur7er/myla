@@ -15,7 +15,7 @@
 // starting threads, thread-local state, the jumps into frames, the
 // stack-overflow handler) is the backend's, per target.
 //
-// Each function gives what the system gives in Myla's terms (D208): a
+// Each function gives what the system gives in Myla's terms (D209): a
 // result (0 or more), or minus a cause code (below), which std.rt records
 // for `std.io` (INTERRUPTED and WOULD_BLOCK are the ones it retries on); a
 // file's kind, size and time, not a `struct stat`; a directory's entries as
@@ -28,7 +28,7 @@
 // own build of it is its default target, the host's.
 pub const TARGET: str = "aarch64-linux"
 
-// What a function that fails gives: minus a cause code (D129, D208), never
+// What a function that fails gives: minus a cause code (D129, D209), never
 // Linux's errno, which `cause` maps here, so nothing above this module
 // knows Linux's numbers. The codes are std.ioerror's, the same in every
 // platform module (tests/burn/test_platform_interface.py holds them to it):
@@ -75,7 +75,7 @@ pub const KIND_FIFO: int64 = 6
 pub const KIND_SOCKET: int64 = 7
 pub const KIND_OTHER: int64 = 8
 
-// What a target may lack (D208, D209): without processes, `run`, `spawn`,
+// What a target may lack (D209, D210): without processes, `run`, `spawn`,
 // `spawn_with`, `spawn_piped`, `try_reap` and `kill` fail with UNSUPPORTED
 // (and `reap` gives -1); without sockets every `sock_` function does.
 pub const PROCESSES: bool = true

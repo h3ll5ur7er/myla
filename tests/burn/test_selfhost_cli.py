@@ -222,7 +222,7 @@ class SelfHostedCli(_Layout):
 
     def test_windows_is_a_target_not_built_yet(self):
         # `--target x86_64-windows` is known (MYLA-700) and refused cleanly,
-        # before any code is generated or tool run, until MYLA-702 (D209)
+        # before any code is generated or tool run, until MYLA-702 (D210)
         out = os.path.join(self.work, "out-win", "win")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         refusal = "myla: building for x86_64-windows is not supported yet (MYLA-702)\n"
