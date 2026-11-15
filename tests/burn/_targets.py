@@ -118,7 +118,8 @@ SKIP: dict[str, dict[str, str]] = {
            for c in ["Terminal", "Signals", "Primitives", "RawModeEnds"]},
     },
     # MYLA-702: Windows' first step has the standard streams, the heap, the
-    # clocks, the arguments and the environment, and tasks on one worker;
+    # clocks, the arguments and the environment, and tasks (on as many
+    # workers as on Linux since MYLA-703);
     # what its later steps bring is `Unsupported` until then (D210), which
     # NetOnWasm, PipesOnWasm, TermOnWasm and HttpOnWasm check there too
     "x86_64-windows": {
@@ -144,8 +145,6 @@ SKIP: dict[str, dict[str, str]] = {
         "test_router.Router": "Windows' sockets come with MYLA-706",
         **{f"test_term.{c}": "Windows' console and signals come with MYLA-707 (TermOnWasm checks they are Unsupported)"
            for c in ["Terminal", "Signals", "Primitives", "RawModeEnds"]},
-        "test_selfhost_codegen.SelfHostedCodegenParity.test_children_run_in_parallel":
-            "one worker until Windows' threads (MYLA-703)",
         # the start makes the command line and the environment UTF-8 in
         # the heap, so a cell freed then is taken again before a new one
         "test_selfhost_codegen.SelfHostedCodegenParity.test_a_runtime_variable_is_its_own_operand":
