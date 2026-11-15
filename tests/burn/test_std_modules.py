@@ -1,8 +1,9 @@
 """Every standard library module's own `#test` cases pass, interpreted and
 natively (MYLA-325, D164), and on the target MYLA_TEST_TARGET names
-(`scripts/test-target.py`): on wasm32 under Node, where `myla test` runs the
-harness again after each case that ends a run (MYLA-370); under qemu-aarch64
-it is excused (`_targets.py`: a qemu process per case takes minutes).
+(`scripts/test-target.py`): on wasm32 under Node and on Windows under Wine,
+where `myla test` runs the harness again after each case that ends a run
+(MYLA-370); under qemu-aarch64 it is excused (`_targets.py`: a qemu process
+per case takes minutes).
 
 The modules are found, not listed, so a new module of `lib/std/` is covered by
 adding its cases, and each run must report every case of the file (one per
@@ -10,9 +11,10 @@ adding its cases, and each run must report every case of the file (one per
 whose cases run in the interpreter only (natively it is the code the harness
 runs on), and the other targets' platform modules, which only their own
 targets can run: on a target, its own platform module runs (`platform_wasm`
-on wasm32, `platform_aarch64` on aarch64), which is its `std.platform`, built
-as that module (MYLA-397). Interpreted, all three platform modules run
-(MYLA-418: the 36 cases of the foreign two ran nowhere, MYLA-325).
+on wasm32, `platform_aarch64` on aarch64, `platform_windows` on Windows),
+which is its `std.platform`, built as that module (MYLA-397). Interpreted,
+every platform module runs (MYLA-418: the 36 cases of the foreign two ran
+nowhere, MYLA-325).
 """
 from __future__ import annotations
 
@@ -22,11 +24,13 @@ import subprocess
 import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, target_flags
+from ._targets import program_excuse
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 NOT_NATIVE = {"rt"}
-PLATFORMS = {"platform", "platform_aarch64", "platform_wasm"}   # `platform` is the host's (D161)
-OWN_PLATFORM = {"": "platform", "aarch64-linux": "platform_aarch64", "wasm32-wasi": "platform_wasm"}
+PLATFORMS = {"platform", "platform_aarch64", "platform_wasm", "platform_windows"}   # `platform` is the host's (D161)
+OWN_PLATFORM = {"": "platform", "aarch64-linux": "platform_aarch64", "wasm32-wasi": "platform_wasm",
+                "x86_64-windows": "platform_windows"}
 _RUN_MJS = os.path.join(os.path.dirname(STDLIB_ROOT), "tools", "wasm", "run.mjs")
 
 
@@ -72,8 +76,10 @@ class StdModuleCases(unittest.TestCase):
         self.assertNotIn("platform", _modules("wasm32-wasi"))
         self.assertIn("platform_aarch64", _modules("aarch64-linux"))
         self.assertNotIn("platform_wasm", _modules("aarch64-linux"))
+        self.assertIn("platform_windows", _modules("x86_64-windows"))
+        self.assertNotIn("platform_windows", _modules())
 
-        self.assertEqual(len(_modules(None)), len(_modules()) + 2)
+        self.assertEqual(len(_modules(None)), len(_modules()) + len(PLATFORMS) - 1)
 
     def _passes_all(self, proc: subprocess.CompletedProcess, name: str) -> None:
         n = _COUNTS[name]
@@ -96,6 +102,10 @@ class StdModuleCases(unittest.TestCase):
             if name in NOT_NATIVE:
                 continue
             with self.subTest(module=name):
+                # a module whose cases need what the target lacks yet
+                why = program_excuse("std." + name)
+                if why:
+                    self.skipTest(why)
                 self._passes_all(_test(name, *flags), name)
 
 

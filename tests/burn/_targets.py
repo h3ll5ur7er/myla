@@ -1,14 +1,14 @@
 """Which burn suites run on which target, and what each target is excused from,
 with why (MYLA-268, Language/Targets). `scripts/test-target.py <target>` runs
 SUITES with MYLA_TEST_TARGET set: the native helpers (`_native.py`) then build
-for the target and run under qemu-aarch64 or Node, and the tests below are
+for the target and run under qemu-aarch64, Node or Wine, and the tests below are
 skipped with their reason. A program inside a test's loop that a target is
 excused from is skipped by the loop itself (`program_excuse`)."""
 from __future__ import annotations
 
 import os
 
-TARGETS = ["aarch64-linux", "wasm32-wasi"]
+TARGETS = ["aarch64-linux", "wasm32-wasi", "x86_64-windows"]
 
 # The suites every target runs: the parity programs, the runtime errors, the
 # error corpus's runtime cases, the I/O suites and the language features.
@@ -76,6 +76,8 @@ _X86_TESTS = [
     "test_selfhost_codegen.SelfHostedCodegenParity.test_derived_eq_on_a_plain_enum_compares_tags",
 ]
 
+_WIN_FILES = "Windows' files and directories come with MYLA-704"
+
 _BOTH = {
     **{t: _X86_CODE for t in _X86_TESTS},
     "test_std_modules.StdModuleCases.test_interpreted": "the interpreter's runs are the host's",
@@ -115,12 +117,55 @@ SKIP: dict[str, dict[str, str]] = {
         **{f"test_term.{c}": "WASI has no terminals or signals (TermOnWasm checks they are Unsupported)"
            for c in ["Terminal", "Signals", "Primitives", "RawModeEnds"]},
     },
+    # MYLA-702: Windows' first step has the standard streams, the heap, the
+    # clocks, the arguments and the environment, and tasks on one worker;
+    # what its later steps bring is `Unsupported` until then (D210), which
+    # NetOnWasm, PipesOnWasm, TermOnWasm and HttpOnWasm check there too
+    "x86_64-windows": {
+        **_BOTH,
+        **{t: _WIN_FILES for t in [
+            "test_fs",
+            "test_compiler_parity.TestCompilerParity.test_io_error_text",
+            "test_platform_interface.Behaviour",
+            "test_platform_primitives.Bytes",
+            "test_platform_primitives.Descriptors",
+            "test_platform_primitives.Paths",
+            "test_net.Hosts",
+        ]},
+        "test_stdio.BrokenPipe.test_a_write_to_another_descriptor_reports_it":
+            "a Windows program has the standard streams only, until its files (MYLA-704)",
+        "test_platform_primitives.Entropy": "random bytes (bcrypt, D212) come with Windows' files (MYLA-704)",
+        "test_process": "Windows' child processes come with MYLA-705 (PipesOnWasm checks they are Unsupported)",
+        "test_platform_primitives.Pipes": "Windows' child processes come with MYLA-705 (PipesOnWasm checks they are Unsupported)",
+        **{f"test_net.{c}": "Windows' sockets come with MYLA-706 (NetOnWasm checks they are Unsupported)"
+           for c in ["Tcp", "Udp", "Dns", "Errors", "Primitives"]},
+        **{f"test_reactor_scaling.{c}": "Windows' sockets come with MYLA-706 (its Readers run)"
+           for c in ["RoundTrips", "Accepts", "Closed", "Lots"]},
+        "test_router.Router": "Windows' sockets come with MYLA-706",
+        **{f"test_term.{c}": "Windows' console and signals come with MYLA-707 (TermOnWasm checks they are Unsupported)"
+           for c in ["Terminal", "Signals", "Primitives", "RawModeEnds"]},
+        "test_selfhost_codegen.SelfHostedCodegenParity.test_children_run_in_parallel":
+            "one worker until Windows' threads (MYLA-703)",
+        # the start makes the command line and the environment UTF-8 in
+        # the heap, so a cell freed then is taken again before a new one
+        "test_selfhost_codegen.SelfHostedCodegenParity.test_a_runtime_variable_is_its_own_operand":
+            "Windows' start allocates (the arguments made UTF-8), so the heap isn't fresh at `main`",
+        **{t: "Wine gives a program its Windows path as argv[0] (`Z:\\…\\prog`), not the argv0 asked for"
+           for t in ["test_stdio.TestArgsExample.test_native_matches_interpreter",
+                     "test_stdio.TestStdioParity.test_args_round_trip"]},
+    },
 }
 
-# Programs inside a test's loop a target is excused from.
+# Programs inside a test's loop a target is excused from (and std's modules
+# in test_std_modules, as `std.<name>`).
 SKIP_PROGRAMS: dict[str, dict[str, str]] = {
     "wasm32-wasi": {
         "io_through_the_ir": "it runs a child process, which WASI has none of",
+    },
+    "x86_64-windows": {
+        "io_through_the_ir": "it runs a child process and opens files, which Windows has none of until MYLA-704 and MYLA-705",
+        **{f"std.{m}": _WIN_FILES for m in ["fs", "glob", "io", "test"]},
+        **{f"std.{m}": "random bytes (bcrypt, D212) come with Windows' files (MYLA-704)" for m in ["random", "uuid"]},
     },
 }
 

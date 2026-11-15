@@ -538,7 +538,10 @@ impl CodeGen {
             Intrinsic.RtAddr(sym) => {
                 // the loads and stores reading it name the variable
                 if self.temp_mem[d] != "" { return }
-                if self.frames && tls_offset(sym) != 0 {
+                if self.frames && tls_offset(sym) != 0 && self.windows {
+                    // (Windows' one worker, MYLA-702: `tv`)
+                    self.emit(format("leaq __tls_blocks+{}(%rip), %rax", tls_offset(sym)))
+                } else if self.frames && tls_offset(sym) != 0 {
                     self.emit("movq %fs:0, %rax")
                     self.emit(format("leaq {}(%rax), %rax", tls_offset(sym)))
                 } else { self.emit(format("leaq {}(%rip), %rax", sym)) }
@@ -984,6 +987,8 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.Global(d, sym, w) => {
+                // (a kernel32 function's import slot on Windows, MYLA-702)
+                self.note_import(sym)
                 if w == 4 { self.emit(format("movslq {}, %rax", self.tv(sym))) } else { self.emit(format("movq {}, %rax", self.tv(sym))) }
                 self.store_temp(d, temp_base)
             },
@@ -1971,6 +1976,7 @@ impl CodeGen {
     // The memory operand of the runtime variable `sym`, `off` bytes in: in
     // the worker's block with tasks (a worker's own), else next to %rip.
     fun rt_var_at(self, sym: str, off: int32) -> str {
+        if self.frames && tls_offset(sym) != 0 && self.windows { return format("__tls_blocks+{}(%rip)", tls_offset(sym) + off) }
         if self.frames && tls_offset(sym) != 0 { return format("%fs:{}", tls_offset(sym) + off) }
         if off == 0 { return format("{}(%rip)", sym) }
         return format("{}+{}(%rip)", sym, off)

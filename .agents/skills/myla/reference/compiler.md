@@ -78,7 +78,7 @@ Entry points: `main.my` (CLI) → `driver.my` (`cmd_interp`, `cmd_test`, `cmd_te
 | `gen_main.my` | 140 | Bootstrap compiler entry (above) |
 | `lex_main`, `parse_main`, `check_main`, `interp_main`, `floatlit_main`, `project_main` | 17–191 | Drivers for the differential burn tests |
 
-Not in selfhost but part of the compiler: `lib/std/rt.my` (5464, the runtime in Myla), `lib/std/platform.my` / `platform_aarch64.my` / `platform_wasm.my` (system-call layer per target, `TARGET` const), `lib/std/fmt.my`, `slice.my`, `num.my` (called by name from the lowering), `tools/embed/main.my` (writes embedded_std.my), `tools/grammar/` (EBNF → tree-sitter), `tools/lsp/` (language server: `resolve.my` walks the AST, `features.my` completion keywords).
+Not in selfhost but part of the compiler: `lib/std/rt.my` (5464, the runtime in Myla), `lib/std/platform.my` / `platform_aarch64.my` / `platform_wasm.my` / `platform_windows.my` (system-call layer per target, `TARGET` const; Windows' calls kernel32 through `__syscall(__rt_get("__imp_Name"), …)`, the import library made of the `__imp_` names the code loads), `lib/std/fmt.my`, `slice.my`, `num.my` (called by name from the lowering), `tools/embed/main.my` (writes embedded_std.my), `tools/grammar/` (EBNF → tree-sitter), `tools/lsp/` (language server: `resolve.my` walks the AST, `features.my` completion keywords).
 
 Module cycles are allowed: `lower` imports `codegen` and `codegen` imports `lower`; `ir_x86`, `ir_a64`, `ir_wasm`, `runtime_*` add `impl CodeGen` blocks from other modules.
 
@@ -108,7 +108,7 @@ Module cycles are allowed: `lower` imports `codegen` and `codegen` imports `lowe
 2. **std.rt in Myla** (`lib/std/rt.my` over `std.platform`, raw memory through `__load64`/`__store64`/`__alloc`/`__addr_of`/`__str_of`/…, `is_raw_memory_primitive`, std-only): compiled through the IR with every native program (loader `opts.runtime`). The lowering calls it in three ways: `myla_runtime_function(prim)` turns `__str_concat`, `__read`, `__stat`, … into `std$rt$<name>` (`Lower.rt_call`); `CodeGen.rt_exec()` aliases runtime entry names to std.rt functions (`__exit_program` → `std$rt$exit_program`); direct `Inst.Call("std$fmt$fmt_int")`, `std$slice$take`, `trap_text_fn`. Every name a back end calls must be in `checker.backend_std_functions()` (else `request_fn` panics "the checker never marked as called"; `test_lazy_std.py` greps the back ends for them).
 3. **IR routines generated per type** in lower.my (drops, clones, walks, deep copies, `==`, hash, map find/put, env routines, partials, `__new` frame constructors, `__compose_call`), requested through `Want`/`type_jobs`/`need_*` and emitted by `emit_routine`/`emit_drop_helpers`.
 
-`std.platform` is chosen per target by the loader (`for_target`: `platform_aarch64.my`, `platform_wasm.my` replace `platform.my`).
+`std.platform` is chosen per target by the loader (`for_target`: `platform_aarch64.my`, `platform_wasm.my`, `platform_windows.my` replace `platform.my`).
 
 ## Interpreter and parity
 

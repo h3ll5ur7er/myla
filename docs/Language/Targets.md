@@ -7,7 +7,7 @@ What a Myla program can count on wherever it runs, and what depends on the targe
 | Linux on x86-64 | `x86_64-linux` | The machine: a static executable, no libc |
 | Linux on aarch64 | `aarch64-linux` | The machine (a Raspberry Pi 4 or 5 with a 64-bit OS, an ARM server): a static executable, no libc |
 | WebAssembly on WASI preview 1 | `wasm32-wasi` | Node: `node tools/wasm/run.mjs`, or a web page through `tools/wasm/myla.mjs` (D125). Node is the host the suites test (D158); another WASI preview 1 host such as wasmtime should run the programs too, but nothing checks it |
-| Windows on x86-64 | `x86_64-windows` | Not yet: `--target` knows it, and a build says `myla: building for x86_64-windows is not supported yet (MYLA-702)` until its first step, a static `.exe` ([[MYLA-165]], D210) |
+| Windows on x86-64 | `x86_64-windows` | Windows: a static console `.exe` that imports only `kernel32.dll` (D212), cross-built on Linux (D214). The suites run it under Wine (D213); a Windows runner is [[MYLA-708]]. Its first step ([[MYLA-702]]) has the standard streams, the heap, the clocks, the arguments and the environment; the rest comes in steps and is `Unsupported` until then ([[MYLA-165]], D210, the last column below) |
 
 [TOC]
 
@@ -19,7 +19,8 @@ The language means the same everywhere, and the interpreter and every target pri
 - **Floats** follow IEEE 754 and print the same digits everywhere: the formatting is Myla code (`std.num`). A NaN prints as `nan`. Its sign and payload, which processors set differently, can't be seen: `std.math.to_bits` reads every NaN as `0x7FF8000000000000`, and `copysign` reads a NaN's sign as positive (D128).
 - **`std.math`** gives bit-identical results everywhere: its functions are Myla code over the processor's correctly rounded `sqrt`.
 - **Maps** iterate in insertion order (D105).
-- **Runtime errors** print `runtime error: <message>` and the position, and exit with status 1 ([[Language/Attributes-and-testing]]). Running out of the stack is `runtime error: stack overflow` with status 1 on every target, without a position (MYLA-182, [[MYLA-261]]).
+- **Runtime errors** print `runtime error: <message>` and the position, and exit with status 1 ([[Language/Attributes-and-testing]]). Running out of the stack is `runtime error: stack overflow` with status 1 on every target, without a position (MYLA-182, [[MYLA-261]]; on Windows from [[MYLA-703]], D216).
+- **Text** is UTF-8: what a program prints is the same bytes on every target, `"\n"` a newline alone (no `\r\n` on Windows, whose console is switched to UTF-8 while the program runs), and its arguments and environment arrive as UTF-8 (D215).
 - **`become`** passes six argument words freely on every target, and on the stack no more than the function received (D131, [[Language/Statements]]).
 - **The order of tasks** on one worker is the defined order of D110. On several workers it is whatever the timing makes it; a program whose output depends on it is wrong.
 - **Errors** are the same causes everywhere: `IoError` and `SpawnError` name `NotFound`, `PermissionDenied`, `AlreadyExists`, `IsADirectory` and the rest (D129, [[Language/Standard-library]]). Only `Other(code)` carries a platform's own number, which isn't portable.
@@ -28,31 +29,31 @@ The language means the same everywhere, and the interpreter and every target pri
 
 A program learns that its target lacks something from an error: the cause `Unsupported` (D129, D132). A platform module declares what its target lacks (`PROCESSES`, `SOCKETS` in `std.platform`, D209) and fails those functions with that cause instead of emulating them. Code chosen per target at compile time, for the standard library and packages, is still to come ([[MYLA-245]]).
 
-| | x86-64 Linux | aarch64 Linux | wasm32 on WASI |
-| --- | --- | --- | --- |
-| Child processes (`std.process.run`, `run_async`, `command`) | Yes | Yes | No: `Err(SpawnError.Unsupported)` |
-| A child with pipes for its stdin, stdout and stderr, waited for or not, signalled (the primitives `__spawn_piped`, `__try_reap`, `__kill`, [[MYLA-336]]); each stream instead this process's or nothing, and the input a descriptor handed over ([[MYLA-378]]) | Yes: fork, exec, pipes, a pidfd, `wait4`; `/dev/null`, `dup2` | Yes: `clone` for the fork, `dup3` | No: the cause `Unsupported` |
-| Files opened with flags, read and written at a cursor, seeked, their size, kind, permissions and modification time, closed with the close's error (`__open`, `__seek`, `__fstat`, `__close`, [[MYLA-336]], [[MYLA-378]]) | Yes | Yes (`openat`) | Yes, within what the host shares (`path_open`, `fd_seek`, `fd_filestat_get`, `fd_close`); the mode given to a new file isn't used, and the permissions read are made up from its kind |
-| A path's size, kind, permissions, time, device and number without opening it, a symbolic link followed or itself (`__path_stat`, [[MYLA-378]], [[MYLA-363]]) | `stat`, `lstat` | `newfstatat`, with `AT_SYMLINK_NOFOLLOW` for a link itself | `path_filestat_get` with the follow flag or without; the permissions made up from the kind (a link 0o777) |
-| A string's bytes as a list and back in one copy, a builder's capacity (`__str_to_bytes`, `__bytes_to_str`, `StringBuilder(n)`, [[MYLA-369]]) | Yes | Yes | Yes (std.rt's, in Myla) |
-| A descriptor read into a list of bytes and written from one, without a string between (`__read_bytes`, `__write_bytes`, D177, [[MYLA-399]]) | Yes | Yes | Yes (std.rt's, in Myla) |
-| Sockets: TCP, UDP, name lookup (`std.net`, the `__sock_*` primitives, [[MYLA-346]]) | Yes: the BSD socket calls, epoll for the reactor | Yes (the same calls; under qemu-user too) | No: `Unsupported` (WASI preview 1 has no sockets) |
-| The terminal: whether a stream is one, its size, raw mode, escape sequences (`std.term`, the `__term_*` primitives, [[MYLA-350]]) | Yes: `ioctl` (TCGETS, TCSETS, TIOCGWINSZ) | Yes (the same; under qemu-user too) | No: nothing is a terminal, the size is `None`, raw mode `Unsupported` |
-| SIGINT and SIGTERM awaited (`std.signal`, `__signal_listen`, `__signal_take`, [[MYLA-350]]) | Yes: a handler writes them to a self-pipe the reactor waits on | Yes | No: `Unsupported` (WASI has no signals) |
-| The system's entropy (`__random_bytes`, [[MYLA-336]]) | `getrandom` | `getrandom` | The host's `random_get` (Node: `crypto.getRandomValues`) |
-| The wall clock (`__wall_ns`, `std.time.now_utc`, [[MYLA-334]]) | `clock_gettime(CLOCK_REALTIME)` | The same | `clock_time_get` with the realtime clock (Node: `Date.now()`, so milliseconds) |
-| Workers for tasks | `MYLA_THREADS`, else one per CPU the process may use; at most 32 | The same | One; `MYLA_THREADS` is ignored (D125 (4)) |
-| Input that suspends a task (`read_line_async`, …) | Yes: the task waits, the others run | Yes | No: the read blocks the program (the host can't wait for input without blocking) |
-| `task.sleep`, `task.timeout` | Yes | Yes | Yes (`poll_oneoff`) |
-| Files and directories | The whole file system | The whole file system | What the host shares: the first preopened directory; permission bits are made up from the file's kind |
-| The working directory | The process's (`getcwd`) | The process's | `PWD` from the environment |
-| `exit(code)` | The low 8 bits reach the parent (POSIX) | The same | The host's `proc_exit`; `run.mjs` passes the code on |
-| A child's end by a signal (`ExitStatus.Signaled`) | Yes | Yes | No processes |
-| The main thread's stack | Up to 120 MiB (the soft limit raised, MYLA-182) | The same (under qemu-user: 8 MiB unless `QEMU_STACK_SIZE` says more) | 8 MiB of shadow stack, and the engine's own call stack (Node: `--stack-size`) |
-| A worker's stack | 8 MiB, with a guard page | The same | One worker: the main stack |
-| Memory | The machine's; a freed cell bigger than 16 MiB goes back to the system (D157) | The machine's, as on x86-64 | At most 4 GiB, which the program never gives back: a freed big cell is reused by a later one it is large enough for, and a growing list or string at the top of the memory grows where it is (a list of 150 million `int64`s fits, [[MYLA-284]]) |
-| A line printed whole while other workers print | Up to `PIPE_BUF` (4 KiB) per line | The same | One worker: always |
-| Debug information (`myla build -g`) | Yes ([[Development/Debugging]]) | Not yet ([[MYLA-259]]) | Not yet |
+| | x86-64 Linux | aarch64 Linux | wasm32 on WASI | x86-64 Windows ([[MYLA-702]]) |
+| --- | --- | --- | --- | --- |
+| Child processes (`std.process.run`, `run_async`, `command`) | Yes | Yes | No: `Err(SpawnError.Unsupported)` | No: `Err(SpawnError.Unsupported)` until [[MYLA-705]] |
+| A child with pipes for its stdin, stdout and stderr, waited for or not, signalled (the primitives `__spawn_piped`, `__try_reap`, `__kill`, [[MYLA-336]]); each stream instead this process's or nothing, and the input a descriptor handed over ([[MYLA-378]]) | Yes: fork, exec, pipes, a pidfd, `wait4`; `/dev/null`, `dup2` | Yes: `clone` for the fork, `dup3` | No: the cause `Unsupported` | No: the cause `Unsupported` ([[MYLA-705]]) |
+| Files opened with flags, read and written at a cursor, seeked, their size, kind, permissions and modification time, closed with the close's error (`__open`, `__seek`, `__fstat`, `__close`, [[MYLA-336]], [[MYLA-378]]) | Yes | Yes (`openat`) | Yes, within what the host shares (`path_open`, `fd_seek`, `fd_filestat_get`, `fd_close`); the mode given to a new file isn't used, and the permissions read are made up from its kind | No: `Unsupported` until [[MYLA-704]]; the standard streams only |
+| A path's size, kind, permissions, time, device and number without opening it, a symbolic link followed or itself (`__path_stat`, [[MYLA-378]], [[MYLA-363]]) | `stat`, `lstat` | `newfstatat`, with `AT_SYMLINK_NOFOLLOW` for a link itself | `path_filestat_get` with the follow flag or without; the permissions made up from the kind (a link 0o777) | No: `Unsupported` ([[MYLA-704]]) |
+| A string's bytes as a list and back in one copy, a builder's capacity (`__str_to_bytes`, `__bytes_to_str`, `StringBuilder(n)`, [[MYLA-369]]) | Yes | Yes | Yes (std.rt's, in Myla) | Yes (std.rt's, in Myla) |
+| A descriptor read into a list of bytes and written from one, without a string between (`__read_bytes`, `__write_bytes`, D177, [[MYLA-399]]) | Yes | Yes | Yes (std.rt's, in Myla) | Yes, the standard streams |
+| Sockets: TCP, UDP, name lookup (`std.net`, the `__sock_*` primitives, [[MYLA-346]]) | Yes: the BSD socket calls, epoll for the reactor | Yes (the same calls; under qemu-user too) | No: `Unsupported` (WASI preview 1 has no sockets) | No: `Unsupported` until [[MYLA-706]] (Winsock) |
+| The terminal: whether a stream is one, its size, raw mode, escape sequences (`std.term`, the `__term_*` primitives, [[MYLA-350]]) | Yes: `ioctl` (TCGETS, TCSETS, TIOCGWINSZ) | Yes (the same; under qemu-user too) | No: nothing is a terminal, the size is `None`, raw mode `Unsupported` | No: nothing is a terminal yet, raw mode `Unsupported` ([[MYLA-707]]) |
+| SIGINT and SIGTERM awaited (`std.signal`, `__signal_listen`, `__signal_take`, [[MYLA-350]]) | Yes: a handler writes them to a self-pipe the reactor waits on | Yes | No: `Unsupported` (WASI has no signals) | No: `Unsupported` until [[MYLA-707]] (Ctrl-C and the console's close, D216) |
+| The system's entropy (`__random_bytes`, [[MYLA-336]]) | `getrandom` | `getrandom` | The host's `random_get` (Node: `crypto.getRandomValues`) | Not yet: `Unsupported` (`BCryptGenRandom` comes with the files, D212) |
+| The wall clock (`__wall_ns`, `std.time.now_utc`, [[MYLA-334]]) | `clock_gettime(CLOCK_REALTIME)` | The same | `clock_time_get` with the realtime clock (Node: `Date.now()`, so milliseconds) | `GetSystemTimePreciseAsFileTime` (100 ns) |
+| Workers for tasks | `MYLA_THREADS`, else one per CPU the process may use; at most 32 | The same | One; `MYLA_THREADS` is ignored (D125 (4)) | One until [[MYLA-703]], as on wasm32; `MYLA_THREADS` is ignored |
+| Input that suspends a task (`read_line_async`, …) | Yes: the task waits, the others run | Yes | No: the read blocks the program (the host can't wait for input without blocking) | No: the read blocks the program (one worker) |
+| `task.sleep`, `task.timeout` | Yes | Yes | Yes (`poll_oneoff`) | Yes: the worker sleeps until the nearest timer (`Sleep`) |
+| Files and directories | The whole file system | The whole file system | What the host shares: the first preopened directory; permission bits are made up from the file's kind | None yet ([[MYLA-704]]) |
+| The working directory | The process's (`getcwd`) | The process's | `PWD` from the environment | `Unsupported` until [[MYLA-704]] |
+| `exit(code)` | The low 8 bits reach the parent (POSIX) | The same | The host's `proc_exit`; `run.mjs` passes the code on | All 32 bits (`ExitProcess`, D216; under Wine a Linux parent sees the low 8) |
+| A child's end by a signal (`ExitStatus.Signaled`) | Yes | Yes | No processes | No processes |
+| The main thread's stack | Up to 120 MiB (the soft limit raised, MYLA-182) | The same (under qemu-user: 8 MiB unless `QEMU_STACK_SIZE` says more) | 8 MiB of shadow stack, and the engine's own call stack (Node: `--stack-size`) | 120 MiB reserved by the linker (`/stack`); running out of it isn't reported yet ([[MYLA-703]]) |
+| A worker's stack | 8 MiB, with a guard page | The same | One worker: the main stack | One worker: the main stack |
+| Memory | The machine's; a freed cell bigger than 16 MiB goes back to the system (D157) | The machine's, as on x86-64 | At most 4 GiB, which the program never gives back: a freed big cell is reused by a later one it is large enough for, and a growing list or string at the top of the memory grows where it is (a list of 150 million `int64`s fits, [[MYLA-284]]) | The machine's, through `VirtualAlloc`; a freed big cell goes back (`VirtualFree`) |
+| A line printed whole while other workers print | Up to `PIPE_BUF` (4 KiB) per line | The same | One worker: always | One worker: always |
+| Debug information (`myla build -g`) | Yes ([[Development/Debugging]]) | Not yet ([[MYLA-259]]) | Not yet | Not yet (D216) |
 
 ## Sockets on another system
 
