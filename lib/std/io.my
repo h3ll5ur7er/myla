@@ -8,7 +8,7 @@
 // Output is not buffered, so whatever a program wrote is out before it waits
 // for input.
 
-from .ioerror import IoError, from_errno
+from .ioerror import IoError, from_cause, code_number, BAD_HANDLE, OTHER
 import .str as str_m // `find_from`
 
 // Write `s`'s bytes to file descriptor `fd` (1 = stdout, 2 = stderr), all of
@@ -19,7 +19,7 @@ pub fun write(fd: int32, s: str) -> Result<(), IoError> {
     __write(fd, s)
     let err = __io_errno()
     if err != 0 {
-        return Err(from_errno(err))
+        return Err(from_cause(err))
     }
     return Ok(())
 }
@@ -54,26 +54,33 @@ fun put(fd: int32, s: str) {
     }
 }
 
-// What the errno `code` of a failed write means (std.rt's `errno_text`).
-#test(28)["no space left on device"]
-#test(77)["errno 77"]
+// What the cause code `code` (`__io_errno`'s, D209) of a failed write means
+// (std.rt's `errno_text`): a handle that isn't open, the system's codes
+// Linux and wasm32 give, else `errno` and the number `code_number` gives.
+#test(284)["no space left on device"]
+#test(34)["bad file descriptor"]
+#test(333)["errno 77"]
+#test(11)["errno 22"]
 pub fun errno_text(code: int32) -> str {
-    if code == 28 {
-        return "no space left on device"
-    }
-    if code == 5 {
-        return "input/output error"
-    }
-    if code == 9 {
+    if code == BAD_HANDLE {
         return "bad file descriptor"
     }
-    if code == 27 {
-        return "file too large"
+    let n = code_number(code)
+    if code >= OTHER {
+        if n == 28 {
+            return "no space left on device"
+        }
+        if n == 5 {
+            return "input/output error"
+        }
+        if n == 27 {
+            return "file too large"
+        }
+        if n == 122 {
+            return "disk quota exceeded"
+        }
     }
-    if code == 122 {
-        return "disk quota exceeded"
-    }
-    return f"errno {code}"
+    return f"errno {n}"
 }
 
 // --- Streams (MYLA-338) ---------------------------------------------------------
@@ -191,7 +198,7 @@ impl Read for FdStream {
         if n <= 0 { return Ok([]) }
         let chunk = __read_bytes(self.fd, n)
         let err = __io_errno()
-        if err != 0 { return Err(from_errno(err)) }
+        if err != 0 { return Err(from_cause(err)) }
         return Ok(chunk)
     }
 }
@@ -202,7 +209,7 @@ impl Write for FdStream {
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
         __write_bytes(self.fd, b)
         let err = __io_errno()
-        if err != 0 { return Err(from_errno(err)) }
+        if err != 0 { return Err(from_cause(err)) }
         return Ok(b.len())
     }
 
@@ -253,7 +260,7 @@ impl Seek for FdStream {
             End(k) => (k, 2)
         }
         let r = __seek(self.fd, offset, whence)
-        if r < 0 { return Err(from_errno(__io_errno())) }
+        if r < 0 { return Err(from_cause(__io_errno())) }
         return Ok(r)
     }
 }

@@ -488,9 +488,9 @@ Import: `from std.ioerror import IoError` (or the same from `std.fs`).
 - `pub enum IoError`:
   - `NotFound`, `PermissionDenied`, `AlreadyExists`, `NotADirectory`, `IsADirectory`, `NotEmpty`, `Interrupted`, `Cancelled`, `Unsupported`, `BrokenPipe`, `InvalidInput`
   - Network: `ConnectionRefused`, `ConnectionReset`, `ConnectionAborted`, `NotConnected`, `AddrInUse`, `AddrNotAvailable`, `TimedOut`, `HostUnreachable`, `NetworkUnreachable`
-  - `InvalidData`, `Other(int32)` (a raw errno)
+  - `InvalidData`, `Other(int32)` (the platform's own code; `Other(9)` a handle that isn't open)
 - `e.message() -> str` (`"not found (NotFound)"`), `impl Format` (so `f"{e}"` works)
-- `pub fun from_errno(code: int32) -> IoError`, `pub fun io_error_name(e: IoError) -> str`
+- `pub fun from_cause(code: int32) -> IoError` (a cause code, what `__io_errno()` gives, D209), `pub fun code_number(code: int32) -> int32`, `pub fun from_errno(code: int32) -> IoError` (a Linux errno), `pub fun io_error_name(e: IoError) -> str`; the cause codes `NOT_FOUND` (1) … `INVALID_DATA` (21), `WOULD_BLOCK`, `IN_PROGRESS`, `BAD_HANDLE`, `NOT_A_TERMINAL`, `OTHER` (256: plus a system's own code)
 - Gotcha: **`IoError` is not `Eq`**. `r == Err(IoError.NotFound)` doesn't type-check, so match it instead (`Err(IoError.NotFound) => …`).
 - Prose: `docs/Language/Standard-library/Ioerror.md`
 
@@ -634,7 +634,7 @@ Import: `import std.path as path`.
 - Prose: `docs/Language/Standard-library/Path.md`
 
 ## std.platform, std.platform_aarch64, std.platform_wasm, std.rt
-Runtime internals, not for programs. `std.rt` is the runtime written in Myla that a native build loads with every program (string concat/compare, maps, printing, files, processes, sockets `sock_*`, the heap, the executor/timers/notifiers, `exit_program`); it uses the `__load64`/`__store64`/`__syscall`… primitives that only the standard library may call (D152). `std.platform` is its OS layer: Linux x86-64; `platform_aarch64.my` and `platform_wasm.my` stand in for it on `--target aarch64-linux` and `wasm32-wasi` (WASI preview 1: no processes, no sockets, one worker). The only thing a program can usefully take: `from std.platform import TARGET` (`pub const TARGET: str`, `"x86_64-linux"`, `"aarch64-linux"` or `"wasm32-wasi"`: the target being built for). Documented in `docs/Language/Standard-library/Rt.md`.
+Runtime internals, not for programs. `std.rt` is the runtime written in Myla that a native build loads with every program (string concat/compare, maps, printing, files, processes, sockets `sock_*`, the heap, the executor/timers/notifiers, `exit_program`); it uses the `__load64`/`__store64`/`__syscall`… primitives that only the standard library may call (D152). `std.platform` is its OS layer: Linux x86-64; `platform_aarch64.my` and `platform_wasm.my` stand in for it on `--target aarch64-linux` and `wasm32-wasi` (WASI preview 1: no processes, no sockets, one worker); its interface is in Myla's terms (D209): errors as std.ioerror's cause codes, a file's kind, directory entries as names and kinds, `PROCESSES`/`SOCKETS` saying what a target lacks. The only thing a program can usefully take: `from std.platform import TARGET` (`pub const TARGET: str`, `"x86_64-linux"`, `"aarch64-linux"` or `"wasm32-wasi"`: the target being built for). Documented in `docs/Language/Standard-library/Rt.md`.
 
 ## std.process: arguments, environment, exit, child processes
 Import: `import std.process as process`.

@@ -205,6 +205,41 @@ class SelfHostedCli(_Layout):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("myla: 'as' was not found: building for x86_64-linux here needs GNU as and ld (binutils)", proc.stderr)
 
+    @unittest.skipUnless(shutil.which("clang"), "needs clang")
+    def test_build_without_the_linker_on_path(self):
+        # the target's record names its tools (MYLA-700): with clang but no
+        # wasm-ld on PATH, the link names the missing one and the target
+        only = os.path.join(self.work, "clang-only")
+        os.makedirs(only, exist_ok=True)
+        if not os.path.exists(os.path.join(only, "clang")):
+            os.symlink(shutil.which("clang"), os.path.join(only, "clang"))
+        out = os.path.join(self.work, "out", "nold")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = subprocess.run([self.myla, "build", "prog.my", "--target", "wasm32-wasi", "-o", out], cwd=self.work,
+                              capture_output=True, text=True, env=dict(os.environ, PATH=only))
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("myla: 'wasm-ld' was not found: building for wasm32-wasi here needs clang and wasm-ld", proc.stderr)
+
+    def test_windows_is_a_target_not_built_yet(self):
+        # `--target x86_64-windows` is known (MYLA-700) and refused cleanly,
+        # before any code is generated or tool run, until MYLA-702 (D210)
+        out = os.path.join(self.work, "out-win", "win")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        refusal = "myla: building for x86_64-windows is not supported yet (MYLA-702)\n"
+        for argv in (["build", "prog.my", "--target", "x86_64-windows", "-o", out],
+                     ["test", "prog.my", "--target", "x86_64-windows"]):
+            with self.subTest(argv=argv):
+                proc = self.myla_cmd(*argv)
+                self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("", refusal, 1))
+        self.assertEqual(os.listdir(os.path.dirname(out)), [])
+        proc = self.myla_cmd("build", "prog.my", "--target", "x86_64-macos")
+        self.assertEqual((proc.stderr, proc.returncode),
+                         ("myla: unknown target 'x86_64-macos' (x86_64-linux, aarch64-linux, wasm32-wasi, x86_64-windows)\n", 1))
+        gen = subprocess.run([selfhost_tool("gen_main"), "prog.my", STDLIB_ROOT, "--target", "x86_64-windows"],
+                             cwd=self.work, capture_output=True, text=True)
+        self.assertEqual((gen.stdout, gen.stderr, gen.returncode),
+                         ("", "gen_main: building for x86_64-windows is not supported yet (MYLA-702)\n", 2))
+
 
 if __name__ == "__main__":
     unittest.main()

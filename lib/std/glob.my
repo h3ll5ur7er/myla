@@ -451,8 +451,8 @@ pub fun walk_with(dir: str, follow_links: bool) -> Result<[str], IoError> {
             let st = __path_stat(full, true)
             // a file number 0 is none the host knows (a WASI host's memory
             // file system): such a directory can't be told, so it is gone into
-            if st.len() == 5 && ((st[1] as int32) & S_IFMT) == S_IFDIR && (st[4] == 0 || !chain.contains((st[3], st[4]))) {
-                chain.push((st[3], st[4]))
+            if st.len() == 6 && st[1] == KIND_DIR && (st[5] == 0 || !chain.contains((st[4], st[5]))) {
+                chain.push((st[4], st[5]))
                 into = true
             }
         } else {
@@ -470,8 +470,8 @@ pub fun walk_with(dir: str, follow_links: bool) -> Result<[str], IoError> {
     return Ok(out)
 }
 
-const S_IFMT: int32 = 0xF000
-const S_IFDIR: int32 = 0x4000
+// `__path_stat`'s kind of a directory: std.platform's KIND_DIR (D209).
+const KIND_DIR: int64 = 2
 
 // Whether `p` is a directory itself, not a symbolic link to one.
 fun dir_itself(p: str) -> bool {
@@ -485,10 +485,10 @@ fun dir_itself(p: str) -> bool {
 // `(-1, -1)` when it has none.
 fun dir_id(p: str) -> (int64, int64) {
     let st = __path_stat(p, true)
-    if st.len() != 5 {
+    if st.len() != 6 {
         return (-1i64, -1i64)
     }
-    return (st[3], st[4])
+    return (st[4], st[5])
 }
 
 // The paths that match `pattern`, found below the working directory (or

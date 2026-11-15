@@ -27,7 +27,7 @@
 // stays as it is. [[Language/Standard-library/Net]] says what a port must
 // provide.
 
-from .ioerror import IoError, from_errno
+from .ioerror import IoError, from_cause, INTERRUPTED, WOULD_BLOCK, CONNECTION_ABORTED, IN_PROGRESS
 from .fs import read_to_string
 from .io import Read, Write, eprint
 import .fmt as fmt
@@ -631,10 +631,6 @@ const READABLE: int = 1
 const WRITABLE: int = 2
 const STREAM: int = 1
 const DATAGRAM: int = 2
-const EINTR: int = 4
-const EAGAIN: int = 11
-const ECONNABORTED: int = 103
-const EINPROGRESS: int = 115
 // the socket options of `__sock_option`
 const NO_DELAY: int = 1
 const BROADCAST: int = 2
@@ -642,7 +638,7 @@ const REUSE_ADDR: int = 3
 
 // The cause of the last primitive's failure.
 fun last_error() -> IoError {
-    return from_errno(__io_errno())
+    return from_cause(__io_errno())
 }
 
 // The family of the platform's records for `ip`.
@@ -671,10 +667,10 @@ fun made(h: int) -> Result<int, IoError> {
     return Ok(h)
 }
 
-// The socket `h` closed, and the error `errno` given.
-fun failed<T>(h: int, errno: int) -> Result<T, IoError> {
+// The socket `h` closed, and the error of the cause code `code` given.
+fun failed<T>(h: int, code: int) -> Result<T, IoError> {
     let gone = __sock_close(h)
-    return Err(from_errno(errno))
+    return Err(from_cause(code))
 }
 
 // How long a blocking wait for a socket holds its worker while other tasks
@@ -832,10 +828,10 @@ impl TcpListener {
                 return accepted(h)
             }
             let err = __io_errno()
-            if err == EAGAIN {
+            if err == WOULD_BLOCK {
                 wait_ready(self.handle, READABLE, self.timeout_ms)?
-            } else if err != ECONNABORTED && err != EINTR {
-                return Err(from_errno(err))
+            } else if err != CONNECTION_ABORTED && err != INTERRUPTED {
+                return Err(from_cause(err))
             }
         }
         unreachable()
@@ -849,13 +845,13 @@ impl TcpListener {
                 return accepted(h)
             }
             let err = __io_errno()
-            if err == EAGAIN {
+            if err == WOULD_BLOCK {
                 await __wait_socket(self.handle, READABLE)
                 if __task_cancelled() {
                     return Err(IoError.Cancelled)
                 }
-            } else if err != ECONNABORTED && err != EINTR {
-                return Err(from_errno(err))
+            } else if err != CONNECTION_ABORTED && err != INTERRUPTED {
+                return Err(from_cause(err))
             }
         }
         unreachable()
@@ -892,7 +888,7 @@ pub fun connect_timeout(a: SocketAddr, ms: int) -> Result<TcpStream, IoError> {
     let h = new_socket(a.ip, STREAM)?
     if __sock_connect(h, record(a)) < 0 {
         let err = __io_errno()
-        if err != EINPROGRESS && err != EAGAIN && err != EINTR {
+        if err != IN_PROGRESS && err != WOULD_BLOCK && err != INTERRUPTED {
             return failed(h, err)
         }
         match wait_ready(h, WRITABLE, ms) {
@@ -918,7 +914,7 @@ pub async fun connect_async(a: SocketAddr) -> Result<TcpStream, IoError> {
     let h = new_socket(a.ip, STREAM)?
     if __sock_connect(h, record(a)) < 0 {
         let err = __io_errno()
-        if err != EINPROGRESS && err != EAGAIN && err != EINTR {
+        if err != IN_PROGRESS && err != WOULD_BLOCK && err != INTERRUPTED {
             return failed(h, err)
         }
         // woken early (another waiter of the socket), it waits again
@@ -971,8 +967,8 @@ impl Read for TcpStream {
             if err == 0 {
                 return Ok(bytes_m.from_str(s))
             }
-            if err != EAGAIN {
-                return Err(from_errno(err))
+            if err != WOULD_BLOCK {
+                return Err(from_cause(err))
             }
             wait_ready(self.handle, READABLE, self.read_ms)?
         }
@@ -993,8 +989,8 @@ impl Write for TcpStream {
                 at += r
             } else {
                 let err = __io_errno()
-                if err != EAGAIN {
-                    return Err(from_errno(err))
+                if err != WOULD_BLOCK {
+                    return Err(from_cause(err))
                 }
                 wait_ready(self.handle, WRITABLE, self.write_ms)?
             }
@@ -1020,8 +1016,8 @@ impl TcpStream {
             if err == 0 {
                 return Ok(bytes_m.from_str(s))
             }
-            if err != EAGAIN {
-                return Err(from_errno(err))
+            if err != WOULD_BLOCK {
+                return Err(from_cause(err))
             }
             await __wait_socket(self.handle, READABLE)
             if __task_cancelled() {
@@ -1041,8 +1037,8 @@ impl TcpStream {
                 at += r
             } else {
                 let err = __io_errno()
-                if err != EAGAIN {
-                    return Err(from_errno(err))
+                if err != WOULD_BLOCK {
+                    return Err(from_cause(err))
                 }
                 await __wait_socket(self.handle, WRITABLE)
                 if __task_cancelled() {
@@ -1296,8 +1292,8 @@ impl UdpSocket {
                 return Ok(r)
             }
             let err = __io_errno()
-            if err != EAGAIN {
-                return Err(from_errno(err))
+            if err != WOULD_BLOCK {
+                return Err(from_cause(err))
             }
             wait_ready(self.handle, WRITABLE, -1)?
         }
@@ -1318,8 +1314,8 @@ impl UdpSocket {
                 return datagram(r)
             }
             let err = __io_errno()
-            if err != EAGAIN {
-                return Err(from_errno(err))
+            if err != WOULD_BLOCK {
+                return Err(from_cause(err))
             }
             wait_ready(self.handle, READABLE, self.read_ms)?
         }
@@ -1340,8 +1336,8 @@ impl UdpSocket {
                 return datagram(r)
             }
             let err = __io_errno()
-            if err != EAGAIN {
-                return Err(from_errno(err))
+            if err != WOULD_BLOCK {
+                return Err(from_cause(err))
             }
             await __wait_socket(self.handle, READABLE)
             if __task_cancelled() {

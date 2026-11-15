@@ -1068,21 +1068,23 @@ fun main() {
     print(e(__signal_listen(h)))
 }
 """
+# the cause codes (std.ioerror's, D209): 35 not a terminal, 34 a handle
+# that isn't open, 11 invalid input
 PRIMITIVES_OUT = """0 0
--1 25
--1 9
-0 25
--1 22
--1 25
--1 9
--1 25
--1 9
+-1 35
+-1 34
+0 35
+-1 11
+-1 35
+-1 34
+-1 35
+-1 34
 true 0
 false
 0 0
--1 9
--1 9
--1 9
+-1 34
+-1 34
+-1 34
 0 0
 """
 
@@ -1115,7 +1117,7 @@ fun main() {
             for how, argv, exe in b.commands():
                 with self.subTest(how):
                     out, code = Pty(argv, exe).finish()
-                    self.assertEqual((out, code), ("true 0 0 -1 22\n", 0))
+                    self.assertEqual((out, code), ("true 0 0 -1 11\n", 0))
         finally:
             b.close()
 

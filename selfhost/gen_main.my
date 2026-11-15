@@ -12,12 +12,12 @@
 
 from std.process import args, exit
 from std.io import write, eprintln
-from std.platform import TARGET
 from std.rt import heap_huge_pages
 from .checker import build_checker_lazy
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
 from .loader import load_program_opts, load_options, for_target, parse_package_flag, Loaded, type_errors
+from .target import Target, host, parse_target, target_names, unsupported
 from .stdroot import default_stdlib_root
 from .diag import render
 
@@ -33,19 +33,19 @@ from .diag import render
 // `--emit-ir` the text shows the promoted functions). `no_inline`: no
 // small function copied into its callers (`--no-inline`, for the tests of
 // one function's code). `target`: `x86_64-linux`, `aarch64-linux`
-// (MYLA-163) or `wasm32-wasi` (MYLA-158) with `--target`; by default the
+// (MYLA-163) or `wasm32-wasi` (MYLA-158) with `--target` (target.my,
+// MYLA-700; `x86_64-windows` is refused until MYLA-702); by default the
 // target this compiler was built for, the machine's it runs on (MYLA-276).
 // `primitives`: the program may call the raw-memory primitives
 // (`--primitives`, for the tests of their code; an error otherwise).
-struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool, no_inline: bool, target: str, primitives: bool, checked: bool }
+struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool, no_inline: bool, target: Target, primitives: bool, checked: bool }
 
 fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
     return match build_checker_lazy(prog.decls, prog.next_id, mode.primitives, prog.std_impls, prog.bodies) {
         Ok(c) => {
             var g = new_codegen(c)
             if mode.frames { g.frames = true }
-            if mode.target == "aarch64-linux" { g.a64 = true }
-            if mode.target == "wasm32-wasi" { g.wasm = true }
+            g.set_target(mode.target)
             g.set_sources(prog.spans, prog.next_id)
             if mode.debug { g.enable_debug_info(read_gdb_script(stdlib_root)) }
             if mode.emit_ir { g.keep_ir_text() }
@@ -77,12 +77,12 @@ fun main() {
     heap_huge_pages()
     let argv = args()
     if argv.len() < 2 {
-        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--no-inline] [--checked] [--primitives] [--ssa | --ssa-stats] [--target x86_64-linux|aarch64-linux|wasm32-wasi] [--package name=dir]... [--root dir]")
+        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--no-inline] [--checked] [--primitives] [--ssa | --ssa-stats] [--target <t>] [--package name=dir]... [--root dir]")
         exit(2)
     }
     var opts = load_options(default_stdlib_root())
     opts.runtime = true
-    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false, no_inline: false, target: TARGET, primitives: false, checked: false }
+    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false, no_inline: false, target: host(), primitives: false, checked: false }
     var j = 2
     while j < argv.len() {
         if argv[j] == "-g" {
@@ -112,10 +112,13 @@ fun main() {
             }
             j = j + 1
         } else if argv[j] == "--target" && j + 1 < argv.len() {
-            mode.target = argv[j + 1]
-            if mode.target != "x86_64-linux" && mode.target != "aarch64-linux" && mode.target != "wasm32-wasi" {
-                eprintln(format("gen_main: unknown target '{}' (x86_64-linux, aarch64-linux, wasm32-wasi)", mode.target))
-                exit(2)
+            mode.target = match parse_target(argv[j + 1]) {
+                Some(t) => t,
+                None => {
+                    eprintln(format("gen_main: unknown target '{}' ({})", argv[j + 1], target_names()))
+                    exit(2)
+                    host()
+                },
             }
             j = j + 1
         } else if argv[j] == "--root" && j + 1 < argv.len() {
@@ -126,8 +129,13 @@ fun main() {
         }
         j = j + 1
     }
-    if mode.debug && mode.target != "x86_64-linux" {
-        eprintln(format("gen_main: -g is not supported for {} yet", mode.target))
+    let refused = unsupported(mode.target)
+    if refused != "" {
+        eprintln("gen_main: " + refused)
+        exit(2)
+    }
+    if mode.debug && !mode.target.debug_info {
+        eprintln(format("gen_main: -g is not supported for {} yet", mode.target.name))
         exit(2)
     }
     match load_program_opts(argv[1], for_target(opts, mode.target)) {

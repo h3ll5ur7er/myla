@@ -98,7 +98,7 @@ A `LineEdit` is a line being edited, a value with no input or output, so it is t
 
 ## Primitives
 
-The module rests on these ([[MYLA-350]]), each a function of `std.rt` over `std.platform`'s of the same name, and in the interpreter the host's own. Each sets `__io_errno()`, 0 on success: ENOTTY (25) for a descriptor that isn't a terminal, EBADF (9) for a negative one, ENOSYS (38) on wasm32.
+The module rests on these ([[MYLA-350]]), each a function of `std.rt` over `std.platform`'s of the same name, and in the interpreter the host's own. Each sets `__io_errno()`, 0 on success, to a cause code of std.ioerror's (D209): NOT_A_TERMINAL (35) for a descriptor that isn't a terminal, BAD_HANDLE (34) for a negative one, UNSUPPORTED (9) on wasm32. The tables below name the system's errors, which the platform module maps.
 
 | Primitive | x86-64 and aarch64 Linux | wasm32 |
 | --- | --- | --- |
@@ -112,11 +112,11 @@ The module rests on these ([[MYLA-350]]), each a function of `std.rt` over `std.
 
 ## Porting to another system
 
-A port gives `std.platform`'s terminal functions again: `term_is_tty(fd)`, `term_size(fd)`, `term_get_mode(fd, buf)`, `term_set_mode(fd, mode)`, `term_make_raw(fd)`, `term_make_cbreak(fd)` and `term_enable_vt(fd)`, each 0 or more or minus an errno ([[Language/Targets#the-terminal-and-signals-on-another-system]]), and `raw_signals(on)` with its handler `raw_signal(sig)` (D192), which the code generator names `__on_raw_signal` in every program: the handler puts the exit hook's mode back without allocating and ends the program as the signal would. `std.term` and `std.rt` stay as they are. For Windows (`platform_windows.my`, over the console API):
+A port gives `std.platform`'s terminal functions again: `term_is_tty(fd)`, `term_size(fd)`, `term_get_mode(fd, buf)`, `term_set_mode(fd, mode)`, `term_make_raw(fd)`, `term_make_cbreak(fd)` and `term_enable_vt(fd)`, each 0 or more or minus a cause code ([[Language/Targets#the-terminal-and-signals-on-another-system]]), and `raw_signals(on)` with its handler `raw_signal(sig)` (D192), which the code generator names `__on_raw_signal` in every program: the handler puts the exit hook's mode back without allocating and ends the program as the signal would. `std.term` and `std.rt` stay as they are. For Windows (`platform_windows.my`, over the console API):
 
 - **Streams.** `fd` 0 to 2 are `GetStdHandle(STD_INPUT_HANDLE)`, `STD_OUTPUT_HANDLE` and `STD_ERROR_HANDLE`. `term_is_tty` is whether `GetConsoleMode` succeeds on the handle; a redirected stream is a file or a pipe and gives ENOTTY elsewhere.
 - **Size.** `term_size` is `GetConsoleScreenBufferInfo`'s window, `srWindow.Right - srWindow.Left + 1` columns by `srWindow.Bottom - srWindow.Top + 1` rows (not the buffer's size), packed as `cols << 16 | rows`.
 - **Mode.** `term_get_mode` writes the handle's console mode (`GetConsoleMode`, a 32-bit word) into the block, and `term_set_mode` gives it back (`SetConsoleMode`). The block is the port's own: `std.term` keeps it and hands it back unread. Raw mode is the input's, so restoring it leaves the output's escape sequences on.
 - **Raw mode.** `term_make_raw` clears `ENABLE_LINE_INPUT`, `ENABLE_ECHO_INPUT` and `ENABLE_PROCESSED_INPUT` (so Ctrl-C is a key, as without ISIG) and sets `ENABLE_VIRTUAL_TERMINAL_INPUT`, so the arrows and the other special keys arrive as the same escape sequences `parse_key` decodes. The input is read as UTF-8 bytes (the console's input code page 65001, or `ReadConsoleW` converted), through `__read` as on Linux.
-- **Escape sequences.** `term_enable_vt` sets `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the output handle's mode: 0 when the console accepts it, ENOTTY for a handle that isn't a console. Without it a Windows console prints the escapes, which is why `colors` asks first.
-- **Errors.** `ERROR_INVALID_HANDLE` maps to EBADF (9), a handle that isn't a console to ENOTTY (25).
+- **Escape sequences.** `term_enable_vt` sets `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the output handle's mode: 0 when the console accepts it, NOT_A_TERMINAL for a handle that isn't a console. Without it a Windows console prints the escapes, which is why `colors` asks first.
+- **Errors.** `ERROR_INVALID_HANDLE` maps to the cause BAD_HANDLE, a handle that isn't a console to NOT_A_TERMINAL; another code to OTHER plus it (D209).
