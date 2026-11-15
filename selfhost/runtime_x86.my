@@ -417,6 +417,28 @@ impl CodeGen {
             "\tmovq %rbp, %rsp", "\tpopq %rbp", "\tret", ""] {
             self.raw(line)
         }
+        // `__win_call` (MYLA-705), itself called as `__syscall(
+        // __rt_addr("__win_call"), block, 0, 0)`: the function at the
+        // block's first word called with the ten words after it as its
+        // arguments, for kernel32's functions of more than five
+        // (`CreateProcessW` has ten, `DuplicateHandle` seven); the fifth to
+        // the tenth above the shadow space, %rbx (which Win64 keeps) holding
+        // the block across the call, the stack aligned to 16 bytes (8 off it
+        // at the entry, then %rbx and 96 bytes).
+        self.raw("__win_call:")
+        self.raw("\tpushq %rbx")
+        self.raw("\tmovq %rcx, %rbx")
+        self.raw("\tsubq $96, %rsp")
+        var k = 5
+        while k <= 10 {
+            self.raw(format("\tmovq {}(%rbx), %rax", 8 * k))
+            self.raw(format("\tmovq %rax, {}(%rsp)", 32 + 8 * (k - 5)))
+            k += 1
+        }
+        for line in ["\tmovq 8(%rbx), %rcx", "\tmovq 16(%rbx), %rdx", "\tmovq 24(%rbx), %r8", "\tmovq 32(%rbx), %r9",
+            "\tcall *(%rbx)", "\taddq $96, %rsp", "\tpopq %rbx", "\tret", ""] {
+            self.raw(line)
+        }
     }
 
     // The ready frames: each worker has a ring of its own (`emit_executor`
