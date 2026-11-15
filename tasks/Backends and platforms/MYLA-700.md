@@ -20,7 +20,9 @@ A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 20
 - **The tools:** the driver runs them with `std.process.run`, which searches PATH itself (`std.rt`, D147): no `/usr/bin/env` was left in the driver at BASE, and none is in the tools now (`grep -rn /usr/bin/env selfhost tools lib` finds only scripts' shebangs). A missing tool is named with the target and the record's `needs`: `myla: 'wasm-ld' was not found: building for wasm32-wasi here needs clang and wasm-ld`; lld-link's is the same path once Windows builds.
 - **Docs:** [[Getting started]] lists each target's tools in a table; [[Language/Targets]] has the Windows row; [[Architecture/Self-hosted-compiler]] has `target.my`; the `myla` skill's toolchain reference (both copies).
 
-## Proposals (open for the owner)
+## Proposals (accepted 2026-11-15, D217)
+
+The owner took the four recommendations; the record itself is D217.
 
 1. **Windows' programs start no processes in the record (`spawns: false`) until [[MYLA-705]].** A test harness then runs its cases as runs of itself (as on wasm32, [[MYLA-370]]), so [[MYLA-702]]'s first `myla test --target x86_64-windows` needs no `CreateProcess`. Alternative: `true` now, and the harness's cases wait for [[MYLA-705]]. Recommended: `false`, flipped by [[MYLA-705]].
 2. **The default output on Windows is `a.exe`, a project's `build/<name>.exe`** (the record's suffix; `a.out` elsewhere, as before). Alternative: `a.out` everywhere, which Windows doesn't run by double-click or `PATHEXT`.

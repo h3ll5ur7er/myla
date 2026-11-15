@@ -130,7 +130,7 @@ Copying a stream of any size is a loop over a buffer: `copy` from `std.io` reads
 | --- | --- |
 | `metadata(path: str) -> Result<Metadata, IoError>` | What the path names, symbolic links followed; a missing path, or a dangling link, is `NotFound` |
 | `symlink_metadata(path: str) -> Result<Metadata, IoError>` | The path itself: a symbolic link isn't followed, its kind is `Symlink` and its size the length of the path it holds ([[MYLA-363]]) |
-| `struct Metadata { size: int64, kind: FileKind, permissions: int32, modified_ns: int64 }` | The size in bytes, the kind, the permission bits (POSIX's `0o7777` on every target: a platform without them gives what its system has as such bits, [[MYLA-701]]'s proposal), the last modification in nanoseconds since 1970 (`std.time.from_unix_ns(m.modified_ns)` is its `DateTime`) |
+| `struct Metadata { size: int64, kind: FileKind, permissions: int32, modified_ns: int64 }` | The size in bytes, the kind, the permission bits (POSIX's `0o7777` on every target: a platform without them gives what its system has as such bits, D218), the last modification in nanoseconds since 1970 (`std.time.from_unix_ns(m.modified_ns)` is its `DateTime`) |
 | `m.is_file() -> bool`, `m.is_dir() -> bool`, `m.is_symlink() -> bool` | Whether it is a regular file, a directory, a symbolic link |
 | `enum FileKind { File, Dir, CharDevice, BlockDevice, Fifo, Socket, Symlink, Other }` | The kind, which the platform gives (its `KIND_FILE`, …; no type bits cross, D209); `Symlink` only from `symlink_metadata` |
 
