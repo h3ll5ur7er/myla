@@ -1,0 +1,214 @@
+.lead {
+  font-size: 1.1rem;
+  color: var(--text-muted);
+  max-width: 720px;
+}
+
+.group {
+  margin: 48px 0 16px;
+  font-size: 1.3rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 14px;
+}
+
+.mod {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text);
+  text-decoration: none !important;
+  .name {
+    font: 650 0.98rem var(--font-mono);
+    color: var(--accent-strong);
+  }
+  .sum {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.45;
+    flex: 1;
+  }
+  .count {
+    font-size: 0.72rem;
+    color: var(--text-faint);
+  }
+}
+
+.builtins {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-top: 28px;
+  color: var(--text);
+  text-decoration: none !important;
+  background: var(--gradient-soft);
+  .big {
+    font-size: 2rem;
+  }
+  b {
+    display: block;
+    font-size: 1.1rem;
+  }
+  span span {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
+}
+
+// --- a module's API ---------------------------------------------------------------------------
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 24px;
+}
+
+.api-head {
+  margin-top: 56px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.filter {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 12px 0 24px;
+  input {
+    flex: 1;
+    min-width: 200px;
+    padding: 9px 14px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    &:focus {
+      border-color: var(--accent);
+      outline: none;
+    }
+  }
+}
+
+.kind-head {
+  font-size: 1.05rem;
+  margin: 32px 0 12px;
+  color: var(--text-muted);
+}
+
+.item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  margin-bottom: 14px;
+  overflow: hidden;
+  scroll-margin-top: calc(var(--header-h) + 16px);
+  &:target {
+    border-color: var(--accent);
+    box-shadow: var(--glow);
+  }
+}
+
+.sig {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--code-bg);
+  border-bottom: 1px solid var(--border);
+  pre {
+    margin: 0;
+    flex: 1;
+    font: 13.5px/1.55 var(--font-mono);
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--code-text);
+  }
+  a.src {
+    font-size: 0.75rem;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+}
+
+.body {
+  padding: 4px 16px 12px;
+  :host ::ng-deep & p:first-child {
+    margin-top: 10px;
+  }
+}
+
+.doc {
+  font-size: 0.93rem;
+  max-width: none;
+}
+
+.tests {
+  margin: 8px 0 4px;
+  summary {
+    cursor: pointer;
+    font-size: 0.8rem;
+    color: var(--text-faint);
+  }
+  pre {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--code-bg);
+    font: 12.5px/1.55 var(--font-mono);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+}
+
+.members {
+  margin: 10px 0 4px;
+  border-top: 1px dashed var(--border);
+}
+
+.member {
+  padding: 10px 0;
+  border-bottom: 1px dashed var(--border);
+  &:last-child {
+    border-bottom: 0;
+  }
+  pre {
+    margin: 0;
+    font: 13px/1.5 var(--font-mono);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .doc {
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 0.88rem;
+  }
+}
+
+.impl {
+  margin-top: 14px;
+  padding-top: 6px;
+  scroll-margin-top: calc(var(--header-h) + 16px);
+}
+
+.impl-head {
+  margin: 8px 0 4px;
+  font: 600 0.82rem var(--font-mono);
+  color: var(--text-muted);
+}
+
+.module-doc {
+  white-space: pre-wrap;
+  font: 0.92rem/1.6 var(--font-body);
+  color: var(--text-muted);
+  max-width: var(--prose-w);
+}
+
+.none {
+  color: var(--text-faint);
+}

@@ -1,0 +1,26 @@
+trait Mighty {
+    fun strength(self) -> int
+}
+
+struct Thor {}
+struct Vision {}
+
+impl Mighty for Thor {
+    fun strength(self) -> int { return 100 }
+}
+
+impl Mighty for Vision {
+    fun strength(self) -> int { return 99 }
+}
+
+fun lift<T: Mighty>(who: T) -> str {
+    if who.strength() >= 99 {
+        return "worthy"
+    }
+    return "not worthy"
+}
+
+#test()[["worthy", "worthy"]]
+fun trials() -> [str] {
+    return [lift(Thor {}), lift(Vision {})]
+}

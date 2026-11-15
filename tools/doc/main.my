@@ -1,0 +1,67 @@
+// main.my: the API reference of standard library modules as JSON, for the
+// website (MYLA-632, D208).
+//
+//   doc [-o <out.json>] <lib/std/module.my>...
+//
+// Each file is documented as the module `std.<its name>` (doc.my says what
+// is documented); the JSON is an array of modules, written to <out.json> or
+// to standard output. A file that can't be read or parsed is reported, and
+// the exit status is 1.
+
+from std.process import args, exit
+from std.fs import read_to_string, write_to_file
+from std.io import eprintln
+from std.path import stem
+from .doc import Module, document, to_json
+
+fun main() {
+    let argv = args()
+    var out = ""
+    var files: [str] = []
+    var i = 1
+    while i < argv.len() {
+        if argv[i] == "-o" && i + 1 < argv.len() {
+            out = argv[i + 1]
+            i += 1
+        } else {
+            files.push(argv[i])
+        }
+        i += 1
+    }
+    if files.len() == 0 {
+        eprintln("usage: doc [-o <out.json>] <lib/std/module.my>...")
+        exit(2)
+    }
+    var modules: [Module] = []
+    var status = 0
+    for f in files {
+        match read_to_string(f) {
+            Ok(text) => {
+                match document("std." + stem(f).unwrap_or(f), f, text) {
+                    Ok(m) => modules.push(m),
+                    Err(e) => {
+                        eprintln(e)
+                        status = 1
+                    },
+                }
+            },
+            Err(e) => {
+                eprintln(f"cannot read {f}: {e}")
+                status = 1
+            },
+        }
+    }
+    let text = to_json(modules)
+    if out == "" {
+        print(text)
+    } else {
+        match write_to_file(out, text) {
+            Ok(_) => {},
+            Err(e) => {
+                eprintln(f"cannot write {out}: {e}")
+                status = 1
+            },
+        }
+    }
+    exit(status)
+}

@@ -6,7 +6,7 @@ status: todo
 priority: high
 labels: [platforms, windows]
 ---
-A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 2026-11-14 ([[Project/Follow-up-plan#windows-2026-11-14]]). D208, the part of [[MYLA-265]] the port needs before it starts: Windows would otherwise translate its API into Linux shapes, as wasm32 does today.
+A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 2026-11-14 ([[Project/Follow-up-plan#windows-2026-11-14]]). D209, the part of [[MYLA-265]] the port needs before it starts: Windows would otherwise translate its API into Linux shapes, as wasm32 does today.
 
 - [ ] Errors as Myla's causes (D129) from the platform functions, not negative Linux errnos
 - [ ] A directory's entries as names and kinds, not `getdents64` records

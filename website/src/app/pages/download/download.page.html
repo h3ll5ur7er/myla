@@ -1,0 +1,42 @@
+<div class="container">
+  <header class="page-head">
+    <span class="eyebrow">Download</span>
+    <h1>Get <span class="gradient-text">Myla</span></h1>
+    <p class="lead">Prebuilt tools from the latest master build, or build them from source in about ten seconds. Either way: don't forget your towel.</p>
+  </header>
+
+  <div class="platforms">
+    @for (p of platforms; track p.id) {
+      <div class="card platform">
+        <span class="icon" aria-hidden="true">{{ p.icon }}</span>
+        <h2>{{ p.title }}</h2>
+        <p>{{ p.body }}</p>
+        @if (file(p.id); as f) {
+          <a class="btn primary" [href]="'downloads/' + f.name" download>Download {{ f.name }}</a>
+          <span class="meta">{{ mb(f.size) | number: '1.1-1' }} MB · sha256 <code>{{ f.sha256.slice(0, 16) }}…</code></span>
+        } @else {
+          <span class="meta">
+            @if (manifest.isLoading()) {
+              Looking in the downloads…
+            } @else {
+              No prebuilt file in this build of the site: build it from source below.
+            }
+          </span>
+        }
+      </div>
+    }
+  </div>
+  @if (manifest.value(); as m) {
+    <p class="built">Built from <a [href]="repo + '/commit/' + m.commit" target="_blank" rel="noopener"><code>{{ m.commit.slice(0, 7) }}</code></a> on {{ m.date }}. Extract with <code>tar xzf</code>, then put <code>myla</code> on your <code>PATH</code>.</p>
+  }
+
+  <section class="source">
+    <h2>Build from source</h2>
+    <p>The repository carries the compiler as assembly (the <em>seed</em>) for each machine, so all it needs is GNU <code>as</code> and <code>ld</code>.</p>
+    <pre class="block"><code>git clone {{ repo }}
+cd myla
+scripts/bootstrap.sh      # stages 0 to 3 and the fixed point; writes build/myla
+build/myla run examples/hello.my</code></pre>
+    <p>Then the <a routerLink="/quickstart">quickstart</a> shows the commands and projects, and the <a routerLink="/learn">course</a> the language.</p>
+  </section>
+</div>

@@ -1,0 +1,18 @@
+// title: No Implicit Conversions
+// xp: 20
+// hidden: average #test(1, 4)[0.25]
+// hint: Dividing two `int`s gives an `int`, but the function promises a `float`.
+// hint: Convert each operand with `as` before dividing; converting the result would be too late (`7 / 2` is already 3).
+//
+// Myla never converts a number from one type to another behind your back:
+// an `int` stays an `int` until you say otherwise with `as`.
+//
+// `average` should give the mean of `count` towels whose lengths add up to
+// `total`, as a `float`. Fix it so it compiles and its tests pass.
+// See [[Language/Types]] for the number types.
+#test(7, 2)[3.5]
+#test(42, 4)[10.5]
+#test(9, 3)[3.0]
+fun average(total: int, count: int) -> float {
+    return total / count
+}

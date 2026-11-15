@@ -1,0 +1,12 @@
+#test(1)["Reverse Mountain"]
+#test(3)["Whiskey Peak"]
+#test(4)["Little Garden"]
+#test(99)["uncharted"]
+fun next_island(log: int) -> str {
+    return match log {
+        1 => "Reverse Mountain",
+        2 | 3 => "Whiskey Peak",
+        4 => "Little Garden",
+        _ => "uncharted",
+    }
+}

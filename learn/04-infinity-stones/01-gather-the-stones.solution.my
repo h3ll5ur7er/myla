@@ -1,0 +1,7 @@
+#test(["Space", "Mind"], "Time")[["Space", "Mind", "Time"]]
+#test([], "Soul")[["Soul"]]
+fun gather(stones: [str], found: str) -> [str] {
+    var all = stones
+    all.push(found)
+    return all
+}

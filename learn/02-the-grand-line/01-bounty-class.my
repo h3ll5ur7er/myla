@@ -1,0 +1,25 @@
+// title: Bounty Class
+// xp: 15
+// hidden: bounty_class #test(99_999_999)["rookie"]
+// hidden: bounty_class #test(999_999_999)["supernova"]
+// hint: The function only ever answers "rookie" or "supernova". Which answer never comes?
+// hint: Add an `else if` for the middle range, and let everything else fall through to the last answer.
+//
+// The Marines rank pirates by their bounty, in berries:
+//
+// - below 100 million: `"rookie"`
+// - below a billion: `"supernova"`
+// - a billion or more: `"emperor"`
+//
+// `bounty_class` gets it wrong for everybody but rookies. Fix it.
+// (`int64` holds big numbers; `_` in a number is only for reading.)
+#test(30_000_000)["rookie"]
+#test(300_000_000)["supernova"]
+#test(3_000_000_000)["emperor"]
+#test(1_000_000_000)["emperor"]
+fun bounty_class(berries: int64) -> str {
+    if berries < 100_000_000 {
+        return "rookie"
+    }
+    return "supernova"
+}

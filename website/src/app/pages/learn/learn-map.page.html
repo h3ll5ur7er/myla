@@ -1,0 +1,65 @@
+<div class="container">
+  <header class="learn-hero">
+    <div>
+      <span class="eyebrow">Learn Myla</span>
+      <h1>Your journey across the <span class="gradient-text">Grand Line</span> of code</h1>
+      <p class="lead">
+        Small exercises, each a broken program and the tests it must pass. Fix it, press Check, collect XP. Rustlings-style, with more ninjas.
+        Everything runs in your browser and your progress stays in it.
+      </p>
+      <div class="ctas">
+        @if (next(); as n) {
+          <a class="btn primary" [routerLink]="['/learn', n.chapter, n.exercise]">{{ progress.solvedCount() ? 'Continue' : 'Start the course' }} →</a>
+        } @else if (total() > 0) {
+          <span class="chip accent">Course complete. So long, and thanks for all the fish! 🐬</span>
+        }
+        <a class="btn ghost" routerLink="/learn/profile">Your profile & achievements</a>
+      </div>
+    </div>
+    <a class="player card" routerLink="/learn/profile">
+      <div class="lvl-ring" [style.--p]="progress.level().fraction">
+        <span>{{ progress.level().level.n }}</span>
+      </div>
+      <div class="who">
+        <b>{{ progress.level().level.title }}</b>
+        <span class="src">as seen in {{ progress.level().level.from }}</span>
+        <span class="xpline">{{ progress.xp() }} XP @if (progress.level().next; as nx) {· {{ nx.xp - progress.xp() }} to {{ nx.title }}}</span>
+        <span class="stats">
+          <span>🔥 {{ progress.streak().current }} day streak</span>
+          <span>✅ {{ progress.solvedCount() }}/{{ total() }}</span>
+          <span>🏆 {{ earned() }}/{{ achievements }}</span>
+        </span>
+      </div>
+    </a>
+  </header>
+
+  @if (course.value()) {
+    <ol class="map">
+      @for (c of chapters(); track c.id; let i = $index) {
+        <li class="stop" [class.locked]="!c.unlocked" [class.done]="c.done">
+          <span class="node" aria-hidden="true">{{ c.done ? '✓' : c.unlocked ? c.emoji : '🔒' }}</span>
+          @if (c.unlocked) {
+            <a class="card interactive chapter" [routerLink]="['/learn', c.id]">
+              <span class="num">Chapter {{ i + 1 }}</span>
+              <h2>{{ c.title }}</h2>
+              <p>{{ c.tagline }}</p>
+              <span class="bar"><i [style.width.%]="c.total ? (c.solved / c.total) * 100 : 0"></i></span>
+              <span class="meta">{{ c.solved }}/{{ c.total }} solved · {{ c.xp }} XP</span>
+            </a>
+          } @else {
+            <div class="card chapter">
+              <span class="num">Chapter {{ i + 1 }}</span>
+              <h2>{{ c.title }}</h2>
+              <p>{{ c.tagline }}</p>
+              <span class="meta lock">{{ lockReason(i) }}</span>
+            </div>
+          }
+        </li>
+      }
+    </ol>
+  } @else if (course.value() === null) {
+    <p>The course couldn't be loaded. The Infinite Improbability Drive must be acting up.</p>
+  } @else {
+    <p class="loading">Charting the course…</p>
+  }
+</div>

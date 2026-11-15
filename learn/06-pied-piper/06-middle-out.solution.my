@@ -1,0 +1,55 @@
+#test("aaabcc")["3a1b2c"]
+#test("")[""]
+#test("xxxxxxxxxxxx")["12x"]
+fun encode(text: str) -> str {
+    let cs = text.chars()
+    var out = StringBuilder()
+    var i = 0
+    while i < cs.len() {
+        var run = 1
+        while i + run < cs.len() && cs[i + run] == cs[i] {
+            run += 1
+        }
+        out.append(f"{run}{cs[i]}")
+        i += run
+    }
+    return out.build()
+}
+
+#test("3a1b2c")[Ok("aaabcc")]
+#test("12x")[Ok("xxxxxxxxxxxx")]
+#test("3ab")[Err("no count before 'b'")]
+#test("2a7")[Err("a count without a character")]
+fun decode(code: str) -> Result<str, str> {
+    var out = StringBuilder()
+    var count = 0
+    var counting = false
+    for c in code.chars() {
+        match c.to_digit(10) {
+            Some(d) => {
+                count = count * 10 + d
+                counting = true
+            },
+            None => {
+                if !counting {
+                    return Err(f"no count before '{c}'")
+                }
+                out.append(f"{c}".repeat(count))
+                count = 0
+                counting = false
+            },
+        }
+    }
+    if counting {
+        return Err("a count without a character")
+    }
+    return Ok(out.build())
+}
+
+#test("tip-to-tip efficiency")[true]
+fun round_trip(text: str) -> bool {
+    return match decode(encode(text)) {
+        Ok(back) => back == text,
+        Err(e) => false,
+    }
+}

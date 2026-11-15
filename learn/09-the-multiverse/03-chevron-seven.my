@@ -1,0 +1,18 @@
+// title: Chevron Seven Locked
+// xp: 20
+// hidden: address #test([1, 2, 3, 4, 5, 6, 7])["01-02-03-04-05-06-07"]
+// hint: Each glyph is printed as it is, but the address wants every one as two digits.
+// hint: A hole in an f-string can say how wide its value is and what fills the gap, after a colon.
+//
+// *Chevron seven… locked!* The Stargate's dialing computer shows an address
+// as seven glyph numbers, each with two digits, joined by dashes: glyph 7 is
+// `07`, so Abydos reads `27-07-15-32-12-30-01`.
+//
+// `address` gets the glyphs right but forgets the padding. Walter Harriman
+// is not amused, and Walter is the only one who knows how this thing works.
+#test([27, 7, 15, 32, 12, 30, 1])["27-07-15-32-12-30-01"]
+#test([10, 11, 12, 13, 14, 15, 16])["10-11-12-13-14-15-16"]
+fun address(glyphs: [int]) -> str {
+    let parts = glyphs.map((g: int) => f"{g}")
+    return parts.join("-")
+}

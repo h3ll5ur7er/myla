@@ -1,0 +1,6 @@
+#test("I solemnly swear that I am up to no good")[true]
+#test("  I SOLEMNLY swear   that I am up to no good ")[true]
+#test("I solemnly swear that I am up to no harm")[false]
+fun opens(words: str) -> bool {
+    return words.to_lower().words().join(" ") == "i solemnly swear that i am up to no good"
+}

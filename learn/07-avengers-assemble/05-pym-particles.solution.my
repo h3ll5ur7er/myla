@@ -1,0 +1,26 @@
+#derive(Eq)
+struct Size {
+    cm: int,
+}
+
+impl Mul<int> for Size {
+    fun mul(self, k: int) -> Size {
+        return Size { cm: self.cm * k }
+    }
+}
+
+impl Div<int> for Size {
+    fun div(self, k: int) -> Size {
+        return Size { cm: self.cm / k }
+    }
+}
+
+#test(Size { cm: 180 }, 10)[Size { cm: 1800 }]
+fun giant(s: Size, k: int) -> Size {
+    return s * k
+}
+
+#test(Size { cm: 180 }, 100)[Size { cm: 1 }]
+fun ant(s: Size, k: int) -> Size {
+    return s / k
+}

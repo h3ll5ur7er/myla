@@ -1,0 +1,17 @@
+// title: I Am Inevitable
+// xp: 25
+// hidden: monologue #test("perfectly balanced")["BALANCED PERFECTLY"]
+// hint: Break the sentence into words, turn the words around, put them back together, then shout.
+// hint: Strings have `split` and `to_upper`; lists have `reversed`, and a list of strings has `join`. Chain them.
+//
+// Villains talk backwards when they monologue (it's in the contract).
+// `monologue` should reverse the order of the words of a sentence and shout
+// it: `"i am inevitable"` becomes `"INEVITABLE AM I"`.
+//
+// Strings have `split(sep)`, which gives a `[str]`; lists have `reversed()`
+// and, for strings, `join(sep)`; and strings have `to_upper()`. Chain them.
+#test("i am inevitable")["INEVITABLE AM I"]
+#test("snap")["SNAP"]
+fun monologue(sentence: str) -> str {
+    return sentence
+}
