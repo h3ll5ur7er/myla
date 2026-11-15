@@ -658,6 +658,7 @@ impl CodeGen {
         for l in failed_lines { self.raw(l) }
         self.raw(format("\tmovq {}, %rsp", failed_sp))
         self.raw("\txorl %eax, %eax")
+        // (%rcx still holds the thread's block on Windows, loaded just above)
         self.raw(format("\txchgq %rax, {}", self.tv_at("__exec_cur", "rcx").1))
         self.raw("\tcall __exec_loop")
         self.raw("")
