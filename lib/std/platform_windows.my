@@ -2257,8 +2257,12 @@ pub fun poller_watch(p: int64, fd: int64, token: int64, again: bool) -> int64 {
             __copy_bytes(ws, __load64(p + 24), cap * WATCH)
             __free(__load64(p + 24))
             __store64(p + 24, ws)
+            // (the last wait's events kept: std.rt may arm a watch
+            // while it reads them)
+            let events = __alloc(2 * cap * 8)
+            __copy_bytes(events, __load64(p + 40), cap * 8)
             __free(__load64(p + 40))
-            __store64(p + 40, __alloc(2 * cap * 8))
+            __store64(p + 40, events)
             cap = 2 * cap
             __store64(p, cap)
         }
