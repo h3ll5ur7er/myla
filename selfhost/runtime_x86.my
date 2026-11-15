@@ -1,10 +1,12 @@
-// runtime_x86.my -- the runtime's x86-64 Linux assembly (MYLA-162, D108).
+// runtime_x86.my -- the runtime's x86-64 assembly, for Linux (MYLA-162,
+// D108) and Windows (MYLA-702).
 //
 // What of the runtime is still hand-written for this target, what is the
 // machine's own (MYLA-263): the program's start (`_start`: the stack limit,
 // the alternate signal stack and the stack-overflow handler, the main
 // thread's state block, the workers and their rings), the traps and the
-// panic, the system calls (`__syscall`, `__syscall5`), the bulk copy
+// panic, the system calls (`__syscall`, `__syscall5`; on Windows calls of
+// kernel32's functions, D212), the bulk copy
 // (`__copy_bytes`), the executor's control transfers (starting worker
 // threads, the jumps into frames, `__exec_run`) and the float remainder
 // (`__fmod`). The rest of the runtime is std.rt and std.platform, and the
@@ -16,7 +18,76 @@ from .codegen import CodeGen, DropEntry, ends_colon, EXEC_CAP, tls_offset, TLS_S
 from .lower import drop_entry_ir, compose_ir
 
 impl CodeGen {
+    // The program's start and the runtime's code that isn't IR, on Linux
+    // (`emit_linux_start`, `emit_linux_handlers`, `emit_linux_calls`) or
+    // Windows (`emit_windows_start`, `emit_windows_calls`; MYLA-702).
     fun emit_runtime_prelude(var self, entry_name: str) {
+        if self.windows { self.emit_windows_start(entry_name) } else { self.emit_linux_start(entry_name) }
+        if self.frames {
+            self.emit_executor()
+        }
+        // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
+        // (MYLA-17); the message is the interpreter's, without the values. The
+        // caller passes the position record in %rsi; out of memory has none.
+        for label in trap_labels(self.checked) {
+            self.raw(format("{}:", label))
+            if label == "__trap_oom" { self.raw("\txorl %esi, %esi") }
+            self.raw(format("\tleaq .Lmsg{}(%rip), %rdi", label))
+            self.raw("\tjmp __panic")
+        }
+        self.raw("")
+        if !self.windows { self.emit_linux_handlers() }
+        // __panic: %rdi -> the message, %rsi -> the position record or 0;
+        // reported by std.rt (`panic_report`: `runtime error: <message>`,
+        // then `  --> file:line:col`, MYLA-65)
+        self.raw("__panic:")
+        if self.frames {
+            // held for the parent when a task other than the entry's fails
+            // (`__task_fail` goes back to the executor then)
+            self.raw("\tpushq %rsi")
+            self.raw("\tpushq %rdi")
+            self.raw("\tmovq %rsi, %rdx")
+            self.raw("\tmovq %rdi, %rsi")
+            self.raw("\tmovq $2, %rdi")
+            self.raw("\tcall __task_fail")
+            self.raw("\tpopq %rdi")
+            self.raw("\tpopq %rsi")
+            self.raw("\tjmp __panic_report_tasks")
+        } else {
+            self.raw("\tjmp __panic_report")
+        }
+        self.raw("")
+        if self.windows { self.emit_windows_calls() } else { self.emit_linux_calls() }
+        // __copy_bytes(dst, src, n): a bulk copy for the runtime written in
+        // Myla (MYLA-162's prototype)
+        self.raw("__copy_bytes:")
+        self.raw("\tmovq %rdx, %rcx")
+        self.emit_byte_copy(true)
+        self.raw("\tret")
+        self.raw("")
+        // __str_drop: rdi = str cell. Decrement; free at zero (a str owns nothing
+        // else); static cells never reach zero. Built as IR with std.rt's
+        // allocator (MYLA-162).
+        self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
+        self.raw("\t.set __str_drop, myla___str_drop")
+        // the executor's routines and the allocator in std.rt (MYLA-162):
+        // the names the rest of the runtime calls stand for its functions
+        for p in self.rt_exec() {
+            self.raw(format("\t.set {}, myla_{}", p.0, p.1))
+        }
+        self.raw("\t.set __print_str, myla_std$rt$print_str")
+        let names = self.rt_alloc_names()
+        self.raw(format("\t.set __alloc, myla_{}", names.0))
+        self.raw(format("\t.set __free, myla_{}", names.1))
+        self.raw("")
+        self.emit_compose_runtime()
+        self.emit_derived_eq()
+    }
+
+    // Linux's `_start`: the stack's limit, the stack-overflow handler, SIGPIPE
+    // ignored, the main thread's state block, the arguments and the
+    // environment from the stack, the workers, then the entry and the exit.
+    fun emit_linux_start(var self, entry_name: str) {
         self.raw("\t.global _start")
         self.raw("_start:")
         // the main thread's stack may grow to 120 MiB (MYLA-182): Linux grows
@@ -157,19 +228,11 @@ impl CodeGen {
         self.raw("\txorl %edi, %edi")
         self.raw("\tcall __exit_program")
         self.raw("")
-        if self.frames {
-            self.emit_executor()
-        }
-        // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
-        // (MYLA-17); the message is the interpreter's, without the values. The
-        // caller passes the position record in %rsi; out of memory has none.
-        for label in trap_labels(self.checked) {
-            self.raw(format("{}:", label))
-            if label == "__trap_oom" { self.raw("\txorl %esi, %esi") }
-            self.raw(format("\tleaq .Lmsg{}(%rip), %rdi", label))
-            self.raw("\tjmp __panic")
-        }
-        self.raw("")
+    }
+
+    // The signal handlers of Linux's runtime: a stack overflow's report, the
+    // restorer, std.signal's self-pipe.
+    fun emit_linux_handlers(var self) {
         // __on_segv(sig, siginfo, ucontext), on the alternate stack: the fault
         // address (siginfo + 16) within 64 KiB below or 1 MiB above the interrupted
         // %rsp (ucontext + 160) is a stack overflow (MYLA-182), reported once:
@@ -251,26 +314,10 @@ impl CodeGen {
         self.raw(".Lmsg_sov:")
         self.raw("	.ascii \"runtime error: stack overflow\\n\"")
         self.raw("")
-        // __panic: %rdi -> the message, %rsi -> the position record or 0;
-        // reported by std.rt (`panic_report`: `runtime error: <message>`,
-        // then `  --> file:line:col`, MYLA-65)
-        self.raw("__panic:")
-        if self.frames {
-            // held for the parent when a task other than the entry's fails
-            // (`__task_fail` goes back to the executor then)
-            self.raw("\tpushq %rsi")
-            self.raw("\tpushq %rdi")
-            self.raw("\tmovq %rsi, %rdx")
-            self.raw("\tmovq %rdi, %rsi")
-            self.raw("\tmovq $2, %rdi")
-            self.raw("\tcall __task_fail")
-            self.raw("\tpopq %rdi")
-            self.raw("\tpopq %rsi")
-            self.raw("\tjmp __panic_report_tasks")
-        } else {
-            self.raw("\tjmp __panic_report")
-        }
-        self.raw("")
+    }
+
+    // Linux's system calls for std.platform (`__syscall`, `__syscall5`).
+    fun emit_linux_calls(var self) {
         // __syscall(n, a, b, c): Linux's platform layer for the runtime written
         // in Myla (MYLA-162): the call's number and three arguments moved
         // into the kernel's registers; the result, a negative errno on a
@@ -297,30 +344,78 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("\tret")
         self.raw("")
-        // __copy_bytes(dst, src, n): a bulk copy for the runtime written in
-        // Myla (MYLA-162's prototype)
-        self.raw("__copy_bytes:")
-        self.raw("\tmovq %rdx, %rcx")
-        self.emit_byte_copy(true)
-        self.raw("\tret")
-        self.raw("")
-        // __str_drop: rdi = str cell. Decrement; free at zero (a str owns nothing
-        // else); static cells never reach zero. Built as IR with std.rt's
-        // allocator (MYLA-162).
-        self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
-        self.raw("\t.set __str_drop, myla___str_drop")
-        // the executor's routines and the allocator in std.rt (MYLA-162):
-        // the names the rest of the runtime calls stand for its functions
-        for p in self.rt_exec() {
-            self.raw(format("\t.set {}, myla_{}", p.0, p.1))
+    }
+
+    // Windows' `_start` (MYLA-702, D212): kernel32 calls it as a function
+    // and nothing calls back into a C runtime, so the stack is aligned as
+    // Linux's start finds it and the program never returns. std.platform's
+    // `windows_start` sets the console to UTF-8 (D215) and lays out the
+    // arguments and the environment from kernel32 as `__argv` and
+    // `__environ` read them; then the entry, and the exit through the exit
+    // hook (`ExitProcess`). No signal or stack-overflow handler yet, and
+    // one worker (MYLA-703); the main thread's stack is the linker's
+    // (`/stack`).
+    fun emit_windows_start(var self, entry_name: str) {
+        let start = self.request_fn(self.platform_fn("windows_start"), [])
+        self.raw("\t.global _start")
+        self.raw("_start:")
+        self.raw("\tandq $-16, %rsp")
+        if self.frames {
+            // with tasks, one worker until MYLA-703, as on wasm32 (D125):
+            // its state block the first of `__tls_blocks` (`tv`), its
+            // first word its own address, before anything allocates
+            self.raw("\tleaq __tls_blocks(%rip), %rsi")
+            self.raw("\tmovq %rsi, (%rsi)")
         }
-        self.raw("\t.set __print_str, myla_std$rt$print_str")
-        let names = self.rt_alloc_names()
-        self.raw(format("\t.set __alloc, myla_{}", names.0))
-        self.raw(format("\t.set __free, myla_{}", names.1))
+        // the arguments and the environment, which `__sched_init` reads
+        self.raw(f"\tcall myla_{start}")
+        if self.frames {
+            // its ring of ready frames
+            let map_memory = self.request_fn(self.platform_fn("map_memory"), [])
+            self.raw("\tcall __sched_init")
+            self.raw("\tmovl $1, __exec_workers(%rip)")
+            self.raw(format("\tmovq ${}, %rdi", 8 * EXEC_CAP))
+            self.raw(f"\tcall myla_{map_memory}")
+            self.raw("\ttestq %rax, %rax")
+            self.raw("\tjs __trap_oom")
+            self.raw("\tmovq %rax, __wq_rings(%rip)")
+        }
+        if self.frames && self.sig_of(entry_name).decl.is_async {
+            // the entry's task: its frame queued, the executor run (D90)
+            self.raw(format("\tcall myla_{}__new", entry_name))
+            self.raw("\tmovq %rax, __exec_main(%rip)")
+            self.raw("\tmovq %rax, 40(%rax)")
+            self.raw("\tmovq %rax, %rdi")
+            self.raw("\tcall __exec_push")
+            self.raw("\tcall __exec_run")
+        } else {
+            self.raw(format("\tcall myla_{}", entry_name))
+        }
+        self.raw("\txorl %edi, %edi")
+        self.raw("\tcall __exit_program")
         self.raw("")
-        self.emit_compose_runtime()
-        self.emit_derived_eq()
+    }
+
+    // Windows' calls for std.platform (MYLA-702): `__syscall(f, a, b, c)`
+    // and `__syscall5(f, a, b, c, d, e)` call the function at `f`, a
+    // kernel32 function's address (its import slot's word,
+    // `__rt_get("__imp_<name>")`, which the code generator records for the
+    // import library), with Win64's convention, at this boundary only
+    // (D130): the arguments in %rcx, %rdx, %r8 and %r9 (0 for a fourth of
+    // `__syscall`), the fifth on the stack above 32 bytes of shadow space,
+    // the stack aligned to 16 bytes. The result is %rax as the function
+    // leaves it: a BOOL's or a DWORD's upper half is undefined, which the
+    // platform module masks. Win64 keeps every register the callers keep
+    // and %rdi and %rsi too.
+    fun emit_windows_calls(var self) {
+        for line in ["__syscall:", "\tpushq %rbp", "\tmovq %rsp, %rbp", "\tandq $-16, %rsp", "\tsubq $32, %rsp",
+            "\tmovq %rdi, %rax", "\tmovq %rcx, %r8", "\tmovq %rsi, %rcx", "\txorl %r9d, %r9d", "\tcall *%rax",
+            "\tmovq %rbp, %rsp", "\tpopq %rbp", "\tret", "",
+            "__syscall5:", "\tpushq %rbp", "\tmovq %rsp, %rbp", "\tandq $-16, %rsp", "\tsubq $48, %rsp",
+            "\tmovq %r9, 32(%rsp)", "\tmovq %r8, %r9", "\tmovq %rcx, %r8", "\tmovq %rsi, %rcx", "\tmovq %rdi, %rax", "\tcall *%rax",
+            "\tmovq %rbp, %rsp", "\tpopq %rbp", "\tret", ""] {
+            self.raw(line)
+        }
     }
 
     // The ready frames: each worker has a ring of its own (`emit_executor`
@@ -416,6 +511,13 @@ impl CodeGen {
         self.raw("\txorl %eax, %eax")
         self.raw("\tret")
         self.raw("")
+        // (Windows' one worker starts none until MYLA-703)
+        if !self.windows { self.emit_start_workers() }
+        self.emit_executor_entries()
+    }
+
+    // __start_workers: Linux's workers besides the main thread.
+    fun emit_start_workers(var self) {
         // __start_workers: the workers besides the main thread (worker 0),
         // as many as `__exec_workers` says (`_start` set it); each a thread
         // (clone: the address space, files, signal handlers and thread group
@@ -501,6 +603,11 @@ impl CodeGen {
         self.raw("\tpopq %rbx")
         self.raw("\tret")
         self.raw("")
+    }
+
+    // The executor's entry points the frame functions jump to: a yield, a
+    // wait for a task or an actor, `exit` with tasks.
+    fun emit_executor_entries(var self) {
         // myla___yield(frame): a turn for the others, the frame queued again
         // (its resume point stored before this tail call, D92)
         self.raw("myla___yield:")

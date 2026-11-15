@@ -220,26 +220,20 @@ class SelfHostedCli(_Layout):
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn("myla: 'wasm-ld' was not found: building for wasm32-wasi here needs clang and wasm-ld", proc.stderr)
 
-    def test_windows_is_a_target_not_built_yet(self):
-        # `--target x86_64-windows` is known (MYLA-700) and refused cleanly,
-        # before any code is generated or tool run, until MYLA-702 (D210)
-        out = os.path.join(self.work, "out-win", "win")
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        refusal = "myla: building for x86_64-windows is not supported yet (MYLA-702)\n"
-        for argv in (["build", "prog.my", "--target", "x86_64-windows", "-o", out],
-                     ["test", "prog.my", "--target", "x86_64-windows"]):
-            with self.subTest(argv=argv):
-                proc = self.myla_cmd(*argv)
-                self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("", refusal, 1))
-        self.assertEqual(os.listdir(os.path.dirname(out)), [])
+    def test_windows_is_a_target_unknown_ones_are_named(self):
+        # `--target x86_64-windows` is known (MYLA-700) and built since
+        # MYLA-702 (tests/burn/test_windows.py runs its programs under Wine):
+        # the compiler writes COFF's sections for it, not ELF's
         proc = self.myla_cmd("build", "prog.my", "--target", "x86_64-macos")
         self.assertEqual((proc.stderr, proc.returncode),
                          ("myla: unknown target 'x86_64-macos' (x86_64-linux, aarch64-linux, wasm32-wasi, x86_64-windows)\n", 1))
         gen = subprocess.run([selfhost_tool("gen_main"), "prog.my", STDLIB_ROOT, "--target", "x86_64-windows"],
                              cwd=self.work, capture_output=True, text=True)
-        self.assertEqual((gen.stdout, gen.stderr, gen.returncode),
-                         ("", "gen_main: building for x86_64-windows is not supported yet (MYLA-702)\n", 2))
-
+        self.assertEqual((gen.stderr, gen.returncode), ("", 0))
+        self.assertIn('\t.section .rdata,"dr"\n', gen.stdout)
+        self.assertIn("__imp_ExitProcess", gen.stdout)
+        self.assertNotIn(".note.GNU-stack", gen.stdout)
+        self.assertNotIn("\tsyscall", gen.stdout)
 
 if __name__ == "__main__":
     unittest.main()
