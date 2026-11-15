@@ -2,7 +2,7 @@
 id: MYLA-704
 title: "Windows step 5: files, directories and paths"
 type: feature
-status: todo
+status: in-progress
 priority: medium
 labels: [platforms, windows]
 ---
