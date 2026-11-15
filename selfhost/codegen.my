@@ -290,7 +290,7 @@ pub struct CodeGen {
     wasm_arity: [str: int32],
     wasm_calls: [str: int32],
     // MYLA-702: the target is x86-64 Windows (COFF, kernel32 through its
-    // import slots, `emit_runtime_prelude_windows`); the functions of
+    // import slots, `emit_windows_start`, `emit_windows_calls`); the functions of
     // kernel32 the program calls (`__imp_<name>`), for its import library
     windows: bool,
     imports: [str: bool],

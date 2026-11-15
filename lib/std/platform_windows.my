@@ -122,8 +122,13 @@ fun failed() -> int64 {
 
 // The cause code of Windows' error code `e` (winerror.h): the file and path
 // not found NOT_FOUND, access denied and a sharing violation
-// PERMISSION_DENIED, a pipe being closed or broken BROKEN_PIPE; one
-// without a cause OTHER plus it.
+// PERMISSION_DENIED, a pipe being closed, broken or not connected
+// BROKEN_PIPE. One without a cause is OTHER plus Linux's errno of the same
+// meaning where Linux has one (`linux_errno`), so that an `Other` reads the
+// same on every target (std.rt's and std.io's texts name Linux's numbers:
+// a full disk is "no space left on device"), as wasm32 does with WASI's
+// (MYLA-426); else OTHER plus 4096 plus Windows' own code, past every
+// Linux errno, so it is never taken for one.
 #test(2)[1]
 #test(3)[1]
 #test(5)[2]
@@ -136,10 +141,14 @@ fun failed() -> int64 {
 #test(87)[11]
 #test(109)[10]
 #test(232)[10]
+#test(233)[10]
 #test(995)[8]
 #test(1460)[18]
 #test(13)[21]
-#test(8)[264]
+#test(112)[284]
+#test(8)[268]
+#test(17)[274]
+#test(1392)[5744]
 fun cause(e: int64) -> int64 {
     if e == 2 || e == 3 || e == 15 || e == 161 { return NOT_FOUND }        // FILE_, PATH_NOT_FOUND, INVALID_DRIVE, BAD_PATHNAME
     if e == 5 || e == 32 || e == 33 || e == 1314 { return PERMISSION_DENIED } // ACCESS_DENIED, SHARING_, LOCK_VIOLATION, PRIVILEGE_NOT_HELD
@@ -148,13 +157,35 @@ fun cause(e: int64) -> int64 {
     if e == 145 { return NOT_EMPTY }                                         // DIR_NOT_EMPTY
     if e == 995 || e == 1223 { return CANCELLED }                            // OPERATION_ABORTED, CANCELLED
     if e == 1 || e == 50 || e == 120 { return UNSUPPORTED }                  // INVALID_FUNCTION, NOT_SUPPORTED, CALL_NOT_IMPLEMENTED
-    if e == 109 || e == 232 { return BROKEN_PIPE }                           // BROKEN_PIPE, NO_DATA
+    if e == 109 || e == 232 || e == 233 { return BROKEN_PIPE }               // BROKEN_PIPE, NO_DATA, PIPE_NOT_CONNECTED
     if e == 87 || e == 123 { return INVALID_INPUT }                          // INVALID_PARAMETER, INVALID_NAME
     if e == 258 || e == 1460 { return TIMED_OUT }                            // WAIT_TIMEOUT, TIMEOUT
     if e == 13 || e == 1113 { return INVALID_DATA }                          // INVALID_DATA, NO_UNICODE_TRANSLATION
     if e == 997 { return IN_PROGRESS }                                       // IO_PENDING
     if e == 6 { return BAD_HANDLE }                                          // INVALID_HANDLE
-    return OTHER + e
+    return OTHER + linux_errno(e)
+}
+
+// Linux's errno of the same meaning as Windows' code `e` that has no cause,
+// else 4096 plus `e`.
+#test(112)[28]
+#test(39)[28]
+#test(4)[24]
+#test(14)[12]
+#test(223)[27]
+#test(1117)[5]
+#test(1392)[5488]
+fun linux_errno(e: int64) -> int64 {
+    if e == 4 { return 24 }                          // TOO_MANY_OPEN_FILES: EMFILE
+    if e == 8 || e == 14 { return 12 }               // NOT_ENOUGH_MEMORY, OUTOFMEMORY: ENOMEM
+    if e == 17 { return 18 }                         // NOT_SAME_DEVICE: EXDEV
+    if e == 19 { return 30 }                         // WRITE_PROTECT: EROFS
+    if e == 23 || e == 1117 { return 5 }             // CRC, IO_DEVICE: EIO
+    if e == 39 || e == 112 { return 28 }             // HANDLE_DISK_FULL, DISK_FULL: ENOSPC
+    if e == 206 { return 36 }                        // FILENAME_EXCED_RANGE: ENAMETOOLONG
+    if e == 223 { return 27 }                        // FILE_TOO_LARGE: EFBIG
+    if e == 1921 { return 40 }                       // CANT_RESOLVE_FILENAME: ELOOP
+    return 4096 + e
 }
 
 // --- text: UTF-16 at the system, UTF-8 in Myla (D215) ------------------------------
@@ -502,7 +533,8 @@ pub fun close(fd: int64) -> int64 {
 // 1 when a read of `fd` won't block (input, its end, or an error), 0 when
 // `timeout_ms` (negative: none) ran out: a pipe asked how much it holds
 // (`PeekNamedPipe`), every millisecond; anything else (a file, the
-// console) is taken for ready.
+// console, and under Wine a Linux pipe handed over, which isn't a named
+// pipe) is taken for ready (MYLA-708 checks the limit on Windows).
 pub fun poll_read(fd: int64, timeout_ms: int64) -> int64 {
     if timeout_ms < 0 {
         return 1

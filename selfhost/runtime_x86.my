@@ -402,8 +402,9 @@ impl CodeGen {
     // `__rt_get("__imp_<name>")`, which the code generator records for the
     // import library), with Win64's convention, at this boundary only
     // (D130): the arguments in %rcx, %rdx, %r8 and %r9 (0 for a fourth of
-    // `__syscall`), the fifth on the stack above 32 bytes of shadow space,
-    // the stack aligned to 16 bytes. The result is %rax as the function
+    // `__syscall`), the fifth on the stack above 32 bytes of shadow space
+    // and a sixth 0 after it (`PeekNamedPipe`'s last), the stack aligned to
+    // 16 bytes. The result is %rax as the function
     // leaves it: a BOOL's or a DWORD's upper half is undefined, which the
     // platform module masks. Win64 keeps every register the callers keep
     // and %rdi and %rsi too.
@@ -412,7 +413,7 @@ impl CodeGen {
             "\tmovq %rdi, %rax", "\tmovq %rcx, %r8", "\tmovq %rsi, %rcx", "\txorl %r9d, %r9d", "\tcall *%rax",
             "\tmovq %rbp, %rsp", "\tpopq %rbp", "\tret", "",
             "__syscall5:", "\tpushq %rbp", "\tmovq %rsp, %rbp", "\tandq $-16, %rsp", "\tsubq $48, %rsp",
-            "\tmovq %r9, 32(%rsp)", "\tmovq %r8, %r9", "\tmovq %rcx, %r8", "\tmovq %rsi, %rcx", "\tmovq %rdi, %rax", "\tcall *%rax",
+            "\tmovq %r9, 32(%rsp)", "\tmovq $0, 40(%rsp)", "\tmovq %r8, %r9", "\tmovq %rcx, %r8", "\tmovq %rsi, %rcx", "\tmovq %rdi, %rax", "\tcall *%rax",
             "\tmovq %rbp, %rsp", "\tpopq %rbp", "\tret", ""] {
             self.raw(line)
         }
