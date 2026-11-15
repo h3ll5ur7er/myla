@@ -1395,7 +1395,8 @@ class Errors(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-@unittest.skipUnless(TEST_TARGET == "wasm32-wasi", "the wasm32 suite's (scripts/test-target.py wasm32-wasi)")
+@unittest.skipUnless(TEST_TARGET in ("wasm32-wasi", "x86_64-windows"),
+                     "the suites of a target without sockets (wasm32; Windows until MYLA-706)")
 class NetOnWasm(unittest.TestCase):
     def test_every_operation_is_unsupported(self):
         with tempfile.TemporaryDirectory() as tmp:

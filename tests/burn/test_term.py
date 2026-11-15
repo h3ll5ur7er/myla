@@ -1030,7 +1030,8 @@ listen: signals are not supported on this target
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-@unittest.skipUnless(TEST_TARGET == "wasm32-wasi", "the wasm32 suite's (scripts/test-target.py wasm32-wasi)")
+@unittest.skipUnless(TEST_TARGET in ("wasm32-wasi", "x86_64-windows"),
+                     "the suites of a target without terminals and signals (wasm32; Windows until MYLA-707)")
 class TermOnWasm(Case):
     def test_no_terminal_and_unsupported(self):
         with tempfile.TemporaryDirectory() as tmp:

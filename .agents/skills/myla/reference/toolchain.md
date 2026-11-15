@@ -27,7 +27,7 @@ Options valid with every command, before or after the file:
 - `--package name=dir` (repeatable): `import name…` resolves in `dir`. The project commands pass these themselves (`name=<dep>/src`).
 - `--root <dir>`: the root absolute imports (`from util.strs import f`) resolve in; default the file's directory, `src/` in a project.
 
-`--target T` is `x86_64-linux`, `aarch64-linux`, `wasm32-wasi` or `x86_64-windows` (anything else: `myla: unknown target 'T' (…)`, exit 1; each target is a record in `selfhost/target.my`, `parse_target`, MYLA-700); the default is the machine's. `x86_64-windows` is refused until MYLA-702: `myla: building for x86_64-windows is not supported yet (MYLA-702)`, exit 1. With `test` it implies `--native`. Tools per target, found on `PATH`: own Linux target `as --64`/`as` + `ld`; the other Linux target `clang --target=<triple>-linux-gnu -c` + `ld.lld -static`; wasm32 `clang --target=wasm32-wasi -mtail-call -mbulk-memory -mnontrapping-fptoint -msign-ext` + `wasm-ld --stack-first -z stack-size=8388608`; Windows (not used yet, D211) `clang --target=x86_64-pc-windows-msvc`, `llvm-dlltool`, `lld-link`. A missing tool: `myla: 'clang' was not found: building for aarch64-linux here needs clang and ld.lld`. `-g` is x86-64 only (`myla: -g is not supported for aarch64-linux yet`). Run a wasm module with `node tools/wasm/run.mjs prog.wasm [args…]` (exit code passed on; a trap is `runtime error: …`, exit 1); an aarch64 binary on x86-64 with `qemu-aarch64 ./prog`.
+`--target T` is `x86_64-linux`, `aarch64-linux`, `wasm32-wasi` or `x86_64-windows` (anything else: `myla: unknown target 'T' (…)`, exit 1; each target is a record in `selfhost/target.my`, `parse_target`, MYLA-700); the default is the machine's. `x86_64-windows` (MYLA-702) builds a static console PE32+ that imports only kernel32 (default output `a.exe`, a project's `build/<name>.exe`); it has the standard streams, the heap, the clocks, the arguments and the environment, tasks on one worker, and `Unsupported` for files, processes, sockets, the terminal and signals until their steps (MYLA-703 to 707). With `test` it implies `--native`. Tools per target, found on `PATH`: own Linux target `as --64`/`as` + `ld`; the other Linux target `clang --target=<triple>-linux-gnu -c` + `ld.lld -static`; wasm32 `clang --target=wasm32-wasi -mtail-call -mbulk-memory -mnontrapping-fptoint -msign-ext` + `wasm-ld --stack-first -z stack-size=8388608`; Windows (D211) `clang --target=x86_64-pc-windows-msvc -c`, `llvm-dlltool -m i386:x86-64 -d <out>.def -l <out>.lib` (kernel32's functions the program calls), `lld-link /nologo /subsystem:console /entry:_start /nodefaultlib /stack:125829120`. A missing tool: `myla: 'clang' was not found: building for aarch64-linux here needs clang and ld.lld`. `-g` is x86-64 only (`myla: -g is not supported for aarch64-linux yet`). Run a wasm module with `node tools/wasm/run.mjs prog.wasm [args…]` (exit code passed on; a trap is `runtime error: …`, exit 1); an aarch64 binary on x86-64 with `qemu-aarch64 ./prog`; a Windows one under Wine (`WINEDEBUG=-all /usr/lib/wine/wine64 prog.exe`; `MYLA_EMULATOR` names it for `myla test --target x86_64-windows`, whose cases run as runs of the harness, as on wasm32).
 
 ### Exit status and diagnostics
 
@@ -202,7 +202,7 @@ geo = { git = "https://example.org/geo.git", tag = "v1.2" }      # or branch = "
 | `MYLA_ARCH`, `AS`, `LD`, `MYLA_RUN` | `scripts/host.sh` | bootstrap another machine's seed here (arch, binutils, emulator to run stages under) |
 | `MYLA` | `scripts/build-page.sh` | the compiler to use (default `build/myla`) |
 | `PYTHON` | `scripts/test.sh` | interpreter (default `python3`) |
-| `MYLA_REQUIRE_TARGETS=1`, `MYLA_REQUIRE_BROWSER=1` | burn tests | fail instead of skip when clang/lld/qemu or Playwright are missing (CI sets them) |
+| `MYLA_REQUIRE_TARGETS=1`, `MYLA_REQUIRE_BROWSER=1` | burn tests | fail instead of skip when clang/lld/llvm-dlltool/qemu/Wine or Playwright are missing (CI sets them) |
 | `MYLA_TEST_TARGET` | burn tests | the target `scripts/test-target.py` runs a suite for |
 | `MYLA_PIN_DIAGNOSTICS=1` | `test_error_corpus` | writes missing `examples/errors/*.stderr` pins |
 | `MYLA_GENERATED=full`, `MYLA_GENERATED_SEED` | generated burn suites | all cases / another seed |
@@ -245,7 +245,7 @@ A literal format spec in `format`/an f-string is checked at compile time (`type 
 | `scripts/check-seed.sh [BUILD]` | exit 0 when the machine's seed bootstraps the sources (it reports whether each seed is also the current compiler); 1 when `selfhost/embedded_std.my` differs from HEAD; 2 when the seed can't bootstrap the sources (D207). CI and the pre-push hook run it |
 | `scripts/host.sh` | sourced: host target, seed, `asm_to_bin`, `run_tool`, `seed_compile` |
 | `scripts/test.sh [fast\|all]` | burn tests via `python3 -m unittest`; `fast` drops `test_selfhost_*` and ~25 slow modules |
-| `scripts/test-target.py T [MODULE…] [-j N]` | burn suites for `aarch64-linux` (qemu) or `wasm32-wasi` (Node), exceptions in `tests/burn/_targets.py` |
+| `scripts/test-target.py T [MODULE…] [-j N]` | burn suites for `aarch64-linux` (qemu), `wasm32-wasi` (Node) or `x86_64-windows` (Wine: `/usr/lib/wine/wine64` found, `MYLA_EMULATOR` set, a prefix in `build/wineprefix`), exceptions in `tests/burn/_targets.py` |
 | `scripts/stress-native.py [--runs N] [--workers 1,4,16] [--only t…]` | concurrency stress programs natively |
 | `scripts/build.sh f.my [out]` | `build/stage3 f.my lib` piped to `as`/`ld` (stage3 directly) |
 | `scripts/build-page.sh [OUT=build/page]` | the wasm playground: `play.wasm` + `tools/wasm/{page.html,myla.mjs,wasi.mjs,mem_fs.mjs}` |
@@ -264,7 +264,7 @@ The compiler itself: `build/stage3 <file.my> <stdlib-dir> [--target T] [-g] [--c
 
 | Job | Runs |
 | --- | --- |
-| `burn` | the whole burn suite with gdb, clang, lld, qemu-user, Node, Go and tree-sitter, `MYLA_REQUIRE_TARGETS=1` |
+| `burn` | the whole burn suite with gdb, clang, lld, llvm, qemu-user, wine64, Node, Go and tree-sitter, `MYLA_REQUIRE_TARGETS=1` |
 | `targets` (aarch64-linux, wasm32-wasi) | `scripts/test-target.py <target>` |
 | `wasm-page` | the playground page in Chromium (Playwright) |
 | `bootstrap` | `scripts/bootstrap.sh build`, `scripts/check-seed.sh build`, stage3 builds `examples/hello.my`; on a push to master uploads the seeds and the x86-64 `myla`/`myla-lsp` as artifacts (90 days) |

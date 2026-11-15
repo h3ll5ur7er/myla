@@ -65,10 +65,13 @@ def wine() -> list[str]:
 def wine_env() -> None:
     """Wine's defaults in this process's environment, for it and its children
     (`myla test --target x86_64-windows`'s runs among them): no debug output,
-    and a prefix of the repository's own under build/ (made by its first
-    run, some seconds)."""
+    and a prefix of the repository's own under build/, made here if it isn't
+    there yet (some seconds; a program's first run would say so on its
+    stderr)."""
     os.environ.setdefault("WINEDEBUG", "-all")
     os.environ.setdefault("WINEPREFIX", os.path.join(_ROOT, "build", "wineprefix"))
+    if wine() and not os.path.isdir(os.environ["WINEPREFIX"]):
+        subprocess.run([*wine(), "wineboot", "--init"], capture_output=True, timeout=300)
 
 
 def windows_imports(asm: str) -> list[str]:

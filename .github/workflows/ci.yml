@@ -42,14 +42,15 @@ jobs:
         with:
           go-version: "1.24"
           cache: false
-      - name: gdb for the debug-information tests (MYLA-156); clang, lld and qemu-user for the aarch64 ones (MYLA-163)
+      - name: gdb for the debug-information tests (MYLA-156); clang, lld and qemu-user for the aarch64 ones (MYLA-163); llvm-dlltool and Wine for the Windows ones (MYLA-702)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gdb clang lld qemu-user
+          sudo apt-get install -y -qq gdb clang lld llvm qemu-user wine64
           gdb --version | head -1
           clang --version | head -1
           ld.lld --version | head -1
           qemu-aarch64 --version | head -1
+          /usr/lib/wine/wine64 --version
       # the self-hosted tools the burn tests build, keyed on every source
       # that can change them (as tests/burn/_tools.py's own hash is)
       - uses: actions/cache@v6
@@ -75,15 +76,16 @@ jobs:
 
   targets:
     # the parity, runtime-error, error-corpus, I/O and feature suites built
-    # for each other target and run under qemu-aarch64 or Node, with the
-    # exceptions tests/burn/_targets.py lists (MYLA-268)
+    # for each other target and run under qemu-aarch64, Node or Wine
+    # (MYLA-702, D213), with the exceptions tests/burn/_targets.py lists
+    # (MYLA-268): on Windows what is still `Unsupported` (D210)
     name: Burn suites on ${{ matrix.target }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        target: [aarch64-linux, wasm32-wasi]
+        target: [aarch64-linux, wasm32-wasi, x86_64-windows]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -93,6 +95,11 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld qemu-user
+      - name: llvm-dlltool and Wine (Ubuntu's wine64 puts it at /usr/lib/wine/wine64, which scripts/test-target.py finds)
+        if: matrix.target == 'x86_64-windows'
+        run: |
+          sudo apt-get install -y -qq llvm wine64
+          /usr/lib/wine/wine64 --version
       - uses: actions/cache@v6
         with:
           path: build/test-tools
