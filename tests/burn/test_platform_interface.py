@@ -285,7 +285,8 @@ pub fun probe(dir: str) {
     for e in entries(dir + "/missing") {
         print(e)
     }
-    print(os.PROCESSES == (os.TARGET != "wasm32-wasi" && os.TARGET != "x86_64-windows"))
+    // every target but wasm32 has processes (Windows since MYLA-705)
+    print(os.PROCESSES == (os.TARGET != "wasm32-wasi"))
     if !os.PROCESSES {
         let none: [str] = []
         let h = os.spawn_piped(["true"], ["true"], none)
