@@ -27,7 +27,9 @@ A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 20
 
 **Docs.** [[Language/Targets]] (the row, a Windows column, text in UTF-8 everywhere), [[Architecture/Native-backend#windows-on-x86-64]], [[Getting started]], [[Development/Testing]], [[Language/Standard-library/Rt]], [[Architecture/Self-hosted-compiler]], the `myla` skill's references (both copies).
 
-## Proposals
+## Proposals (accepted 2026-11-15)
+
+The owner took the five recommendations; the first is D220, the second D221, the other three stand as built.
 
 1. **A Windows error code without a cause is Linux's errno of the same meaning, else 4096 plus the code** (built). `ERROR_DISK_FULL` is ENOSPC's `Other(28)` ("no space left on device", as std.rt's and std.io's texts name Linux's numbers), `ERROR_NOT_ENOUGH_MEMORY` ENOMEM's, and one Linux hasn't `Other(4096 + code)`, never taken for a Linux number, as wasm32 does with WASI's ([[MYLA-426]]). Alternative: D219's letter, `Other(code)` with Windows' own number, which reads as an unrelated Linux errno in every text (`ERROR_NOT_SAME_DEVICE` 17 as "file exists"), until [[MYLA-716]]'s per-platform texts. Proposed row: *"A Windows error code with no cause is `Other` of Linux's errno of the same meaning, else of 4096 plus the code, as wasm32 maps WASI's (D219, [[MYLA-702]])."*
 2. **Tasks run on one worker on Windows until [[MYLA-703]]** (built), its state block next to `%rip`. Alternative: refuse a program with tasks; but `task_line` counts every `async let` of every module loaded, so std.process (`exit`) and std.test, and with them `myla test --target x86_64-windows`, would all be refused. Proposed row: *"Until Windows' threads, its tasks run on one worker, as on wasm32 (D125): `MYLA_THREADS` is ignored there ([[MYLA-702]], [[MYLA-703]])."*
