@@ -5,6 +5,11 @@
 // slashes counts as one. A path that starts with `/` is absolute; any run of
 // slashes at its start is the one root, as on Linux (Python's `posixpath`
 // keeps exactly two, `//a`, as they are).
+//
+// These are Linux's and WASI's paths. On Windows std.path is
+// `std/path_windows.my` (MYLA-704, D215: the loader's copy for the target,
+// as Python's `os.path` is `ntpath` there), the same functions on Windows'
+// paths: `\` a separator too, a drive or a UNC share before the root.
 
 import std.list as list_m // `join`
 
@@ -15,6 +20,21 @@ import std.list as list_m // `join`
 #test("")[false]
 pub fun is_absolute(p: str) -> bool {
     return p.len() > 0 && p[0] == '/'
+}
+
+// The root `p` starts with: `/` for an absolute path (a run of slashes is
+// one), `""` for a relative one; on Windows a drive or a UNC share too, with
+// its root or without (`C:\`, `C:`, `\\srv\share\`). It is where `p`
+// starts: `p` is it, maybe more slashes, and the components.
+#test("/a/b")["/"]
+#test("///a")["/"]
+#test("a/b")[""]
+#test("")[""]
+pub fun anchor(p: str) -> str {
+    if is_absolute(p) {
+        return "/"
+    }
+    return ""
 }
 
 // `b` after `a`, with one `/` between them. An absolute `b` replaces `a`, as

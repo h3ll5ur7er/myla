@@ -508,12 +508,18 @@ fun environment_strings(block: [int]) -> [str] {
 
 // --- the standard streams ---------------------------------------------------------
 
-// The handle of the standard stream `fd` (0 input, 1 output, 2 error:
-// `GetStdHandle`), 0 for none; the descriptors of files come with
-// MYLA-704.
+// The handle of the descriptor `fd`, 0 for none. A descriptor is a
+// handle (MYLA-704): a file's, a directory's (`open_file`, `open_dir`), a
+// pipe's; but 0, 1 and 2, which no handle is (a handle is a multiple of 4,
+// an old console's 3 more), are the standard streams (input, output, error:
+// `GetStdHandle`). A negative one is none (-1 and -2 would be the process's
+// and the thread's own pseudo-handles).
 fun std_handle(fd: int64) -> int64 {
-    if fd < 0 || fd > 2 {
+    if fd < 0 {
         return 0
+    }
+    if fd > 2 {
+        return fd
     }
     let h = __syscall(__rt_get("__imp_GetStdHandle"), -10 - fd, 0, 0)
     if h == -1 {
@@ -542,9 +548,18 @@ pub fun read(fd: int64, buf: int64, n: int64) -> int64 {
         if e == 109 || e == 38 {
             return 0  // BROKEN_PIPE, HANDLE_EOF
         }
-        return -cause(e)
+        return -access_cause(e)
     }
     return got
+}
+
+// The cause of the error `e` of a read or a write: access denied, for a
+// handle opened without the access, BAD_HANDLE as Linux's EBADF.
+fun access_cause(e: int64) -> int64 {
+    if e == 5 {
+        return BAD_HANDLE
+    }
+    return cause(e)
 }
 
 // Up to `n` bytes at `buf` written to `fd`: how many.
@@ -564,20 +579,26 @@ pub fun write(fd: int64, buf: int64, n: int64) -> int64 {
     let r = __syscall5(__rt_get("__imp_WriteFile"), h, buf, len, done, 0)
     let wrote = __load64(done) & LOW32
     if !ok(r) {
-        return failed()
+        return -access_cause(last_error())
     }
     return wrote
 }
 
-// The descriptor `fd` closed: one of the standard streams' handle closed,
-// and the stream left without one (a write to it then BAD_HANDLE, as
-// Linux's EBADF).
+// The descriptor `fd` closed: its handle closed (`CloseHandle`, one that
+// isn't open BAD_HANDLE); one of the standard streams left without one (a
+// write to it then BAD_HANDLE, as Linux's EBADF).
 pub fun close(fd: int64) -> int64 {
     let h = std_handle(fd)
     if h == 0 {
         return -BAD_HANDLE
     }
     let r = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+    if fd > 2 {
+        if !ok(r) {
+            return failed()
+        }
+        return 0
+    }
     let none = __syscall(__rt_get("__imp_SetStdHandle"), -10 - fd, 0, 0)
     if !ok(r) {
         return failed()
@@ -658,88 +679,742 @@ pub fun broken_pipe() {
     exit(141)
 }
 
-// --- files and directories: MYLA-704 -------------------------------------------------
+// --- files and directories (MYLA-704) ---------------------------------------------------
+// A path crosses as UTF-16 (`wide`, D215), `/` and `\` both its separators
+// (Windows reads both); a descriptor is the handle of the file or directory
+// (`std_handle`). A file is opened sharing reading, writing and removing it
+// with every other handle, as on Linux, where an open file locks nothing.
+// What Windows reports otherwise than Linux is made Linux's where a
+// program would see it: a directory opened as a file IS_A_DIRECTORY, and a
+// path through a file NOT_A_DIRECTORY, not access denied and a path not
+// found (`open_handle`, `path_failed`).
 
+// CreateFile2's access rights, sharing, ways to open and flags
+const GENERIC_READ: int64 = 2147483648i64
+const GENERIC_WRITE: int64 = 1073741824
+// FILE_GENERIC_WRITE less FILE_WRITE_DATA: every write at the end
+const APPEND_ACCESS: int64 = 1179924
+const FILE_READ_ATTRIBUTES: int64 = 128
+const SHARE_ALL: int64 = 7
+const CREATE_NEW: int64 = 1
+const CREATE_ALWAYS: int64 = 2
+const OPEN_EXISTING: int64 = 3
+const OPEN_ALWAYS: int64 = 4
+const TRUNCATE_EXISTING: int64 = 5
+const FILE_FLAG_BACKUP_SEMANTICS: int64 = 33554432
+const FILE_FLAG_OPEN_REPARSE_POINT: int64 = 2097152
+// a file's attributes, and GetFileAttributesW's failure
+const ATTR_READONLY: int64 = 1
+const ATTR_DIRECTORY: int64 = 16
+const ATTR_REPARSE_POINT: int64 = 1024
+const NO_ATTRIBUTES: int64 = 4294967295i64
+// the reparse points that are links: a symbolic link, a junction, WSL's
+const TAG_SYMLINK: int64 = 2684354572i64
+const TAG_MOUNT_POINT: int64 = 2684354563i64
+const TAG_LX_SYMLINK: int64 = 2684354589i64
+// GetFileType's
+const FILE_TYPE_DISK: int64 = 1
+const FILE_TYPE_CHAR: int64 = 2
+const FILE_TYPE_PIPE: int64 = 3
+// GetFileInformationByHandleEx's classes
+const ATTRIBUTE_TAG_INFO: int64 = 9
+const ID_BOTH_DIRECTORY_INFO: int64 = 10
+// the causes Linux gives where Windows has none: ESPIPE, ERANGE
+const ILLEGAL_SEEK: int64 = 285
+const OUT_OF_RANGE: int64 = 290
+
+// `s` as the NUL-terminated UTF-16 text the system reads (D215), in memory
+// the caller frees: a byte that starts no well-formed UTF-8 character is
+// U+FFFD (`utf8_char`; a unit for each byte at most, so `2 * len + 2`
+// bytes are room).
+fun wide(s: str) -> int64 {
+    let p = __addr_of(s) + 8
+    let n = __load64(p - 8)
+    let out = __alloc(2 * n + 2)
+    var i: int64 = 0
+    var o = out
+    while i < n {
+        // the three bytes after this one that are there, the first lowest
+        var next: int64 = 0
+        var k: int64 = 3
+        while k > 0 {
+            next = next << 8
+            if i + k < n {
+                next |= __load8(p + i + k) as int64
+            }
+            k -= 1
+        }
+        let (c, used) = utf8_char(__load8(p + i) as int64, next, n - i - 1)
+        if c >= 65536 {
+            store_unit(o, 55296 + ((c - 65536) >> 10))
+            store_unit(o + 2, 56320 + ((c - 65536) & 1023))
+            o += 4
+        } else {
+            store_unit(o, c)
+            o += 2
+        }
+        i += used
+    }
+    store_unit(o, 0)
+    return out
+}
+
+// The UTF-16 code unit `u` stored at `p`.
+fun store_unit(p: int64, u: int64) {
+    __store8(p, (u & 255) as uint8)
+    __store8(p + 1, ((u >> 8) & 255) as uint8)
+}
+
+// The code point of the UTF-8 character that starts with the byte `b`, the
+// bytes after it `next` (the first lowest), `left` of them there, and its
+// length in bytes; a byte that starts none (a stray continuation, an
+// overlong form, a surrogate, past U+10FFFF, cut off) is U+FFFD, one byte.
+#test(104, 0, 0)[(104, 1)]
+#test(195, 169, 1)[(233, 2)]
+#test(228, 0xADB8, 2)[(20013, 3)]
+#test(240, 0x80989F, 3)[(128512, 4)]
+#test(128, 65, 1)[(65533, 1)]
+#test(192, 175, 1)[(65533, 1)]
+#test(224, 0x8080, 2)[(65533, 1)]
+#test(237, 0x80A0, 2)[(65533, 1)]
+#test(244, 0x808090, 3)[(65533, 1)]
+#test(240, 0x989F, 2)[(65533, 1)]
+#test(195, 65, 1)[(65533, 1)]
+#test(255, 0, 0)[(65533, 1)]
+fun utf8_char(b: int64, next: int64, left: int64) -> (int64, int64) {
+    if b < 128 {
+        return (b, 1)
+    }
+    var len: int64 = 4
+    var c = b & 7
+    var least: int64 = 65536
+    if b >= 194 && b < 224 {
+        len = 2
+        c = b & 31
+        least = 128
+    } else if b >= 224 && b < 240 {
+        len = 3
+        c = b & 15
+        least = 2048
+    } else if b < 240 || b >= 245 {
+        return (65533, 1)
+    }
+    if len - 1 > left {
+        return (65533, 1)
+    }
+    var k: int64 = 1
+    while k < len {
+        let d = (next >> (8 * (k - 1))) & 255
+        if (d & 192) != 128 {
+            return (65533, 1)
+        }
+        c = (c << 6) | (d & 63)
+        k += 1
+    }
+    if c < least || c > 1114111 || (c >= 55296 && c < 57344) {
+        return (65533, 1)
+    }
+    return (c, len)
+}
+
+// The `n` UTF-16 units at `src` written to `dst` as UTF-8, a lone surrogate
+// as U+FFFD (`joined_units`): how many bytes (three a unit at most).
+fun put_utf8(dst: int64, src: int64, n: int64) -> int64 {
+    var o = dst
+    var i: int64 = 0
+    while i < n {
+        var d: int64 = -1
+        if i + 1 < n {
+            d = unit(src + 2 * i + 2)
+        }
+        let (c, used) = joined_units(unit(src + 2 * i), d)
+        i += used
+        let (bytes, len) = utf8_bytes(c)
+        var k: int64 = 0
+        while k < len {
+            __store8(o + k, ((bytes >> (8 * k)) & 255) as uint8)
+            k += 1
+        }
+        o += len
+    }
+    return o - dst
+}
+
+// The code point the UTF-16 unit `c` starts, `d` the unit after it (-1 for
+// none), and how many units it takes: a surrogate pair two, a lone
+// surrogate U+FFFD, as Windows converts one.
+#test(65, 66)[(65, 1)]
+#test(55357, 56832)[(128512, 2)]
+#test(55357, 65)[(65533, 1)]
+#test(55357, -1)[(65533, 1)]
+#test(56832, 55357)[(65533, 1)]
+fun joined_units(c: int64, d: int64) -> (int64, int64) {
+    if c >= 55296 && c < 56320 && d >= 56320 && d < 57344 {
+        return (65536 + ((c - 55296) << 10) + (d - 56320), 2)
+    }
+    if c >= 55296 && c < 57344 {
+        return (65533, 1)
+    }
+    return (c, 1)
+}
+
+// The UTF-8 bytes of the code point `c`, the first lowest, and how many.
+#test(65)[(65, 1)]
+#test(233)[(0xA9C3, 2)]
+#test(20013)[(0xADB8E4, 3)]
+#test(128512)[(0x80989FF0, 4)]
+fun utf8_bytes(c: int64) -> (int64, int64) {
+    if c < 128 {
+        return (c, 1)
+    }
+    if c < 2048 {
+        return ((192 | (c >> 6)) | ((128 | (c & 63)) << 8), 2)
+    }
+    if c < 65536 {
+        return ((224 | (c >> 12)) | ((128 | ((c >> 6) & 63)) << 8) | ((128 | (c & 63)) << 16), 3)
+    }
+    return ((240 | (c >> 18)) | ((128 | ((c >> 12) & 63)) << 8) | ((128 | ((c >> 6) & 63)) << 16) | ((128 | (c & 63)) << 24), 4)
+}
+
+// The attributes of what the path `w` names (GetFileAttributesW, a link
+// not followed), NO_ATTRIBUTES for none.
+fun attributes(w: int64) -> int64 {
+    return __syscall(__rt_get("__imp_GetFileAttributesW"), w, 0, 0) & LOW32
+}
+
+// Whether the attributes `a` are a directory's.
+fun is_dir_attr(a: int64) -> bool {
+    return a != NO_ATTRIBUTES && (a & ATTR_DIRECTORY) != 0
+}
+
+// What a call on the path `w` that failed with the error `e` gives: minus
+// its cause, but what Linux reports where Windows reports a path not found
+// or a bad name: a name longer than 255 units ENAMETOOLONG's `Other` (no
+// file system of either takes one, D220), and a path through a file
+// NOT_A_DIRECTORY (ENOTDIR), found by asking each directory the path names
+// before its last component for its attributes (and the last one too when
+// the path ends in a separator).
+fun path_failed(w: int64, e: int64) -> int64 {
+    if e != 2 && e != 3 && e != 123 && e != 206 {
+        return -cause(e)
+    }
+    let n = wide_len(w)
+    var run: int64 = 0
+    var k: int64 = 0
+    while k < n {
+        run += 1
+        if is_sep(unit(w + 2 * k)) {
+            run = 0
+        }
+        if run > 255 {
+            return -(OTHER + 36)
+        }
+        k += 1
+    }
+    let trailing = n > 0 && is_sep(unit(w + 2 * n - 2))
+    if e == 2 && !trailing {
+        return -cause(e)
+    }
+    var i: int64 = 1
+    while i < n {
+        let c = unit(w + 2 * i)
+        if is_sep(c) && !is_sep(unit(w + 2 * i - 2)) {
+            store_unit(w + 2 * i, 0)
+            let a = attributes(w)
+            store_unit(w + 2 * i, c)
+            if a != NO_ATTRIBUTES && (a & ATTR_DIRECTORY) == 0 {
+                return -NOT_A_DIRECTORY
+            }
+        }
+        i += 1
+    }
+    return -cause(e)
+}
+
+// Whether the UTF-16 unit `c` separates a path's components.
+fun is_sep(c: int64) -> bool {
+    return c == 47 || c == 92
+}
+
+// What `path` names opened (`CreateFile2`) for `access`, as `disposition`
+// says, with `flags`: its handle, or minus the cause. A directory opened as
+// a file is IS_A_DIRECTORY (Windows: access denied), as Linux reports
+// reading or writing one.
+fun open_handle(path: str, access: int64, disposition: int64, flags: int64) -> int64 {
+    let w = wide(path)
+    // CREATEFILE2_EXTENDED_PARAMETERS: its size and FILE_ATTRIBUTE_NORMAL,
+    // the flags, no security attributes or template
+    let params = __alloc(32)
+    __store64(params, 32 | (128i64 << 32))
+    __store64(params + 8, flags)
+    __store64(params + 16, 0)
+    __store64(params + 24, 0)
+    var h = __syscall5(__rt_get("__imp_CreateFile2"), w, access, SHARE_ALL, disposition, params)
+    if h == -1 {
+        let e = last_error()
+        if e == 5 && (flags & FILE_FLAG_BACKUP_SEMANTICS) == 0 && is_dir_attr(attributes(w)) {
+            h = -IS_A_DIRECTORY
+        } else {
+            h = path_failed(w, e)
+        }
+    }
+    __free(params)
+    __free(w)
+    return h
+}
+
+// The file at `path` opened for reading: its descriptor.
 pub fun open_read(path: str) -> int64 {
-    return ENOSYS
+    return open_handle(path, GENERIC_READ, OPEN_EXISTING, 0)
 }
 
+// The file at `path` opened for writing, created or emptied.
 pub fun open_write(path: str) -> int64 {
-    return ENOSYS
+    return open_handle(path, GENERIC_WRITE, CREATE_ALWAYS, 0)
 }
 
+// The directory at `path` opened for listing (`dir_read`); a file
+// NOT_A_DIRECTORY, as Linux's O_DIRECTORY.
 pub fun open_dir(path: str) -> int64 {
-    return ENOSYS
+    let h = open_handle(path, GENERIC_READ, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS)
+    if h < 0 {
+        return h
+    }
+    let info = __alloc(56)
+    let r = __syscall(__rt_get("__imp_GetFileInformationByHandle"), h, info, 0)
+    let a = __load64(info) & LOW32
+    __free(info)
+    if !ok(r) || (a & ATTR_DIRECTORY) == 0 {
+        let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+        return -NOT_A_DIRECTORY
+    }
+    return h
 }
 
-// The size of the open file `fd`: 0, as for a stream.
+// The size of the open file `fd`, 0 when it has none (a pipe, the console).
 pub fun file_size(fd: int64) -> int64 {
+    let h = std_handle(fd)
+    if h == 0 {
+        return 0
+    }
+    let w = __alloc(8)
+    __store64(w, 0)
+    let r = __syscall(__rt_get("__imp_GetFileSizeEx"), h, w, 0)
+    var size: int64 = 0
+    if ok(r) {
+        size = __load64(w)
+    }
+    __free(w)
+    return size
+}
+
+// The file at `path` opened with std.rt's portable `flags` (1 read, 2
+// write, 4 create, 8 truncate, 16 append, 32 exclusive; at least one of the
+// first two): its descriptor. `mode` isn't used: Windows has no permission
+// bits, and a new file isn't read-only (D218).
+pub fun open_file(path: str, flags: int64, mode: int64) -> int64 {
+    var access: int64 = 0
+    if (flags & 1) != 0 {
+        access |= GENERIC_READ
+    }
+    if (flags & 2) != 0 {
+        if (flags & 16) != 0 {
+            access |= APPEND_ACCESS
+        } else {
+            access |= GENERIC_WRITE
+        }
+    }
+    return open_handle(path, access, disposition_of(flags), 0)
+}
+
+// How CreateFile2 opens a file for the portable `flags`: exclusive with
+// create CREATE_NEW, create and truncate CREATE_ALWAYS, create alone
+// OPEN_ALWAYS, truncate alone TRUNCATE_EXISTING, else OPEN_EXISTING.
+#test(1)[3]
+#test(3 | 4)[4]
+#test(2 | 8)[5]
+#test(2 | 4 | 8)[2]
+#test(3 | 4 | 32)[1]
+#test(2 | 4 | 8 | 32)[1]
+#test(2 | 32)[3]
+#test(2 | 4 | 16)[4]
+fun disposition_of(flags: int64) -> int64 {
+    let create = (flags & 4) != 0
+    let truncate = (flags & 8) != 0
+    if create && (flags & 32) != 0 {
+        return CREATE_NEW
+    }
+    if create && truncate {
+        return CREATE_ALWAYS
+    }
+    if create {
+        return OPEN_ALWAYS
+    }
+    if truncate {
+        return TRUNCATE_EXISTING
+    }
+    return OPEN_EXISTING
+}
+
+// The cursor of `fd` moved to `offset` from the start (`whence` 0), the
+// cursor (1) or the end (2): the new offset. One before the start or past
+// int64's range is INVALID_INPUT and leaves the cursor, as Linux's lseek;
+// a pipe or the console can't seek (ESPIPE's `Other`).
+pub fun seek(fd: int64, offset: int64, whence: int64) -> int64 {
+    let h = std_handle(fd)
+    if h == 0 {
+        return -BAD_HANDLE
+    }
+    let t = file_type(h)
+    if t < 0 {
+        return t
+    }
+    if t != FILE_TYPE_DISK {
+        return -ILLEGAL_SEEK
+    }
+    let w = __alloc(8)
+    __store64(w, 0)
+    var r: int64 = 1
+    if whence == 1 {
+        r = __syscall5(__rt_get("__imp_SetFilePointerEx"), h, 0, w, 1, 0)
+    } else if whence == 2 {
+        r = __syscall(__rt_get("__imp_GetFileSizeEx"), h, w, 0)
+    }
+    let base = __load64(w)
+    if !ok(r) {
+        __free(w)
+        return failed()
+    }
+    if (offset > 0 && base > 9223372036854775807i64 - offset) || base + offset < 0 {
+        __free(w)
+        return -INVALID_INPUT
+    }
+    r = __syscall5(__rt_get("__imp_SetFilePointerEx"), h, base + offset, w, 0, 0)
+    let at = __load64(w)
+    __free(w)
+    if !ok(r) {
+        return failed()
+    }
+    return at
+}
+
+// What the handle `h` is (`GetFileType`: FILE_TYPE_DISK, a pipe, a
+// character device, 0 for another), or minus the cause (a handle that isn't
+// open BAD_HANDLE).
+fun file_type(h: int64) -> int64 {
+    // (an unknown type sets no error)
+    let none = __syscall(__rt_get("__imp_SetLastError"), 0, 0, 0)
+    let t = __syscall(__rt_get("__imp_GetFileType"), h, 0, 0) & LOW32
+    if t == 0 && last_error() != 0 {
+        return failed()
+    }
+    return t
+}
+
+// The size, the kind (KIND_FILE, …), the permission bits and the
+// modification time (nanoseconds since 1970) of the open file `fd`, as four
+// words at `out`: 0, or minus its cause.
+pub fun fd_stat(fd: int64, out: int64) -> int64 {
+    let h = std_handle(fd)
+    if h == 0 {
+        return -BAD_HANDLE
+    }
+    return handle_stat(h, out, false)
+}
+
+// `fd_stat`'s four words of the open handle `h` at `out`, then, when `ids`,
+// the volume's serial number and the file's index on it (which together
+// tell one file from another). A pipe or the console is a FIFO or a
+// character device, its size and time 0 (GetFileType); a file's is
+// GetFileInformationByHandle's, and a reparse point's tag says whether it
+// is a link (`kind_of`). 0, or minus the cause.
+fun handle_stat(h: int64, out: int64, ids: bool) -> int64 {
+    let t = file_type(h)
+    if t < 0 {
+        return t
+    }
+    if t != FILE_TYPE_DISK {
+        var kind = KIND_OTHER
+        if t == FILE_TYPE_CHAR {
+            kind = KIND_CHAR_DEVICE
+        } else if t == FILE_TYPE_PIPE {
+            kind = KIND_FIFO
+        }
+        __store64(out, 0)
+        __store64(out + 8, kind)
+        __store64(out + 16, 438)
+        __store64(out + 24, 0)
+        if ids {
+            __store64(out + 32, 0)
+            __store64(out + 40, 0)
+        }
+        return 0
+    }
+    // BY_HANDLE_FILE_INFORMATION: the attributes at 0, the last write's
+    // FILETIME at 20, the volume's serial number at 28, the size's high and
+    // low halves at 32 and 36, the index's at 44 and 48
+    let info = __alloc(56)
+    let r = __syscall(__rt_get("__imp_GetFileInformationByHandle"), h, info, 0)
+    if !ok(r) {
+        __free(info)
+        return failed()
+    }
+    let attrs = __load64(info) & LOW32
+    var tag: int64 = 0
+    if (attrs & ATTR_REPARSE_POINT) != 0 {
+        // FILE_ATTRIBUTE_TAG_INFO: the attributes, the reparse tag
+        let ti = __alloc(8)
+        if ok(__syscall5(__rt_get("__imp_GetFileInformationByHandleEx"), h, ATTRIBUTE_TAG_INFO, ti, 8, 0)) {
+            tag = (__load64(ti) >> 32) & LOW32
+        }
+        __free(ti)
+    }
+    let kind = kind_of(attrs, tag)
+    __store64(out, ((__load64(info + 32) & LOW32) << 32) | (__load64(info + 36) & LOW32))
+    __store64(out + 8, kind)
+    __store64(out + 16, permissions_of(attrs, kind))
+    __store64(out + 24, (__load64(info + 20) - EPOCH_1970) * 100)
+    if ids {
+        __store64(out + 32, __load64(info + 28) & LOW32)
+        __store64(out + 40, ((__load64(info + 44) & LOW32) << 32) | (__load64(info + 48) & LOW32))
+    }
+    __free(info)
     return 0
 }
 
-pub fun open_file(path: str, flags: int64, mode: int64) -> int64 {
-    return ENOSYS
+// The kind of a file of the attributes `attrs`, a reparse point's tag `tag`:
+// a symbolic link or a junction KIND_SYMLINK (a reparse point of another
+// tag, a file in the cloud say, is what it holds), a directory KIND_DIR, the
+// rest KIND_FILE.
+#test(32, 0)[1]
+#test(16, 0)[2]
+#test(1056, 2684354572)[3]
+#test(1040, 2684354563)[3]
+#test(1056, 2684354589)[3]
+#test(1056, 2147483674)[1]
+#test(1040, 0)[2]
+fun kind_of(attrs: int64, tag: int64) -> int64 {
+    if (attrs & ATTR_REPARSE_POINT) != 0 && (tag == TAG_SYMLINK || tag == TAG_MOUNT_POINT || tag == TAG_LX_SYMLINK) {
+        return KIND_SYMLINK
+    }
+    if (attrs & ATTR_DIRECTORY) != 0 {
+        return KIND_DIR
+    }
+    return KIND_FILE
 }
 
-pub fun seek(fd: int64, offset: int64, whence: int64) -> int64 {
-    return ENOSYS
+// A file's permission bits from its read-only attribute (D218): 0o444 or
+// 0o666, a directory 0o555 or 0o777, a link 0o777, as Linux shows one.
+#test(32, 1)[438]
+#test(33, 1)[292]
+#test(16, 2)[511]
+#test(17, 2)[365]
+#test(1057, 3)[511]
+fun permissions_of(attrs: int64, kind: int64) -> int64 {
+    if kind == KIND_SYMLINK {
+        return 511
+    }
+    let readonly = (attrs & ATTR_READONLY) != 0
+    if kind == KIND_DIR {
+        if readonly {
+            return 365
+        }
+        return 511
+    }
+    if readonly {
+        return 292
+    }
+    return 438
 }
 
-pub fun fd_stat(fd: int64, out: int64) -> int64 {
-    return ENOSYS
-}
-
+// The size, the kind, the permission bits, the modification time, the
+// volume and the file's index on it of what `path` names, as six words at
+// `out` (`handle_stat`), opened for its attributes only: a symbolic link
+// followed when `follow`, else described itself
+// (FILE_FLAG_OPEN_REPARSE_POINT). 0, or minus its cause.
 pub fun path_stat(path: str, follow: bool, out: int64) -> int64 {
-    return ENOSYS
+    var flags = FILE_FLAG_BACKUP_SEMANTICS
+    if !follow {
+        flags |= FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let h = open_handle(path, FILE_READ_ATTRIBUTES, OPEN_EXISTING, flags)
+    if h < 0 {
+        return h
+    }
+    let r = handle_stat(h, out, true)
+    let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+    return r
 }
 
-// Random bytes come from bcrypt (D212), with the files' step.
+// Random bytes come from bcrypt (D212), a second import library: MYLA-722.
 pub fun random_fill(buf: int64, n: int64) -> int64 {
     return ENOSYS
 }
 
+// The kind of what `path` names (KIND_FILE, …; symbolic links followed), or
+// minus its cause.
 pub fun path_kind(path: str) -> int64 {
-    return ENOSYS
+    let out = __alloc(48)
+    var r = path_stat(path, true, out)
+    if r >= 0 {
+        r = __load64(out + 8)
+    }
+    __free(out)
+    return r
 }
 
+// A call of the kernel32 function at `f` on the path `path` (a BOOL): 0, or
+// minus the cause (`path_failed`).
+fun on_path(f: int64, path: str) -> int64 {
+    let w = wide(path)
+    var r: int64 = 0
+    if !ok(__syscall(f, w, 0, 0)) {
+        r = path_failed(w, last_error())
+    }
+    __free(w)
+    return r
+}
+
+// A directory (`CreateDirectoryW`); `mode` isn't used (D218).
 pub fun make_dir(path: str, mode: int64) -> int64 {
-    return ENOSYS
+    return on_path(__rt_get("__imp_CreateDirectoryW"), path)
 }
 
+// The file (or symbolic link) at `path` removed (`DeleteFileW`). A
+// directory is IS_A_DIRECTORY, as Linux's unlink says (Windows: access
+// denied), but a link to one is removed as Windows removes one
+// (`RemoveDirectoryW`).
 pub fun remove_file(path: str) -> int64 {
-    return ENOSYS
+    let w = wide(path)
+    var r: int64 = 0
+    if !ok(__syscall(__rt_get("__imp_DeleteFileW"), w, 0, 0)) {
+        let e = last_error()
+        let a = attributes(w)
+        if e == 5 && is_dir_attr(a) && (a & ATTR_REPARSE_POINT) != 0 {
+            if !ok(__syscall(__rt_get("__imp_RemoveDirectoryW"), w, 0, 0)) {
+                r = failed()
+            }
+        } else if e == 5 && is_dir_attr(a) {
+            r = -IS_A_DIRECTORY
+        } else {
+            r = path_failed(w, e)
+        }
+    }
+    __free(w)
+    return r
 }
 
+// The empty directory at `path` removed (`RemoveDirectoryW`).
 pub fun remove_dir(path: str) -> int64 {
-    return ENOSYS
+    return on_path(__rt_get("__imp_RemoveDirectoryW"), path)
 }
 
+// `from_path` renamed `to_path`, replacing a file there, as Linux's rename
+// (`MoveFileExW` with MOVEFILE_REPLACE_EXISTING).
 pub fun rename(from_path: str, to_path: str) -> int64 {
-    return ENOSYS
+    let a = wide(from_path)
+    let b = wide(to_path)
+    var r: int64 = 0
+    if !ok(__syscall(__rt_get("__imp_MoveFileExW"), a, b, 1)) {
+        r = path_failed(a, last_error())
+    }
+    __free(b)
+    __free(a)
+    return r
 }
 
+// The working directory's path written to `buf` (room for `n` bytes), in
+// UTF-8: its length; ERANGE's `Other` for one longer than `n`, as Linux's
+// getcwd.
 pub fun cwd(buf: int64, n: int64) -> int64 {
-    return ENOSYS
+    let w = __alloc(2 * n + 2)
+    let units = __syscall(__rt_get("__imp_GetCurrentDirectoryW"), n + 1, w, 0) & LOW32
+    if units == 0 {
+        __free(w)
+        return failed()
+    }
+    var len: int64 = -OUT_OF_RANGE
+    if units <= n {
+        let text = __alloc(3 * units)
+        len = put_utf8(text, w, units)
+        if len <= n {
+            __copy_bytes(buf, text, len)
+        } else {
+            len = -OUT_OF_RANGE
+        }
+        __free(text)
+    }
+    __free(w)
+    return len
 }
 
+// The next entries of the directory `fd` read to `buf` (room for `n`
+// bytes), as records of this module's own that `dir_entry_size`,
+// `dir_entry_name`, `dir_entry_name_len` and `dir_entry_kind` read: how
+// many bytes of them (0 at the end), or minus its cause. Windows gives
+// FILE_ID_BOTH_DIR_INFO records (`GetFileInformationByHandleEx`) in half of
+// `n`, each made one of ours: its size, its kind and its name's length in
+// three words, then the name in UTF-8, padded to 8 bytes. A record of ours
+// is at most twice the size of Windows' (at least 104 bytes and two a unit
+// of its name; ours 24 and three a unit), so the records fit in `n`.
 pub fun dir_read(fd: int64, buf: int64, n: int64) -> int64 {
-    return ENOSYS
+    let h = std_handle(fd)
+    if h == 0 {
+        return -BAD_HANDLE
+    }
+    let room = (n / 2) & -8
+    let raw = __alloc(room)
+    if !ok(__syscall5(__rt_get("__imp_GetFileInformationByHandleEx"), h, ID_BOTH_DIRECTORY_INFO, raw, room, 0)) {
+        let e = last_error()
+        __free(raw)
+        if e == 18 || e == 2 {
+            return 0  // NO_MORE_FILES, FILE_NOT_FOUND: no more entries
+        }
+        return -cause(e)
+    }
+    // FILE_ID_BOTH_DIR_INFO: the next record's offset at 0 (0 for none), the
+    // attributes at 56, the name's length in bytes at 60, a reparse point's
+    // tag at 64, the name at 104
+    var at: int64 = 0
+    var o: int64 = 0
+    while true {
+        let rec = raw + at
+        let attrs = __load64(rec + 56) & LOW32
+        let len = put_utf8(buf + o + 24, rec + 104, (__load64(rec + 60) & LOW32) / 2)
+        let size = (24 + len + 7) & -8
+        __store64(buf + o, size)
+        __store64(buf + o + 8, kind_of(attrs, __load64(rec + 64) & LOW32))
+        __store64(buf + o + 16, len)
+        o += size
+        let next = __load64(rec) & LOW32
+        if next == 0 {
+            break
+        }
+        at += next
+    }
+    __free(raw)
+    return o
 }
 
+// The size of the directory record at `rec` (the next one follows it).
 pub fun dir_entry_size(rec: int64) -> int64 {
-    return 0
+    return __load64(rec)
 }
 
+// Where the name of the entry at `rec` starts (`dir_entry_name_len` bytes,
+// UTF-8).
 pub fun dir_entry_name(rec: int64) -> int64 {
-    return rec
+    return rec + 24
 }
 
+// The length of the name of the entry at `rec`, in bytes.
 pub fun dir_entry_name_len(rec: int64) -> int64 {
-    return 0
+    return __load64(rec + 16)
 }
 
+// The kind of the entry at `rec` (from its attributes and tag: `kind_of`).
 pub fun dir_entry_kind(rec: int64) -> int64 {
-    return KIND_UNKNOWN
+    return __load64(rec + 8)
 }
 
 // --- processes: MYLA-705 ----------------------------------------------------------

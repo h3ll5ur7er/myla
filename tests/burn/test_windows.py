@@ -4,11 +4,15 @@ importing only kernel32.dll, D212), assembled by clang, its import library
 made by llvm-dlltool and linked by lld-link (D211), which runs under Wine
 (D213): it prints what the program prints, the same bytes as on Linux (UTF-8,
 `\\n` as is, D215), ends with its exit code (D216) and reports a runtime error
-as on Linux. What isn't there yet says so (D210): a file or a child process
-is `Unsupported`. MYLA-703: tasks run on `MYLA_THREADS` workers, threads of
-their own, and a stack overflow is reported as on Linux (`Workers`);
-MYLA-717: a frame of a page or more is probed (`StackProbes`, and
-`FramesOnWindows` on Windows itself, MYLA-708's runner).
+as on Linux. What isn't there yet says so (D210): a child process or random
+bytes are `Unsupported`. MYLA-703: tasks run on `MYLA_THREADS` workers,
+threads of their own, and a stack overflow is reported as on Linux
+(`Workers`); MYLA-717: a frame of a page or more is probed (`StackProbes`,
+and `FramesOnWindows` on Windows itself, MYLA-708's runner).
+
+Files, directories and paths (MYLA-704): std.fs over kernel32 in UTF-16,
+Windows' errors as Linux's causes where a program sees them, and std.path
+on Windows' paths (`std/path_windows.my`, the loader's copy for the target).
 
 Skipped where clang, llvm-dlltool, lld-link or Wine is missing (CI installs
 them, and MYLA_REQUIRE_TARGETS makes a missing one fail there).
@@ -194,16 +198,107 @@ class HelloWorld(unittest.TestCase):
         self.assertEqual((ran.stdout.decode(), ran.stderr, ran.returncode), ("<one>\n<tw\u00f6>\n", b"", 0))
 
     def test_what_isnt_there_yet_says_so(self):
-        # D210: a file is `Unsupported` until MYLA-704
-        src = ('from std.fs import read_to_string\n'
+        # D210: random bytes are `Unsupported` until MYLA-722, and with them
+        # a temporary directory's name
+        src = ('import std.fs as fs\n'
                'fun main() {\n'
-               '    match read_to_string("main.my") {\n'
-               '        Ok(t) => { print("read") },\n'
+               '    match fs.make_temp_dir() {\n'
+               '        Ok(d) => { print("made") },\n'
                '        Err(e) => { print(f"{e}") },\n'
                '    }\n'
                '}\n')
         ran = self.build_and_run(src)
         self.assertEqual((ran.stdout, ran.returncode), (b"unsupported (Unsupported)\n", 0))
+
+    def test_files_and_directories(self):
+        # MYLA-704: names in UTF-8 made UTF-16, an append at the end, a
+        # listing, metadata, renames and removals, and the errors as Linux
+        # gives them (D219, D220)
+        src = r'''import std.fs as fs
+import std.bytes as bytes
+from std.io import Write, Seek, SeekFrom
+fun unit(r: Result<(), fs.IoError>) -> str {
+    return match r {
+        Ok(()) => "ok"
+        Err(e) => fs.io_error_name(e)
+    }
+}
+fun text(r: Result<str, fs.IoError>) -> str {
+    return match r {
+        Ok(s) => s
+        Err(e) => fs.io_error_name(e)
+    }
+}
+fun main() {
+    print(unit(fs.make_dir_all("d\u{e9}/sub")))
+    print(unit(fs.write_to_file("d\u{e9}/\u{4e2d}.txt", "h\u{e9}llo")))
+    var f = match fs.open_append("d\u{e9}/\u{4e2d}.txt") {
+        Ok(f) => f
+        Err(e) => panic(f"{e}")
+    }
+    let s = f.seek(SeekFrom.Start(0))
+    let w = f.write(bytes.from_str("!"))
+    let c = f.close()
+    print(text(fs.read_to_string("d\u{e9}\\\u{4e2d}.txt")))
+    print(match fs.list_dir("d\u{e9}") {
+        Ok(ns) => ns.join(",")
+        Err(e) => fs.io_error_name(e)
+    })
+    print(match fs.metadata("d\u{e9}/\u{4e2d}.txt") {
+        Ok(m) => f"{m.size} {m.is_file()} {m.permissions:o} {m.modified_ns > 0}"
+        Err(e) => fs.io_error_name(e)
+    })
+    print(fs.is_dir("d\u{e9}/sub") && !fs.is_file("d\u{e9}/sub") && !fs.exists("nothing"))
+    print(text(fs.read_to_string("d\u{e9}")))
+    print(unit(fs.remove_file("d\u{e9}/sub")))
+    print(unit(fs.remove_dir("d\u{e9}")))
+    print(unit(fs.make_dir("d\u{e9}/\u{4e2d}.txt/x")))
+    print(unit(fs.make_dir("d\u{e9}/sub")))
+    print(unit(fs.rename("d\u{e9}/\u{4e2d}.txt", "d\u{e9}/b.txt")))
+    print(text(fs.read_to_string("d\u{e9}/\u{4e2d}.txt")))
+    print(unit(fs.remove_dir_all("d\u{e9}")))
+    print(fs.exists("d\u{e9}"))
+}
+'''
+        ran = self.build_and_run(src)
+        want = ("ok\nok\nh\u00e9llo!\nsub,\u4e2d.txt\n7 true 666 true\ntrue\nIsADirectory\nIsADirectory\nNotEmpty\n"
+                "NotADirectory\nAlreadyExists\nok\nNotFound\nok\nfalse\n")
+        self.assertEqual((ran.stdout.decode(), ran.stderr, ran.returncode), (want, b"", 0))
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["main.my", "prog.exe"])
+
+    def test_windows_paths(self):
+        # D215: std.path is Windows' there (a `\` separates, a drive or a
+        # UNC share starts a path) and writes `/`; the working directory is
+        # Windows' own path (Wine's drive Z: is the root)
+        src = r'''import std.path as path
+import std.fs as fs
+import std.glob as glob
+fun main() {
+    print(path.join("a\\", "b"))
+    print(path.join("C:\\x", "\\y"))
+    print(path.parent("C:\\a\\b").unwrap_or("none"))
+    print(path.file_name("\\\\srv\\share").unwrap_or("none"))
+    print(path.normalize("C:\\a\\..\\b\\.\\c"))
+    print(path.is_absolute("C:/a") && !path.is_absolute("/a") && path.is_absolute("//srv/share"))
+    print(path.relative("C:\\a\\b", "c:/a/d").unwrap_or("none"))
+    let cwd = match fs.current_dir() {
+        Ok(d) => d
+        Err(e) => panic(f"{e}")
+    }
+    print(cwd)
+    print(path.is_absolute(cwd) && path.anchor(cwd) == "Z:\\")
+    print(fs.is_file(path.join(cwd, "main.my")))
+    print(glob.matches("*/*.my", "src\\main.my"))
+    match fs.make_dir_all(cwd + "\\deep\\er") {
+        Ok(()) => print(fs.is_dir("deep/er"))
+        Err(e) => print(f"{e}")
+    }
+}
+'''
+        ran = self.build_and_run(src)
+        work = "Z:" + os.path.realpath(self.tmp).replace("/", "\\")
+        want = f"a\\b\nC:\\y\nC:\\a\nnone\nC:/b/c\ntrue\n../d\n{work}\ntrue\ntrue\ntrue\ntrue\n"
+        self.assertEqual((ran.stdout.decode(), ran.stderr, ran.returncode), (want, b"", 0))
 
     def test_tasks(self):
         # children, an actor, a sleep through the poller's timers, and the

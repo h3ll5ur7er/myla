@@ -18,6 +18,7 @@ from __future__ import annotations
 import glob
 import os
 import random
+import re
 import subprocess
 import tempfile
 import time
@@ -348,8 +349,11 @@ class SelfHostedParserParity(unittest.TestCase):
                 n = int(word) if word.isdigit() else 0
                 # `same 0` is two parses failing alike (MYLA-418), as is
                 # `same error` (MYLA-416): a file of the library or the
-                # compiler parses and has bodies
-                if os.path.relpath(path, _REPO).startswith(("lib" + os.sep, "selfhost" + os.sep)):
+                # compiler parses and has bodies (but a module of constants
+                # alone, std.path_style's, MYLA-704)
+                with open(path, encoding="utf-8") as fh:
+                    has_funs = re.search(r"^(pub )?fun ", fh.read(), re.M) is not None
+                if os.path.relpath(path, _REPO).startswith(("lib" + os.sep, "selfhost" + os.sep)) and has_funs:
                     self.assertGreater(n, 0, proc.stdout[:2000])
                 bodies += n
         self.assertGreater(bodies, 5000)

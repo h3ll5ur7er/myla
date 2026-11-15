@@ -22,6 +22,7 @@ import unittest
 from ._native import (
     CAN_BUILD_NATIVE,
     SKIP_REASON,
+    TEST_TARGET,
     assemble,
     run_argv,
     target_flags,
@@ -636,14 +637,18 @@ NUL_PATHS_OUTPUT = ("invalid input\nfalse\nok\ninvalid input\ninvalid input\ninv
 
 
 def prepare_tree(work: str) -> None:
-    """`tree/` with files, nested directories and a link to `outside/`."""
+    """`tree/` with files, nested directories and a link to `outside/`
+    (none for Windows: Wine shows a Unix link as what it names, a directory
+    or nothing, so `remove_dir_all` would go into it; the links are
+    Windows' reparse points, MYLA-704)."""
     os.makedirs(os.path.join(work, "tree", "sub", "deeper"))
     os.makedirs(os.path.join(work, "outside"))
     for rel in ("tree/one", "tree/sub/two", "tree/sub/deeper/three", "outside/keep"):
         with open(os.path.join(work, rel), "w") as fh:
             fh.write(rel)
-    os.symlink(os.path.join(work, "outside"), os.path.join(work, "tree", "link"))
-    os.symlink("nowhere", os.path.join(work, "tree", "sub", "dangling"))
+    if TEST_TARGET != "x86_64-windows":
+        os.symlink(os.path.join(work, "outside"), os.path.join(work, "tree", "link"))
+        os.symlink("nowhere", os.path.join(work, "tree", "sub", "dangling"))
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -800,6 +805,9 @@ class DirectoryParity(unittest.TestCase):
         for impl, result in self.run_all("cwd", CWD_PROGRAM).items():
             with self.subTest(implementation=impl):
                 work = os.path.realpath(self.work_dir("cwd", impl))
+                if TEST_TARGET == "x86_64-windows" and impl.endswith("native"):
+                    # Windows' own path: Wine's drive Z: is the root
+                    work = "Z:" + work.replace("/", "\\")
                 self.assertEqual(result, (f"{work} true\n", "", 0))
 
     def test_current_dir_removed(self) -> None:
