@@ -62,20 +62,21 @@ def missing_tools(target: str) -> list[str]:
 
 def prepare_wine() -> None:
     """Wine as Windows' emulator (D213): its command in MYLA_EMULATOR, which
-    `myla test --target` and the suites' runs read, its quiet defaults, and
-    its prefix made here, before the suites start their programs at once
-    (`_native.wine_env`)."""
-    _native.wine_env()
+    `myla test --target` and the suites' runs read, its quiet defaults, its
+    prefix, and its server and services started here, before the suites
+    start their programs at once (`_native.wine_env`). The server is kept
+    for the whole run (`-p`), not started again for a program after each
+    pause (a hello world started in 0.37 s without it, 0.1 s with it,
+    2026-11-15 at 31639e8), and stopped at the end."""
+    server = _native.wine_server()
+    if server:
+        _native.wine_env(persist="")
+        atexit.register(subprocess.run, [server, "-k"], capture_output=True)
+    else:
+        _native.wine_env()
     wine = _native.wine()
     if wine and not os.environ.get("MYLA_EMULATOR"):
         os.environ["MYLA_EMULATOR"] = " ".join(wine)
-    # its server kept running while the suites run, not started again for
-    # a program after each pause (a hello world started in 0.37 s without
-    # it, 0.1 s with it, 2026-11-15 at 31639e8)
-    server = shutil.which("wineserver") or (os.path.join(os.path.dirname(wine[0]), "wineserver") if wine else "")
-    if server and os.access(server, os.X_OK):
-        subprocess.run([server, "-p"], capture_output=True)
-        atexit.register(subprocess.run, [server, "-k"], capture_output=True)
 
 
 def run_one(module: str) -> int:

@@ -62,16 +62,37 @@ def wine() -> list[str]:
     return [p for p in _WINE_PATHS if os.access(p, os.X_OK)][:1]
 
 
-def wine_env() -> None:
+def wine_server() -> str:
+    """Wine's server next to its command (`wineserver`; Ubuntu's package
+    puts it beside `wine64`, not on PATH); "" for none."""
+    words = wine()
+    found = shutil.which("wineserver") or (os.path.join(os.path.dirname(words[0]), "wineserver") if words else "")
+    return found if found and os.access(found, os.X_OK) else ""
+
+
+def wine_env(persist: str = "60") -> None:
     """Wine's defaults in this process's environment, for it and its children
     (`myla test --target x86_64-windows`'s runs among them): no debug output,
     and a prefix of the repository's own under build/, made here if it isn't
-    there yet (some seconds; a program's first run would say so on its
-    stderr)."""
+    there yet (some seconds).
+
+    Its services are started here too, their standard streams /dev/null. Wine
+    starts them from the first program of a new server, which they outlive
+    holding its standard streams: a test reading a program's output would wait
+    for them, while the server lives, never seeing the end. The server is
+    started first, kept `persist` seconds after its last program (`-p60`;
+    scripts/test-target.py starts its own for the whole run, `-p`, which this
+    finds running), so the services aren't started again between tests."""
     os.environ.setdefault("WINEDEBUG", "-all")
     os.environ.setdefault("WINEPREFIX", os.path.join(_ROOT, "build", "wineprefix"))
-    if wine() and not os.path.isdir(os.environ["WINEPREFIX"]):
-        subprocess.run([*wine(), "wineboot", "--init"], capture_output=True, timeout=300)
+    if not wine():
+        return
+    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    server = wine_server()
+    if server:
+        subprocess.run([server, "-p" + persist], **quiet)
+    boot = ["wineboot"] if os.path.isdir(os.environ["WINEPREFIX"]) else ["wineboot", "--init"]
+    subprocess.run([*wine(), *boot], timeout=300, **quiet)
 
 
 def windows_imports(asm: str) -> list[str]:
