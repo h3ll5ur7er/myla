@@ -44,7 +44,7 @@ fs.copyFileSync(path.join(SITE, "src", "worker", "myla.worker.mjs"), path.join(p
 // --- the API reference ------------------------------------------------------------------
 const doc = path.join(BUILD, "doc");
 myla(["build", "tools/doc/main.my", "-o", doc]);
-const internal = new Set(["rt", "platform", "platform_aarch64", "platform_wasm", "slice"]);
+const internal = new Set(["rt", "platform", "platform_aarch64", "platform_wasm", "platform_windows", "slice"]);
 const modules = fs
   .readdirSync(path.join(REPO_ROOT, "lib", "std"))
   .filter((f) => f.endsWith(".my") && !internal.has(f.replace(/\.my$/, "")))

@@ -9,7 +9,8 @@
 // Linux target, as the bootstrap uses them (D127); clang and `ld.lld` for the
 // other Linux target (MYLA-163); clang and `wasm-ld` for wasm32 on WASI
 // (D125, MYLA-158); clang for COFF, `llvm-dlltool` and `lld-link` for Windows
-// (D211), which the compiler doesn't build for yet (MYLA-702).
+// (D211), whose programs are static console executables that call only
+// kernel32 (D212, MYLA-702).
 
 from std.platform import TARGET
 
@@ -52,7 +53,7 @@ pub struct Toolchain { assemble: [str], imports: [str], link: [str], needs: str 
 // MYLA_EMULATOR); whether its programs can start processes (a test
 // harness's cases are children where they can, else runs of the harness,
 // MYLA-370); whether `-g` is supported; and whether the compiler builds for
-// it yet (`supported`; Windows: MYLA-702).
+// it yet (`supported`; every target does since MYLA-702).
 pub struct Target {
     name: str,
     os: Os,
@@ -99,11 +100,13 @@ pub fun targets() -> [Target] {
         // D211: clang reads the backend's GAS text for COFF too; the import
         // library of each system DLL (D212) is made from the list of the
         // functions used; no C runtime, so the entry is the program's own.
-        // Child processes come with MYLA-705, debug information later (D216)
+        // The main thread's stack reserved as large as Linux's grows
+        // (120 MiB, MYLA-182). Child processes come with MYLA-705, debug
+        // information later (D216)
         Target { name: "x86_64-windows", os: Os.Windows, arch: Arch.X86_64, format: ObjectFormat.Coff, exe_suffix: ".exe", platform_file: "platform_windows.my",
                  cross: Toolchain { assemble: ["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", "{obj}", "{asm}"], imports: ["llvm-dlltool", "-m", "i386:x86-64", "-d", "{def}", "-l", "{lib}"],
-                                    link: ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/out:{out}", "{obj}", "{lib}"], needs: "clang, llvm-dlltool and lld-link" },
-                 native: None, emulator: ["wine"], spawns: false, debug_info: false, supported: false },
+                                    link: ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:{out}", "{obj}", "{lib}"], needs: "clang, llvm-dlltool and lld-link" },
+                 native: None, emulator: ["wine"], spawns: false, debug_info: false, supported: true },
     ]
 }
 
@@ -131,10 +134,11 @@ pub fun host() -> Target {
 }
 
 // Why the compiler can't build for `t` yet, as an error's text after the
-// tool's name; "" when it can (D210: what isn't there yet says so).
+// tool's name; "" when it can (D210: what isn't there yet says so). Every
+// target builds since MYLA-702; a new one starts refused here.
 pub fun unsupported(t: Target) -> str {
     if t.supported { return "" }
-    return f"building for {t.name} is not supported yet (MYLA-702)"
+    return f"building for {t.name} is not supported yet"
 }
 
 // The tools that build for `t` on a machine whose own target is `host`.
@@ -168,14 +172,16 @@ pub fun missing_tool(tool: str, target: str, needs: str) -> str {
     return f"myla: '{tool}' was not found: building for {target} here needs {needs}"
 }
 
-// Every target's name reads back as it, other words as none; only Windows
-// is refused yet.
+// Every target's name reads back as it, other words as none; every one
+// builds (Windows since MYLA-702).
 #test
 fun the_names_parse() {
     for t in targets() { assert(parse_target(t.name).expect(t.name).name == t.name, t.name) }
     for name in ["wasm32", "x86_64", ""] { assert(match parse_target(name) { Some(t) => false, None => true }, "no target " + name) }
-    assert(unsupported(parse_target("x86_64-linux").expect("x86")) == "", "x86_64-linux builds")
-    assert(unsupported(parse_target("x86_64-windows").expect("windows")) == "building for x86_64-windows is not supported yet (MYLA-702)", "windows doesn't yet")
+    for t in targets() { assert(unsupported(t) == "", t.name + " builds") }
+    var w = parse_target("x86_64-windows").expect("windows")
+    w.supported = false
+    assert(unsupported(w) == "building for x86_64-windows is not supported yet", "a target not built for yet")
 }
 
 // Each target's tools: one to assemble and one to link, each named in its
@@ -193,6 +199,6 @@ fun each_toolchain_names_its_tools() {
         }
     }
     let w = parse_target("x86_64-windows").expect("windows")
-    assert(w.format == ObjectFormat.Coff && w.exe_suffix == ".exe" && !w.supported, "windows")
+    assert(w.format == ObjectFormat.Coff && w.exe_suffix == ".exe" && w.supported && !w.spawns, "windows")
     assert(w.cross.assemble[0] == "clang" && w.cross.imports[0] == "llvm-dlltool" && w.cross.link[0] == "lld-link", "D211")
 }

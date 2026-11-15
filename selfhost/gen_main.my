@@ -33,8 +33,8 @@ from .diag import render
 // `--emit-ir` the text shows the promoted functions). `no_inline`: no
 // small function copied into its callers (`--no-inline`, for the tests of
 // one function's code). `target`: `x86_64-linux`, `aarch64-linux`
-// (MYLA-163) or `wasm32-wasi` (MYLA-158) with `--target` (target.my,
-// MYLA-700; `x86_64-windows` is refused until MYLA-702); by default the
+// (MYLA-163), `wasm32-wasi` (MYLA-158) or `x86_64-windows` (MYLA-702)
+// with `--target` (target.my, MYLA-700); by default the
 // target this compiler was built for, the machine's it runs on (MYLA-276).
 // `primitives`: the program may call the raw-memory primitives
 // (`--primitives`, for the tests of their code; an error otherwise).

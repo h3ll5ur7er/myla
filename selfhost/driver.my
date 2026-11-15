@@ -7,7 +7,9 @@
 // DWARF debug information for gdb: line tables and variables, MYLA-71,
 // MYLA-66), writes it to `<out>.s`, then runs the assembler and linker the
 // target's record names (target.my, MYLA-700; found on PATH, D147) to
-// produce the executable `<out>`, and removes the intermediate files.
+// produce the executable `<out>`, and removes the intermediate files. On
+// Windows an import library of kernel32's functions the program calls is
+// made between the two (`<out>.def`, `<out>.lib`, D211, MYLA-702).
 
 from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
@@ -61,8 +63,10 @@ pub fun load_and_check(entry: str, given: LoadOptions) -> Result<Checked, str> {
 
 // Type-check `file`, then generate its assembly for `target` (`debug`: with DWARF
 // debug information, MYLA-71, MYLA-66; `checked`: integer overflow traps,
-// D175). A target the compiler doesn't build for yet is refused first.
-fun compile_asm(entry: str, given: LoadOptions, debug: bool, checked: bool, target: Target) -> Result<str, str> {
+// D175), and the system's functions it calls by name (Windows' kernel32,
+// whose import library is made of them; [] elsewhere). A target the
+// compiler doesn't build for yet is refused first.
+fun compile_asm(entry: str, given: LoadOptions, debug: bool, checked: bool, target: Target) -> Result<(str, [str]), str> {
     let refused = unsupported(target)
     if refused != "" { return Err("myla: " + refused) }
     let (file, opts) = own_library(entry, given)
@@ -77,7 +81,7 @@ fun compile_asm(entry: str, given: LoadOptions, debug: bool, checked: bool, targ
     if debug { g.enable_debug_info(read_gdb_script(opts.stdlib_root)) }
     let asm = g.generate()
     if g.refused.len() > 0 { return Err(render(type_errors(ch.prog, g.refused))) }
-    return Ok(asm)
+    return Ok((asm, g.windows_imports()))
 }
 
 // The entry file and `opts` it is loaded with: with the library the tools
@@ -526,13 +530,31 @@ fun removed(path: str) -> bool {
 // target's record names for that host (`target.toolchain`), the host's GNU
 // `as` and `ld` for its own Linux target, as the bootstrap uses them; clang
 // and lld for another Linux target (MYLA-163) and for wasm32-wasi (a module
-// for a WASI host such as tools/wasm/run.mjs, MYLA-158; MYLA-276). Windows'
-// import libraries (`Toolchain.imports`) come with its first programs
-// (MYLA-702).
+// for a WASI host such as tools/wasm/run.mjs, MYLA-158; MYLA-276); clang and
+// lld-link for Windows, linking the import library `<out>.lib`
+// (`import_command`, D211, MYLA-702).
 pub fun build_commands(target: Target, host: Target, asm: str, obj: str, out: str) -> ([str], [str]) {
     let tools = toolchain(target, host)
-    let files = ["asm": asm, "obj": obj, "out": out]
+    let files = ["asm": asm, "obj": obj, "out": out, "lib": out + ".lib"]
     return (with_files(tools.assemble, files), with_files(tools.link, files))
+}
+
+// The command line that makes the import library `<out>.lib` from the list
+// `<out>.def` (`def_text`) for `target` on `host`; [] for a target without
+// one (all but Windows, D211).
+pub fun import_command(target: Target, host: Target, out: str) -> [str] {
+    return with_files(toolchain(target, host).imports, ["def": out + ".def", "lib": out + ".lib"])
+}
+
+// The module-definition file of the functions `names` of the system DLL
+// `dll`, which llvm-dlltool makes its import library of (D212: kernel32;
+// ws2_32 and bcrypt join it with sockets and random bytes).
+#test("kernel32.dll", ["WriteFile", "ExitProcess"])["LIBRARY kernel32.dll\nEXPORTS\nWriteFile\nExitProcess\n"]
+pub fun def_text(dll: str, names: [str]) -> str {
+    var sb = StringBuilder()
+    sb.append("LIBRARY " + dll + "\nEXPORTS\n")
+    for n in names { sb.append(n + "\n") }
+    return sb.build()
 }
 
 #test
@@ -546,6 +568,13 @@ fun each_target_has_its_tools() {
     assert(build_commands(x86, a64, "a.s", "a.o", "a") == (["clang", "--target=x86_64-linux-gnu", "-c", "-o", "a.o", "a.s"], ["ld.lld", "-static", "-o", "a", "a.o"]), "x86-64 on aarch64")
     let wasm_tools = (["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext", "-c", "-o", "a.o", "a.s"], ["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", "a", "a.o"])
     assert(build_commands(wasm, x86, "a.s", "a.o", "a") == wasm_tools && build_commands(wasm, a64, "a.s", "a.o", "a") == wasm_tools, "wasm32 on either")
+    for t in [x86, a64, wasm] { assert(import_command(t, x86, "a").len() == 0, t.name + " has no import library") }
+    // Windows from either (D211)
+    let win = parse_target("x86_64-windows").expect("x86_64-windows")
+    let win_tools = (["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", "a.exe.o", "a.exe.s"],
+                     ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:a.exe", "a.exe.o", "a.exe.lib"])
+    assert(build_commands(win, x86, "a.exe.s", "a.exe.o", "a.exe") == win_tools && build_commands(win, a64, "a.exe.s", "a.exe.o", "a.exe") == win_tools, "windows")
+    assert(import_command(win, x86, "a.exe") == ["llvm-dlltool", "-m", "i386:x86-64", "-d", "a.exe.def", "-l", "a.exe.lib"], "windows' import library")
 }
 
 // Run one step of a build: false when it worked; a missing tool named, with
@@ -569,7 +598,7 @@ fun build_step(argv: [str], label: str, target: Target, needs: str) -> bool {
 // `target`'s tools are `build_commands`'. `checked`: integer overflow traps
 // (`--checked`, D175).
 pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, checked: bool, target: Target) -> int32 {
-    let asm = match compile_asm(file, opts, debug, checked, target) {
+    let (asm, imports) = match compile_asm(file, opts, debug, checked, target) {
         Ok(a) => a,
         Err(e) => {
             eprintln(e)
@@ -591,13 +620,34 @@ pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, checke
     if build_step(tools.0, "myla: assembler failed", target, needs) {
         return 1
     }
+    var steps = [asm_path, obj_path]
+    // Windows: kernel32's import library of the functions it calls (D211)
+    let lib = import_command(target, here, output)
+    if lib.len() > 0 {
+        let def_path = output + ".def"
+        match write_to_file(def_path, def_text("kernel32.dll", imports)) {
+            Ok(()) => {},
+            Err(e) => {
+                eprintln("myla: cannot write the import list to " + def_path)
+                return 1
+            },
+        }
+        if build_step(lib, "myla: making the import library failed", target, needs) {
+            return 1
+        }
+        steps.push(def_path)
+        steps.push(output + ".lib")
+    }
     if build_step(tools.1, "myla: linker failed", target, needs) {
         return 1
     }
-    // the assembly and object file were only steps (MYLA-35)
-    if !removed(asm_path) || !removed(obj_path) {
-        eprintln("myla: cannot remove the intermediate files")
-        return 1
+    // the assembly and object file (and the import library) were only
+    // steps (MYLA-35)
+    for f in steps {
+        if !removed(f) {
+            eprintln("myla: cannot remove the intermediate files")
+            return 1
+        }
     }
     return 0
 }

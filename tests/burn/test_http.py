@@ -51,8 +51,9 @@ from ._native import (
 )
 from ._tools import STDLIB_ROOT, selfhost_tool
 
-NO_SOCKETS = TEST_TARGET == "wasm32-wasi"
-NO_SOCKETS_WHY = "WASI has no sockets (HttpOnWasm checks they are Unsupported)"
+# (wasm32, and Windows until MYLA-706)
+NO_SOCKETS = TEST_TARGET in ("wasm32-wasi", "x86_64-windows")
+NO_SOCKETS_WHY = f"{TEST_TARGET} has no sockets (HttpOnWasm checks they are Unsupported)"
 
 PRELUDE = r"""import std.http as http
 from std.http import Request, Response, HttpError, Headers
@@ -1382,7 +1383,7 @@ ON_WASM_OUT = "error: unsupported: sockets\nerror: unsupported: sockets\nserve: 
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-@unittest.skipUnless(NO_SOCKETS, "the wasm32 suite's (MYLA_TEST_TARGET=wasm32-wasi)")
+@unittest.skipUnless(NO_SOCKETS, "the suites of a target without sockets (wasm32; Windows until MYLA-706)")
 class HttpOnWasm(unittest.TestCase):
     def test_every_exchange_is_unsupported(self):
         with tempfile.TemporaryDirectory() as tmp:

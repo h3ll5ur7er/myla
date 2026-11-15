@@ -34,7 +34,7 @@ import .ir_wasm as ir_wasm
 import .runtime_wasm as runtime_wasm
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
-from .target import Target, Arch
+from .target import Target, Arch, Os
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
 // `capoff` is the byte offset within the closure env for a "capture" binding.
@@ -289,6 +289,11 @@ pub struct CodeGen {
     wasm: bool,
     wasm_arity: [str: int32],
     wasm_calls: [str: int32],
+    // MYLA-702: the target is x86-64 Windows (COFF, kernel32 through its
+    // import slots, `emit_windows_start`, `emit_windows_calls`); the functions of
+    // kernel32 the program calls (`__imp_<name>`), for its import library
+    windows: bool,
+    imports: [str: bool],
     env_records: [str],             // MYLA-263: the environments whose routines records the data holds (`env_record_of`)
     // D175: integer `+`, `-`, `*`, unary `-` and the signed minimum `/ -1`
     // trap on overflow, a shift on a count past the width (`--checked`, and
@@ -382,7 +387,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), refused: [], trap_vals: [], ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, ext_at: -1, temp_uses: [], temp_remat: [], temp_fconst: [:], fconst_labels: [:], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], env_records: [], checked: false, unmarked: c.unmarked_std(), op_impls: c.op_impls,
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], windows: false, imports: [:], env_records: [], checked: false, unmarked: c.unmarked_std(), op_impls: c.op_impls,
     }
 }
 
@@ -393,6 +398,23 @@ impl CodeGen {
     fun set_target(var self, t: Target) {
         self.a64 = t.arch == Arch.Aarch64
         self.wasm = t.arch == Arch.Wasm32
+        self.windows = t.os == Os.Windows
+    }
+
+    // The functions of the system's DLLs the program calls through their
+    // import slots (`__imp_<name>`, MYLA-702), in the order the code first
+    // names them: what the driver makes its import library of (D211, D212);
+    // [] but on Windows.
+    fun windows_imports(self) -> [str] {
+        var out: [str] = []
+        for k in self.imports.keys() { out.push(k) }
+        return out
+    }
+
+    // `sym` named by the code: a function's import slot (`__imp_<name>`) on
+    // Windows is recorded for its import library.
+    fun note_import(var self, sym: str) {
+        if self.windows && sym.len() > 6 && sym[0:6] == "__imp_" { self.imports[sym[6:sym.len()]] = true }
     }
 
     // The files of the program: `spans` is the loader's `Loaded.spans`, node
@@ -2339,7 +2361,8 @@ impl CodeGen {
         for line in self.text { out.push(line) }
         if self.line_files.len() > 0 { out.push(".Letext0:") }
         out.push("")
-        out.push("\t.section .rodata")
+        // COFF's read-only data on Windows (MYLA-702)
+        if self.windows { out.push("\t.section .rdata,\"dr\"") } else { out.push("\t.section .rodata") }
         out.push(".Lbool_true:\n\t.ascii \"true\"")
         out.push(".Lbool_false:\n\t.ascii \"false\"")
         let messages = trap_messages(self.checked)
@@ -2514,9 +2537,25 @@ impl CodeGen {
                 out.push(format("\t.skip {}", v.1))
             }
         }
+        if self.windows {
+            // the console's code pages before the program set them to
+            // UTF-8, put back at its end (std.platform's `windows_start`,
+            // D215)
+            out.push("__win_console_cp:")
+            out.push("\t.skip 16")
+            // what VirtualQuery answers `unmap_memory`, and how many bytes
+            // a read or a write moved: the platform's own words, as those
+            // run while the heap grows or report that it can't (one
+            // worker until MYLA-703)
+            out.push("__win_memory_info:")
+            out.push("\t.skip 48")
+            out.push("__win_io:")
+            out.push("\t.skip 8")
+        }
         out.push("")
         if self.line_files.len() > 0 { for l in self.dbg_sections() { out.push(l) } }
-        out.push("\t.section .note.GNU-stack,\"\",@progbits")
+        // (an ELF note: COFF has no executable stack to mark)
+        if !self.windows { out.push("\t.section .note.GNU-stack,\"\",@progbits") }
         out.push("")
         return join_lines(out)
     }
@@ -2628,12 +2667,14 @@ impl CodeGen {
 
     // The operand of the runtime variable `sym`, which is a thread's own in a
     // program with tasks: in the block `%fs` holds (`tls_offset`), else at
-    // its symbol.
+    // its symbol. On Windows, whose one worker's block is the first of
+    // `__tls_blocks` until its threads (MYLA-703), there.
     #test(codegen_on("[int]"), "__heap_end")["__heap_end(%rip)"]
     fun tv(self, sym: str) -> str {
         // (a process-wide one, like `__exec_workers`, next to %rip with tasks
         // too: MYLA-162)
         if !self.frames || tls_offset(sym) == 0 { return sym + "(%rip)" }
+        if self.windows { return format("__tls_blocks+{}(%rip)", tls_offset(sym)) }
         return format("%fs:{}", tls_offset(sym))
     }
 

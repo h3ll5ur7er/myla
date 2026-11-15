@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """test-target.py TARGET [MODULE...] — run the burn suites for another target
 (MYLA-268): the programs are built with `--target TARGET` and run under
-qemu-aarch64 (aarch64-linux) or Node (wasm32-wasi), and the tests that target
-is excused from are skipped with their reason. Which suites run, and the
-exceptions, are in tests/burn/_targets.py.
+qemu-aarch64 (aarch64-linux), Node (wasm32-wasi) or Wine (x86_64-windows,
+MYLA-702), and the tests that target is excused from are skipped with their
+reason. Which suites run, and the exceptions, are in tests/burn/_targets.py.
 
 Each suite runs in its own process, as many at once as there are CPUs
 (`-j N` to change); the summary lists every suite's result and the skipped
@@ -11,6 +11,7 @@ tests' reasons. Exits 1 if any suite failed."""
 from __future__ import annotations
 
 import argparse
+import atexit
 import concurrent.futures
 import os
 import shutil
@@ -22,7 +23,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from tests.burn import _targets  # noqa: E402
+from tests.burn import _native, _targets  # noqa: E402
 
 
 def _excused(suite: unittest.TestSuite) -> unittest.TestSuite:
@@ -46,12 +47,36 @@ def _excused(suite: unittest.TestSuite) -> unittest.TestSuite:
 TOOLS = {
     "aarch64-linux": ["clang", "ld.lld", "qemu-aarch64"],
     "wasm32-wasi": ["clang", "wasm-ld", "node"],
+    "x86_64-windows": ["clang", "llvm-dlltool", "lld-link"],
 }
 
 
 def missing_tools(target: str) -> list[str]:
-    """The tools `target`'s runs need that aren't on PATH."""
-    return [t for t in ["as", "ld", *TOOLS.get(target, [])] if shutil.which(t) is None]
+    """The tools `target`'s runs need that aren't on PATH (Wine for Windows'
+    wherever `_native.wine` finds it)."""
+    missing = [t for t in ["as", "ld", *TOOLS.get(target, [])] if shutil.which(t) is None]
+    if target == "x86_64-windows" and not _native.wine():
+        missing.append("wine")
+    return missing
+
+
+def prepare_wine() -> None:
+    """Wine as Windows' emulator (D213): its command in MYLA_EMULATOR, which
+    `myla test --target` and the suites' runs read, its quiet defaults, its
+    prefix, and its server and services started here, before the suites
+    start their programs at once (`_native.wine_env`). The server is kept
+    for the whole run (`-p`), not started again for a program after each
+    pause (a hello world started in 0.37 s without it, 0.1 s with it,
+    2026-11-15 at 31639e8), and stopped at the end."""
+    server = _native.wine_server()
+    if server:
+        _native.wine_env(persist="")
+        atexit.register(subprocess.run, [server, "-k"], capture_output=True)
+    else:
+        _native.wine_env()
+    wine = _native.wine()
+    if wine and not os.environ.get("MYLA_EMULATOR"):
+        os.environ["MYLA_EMULATOR"] = " ".join(wine)
 
 
 def run_one(module: str) -> int:
@@ -73,6 +98,8 @@ def main() -> int:
     if args.one:
         return run_one(args.modules[0])
     missing = missing_tools(args.target)
+    if args.target == "x86_64-windows":
+        prepare_wine()
     if missing:
         msg = f"{args.target}: missing {', '.join(missing)}: the suites would skip"
         if os.environ.get("MYLA_REQUIRE_TARGETS"):

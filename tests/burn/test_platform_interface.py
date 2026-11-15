@@ -2,7 +2,7 @@
 terms (MYLA-701, D209).
 
 `std.platform` is one module per target (`lib/std/platform.my` for x86-64
-Linux, `platform_aarch64.my`, `platform_wasm.my`; Windows' next), which the
+Linux, `platform_aarch64.my`, `platform_wasm.my`, `platform_windows.my`), which the
 loader takes for `std/platform.my` on its target. std.rt and the library
 above it are written once against it, so each must give the same functions
 with the same types, and the same constants: the cause codes a failure gives
@@ -37,12 +37,17 @@ from ._native import CAN_BUILD_NATIVE, SKIP_REASON, run_argv, target_flags, writ
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 STD = os.path.join(STDLIB_ROOT, "std")
-MODULES = {"x86_64-linux": "platform.my", "aarch64-linux": "platform_aarch64.my", "wasm32-wasi": "platform_wasm.my"}
+MODULES = {"x86_64-linux": "platform.my", "aarch64-linux": "platform_aarch64.my", "wasm32-wasi": "platform_wasm.my",
+           "x86_64-windows": "platform_windows.my"}
 # the constants that tell the targets apart
 PER_TARGET = {"TARGET", "RETURNS_MEMORY", "HUGE_PAGES", "PROCESSES", "SOCKETS"}
 # a target's own entry points, which its back end calls by name
-# (`backend_std_functions`): wasm32's start, which lays out the arguments
-OWN = {"wasm32-wasi": {"wasm_start"}}
+# (`backend_std_functions`): wasm32's and Windows' starts, which lay out the
+# arguments
+OWN = {"wasm32-wasi": {"wasm_start"}, "x86_64-windows": {"windows_start"}}
+# the tools a build for a target needs besides the host's
+BUILD_TOOLS = {"aarch64-linux": ["clang", "ld.lld"], "wasm32-wasi": ["clang", "wasm-ld"],
+               "x86_64-windows": ["clang", "llvm-dlltool", "lld-link"]}
 
 _FUN = re.compile(r"^pub fun ([a-z_0-9]+)\((.*)\)(?: -> (.+?))? \{$")
 _CONST = re.compile(r"^pub const ([A-Z_0-9]+): ([a-z0-9]+) = (.+?)(?:\s*//.*)?$")
@@ -134,7 +139,7 @@ class Declarations(unittest.TestCase):
                 if c.startswith("KIND_"):
                     self.assertEqual(kinds[c], v, f"{name}'s {c}")
         dir_failed = private_consts("process.my")["DIR_FAILED"]
-        for target in ("x86_64-linux", "aarch64-linux"):     # wasm32 has no processes
+        for target in ("x86_64-linux", "aarch64-linux"):     # wasm32 and Windows have none yet
             self.assertEqual(private_consts(MODULES[target])["DIR_FAILED"], dir_failed, target)
 
 
@@ -160,7 +165,7 @@ class Types(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, bindings_program())
             for target in MODULES:
-                if target != "x86_64-linux" and shutil.which("clang") is None:
+                if not all(shutil.which(t) for t in BUILD_TOOLS.get(target, [])):
                     continue
                 with self.subTest(target=target):
                     proc = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--stdlib", STDLIB_ROOT,
@@ -263,7 +268,7 @@ pub fun probe(dir: str) {
     for e in entries(dir + "/missing") {
         print(e)
     }
-    print(os.PROCESSES == (os.TARGET != "wasm32-wasi"))
+    print(os.PROCESSES == (os.TARGET != "wasm32-wasi" && os.TARGET != "x86_64-windows"))
     if !os.PROCESSES {
         let none: [str] = []
         let h = os.spawn_piped(["true"], ["true"], none)

@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -33,11 +34,72 @@ SKIP_REASON = "native build requires x86-64 Linux with `as` and `ld`"
 
 # The target native builds are for (MYLA-268): the machine's, or the one
 # MYLA_TEST_TARGET names (aarch64-linux, run under qemu-aarch64; wasm32-wasi,
-# run under Node with tools/wasm/run.mjs). scripts/test-target.py runs the
+# run under Node with tools/wasm/run.mjs; x86_64-windows, run under Wine,
+# MYLA-702). scripts/test-target.py runs the
 # suites tests/burn/_targets.py lists for a target with it set.
 TEST_TARGET = os.environ.get("MYLA_TEST_TARGET", "")
-_RUN_MJS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                        "tools", "wasm", "run.mjs")
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_RUN_MJS = os.path.join(_ROOT, "tools", "wasm", "run.mjs")
+
+
+# Windows' programs run under Wine (D213, MYLA-702): the command for it is
+# MYLA_EMULATOR's words when the suites run for x86_64-windows
+# (`scripts/test-target.py` sets it), else `wine` or `wine64` on PATH, else
+# where Ubuntu's `wine64` package puts it (that package alone puts nothing
+# on PATH).
+_WINE_PATHS = ["/usr/lib/wine/wine64"]
+
+
+def wine() -> list[str]:
+    """The command a Windows program runs under here; [] for none."""
+    words = os.environ.get("MYLA_EMULATOR", "").split() if TEST_TARGET == "x86_64-windows" else []
+    if words:
+        return words
+    for name in ("wine", "wine64"):
+        found = shutil.which(name)
+        if found:
+            return [found]
+    return [p for p in _WINE_PATHS if os.access(p, os.X_OK)][:1]
+
+
+def wine_server() -> str:
+    """Wine's server next to its command (`wineserver`; Ubuntu's package
+    puts it beside `wine64`, not on PATH); "" for none."""
+    words = wine()
+    found = shutil.which("wineserver") or (os.path.join(os.path.dirname(words[0]), "wineserver") if words else "")
+    return found if found and os.access(found, os.X_OK) else ""
+
+
+def wine_env(persist: str = "60") -> None:
+    """Wine's defaults in this process's environment, for it and its children
+    (`myla test --target x86_64-windows`'s runs among them): no debug output,
+    and a prefix of the repository's own under build/, made here if it isn't
+    there yet (some seconds).
+
+    Its services are started here too, their standard streams /dev/null. Wine
+    starts them from the first program of a new server, which they outlive
+    holding its standard streams: a test reading a program's output would wait
+    for them, while the server lives, never seeing the end. The server is
+    started first, kept `persist` seconds after its last program (`-p60`;
+    scripts/test-target.py starts its own for the whole run, `-p`, which this
+    finds running), so the services aren't started again between tests."""
+    os.environ.setdefault("WINEDEBUG", "-all")
+    os.environ.setdefault("WINEPREFIX", os.path.join(_ROOT, "build", "wineprefix"))
+    if not wine():
+        return
+    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    server = wine_server()
+    if server:
+        subprocess.run([server, "-p" + persist], **quiet)
+    boot = ["wineboot"] if os.path.isdir(os.environ["WINEPREFIX"]) else ["wineboot", "--init"]
+    subprocess.run([*wine(), *boot], timeout=300, **quiet)
+
+
+def windows_imports(asm: str) -> list[str]:
+    """The kernel32 functions the Windows assembly `asm` calls through their
+    import slots (`__imp_<name>`), sorted: the list its import library is
+    made from (D211, D212)."""
+    return sorted(set(re.findall(r"__imp_([A-Za-z0-9_]+)", asm)))
 
 
 def target_flags() -> list[str]:
@@ -52,6 +114,9 @@ def run_argv(binary: str, argv0: str = "prog", args=()) -> tuple[list[str], str 
         return ["qemu-aarch64", "-0", argv0, binary, *args], None
     if TEST_TARGET == "wasm32-wasi":
         return ["node", _RUN_MJS, "--argv0", argv0, binary, *args], None
+    if TEST_TARGET == "x86_64-windows":
+        # (Wine gives a program its Windows path as `argv[0]`, not `argv0`)
+        return [*wine(), binary, *args], None
     return [argv0, *args], binary
 
 
@@ -67,6 +132,19 @@ def assemble(asm_path: str, out: str) -> None:
                         "-msign-ext", "-c", "-o", obj, asm_path], check=True, capture_output=True, text=True)
         subprocess.run(["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", out, obj], check=True,
                        capture_output=True, text=True)
+    elif TEST_TARGET == "x86_64-windows":
+        # as `myla build` does (D211): kernel32's import library made from
+        # the functions the program calls
+        with open(asm_path, encoding="utf-8") as fh:
+            names = windows_imports(fh.read())
+        with open(out + ".def", "w", encoding="utf-8") as fh:
+            fh.write("LIBRARY kernel32.dll\nEXPORTS\n" + "".join(n + "\n" for n in names))
+        subprocess.run(["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", obj, asm_path], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["llvm-dlltool", "-m", "i386:x86-64", "-d", out + ".def", "-l", out + ".lib"], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib",
+                        "/stack:125829120", "/out:" + out, obj, out + ".lib"], check=True, capture_output=True, text=True)
     else:
         subprocess.run(["as", "--64", "-o", obj, asm_path], check=True, capture_output=True, text=True)
         subprocess.run(["ld", "-o", out, obj], check=True, capture_output=True, text=True)
