@@ -134,19 +134,33 @@ Copying a stream of any size is a loop over a buffer: `copy` from `std.io` reads
 | `m.is_file() -> bool`, `m.is_dir() -> bool`, `m.is_symlink() -> bool` | Whether it is a regular file, a directory, a symbolic link |
 | `enum FileKind { File, Dir, CharDevice, BlockDevice, Fifo, Socket, Symlink, Other }` | The kind, which the platform gives (its `KIND_FILE`, …; no type bits cross, D209); `Symlink` only from `symlink_metadata` |
 
-Neither opens anything: they stat the path (`__path_stat`, [[MYLA-378]]), so a file the program may not read has its metadata too, and a device, a FIFO or a socket its own size and time (until November 2026 `metadata` opened files and directories to read them, and gave anything else size and time 0). On wasm32 there are no permissions: they are made up from the kind (0o644 for a file, 0o755 for a directory, 0o777 for a link, [[Language/Targets]]), and a device's or a FIFO's kind is `Other`.
+Neither opens anything: they stat the path (`__path_stat`, [[MYLA-378]]), so a file the program may not read has its metadata too, and a device, a FIFO or a socket its own size and time (until November 2026 `metadata` opened files and directories to read them, and gave anything else size and time 0). On wasm32 there are no permissions: they are made up from the kind (0o644 for a file, 0o755 for a directory, 0o777 for a link, [[Language/Targets]]), and a device's or a FIFO's kind is `Other`. On Windows the permissions come from the read-only attribute (0o444 or 0o666, a directory 0o555 or 0o777, a link 0o777, D218), a directory's size is 0, and a pipe's or the console's kind is `Fifo` or `CharDevice` (below).
 
 ## Temporary files and directories
 
 | Function | Result |
 | --- | --- |
-| `temp_root() -> str` | The directory for temporary files: `$TMPDIR` when it is set and not empty, else `/tmp`, without a trailing `/` |
+| `temp_root() -> str` | The directory for temporary files: `$TMPDIR` when it is set and not empty, else `/tmp`, without a trailing `/`; on Windows the first of `%TMPDIR%`, `%TEMP%` and `%TMP%` set, else `.`, without a trailing `/` or `\` |
 | `make_temp_dir() -> Result<str, IoError>` | A new, empty directory in `temp_root()`, named `myla-` and 16 random hexadecimal digits, mode 0700: its path |
 | `make_temp_dir_in(dir: str, prefix: str) -> Result<str, IoError>` | The same in `dir`, named `prefix` and the digits |
 | `make_temp_file() -> Result<(str, File), IoError>` | A new, empty file in `temp_root()`, named `myla-` and 16 random hexadecimal digits, mode 0600, open for reading and writing: its path and the file |
 | `make_temp_file_in(dir: str, prefix: str) -> Result<(str, File), IoError>` | The same in `dir` |
 
 The digits come from the system's entropy (`__random_bytes`), and the name is made in one step that fails when it is taken (mkdir, or open with create and exclusive), so no other program can slip in a file or a link of its own; a taken name is tried again with new digits, up to 100 times, then it is `AlreadyExists`. Nothing removes them: the caller does, with `remove_dir_all` or `remove_file`, best in a `defer`. In a test, `std.test`'s `temp_dir()` and `temp_file()` make them in the case's scratch directory, which the runner removes ([[Language/Standard-library/Test]]).
+
+## On Windows
+
+On x86-64 Windows ([[MYLA-704]]) std.fs works over kernel32 through std.platform, as on the other targets: a path crosses as UTF-16 (`CreateFile2`, `GetFileInformationByHandle`, `GetFileInformationByHandleEx`'s directory records, `CreateDirectoryW`, `DeleteFileW`, `RemoveDirectoryW`, `MoveFileExW`, `GetCurrentDirectoryW`), its names UTF-8 in the program (D215), and a path's `\` separates as its `/` does, here as in std.path ([[Language/Standard-library/Path#on-windows]]). What a program sees is Linux's where Windows reports it otherwise:
+
+- A file is opened sharing reading, writing and removing with every other handle, so another program's open file doesn't stop a write, a rename or a removal (one removed while open goes once the last handle closes).
+- `read_to_string` of a directory, and `remove_file` of one, are `IsADirectory` (Windows: access denied); a path through a file (`make_dir("f.txt/x")`) is `NotADirectory` (Windows: a path not found); a name longer than 255 units is ENAMETOOLONG's `Other(36)`; reading a `File` open only for writing, or the other way round, `Other(9)` (Linux's EBADF). Windows' other codes are their causes, or Linux's errno of the same meaning (D219, D220).
+- `remove_file` of a symbolic link to a directory removes the link (`RemoveDirectoryW`); a read-only file isn't removed (`PermissionDenied`, as Windows has it, where Linux asks the directory); `rename` replaces a file there (`MOVEFILE_REPLACE_EXISTING`), not a directory.
+- `current_dir()` is Windows' own path (`C:\Users\me`; under Wine the Unix root is `Z:\`); `make_dir_all` starts after a UNC path's server and share.
+- `mode` (of `make_dir` and `OpenOptions.mode`) isn't used: Windows has no permission bits but the read-only attribute, and a new file isn't read-only (D218).
+- A `File` opened to append writes at the end whatever its cursor (`FILE_APPEND_DATA` without `FILE_WRITE_DATA`). Seeking a pipe or the console is ESPIPE's `Other(29)`.
+- The temporary files' names need random bytes, which come with [[MYLA-722]]: until then `make_temp_dir` and `make_temp_file` are `Unsupported` there.
+
+A symbolic link is a reparse point (a symbolic link's or a junction's tag) and `Symlink` as on Linux; Wine shows a Unix link as what it names, so the suites check links on Windows itself ([[MYLA-708]]).
 
 ## Measurements
 
