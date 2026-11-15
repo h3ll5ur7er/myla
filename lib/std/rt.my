@@ -1193,8 +1193,12 @@ pub fun spawn_with(program: str, argv: [str], opts: [str]) -> [int] {
 }
 
 // The paths `program` may be at (D147): itself when it names a path,
-// else in each directory of PATH.
+// else in each directory of PATH. Windows' platform looks for it itself,
+// with PATHEXT's extensions and its own separators (MYLA-705).
 fun program_paths(program: str) -> [str] {
+    if os.TARGET == "x86_64-windows" {
+        return [program]
+    }
     var i = 0
     while i < program.len() {
         if program[i] == 47u8 {         // '/'
@@ -1228,8 +1232,25 @@ fun program_paths(program: str) -> [str] {
     return out
 }
 
+// `__reap(pid)`: the child `pid` waited for and reaped: its exit code (its
+// low 8 bits), or minus the signal that ended it. The whole status is a
+// run's too (`__run_exit_code`, `__run_signal`), where std.process reads
+// it: a Windows exit code has 32 bits (D216, MYLA-705), which would read as
+// a signal or as "still running" here.
 pub fun reap(pid: int) -> int {
-    return os.reap(pid as int64) as int
+    return reaped(os.reap(pid as int64))
+}
+
+// What `reap` and `try_reap` give for the platform's status `r` (an exit
+// code, or minus a signal), the whole status recorded as a run's (raw
+// memory: no case of its own, as the interpreter runs std.rt's cases).
+fun reaped(r: int64) -> int {
+    if r < 0 {
+        __set_run_status(-1, -r, 0)
+        return r as int
+    }
+    __set_run_status(r & LOW32, 0, 0)
+    return (r & 255) as int
 }
 
 // `__kill(pid, sig)`: the signal `sig` sent to `pid`, the cause recorded
@@ -1304,7 +1325,7 @@ pub fun try_reap(pid: int) -> int {
     record(r)
     var code = 256
     if r > 0 {
-        code = __load64(out) as int
+        code = reaped(__load64(out))
     }
     __free(out)
     return code

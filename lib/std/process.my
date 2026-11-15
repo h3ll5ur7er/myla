@@ -281,17 +281,17 @@ async fun collect_async(program: str, argv: [str], opts: [str]) -> Result<Output
     }
     __close(ofd)
     __close(efd)
-    __close(h[4])
+    // reaped before its `exited` is closed: on Windows that handle keeps
+    // the process ID the child's (MYLA-705)
     if stopped {
         __kill(pid, 9)
         let gone = __reap(pid)
+        __close(h[4])
         return Err(SpawnError.Cancelled)
     }
     let code = __reap(pid)
-    var status = ExitStatus.Exited(code)
-    if code < 0 {
-        status = ExitStatus.Signaled(-code)
-    }
+    let status = reaped_status()
+    __close(h[4])
     return Ok(Output { stdout: out, stderr: err, status: status })
 }
 
@@ -673,15 +673,16 @@ fun held(fd: int32) -> int32 {
     return fd
 }
 
-// The status of a child that ended, from what `__reap` gives.
-#test(0)[ExitStatus.Exited(0)]
-#test(3)[ExitStatus.Exited(3)]
-#test(-9)[ExitStatus.Signaled(9)]
-fun status_of(code: int) -> ExitStatus {
-    if code < 0 {
-        return ExitStatus.Signaled(-code)
+// The status of the child the last `__reap` or `__try_reap` reaped, which
+// std.rt keeps as a run's: the signal that ended it, else its exit code,
+// all 32 bits of it on Windows (D216, MYLA-705), where `__reap`'s own
+// result is its low 8 bits.
+fun reaped_status() -> ExitStatus {
+    let sig = __run_signal()
+    if sig != 0 {
+        return ExitStatus.Signaled(sig)
     }
-    return ExitStatus.Exited(code)
+    return ExitStatus.Exited(__run_exit_code())
 }
 
 // The write end of a child's standard input. `Write`: a write blocks until
@@ -886,7 +887,7 @@ impl Child {
             }
             return Ok(None)
         }
-        let st = status_of(code)
+        let st = reaped_status()
         self.status = Some(st)
         self.forget_exited()
         return Ok(Some(st))
@@ -1012,7 +1013,8 @@ impl Child {
                 Some(st) => { return Ok(st) }
                 None => {
                     if self.exited < 0 {
-                        let st = status_of(__reap(self.pid))
+                        let code = __reap(self.pid)
+                        let st = reaped_status()
                         self.status = Some(st)
                         return Ok(st)
                     }
