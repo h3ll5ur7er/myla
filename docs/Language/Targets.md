@@ -53,7 +53,7 @@ A program learns that its target lacks something from an error: the cause `Unsup
 | A worker's stack | 8 MiB, with a guard page | The same | One worker: the main stack | One worker: the main stack |
 | Memory | The machine's; a freed cell bigger than 16 MiB goes back to the system (D157) | The machine's, as on x86-64 | At most 4 GiB, which the program never gives back: a freed big cell is reused by a later one it is large enough for, and a growing list or string at the top of the memory grows where it is (a list of 150 million `int64`s fits, [[MYLA-284]]) | The machine's, through `VirtualAlloc`; a freed big cell goes back (`VirtualFree`) |
 | A line printed whole while other workers print | Up to `PIPE_BUF` (4 KiB) per line | The same | One worker: always | One worker: always |
-| Debug information (`myla build -g`) | Yes ([[Development/Debugging]]) | Not yet ([[MYLA-259]]) | Not yet | Not yet (D216) |
+| Debug information (`myla build -g`) | Yes ([[Development/Debugging]]) | Not yet ([[MYLA-259]]) | Not yet | DWARF in the `.exe`, for gdb and lldb ([[MYLA-757]]); no PDB for Visual Studio and WinDbg |
 
 ## Sockets on another system
 

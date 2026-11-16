@@ -6,8 +6,9 @@ D213, D214).
       On Linux: builds for x86_64-windows the examples, the concurrency
       stress programs, tests/burn/test_windows.py's programs (its HELPER and
       process and socket cases, FramesOnWindows' 64 KiB frame, console cases of its
-      own), a read of the standard input with a time limit, and myla.exe and
-      myla-lsp.exe, into OUT, and writes OUT/cases.json: each case's
+      own), a read of the standard input with a time limit, a program with
+      debug information (-g, MYLA-757), and myla.exe and myla-lsp.exe, into
+      OUT, and writes OUT/cases.json: each case's
       commands and what each must print and exit with (the examples' from
       the interpreter here, as bootstrap-arm64 takes them).
 
@@ -18,7 +19,8 @@ D213, D214).
       wine64 or wine on PATH): what Wine can't show is skipped with its
       reason (a case's `windows_only`), and so is what needs tools that
       aren't there (`myla.exe build` needs clang, lld-link and llvm-dlltool
-      for Windows on PATH, or in C:\\Program Files\\LLVM\\bin).
+      for Windows on PATH, or in C:\\Program Files\\LLVM\\bin; reading a -g
+      program's DWARF llvm-symbolizer or llvm-dwarfdump).
 
 The run needs Python's standard library only and nothing of the checkout
 but OUT: a case's programs are under OUT/bin and OUT/tools, the files it
@@ -42,6 +44,8 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 FORMAT = 1
 STRESS_WORKERS = ["1", "4", "16"]
 LLVM_TOOLS = ["clang", "lld-link", "llvm-dlltool"]
+# what reads a -g program's DWARF (MYLA-757), each in a step of its own
+DEBUG_TOOLS = ["llvm-symbolizer", "llvm-dwarfdump"]
 
 # --- the console cases ---------------------------------------------------------
 # Each: (name, source, steps), a step a dict of `Step`'s fields (see `step`).
@@ -304,7 +308,8 @@ def lsp_input() -> str:
 def step(argv, stdout=None, stderr="", code=0, stdin="", env=None, timeout=120, has=(), subst=False,
          path_dir=False, expect_timeout=False, dialog=None, repeat=False, needs=(), drive=None):
     """A command of a case and what it must do. `argv[0]` is a program under
-    OUT (`bin/…`, `tools/…`) or in the case's directory (`./…`). `stdout`
+    OUT (`bin/…`, `tools/…`), in the case's directory (`./…`), or a tool on
+    PATH named by itself (DEBUG_TOOLS, put in `needs`). `stdout`
     exactly (None: not checked) or containing each of `has`; `stderr`
     exactly (None: not checked); `subst`: @CWD@ and @ANCHOR@ in `stdout`
     and `env` are the case's directory as Windows names it and its drive;
@@ -394,16 +399,19 @@ def build(out: str, myla: str, jobs: int) -> int:
     scratch = tempfile.mkdtemp(prefix="windows-runner-")
     start = time.monotonic()
     builds: list[tuple[str, str, str]] = []   # (exe under OUT, source file, directory it is built in)
+    debug_builds: set[str] = set()            # the exes of those built with -g (MYLA-757)
     cases: list[dict] = []
 
-    def program(exe: str, source: str, name: str = "main.my") -> None:
+    def program(exe: str, source: str, name: str = "main.my", debug: bool = False) -> None:
         """`source` built as OUT/`exe` from a file `name` of a directory of
-        its own (a runtime error's position names it)."""
+        its own (a runtime error's position names it); `debug`: with -g."""
         d = os.path.join(scratch, exe.replace("/", "_"))
         os.makedirs(d)
         with open(os.path.join(d, name), "w", encoding="utf-8") as fh:
             fh.write(source)
         builds.append((exe, name, d))
+        if debug:
+            debug_builds.add(exe)
 
     def file(name: str, text: str) -> str:
         """`text` kept as OUT/files/`name`; its path under OUT."""
@@ -555,11 +563,32 @@ def build(out: str, myla: str, jobs: int) -> int:
         step(["tools/myla.exe", "test", "t.my", "--native"], native["stdout"], native["stderr"], native["code"],
              env={"TMPDIR": "@CWD@"}, subst=True, needs=LLVM_TOOLS, timeout=300),
     ], tool_files)
+    # and with -g: the image's LLVM reads the DWARF lld-link kept there,
+    # `main` at its `fun` line (MYLA-757)
+    case("tools/myla-build-g", [
+        step(["tools/myla.exe", "build", "hello.my", "-g", "-o", "hello.exe"], "", "", needs=LLVM_TOOLS, timeout=300),
+        step(["./hello.exe"], "Hello from Myla on Windows\n", needs=LLVM_TOOLS),
+        step(["llvm-symbolizer", "--obj=hello.exe", "myla_main"], None, None, has=["myla_main", "hello.my:1:1"],
+             needs=LLVM_TOOLS + ["llvm-symbolizer"]),
+    ], tool_files)
+
+    # debug information (MYLA-757): test_debug_info's Windows program built
+    # here with -g runs as without it, and the image's LLVM reads its DWARF:
+    # a function's address is its `fun` line, and the whole unit verifies
+    from tests.burn.test_debug_info import WIN_PROGRAM
+    program("bin/debug.exe", WIN_PROGRAM, debug=True)
+    case("debug/runs", [step(["bin/debug.exe"], "5\ntwo\n2\n")])
+    case("debug/symbolizer", [step(["llvm-symbolizer", "--obj=debug.exe", "myla_add", "myla_main"], None, None,
+                                   has=["myla_add", "main.my:6:1", "myla_main", "main.my:11:1"], needs=["llvm-symbolizer"])],
+         {"debug.exe": "bin/debug.exe"})
+    case("debug/dwarfdump", [step(["llvm-dwarfdump", "--verify", "debug.exe"], None, None, has=["No errors."],
+                                  needs=["llvm-dwarfdump"])], {"debug.exe": "bin/debug.exe"})
 
     def make(b: tuple[str, str, str]) -> str:
         exe, src, cwd = b
+        flags = ["-g"] if exe in debug_builds else []
         r = subprocess.run([myla, "build", src, "--target", "x86_64-windows", "--stdlib", stdlib,
-                            "-o", os.path.join(out, exe)], cwd=cwd, capture_output=True, text=True, timeout=900)
+                            "-o", os.path.join(out, exe), *flags], cwd=cwd, capture_output=True, text=True, timeout=900)
         return "" if r.returncode == 0 else f"{exe} ({src}): {r.stderr.strip() or r.returncode}"
 
     with ThreadPoolExecutor(jobs) as pool:
@@ -585,17 +614,18 @@ class Runner:
         self.tools_missing = self.find_tools()
 
     def find_tools(self) -> list[str]:
-        """The LLVM tools `myla.exe build` needs that the machine hasn't (all
-        of them under Wine: Linux's aren't Windows programs). LLVM's
-        installer's directory goes on PATH when they are there."""
+        """The LLVM tools `myla.exe build` needs, and those that read debug
+        information (MYLA-757), that the machine hasn't (all of them under
+        Wine: Linux's aren't Windows programs). LLVM's installer's directory
+        goes on PATH when they are there."""
         if self.wine:
-            return list(LLVM_TOOLS)
+            return LLVM_TOOLS + DEBUG_TOOLS
         llvm = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "LLVM", "bin")
         path = self.env.get("PATH", "")
-        if not all(shutil.which(t, path=path) for t in LLVM_TOOLS) and os.path.isdir(llvm):
+        if not all(shutil.which(t, path=path) for t in LLVM_TOOLS + DEBUG_TOOLS) and os.path.isdir(llvm):
             self.env["PATH"] = llvm + os.pathsep + path
         missing = []
-        for t in LLVM_TOOLS:
+        for t in LLVM_TOOLS + DEBUG_TOOLS:
             found = shutil.which(t, path=self.env["PATH"])
             if not found:
                 missing.append(t)
@@ -616,6 +646,8 @@ class Runner:
     def program(self, word: str, work: str) -> str:
         if word.startswith("./"):
             return os.path.join(work, word[2:])
+        if "/" not in word:   # a tool on PATH (DEBUG_TOOLS)
+            return shutil.which(word, path=self.env["PATH"]) or word
         return os.path.join(self.bundle, *word.split("/"))
 
     def run_case(self, c: dict) -> tuple[str, str]:

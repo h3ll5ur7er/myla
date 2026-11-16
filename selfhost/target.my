@@ -42,8 +42,10 @@ pub enum ObjectFormat {
 // and `{lib}` (its list of functions and the library made of it; Windows,
 // D211, D212); the word `{libs}` of `link` is the import libraries, one a
 // DLL the program calls (MYLA-722). `imports` is [] where there are none.
-// `needs` names them all, for the error when one isn't on PATH.
-pub struct Toolchain { assemble: [str], imports: [str], link: [str], needs: str }
+// `debug_link`: the words `link` ends with under `-g` ([] where the linker
+// keeps the DWARF anyway: lld-link keeps it only so, MYLA-757). `needs`
+// names them all, for the error when one isn't on PATH.
+pub struct Toolchain { assemble: [str], imports: [str], link: [str], debug_link: [str], needs: str }
 
 // A target: its name (`x86_64-linux`, the `--target` word), operating
 // system, architecture and object format; the suffix of its programs'
@@ -74,7 +76,7 @@ pub struct Target {
 // A Linux target's tools from another machine: clang for its triple and
 // lld (MYLA-163).
 fun linux_cross(triple: str) -> Toolchain {
-    return Toolchain { assemble: ["clang", "--target=" + triple, "-c", "-o", "{obj}", "{asm}"], imports: [], link: ["ld.lld", "-static", "-o", "{out}", "{obj}"], needs: "clang and ld.lld" }
+    return Toolchain { assemble: ["clang", "--target=" + triple, "-c", "-o", "{obj}", "{asm}"], imports: [], link: ["ld.lld", "-static", "-o", "{out}", "{obj}"], debug_link: [], needs: "clang and ld.lld" }
 }
 
 // A Linux target's tools on its own machine: GNU `as` (with `flags`) and
@@ -83,7 +85,7 @@ fun linux_native(flags: [str]) -> Toolchain {
     var asm = ["as"]
     for f in flags { asm.push(f) }
     for w in ["-o", "{obj}", "{asm}"] { asm.push(w) }
-    return Toolchain { assemble: asm, imports: [], link: ["ld", "-o", "{out}", "{obj}"], needs: "GNU as and ld (binutils)" }
+    return Toolchain { assemble: asm, imports: [], link: ["ld", "-o", "{out}", "{obj}"], debug_link: [], needs: "GNU as and ld (binutils)" }
 }
 
 // Every target, in the order the usage and the errors name them.
@@ -97,18 +99,22 @@ pub fun targets() -> [Target] {
         // the data (MYLA-261)
         Target { name: "wasm32-wasi", os: Os.Wasi, arch: Arch.Wasm32, format: ObjectFormat.Wasm, exe_suffix: "", platform_file: "platform_wasm.my",
                  cross: Toolchain { assemble: ["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext", "-c", "-o", "{obj}", "{asm}"], imports: [],
-                                    link: ["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", "{out}", "{obj}"], needs: "clang and wasm-ld" },
+                                    link: ["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", "{out}", "{obj}"], debug_link: [], needs: "clang and wasm-ld" },
                  native: None, emulator: [], spawns: false, debug_info: false, supported: true },
         // D211: clang reads the backend's GAS text for COFF too; the import
         // library of each system DLL (D212) is made from the list of the
         // functions used; no C runtime, so the entry is the program's own.
         // The main thread's stack reserved as large as Linux's grows
         // (120 MiB, MYLA-182). A test harness's cases run as children
-        // (MYLA-705); debug information later (D216)
+        // (MYLA-705). Under -g the DWARF that clang puts in the object's
+        // COFF sections is kept in the image (`/debug:dwarf`, no PDB), and
+        // what the program doesn't call is still left out as without it
+        // (`/opt:ref`, which `/debug` would turn off; MYLA-757)
         Target { name: "x86_64-windows", os: Os.Windows, arch: Arch.X86_64, format: ObjectFormat.Coff, exe_suffix: ".exe", platform_file: "platform_windows.my",
                  cross: Toolchain { assemble: ["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", "{obj}", "{asm}"], imports: ["llvm-dlltool", "-m", "i386:x86-64", "-d", "{def}", "-l", "{lib}"],
-                                    link: ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:{out}", "{obj}", "{libs}"], needs: "clang, llvm-dlltool and lld-link" },
-                 native: None, emulator: ["wine"], spawns: true, debug_info: false, supported: true },
+                                    link: ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:{out}", "{obj}", "{libs}"],
+                                    debug_link: ["/debug:dwarf", "/opt:ref"], needs: "clang, llvm-dlltool and lld-link" },
+                 native: None, emulator: ["wine"], spawns: true, debug_info: true, supported: true },
     ]
 }
 
@@ -202,7 +208,7 @@ fun the_names_parse() {
 }
 
 // Each target's tools: one to assemble and one to link, each named in its
-// `needs`; D211's three for Windows.
+// `needs`; D211's three for Windows, which keeps the DWARF under -g.
 #test
 fun each_toolchain_names_its_tools() {
     for t in targets() {
@@ -218,4 +224,6 @@ fun each_toolchain_names_its_tools() {
     let w = parse_target("x86_64-windows").expect("windows")
     assert(w.format == ObjectFormat.Coff && w.exe_suffix == ".exe" && w.supported && w.spawns, "windows: its cases run as children (MYLA-705)")
     assert(w.cross.assemble[0] == "clang" && w.cross.imports[0] == "llvm-dlltool" && w.cross.link[0] == "lld-link", "D211")
+    // -g: DWARF in the image, as on x86-64 Linux (MYLA-757)
+    assert(w.debug_info && w.cross.debug_link == ["/debug:dwarf", "/opt:ref"], "windows -g")
 }

@@ -7,6 +7,7 @@ from __future__ import annotations
 import ctypes
 import importlib.util
 import os
+import tempfile
 import unittest
 
 from .test_windows import RUNNER_CASES
@@ -67,6 +68,23 @@ class Typing(unittest.TestCase):
         # a window
         self.assertEqual(sorted(rc["args"][0] for rc in RUNNER_CASES if rc.get("host") == "pty"),
                          ["close", "readline"])
+
+
+class Programs(unittest.TestCase):
+    def test_a_word_without_a_slash_is_a_tool_on_path(self):
+        # the debug cases run the machine's LLVM on a -g program (MYLA-757);
+        # the other words are the bundle's programs or the case's own
+        r = runner.Runner.__new__(runner.Runner)
+        r.bundle = os.path.join(os.sep, "b")
+        with tempfile.TemporaryDirectory() as d:
+            tool = os.path.join(d, "llvm-symbolizer")
+            with open(tool, "w") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(tool, 0o755)
+            r.env = {"PATH": d}
+            self.assertEqual(r.program("llvm-symbolizer", "/w"), tool)
+        self.assertEqual(r.program("bin/debug.exe", "/w"), os.path.join(os.sep, "b", "bin", "debug.exe"))
+        self.assertEqual(r.program("./hello.exe", "/w"), os.path.join("/w", "hello.exe"))
 
 
 class Records(unittest.TestCase):
