@@ -179,6 +179,33 @@ TASKS = ('import std.task as task\n'
          '    print(ms >= 50 && ms < 5000)\n'
          '}\n')
 
+# MYLA-722's random bytes: a temporary directory and file under %TEMP%
+# (D227), UUIDs, the system's generator (as test_windows' cases of them)
+RANDOM = ('import std.fs as fs\n'
+          'import std.uuid as uuid\n'
+          'import std.random as random\n'
+          'from std.process import env\n'
+          'fun main() {\n'
+          '    let root = env("TEMP").unwrap_or("")\n'
+          '    let d = fs.make_temp_dir().expect("dir")\n'
+          '    let e = fs.make_temp_dir().expect("dir")\n'
+          '    print(root != "" && d.starts_with(root + "\\\\myla-") && d.len() == root.len() + 22 && d != e)\n'
+          '    print(fs.is_dir(d))\n'
+          '    let (p, file) = fs.make_temp_file().expect("file")\n    var f = file\n'
+          '    let c = f.close()\n'
+          '    print(fs.is_file(p) && p.starts_with(root + "\\\\myla-"))\n'
+          '    for x in [d, e] { fs.remove_dir(x).expect("rmdir") }\n'
+          '    fs.remove_file(p).expect("rm")\n'
+          '    print(fs.exists(d) || fs.exists(p))\n'
+          '    let a = f"{uuid.v4()}"\n'
+          '    let b = f"{uuid.v4()}"\n'
+          '    print(a.len() == 36 && a[14] == \'4\' && a != b)\n'
+          '    var r = random.from_os()\n'
+          '    var seen: [int: bool] = [:]\n'
+          '    for i in 0..100 { seen[r.int_in(0, 1000000)] = true }\n'
+          '    print(seen.len() > 90)\n'
+          '}\n')
+
 # The standard input read with a time limit (`Reader.ready(ms)`, std.platform's
 # `poll_read`, which asks the pipe how much it holds, `PeekNamedPipe`): none
 # within 300 ms while the pipe is open and empty, at once once a line came,
@@ -275,7 +302,7 @@ def lsp_input() -> str:
 
 
 def step(argv, stdout=None, stderr="", code=0, stdin="", env=None, timeout=120, has=(), subst=False,
-         path_dir=False, expect_timeout=False, dialog=None, repeat=False, needs=(), new_console=False):
+         path_dir=False, expect_timeout=False, dialog=None, repeat=False, needs=(), drive=None):
     """A command of a case and what it must do. `argv[0]` is a program under
     OUT (`bin/…`, `tools/…`) or in the case's directory (`./…`). `stdout`
     exactly (None: not checked) or containing each of `has`; `stderr`
@@ -284,22 +311,18 @@ def step(argv, stdout=None, stderr="", code=0, stdin="", env=None, timeout=120, 
     `path_dir`: that directory first on the program search path; `dialog`:
     lines expected and text sent before the rest is read; `expect_timeout`:
     it must still run after `timeout` seconds (then killed); `repeat`: it
-    runs --runs times; `needs`: tools it needs on PATH; `new_console`: it
-    gets a console of its own (CREATE_NEW_CONSOLE), its standard streams
-    still this script's pipes (skipped under Wine)."""
+    runs --runs times; `needs`: tools it needs on PATH; `drive`: one of
+    test_windows' RUNNER_CASES, which `Runner.drive_console` runs in a
+    console of its own (Windows only)."""
     return {"argv": list(argv), "stdout": stdout, "stderr": stderr, "code": code, "stdin": stdin,
             "env": dict(env or {}), "timeout": timeout, "has": list(has), "subst": subst, "path_dir": path_dir,
             "expect_timeout": expect_timeout, "dialog": dialog, "repeat": repeat, "needs": list(needs),
-            "new_console": new_console}
+            "drive": drive}
 
 
-# MYLA-707 (std.term and std.signal on the console API) adds its console
-# cases here: (name, source, steps), as `console_cases` makes them, the
-# program built as `bin/console-<name>.exe` from a `main.my`; or (name,
-# source, steps, why) for one that Wine can't show (a real console's raw
-# input, its window's size), skipped there with `why`. A step with
-# `new_console=True` runs in a console of its own.
-MORE_CONSOLE_CASES: list[tuple] = []
+# MYLA-707's cases of a console of the program's own (std.term, std.signal)
+# are test_windows' RUNNER_CASES, which `build` turns into `terminal/…`
+# cases: a new one goes there.
 
 
 def console_cases(deep: str, busy_entry: str) -> list[tuple[str, str, list[dict]]]:
@@ -339,7 +362,10 @@ def console_cases(deep: str, busy_entry: str) -> list[tuple[str, str, list[dict]
                     '    exit(3)\n    return 0\n}\n\n' + busy_entry,
          [step([exe("workers")], "child\n", code=3, env={"MYLA_THREADS": "2"}, timeout=60),
           step([exe("workers")], None, None, env={"MYLA_THREADS": "1"}, timeout=3, expect_timeout=True)]),
-    ] + MORE_CONSOLE_CASES
+        # MYLA-722: random bytes from bcrypt (D212): a temporary directory
+        # and file under %TEMP% (D227), UUIDs, the system's generator
+        ("random", RANDOM, [step([exe("random")], "true\ntrue\ntrue\nfalse\ntrue\ntrue\n")]),
+    ]
 
 
 # --- building (Linux) ------------------------------------------------------------
@@ -396,10 +422,20 @@ def build(out: str, myla: str, jobs: int) -> int:
                 "stderr": r.stderr.decode("utf-8", "backslashreplace"), "code": r.returncode}
 
     # the console: test_windows' HelloWorld and Workers programs, and MYLA-707's
-    for name, source, steps, *why in console_cases(tw.DEEP, tw.BUSY_ENTRY):
+    for name, source, steps in console_cases(tw.DEEP, tw.BUSY_ENTRY):
         program(f"bin/console-{name}.exe", source)
         files = {"main.my": file(f"console-{name}/main.my", source)} if name == "paths" else {}
-        case(f"console/{name}", steps, files, windows_only=why[0] if why else "")
+        case(f"console/{name}", steps, files)
+
+    # MYLA-707's console of its own (test_windows.RUNNER_CASES): its CONSOLE
+    # program as console.exe, typed into, sent control events, closed
+    program("bin/console.exe", tw.CONSOLE)
+    for k, rc in enumerate(tw.RUNNER_CASES):
+        words = "-".join(a for a in rc["args"] if a != "token" and not a.endswith(".txt"))
+        case(f"terminal/{k + 1:02}-{words}", [step(["./console.exe"], drive=rc, timeout=rc["seconds"])],
+             {"console.exe": "bin/console.exe"},
+             windows_only="a console of the program's own, typed into and signalled from Windows' Python (ctypes); "
+                          "test_windows.Console runs the same program on Wine's console of a pseudo-terminal")
 
     # the standard input with a time limit: from this script's pipe, which is
     # a named pipe on Windows, and from a Windows program's
@@ -562,8 +598,6 @@ class Runner:
         """("ok" | "FAIL" | "skip", what)"""
         if c["windows_only"] and self.wine:
             return "skip", "under Wine: " + c["windows_only"]
-        if self.wine and any(s.get("new_console") for s in c["steps"]):
-            return "skip", "under Wine: a console of its own for a program a Linux process starts"
         needs = sorted({t for s in c["steps"] for t in s["needs"] if t in self.tools_missing})
         if needs:
             return "skip", f"needs {', '.join(needs)}, not on this machine's PATH (nor in LLVM's directory)"
@@ -587,6 +621,8 @@ class Runner:
 
     def run_step(self, s: dict, work: str, subst: dict) -> str:
         """What step `s` did wrong, "" for nothing."""
+        if s["drive"]:
+            return self.drive_console(s["drive"], work)
         def put(text: str) -> str:
             if s["subst"]:
                 for k, v in subst.items():
@@ -601,11 +637,10 @@ class Runner:
             else:
                 env["PATH"] = work + os.pathsep + env.get("PATH", "")
         argv = [*self.wine, self.program(s["argv"][0], work), *s["argv"][1:]]
-        flags = subprocess.CREATE_NEW_CONSOLE if s.get("new_console") and sys.platform == "win32" else 0
         # a dialog reads its output unbuffered: a line at a time, nothing
         # of the rest taken from what `communicate` reads after it
         proc = subprocess.Popen(argv, cwd=work, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, creationflags=flags, bufsize=0 if s["dialog"] else -1)
+                                stderr=subprocess.PIPE, bufsize=0 if s["dialog"] else -1)
         deadline = time.monotonic() + s["timeout"]
         got_lines = []
         if s["dialog"]:
@@ -648,6 +683,187 @@ class Runner:
         if s["stderr"] is not None and stderr != s["stderr"]:
             problems.append("stderr " + differs(stderr, s["stderr"]))
         return "; ".join(problems)
+
+
+    def drive_console(self, rc: dict, work: str) -> str:
+        """test_windows' RUNNER_CASE `rc` (its comment says what each field
+        means): CONSOLE, copied to `work` as console.exe, in a console of
+        its own (`cmd /c "[before &&] console.exe ARGS > out.txt"`, or
+        console.exe alone), driven by `console_action` in a process of this
+        script attached to that console; what it did wrong, "" for nothing."""
+        deadline = time.monotonic() + rc["seconds"]
+        out_path = os.path.join(work, "out.txt")
+        if rc.get("alone"):
+            command = [os.path.join(work, "console.exe"), *rc["args"]]
+        else:
+            line = "console.exe " + " ".join(rc["args"]) + " > out.txt"
+            if rc.get("before"):
+                line = rc["before"] + " && " + line
+            command = f'cmd /c "{line}"'
+
+        def text(path: str) -> str:
+            try:
+                with open(path, "rb") as fh:
+                    return fh.read().decode("utf-8", "backslashreplace")
+            except OSError:
+                return ""
+
+        # what this process ignores its children would too (Ctrl-C's flag)
+        ctypes_kernel32().SetConsoleCtrlHandler(None, False)
+        proc = subprocess.Popen(command, cwd=work, env=self.env, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        try:
+            for k, st in enumerate(rc["steps"]):
+                if "wait" in st or "wait_file" in st:
+                    path = out_path if "wait" in st else os.path.join(work, st["wait_file"])
+                    want = st.get("wait", st.get("text"))
+                    while want not in text(path):
+                        if time.monotonic() > deadline or proc.poll() is not None:
+                            return (f"step {k + 1}: {want!r} not written (exit {proc.poll()}); "
+                                    f"it wrote {text(path)!r}")
+                        time.sleep(0.05)
+                    continue
+                if "keys" in st:
+                    action = ["keys", json.dumps([r for name in st["keys"] for r in key_records(name)])]
+                elif "event" in st:
+                    action = ["event", str(CTRL_EVENTS[st["event"]])]
+                else:
+                    action = ["close"]
+                done = subprocess.run([sys.executable, os.path.abspath(__file__), "console-action", str(proc.pid),
+                                       *action], capture_output=True, text=True, timeout=30,
+                                      creationflags=subprocess.DETACHED_PROCESS)
+                if "ok" not in done.stdout.split():
+                    return f"step {k + 1} ({action[0]}): {done.stdout.strip()} {done.stderr.strip()}"
+            try:
+                code = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                return f"still running after {rc['seconds']} s; it wrote {text(out_path)!r}"
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        problems = []
+        if code != rc["exit"]:
+            problems.append(f"exit {code:#x}, expected {rc['exit']:#x}")
+        if "out" in rc and text(out_path) != rc["out"]:
+            problems.append("out.txt " + differs(text(out_path), rc["out"]))
+        if "file" in rc and text(os.path.join(work, rc["args"][1])) != rc["file"]:
+            problems.append(f"{rc['args'][1]} " + differs(text(os.path.join(work, rc["args"][1])), rc["file"]))
+        return "; ".join(problems)
+
+
+# --- a console's input events and control events (Windows) ---------------------
+
+CTRL_EVENTS = {"CTRL_C_EVENT": 0, "CTRL_BREAK_EVENT": 1}
+LEFT_ALT, LEFT_CTRL, SHIFT, ENHANCED = 0x0002, 0x0008, 0x0010, 0x0100
+NAMED_KEYS = {  # name: (virtual key, character, control key state)
+    "Up": (0x26, 0, ENHANCED), "Down": (0x28, 0, ENHANCED), "Left": (0x25, 0, ENHANCED),
+    "Right": (0x27, 0, ENHANCED), "Home": (0x24, 0, ENHANCED), "End": (0x23, 0, ENHANCED),
+    "Delete": (0x2E, 0, ENHANCED), "Escape": (0x1B, 0x1B, 0), "Enter": (0x0D, 0x0D, 0), "Tab": (0x09, 0x09, 0),
+    "Backspace": (0x08, 0x08, 0),
+}
+
+
+def key_records(name: str) -> list[list[int]]:
+    """The key `name` pressed and let go, as [down, virtual key, character,
+    control key state] records (RUNNER_CASES' names: a key's name, "F5",
+    one character, "Ctrl-c", "Alt-x")."""
+    if name in NAMED_KEYS:
+        vk, ch, state = NAMED_KEYS[name]
+    elif name[0] == "F" and name[1:].isdigit():
+        vk, ch, state = 0x6F + int(name[1:]), 0, 0
+    elif name.startswith("Ctrl-") and len(name) == 6:
+        vk, ch, state = ord(name[5].upper()), ord(name[5].lower()) & 0x1F, LEFT_CTRL
+    elif name.startswith("Alt-") and len(name) == 5:
+        vk, ch, state = ord(name[4].upper()), ord(name[4]), LEFT_ALT
+    elif len(name) == 1:
+        c = name
+        if c.isascii() and c.isalnum():
+            vk, ch, state = ord(c.upper()), ord(c), SHIFT if c.isupper() else 0
+        else:
+            vk, ch, state = 0, ord(c), 0   # a character no key of the layout gives (ö, ß): itself
+    else:
+        raise ValueError(f"no key named {name!r}")
+    return [[1, vk, ch, state], [0, vk, ch, state]]
+
+
+def ctypes_kernel32():
+    import ctypes
+    return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+def console_action(pid: int, action: str, arg: str) -> int:
+    """In a process of its own, attached to the console of the process
+    `pid`: `keys` (the records `arg` into the console's input, CONIN$),
+    `event` (the control event `arg` to every process on the console, this
+    one ignoring it) or `close` (WM_CLOSE to the console's window, which is
+    CTRL_CLOSE_EVENT). Prints "ok" when done."""
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes_kernel32()
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    k.FreeConsole()
+    if not k.AttachConsole(pid):
+        print(f"AttachConsole({pid}) failed: {ctypes.get_last_error()}")
+        return 1
+    # every event this process sees handled, so none ends it (Ctrl-Break
+    # and the close aren't Ctrl-C's flag's)
+    handler = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)(lambda event: True)
+    k.SetConsoleCtrlHandler(None, True)
+    k.SetConsoleCtrlHandler(handler, True)
+    ok = False
+    if action == "event":
+        ok = bool(k.GenerateConsoleCtrlEvent(int(arg), 0))
+    elif action == "close":
+        k.GetConsoleWindow.restype = wintypes.HWND
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        ok = bool(user32.PostMessageW(k.GetConsoleWindow(), 0x0010, 0, 0))
+    elif action == "keys":
+        records = json.loads(arg)
+        k.CreateFileW.restype = wintypes.HANDLE
+        k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                  wintypes.DWORD, wintypes.HANDLE]
+        # read and write, shared both ways, the one there is
+        conin = k.CreateFileW("CONIN$", 0xC0000000, 3, None, 3, 0, None)
+        if conin is None or conin == wintypes.HANDLE(-1).value:
+            print(f"CONIN$ not opened: {ctypes.get_last_error()}")
+            return 1
+        events = (input_record_type() * len(records))()
+        for e, (down, vk, ch, state) in zip(events, records):
+            e.EventType = 1   # KEY_EVENT
+            e.Event.KeyEvent.bKeyDown = down
+            e.Event.KeyEvent.wRepeatCount = 1
+            e.Event.KeyEvent.wVirtualKeyCode = vk
+            e.Event.KeyEvent.wVirtualScanCode = user32.MapVirtualKeyW(vk, 0) if vk else 0
+            e.Event.KeyEvent.uChar = ch
+            e.Event.KeyEvent.dwControlKeyState = state
+        written = wintypes.DWORD()
+        ok = bool(k.WriteConsoleInputW(wintypes.HANDLE(conin), events, len(records), ctypes.byref(written)))
+        ok = ok and written.value == len(records)
+        k.CloseHandle(wintypes.HANDLE(conin))
+    error = ctypes.get_last_error()
+    print("ok" if ok else f"{action} failed: {error}", flush=True)
+    k.FreeConsole()
+    return 0 if ok else 1
+
+
+def input_record_type():
+    """INPUT_RECORD with its KEY_EVENT_RECORD: 20 bytes, the event at 4
+    (in fixed widths: BOOL and DWORD are 32 bits on Windows)."""
+    import ctypes
+    u16, u32 = ctypes.c_uint16, ctypes.c_uint32
+
+    class KeyEvent(ctypes.Structure):
+        _fields_ = [("bKeyDown", ctypes.c_int32), ("wRepeatCount", u16), ("wVirtualKeyCode", u16),
+                    ("wVirtualScanCode", u16), ("uChar", u16),   # the UnicodeChar of the union
+                    ("dwControlKeyState", u32)]
+
+    class Event(ctypes.Union):
+        _fields_ = [("KeyEvent", KeyEvent), ("_pad", ctypes.c_byte * 16)]
+
+    class InputRecord(ctypes.Structure):
+        _fields_ = [("EventType", u16), ("Event", Event)]
+
+    return InputRecord
 
 
 def stop(proc: subprocess.Popen) -> tuple[bytes, bytes]:
@@ -759,10 +975,16 @@ def main() -> int:
     r.add_argument("--runs", type=int, default=1, help="runs of each repeated step (the stress programs, …)")
     r.add_argument("--only", action="append", default=[], help="cases whose name has this text (repeatable)")
     r.add_argument("--list", action="store_true", help="name the cases without running them")
+    a = sub.add_parser("console-action", help="(the runner's own, on Windows) act on a case's console")
+    a.add_argument("pid", type=int)
+    a.add_argument("action", choices=["keys", "event", "close"])
+    a.add_argument("arg", nargs="?", default="")
     args = ap.parse_args()
     # what a program printed, in any script, on a console or pipe of any
     # code page (Windows' Python writes its own in the ANSI one)
     sys.stdout.reconfigure(errors="backslashreplace")
+    if args.cmd == "console-action":
+        return console_action(args.pid, args.action, args.arg)
     if args.cmd == "build":
         return build(args.out, args.myla or default_myla(), args.jobs)
     wine = wine_command(args.wine) if args.wine is not None else []
