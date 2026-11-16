@@ -572,7 +572,11 @@ impl CodeGen {
     // block (the workers' TLS slot is empty there), so it reaches only the
     // process's words. Ctrl-C and Ctrl-Break (0, 1) are SIGINT, the
     // console's close, a logoff and a shutdown (2, 5, 6) SIGTERM; anything
-    // else is passed on (FALSE). While someone listens (`__sig_pipe`'s
+    // else is passed on (FALSE). A Ctrl-C or a Ctrl-Break is counted first
+    // (`__win_console_cp`'s fifth word, a locked add): Windows ends a read
+    // of the console's lines with it, giving 0 bytes and no error, and
+    // std.platform's `read` tells that from the input's end by the count
+    // (MYLA-708). While someone listens (`__sig_pipe`'s
     // count), the signal's number goes to std.signal's pipe as a byte (its
     // write end the first word), as Linux's `__on_signal` writes it, and
     // the event is handled (TRUE); after a SIGTERM's, the thread waits,
@@ -596,7 +600,10 @@ impl CodeGen {
         }
         self.raw("\tmovl $2, %ebx")
         self.raw("\tcmpl $1, %ecx")
-        self.raw("\tjbe .Lwin_ctrl_signal")
+        self.raw("\tja .Lwin_ctrl_term")
+        self.raw("\tlock incq __win_console_cp+32(%rip)")
+        self.raw("\tjmp .Lwin_ctrl_signal")
+        self.raw(".Lwin_ctrl_term:")
         self.raw("\tmovl $15, %ebx")
         for ev in [2, 5] {
             self.raw(f"\tcmpl ${ev}, %ecx")

@@ -496,9 +496,12 @@ pub fun read(fd: int64, buf: int64, n: int64) -> int64 {
     }
     let done = __rt_addr("__win_io")
     __store64(done, 0)
+    // (the console's Ctrl-Cs and Ctrl-Breaks so far: one more after a read
+    // that gave nothing ended it, `console_read_aborted`)
+    let ctrls = __load_acq64(__rt_addr("__win_console_cp") + CTRLS_TAKEN)
     let r = __syscall5(__rt_get("__imp_ReadFile"), h, buf, len, done, 0)
     let got = __load64(done) & LOW32
-    if got == 0 && len > 0 && console_read_aborted(h) {
+    if got == 0 && len > 0 && console_read_aborted(h, ctrls) {
         return read(fd, buf, n)
     }
     if !ok(r) {
@@ -512,18 +515,63 @@ pub fun read(fd: int64, buf: int64, n: int64) -> int64 {
 }
 
 // Whether a read of `h` that gave nothing was a read of the console that a
-// Ctrl-C ended (ERROR_OPERATION_ABORTED, as Python's console reader takes
-// it), the error then cleared: the read goes on, as Linux restarts a read
-// that a signal std.signal catches interrupts (SA_RESTART); without a
-// listener the Ctrl-C ends the program meanwhile (MYLA-707).
-fun console_read_aborted(h: int64) -> bool {
-    if last_error() != 995 {
-        return false
+// Ctrl-C or a Ctrl-Break ended, `ctrls` the console's count of those
+// before it (`read_ended_by`, `ctrl_counted_since`), the error then
+// cleared: the read goes on, as Linux restarts a read that a signal
+// std.signal catches interrupts (SA_RESTART); without a listener the
+// Ctrl-C ends the program meanwhile (MYLA-707). Else the error is what it
+// was, for the caller's cause.
+fun console_read_aborted(h: int64, ctrls: int64) -> bool {
+    let e = last_error()
+    let how = read_ended_by(console_mode(h), e == 995)
+    let ended = how == 1 || (how == 2 && ctrl_counted_since(ctrls, 100))
+    let c = __syscall(__rt_get("__imp_SetLastError"), if ended { 0 } else { e }, 0, 0)
+    return ended
+}
+
+// Where `__win_console_cp` counts the console's Ctrl-Cs and Ctrl-Breaks
+// (the runtime's `__win_on_ctrl`, with a locked add: it runs on a thread
+// Windows starts for the event, which has no state block).
+const CTRLS_TAKEN: int64 = 32
+
+// What a read of a console in the mode `mode` (negative: no console) that
+// gave nothing was: 0 the end (Ctrl-Z), 1 a Ctrl-C's or a Ctrl-Break's,
+// 2 one if the console's control handler counts one (`ctrl_counted_since`).
+// Only a read of lines (ENABLE_LINE_INPUT) is ended by one.
+// ERROR_OPERATION_ABORTED says so where it is set (`aborted`: ReadConsoleW
+// sets it), but Windows gives ReadFile's 0 bytes and no error (MYLA-708's
+// runner).
+#test(-1, true)[0]
+#test(0, true)[0]
+#test(0, false)[0]
+#test(2, true)[1]
+#test(3, false)[2]
+fun read_ended_by(mode: int64, aborted: bool) -> int64 {
+    if mode < 0 || (mode & ENABLE_LINE_INPUT) == 0 {
+        return 0
     }
-    // (another handle's error kept for the caller's cause)
-    let console = console_mode(h) >= 0
-    let c = __syscall(__rt_get("__imp_SetLastError"), if console { 0 } else { 995 }, 0, 0)
-    return console
+    if aborted {
+        return 1
+    }
+    return 2
+}
+
+// Whether the console's control handler counted a Ctrl-C or a Ctrl-Break
+// since the count was `before`, within `naps` milliseconds: it counts on a
+// thread Windows starts for the event, which can come a little after the
+// read the event ended returned, so this waits as Python's console reader
+// waits up to 100 ms for its SIGINT.
+fun ctrl_counted_since(before: int64, naps: int64) -> bool {
+    let count = __rt_addr("__win_console_cp") + CTRLS_TAKEN
+    var k: int64 = 0
+    while __load_acq64(count) == before {
+        if k >= naps {
+            return false
+        }
+        let s = __syscall(__rt_get("__imp_Sleep"), 1, 0, 0)
+        k += 1
+    }
+    return true
 }
 
 // The kind of the watched handle of `h` (K_PIPE_IN, …), 0 for a handle

@@ -2602,9 +2602,11 @@ impl CodeGen {
             // the console's code pages before the program set them to
             // UTF-8, put back at its end (std.platform's `windows_start`,
             // D215), then the screen buffer whose output mode
-            // `term_enable_vt` changed and that mode (MYLA-707)
+            // `term_enable_vt` changed and that mode (MYLA-707), then how
+            // many Ctrl-Cs and Ctrl-Breaks the console's control handler
+            // took (`__win_on_ctrl`; std.platform's `read`, MYLA-708)
             out.push("__win_console_cp:")
-            out.push("\t.skip 32")
+            out.push("\t.skip 40")
             // what VirtualQuery answers `unmap_memory`, and how many bytes
             // a read or a write moved: the platform's own words, as those
             // run while the heap grows or report that it can't; with tasks

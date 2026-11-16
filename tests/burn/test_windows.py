@@ -1922,6 +1922,53 @@ class Console(unittest.TestCase):
         self.assertRegex(lines[0], r"^stdin \d+ \d+$")
 
 
+# A case of std.platform's Windows module that only Windows runs (its own
+# cases run on the host too, interpreted and natively): a Ctrl-C to a
+# console of the case's own (`AllocConsole`, after leaving any it shares,
+# so no other process gets it) while it listens; how many the console's
+# control handler counted (`__win_console_cp`'s word that `read` tells a
+# read of lines a Ctrl-C ended by, MYLA-708) and what it wrote to the
+# signals' pipe, which it does after counting.
+CTRL_COUNTED = '''
+#test()[(1, 2)]
+fun ctrl_counted() -> (int64, int64) {
+    let left = __syscall(__rt_get("__imp_FreeConsole"), 0, 0, 0)
+    let made = __syscall(__rt_get("__imp_AllocConsole"), 0, 0, 0)
+    let h = signal_listen(1)
+    let before = __load_acq64(__rt_addr("__win_console_cp") + CTRLS_TAKEN)
+    let sent = __syscall(__rt_get("__imp_GenerateConsoleCtrlEvent"), 0, 0, 0)
+    let sig = signal_take(h)
+    let counted = __load_acq64(__rt_addr("__win_console_cp") + CTRLS_TAKEN) - before
+    let off = signal_listen(0)
+    let freed = __syscall(__rt_get("__imp_FreeConsole"), 0, 0, 0)
+    return (counted, sig)
+}
+'''
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class ControlHandler(unittest.TestCase):
+    """MYLA-708: Windows gives a read of the console's lines that a Ctrl-C
+    ended 0 bytes and no error, which `read` tells from the end by the
+    control handler's count of Ctrl-Cs and Ctrl-Breaks. Wine doesn't end
+    the read (the runner's terminal/06-readline does that part); this is
+    the count, `CTRL_COUNTED` appended to a copy of the library's module."""
+
+    setUpClass = HelloWorld.setUpClass
+
+    def test_the_handler_counts_a_ctrl_c(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(os.path.join(STDLIB_ROOT, "std"), os.path.join(tmp, "std"))
+            module = os.path.join(tmp, "std", "platform_windows.my")
+            with open(module, "a", encoding="utf-8") as fh:
+                fh.write(CTRL_COUNTED)
+            ran = subprocess.run([selfhost_tool("main"), "test", module, "--target", "x86_64-windows", "--stdlib", tmp,
+                                  "--only", "ctrl_counted"], capture_output=True, text=True, timeout=600,
+                                 env=dict(os.environ, MYLA_EMULATOR=" ".join(wine())))
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("PASS  ctrl_counted #1\n\n1/1 passed.\n", "", 0))
+
+
 # MYLA-707's cases for MYLA-708's Windows runner, what Wine's console can't
 # show: each runs CONSOLE built as `console.exe` with its arguments in a
 # console of its own, its input that console and its output a file, as
