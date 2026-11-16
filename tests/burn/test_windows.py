@@ -31,6 +31,7 @@ them, and MYLA_REQUIRE_TARGETS makes a missing one fail there).
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -1531,6 +1532,155 @@ class BootstrapLink(unittest.TestCase):
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"42 true\n", b"", 0))
 
 
+# MYLA-723: what a program run on the machine the tools run on reads of the
+# standard library's modules that a target has copies of
+HOST_PATHS = ('import std.path as path\nimport std.platform as platform\nimport std.path_style as style\n\n'
+              'fun main() {\n    print(path.parent("a\\\\b").unwrap_or("none"))\n    print(platform.TARGET)\n'
+              '    print(style.WINDOWS)\n}\n')
+HOST_TESTS = ('import std.path as path\nimport std.test as test\nfrom std.process import env\n\n'
+              '#test("a\\\\b")[Some("a")]\nfun up(p: str) -> Option<str> {\n    return path.parent(p)\n}\n\n'
+              # MYLA-729: the interpreter's case root under %TEMP%, joined with `\`
+              '#test()[true]\nfun under_temp() -> bool {\n    let d = test.temp_dir()\n'
+              '    return d.starts_with(env("TEMP").unwrap_or("?") + "\\\\myla-test-")\n}\n')
+# what only Windows' std.platform declares: checked against Linux's, an error
+HOST_CHECKED = 'import std.platform as platform\n\nfun never() {\n    platform.windows_start()\n}\n\nfun main() {}\n'
+
+
+# A client of the language server for HostModules: myla-lsp.exe as its
+# child, open.txt's messages sent, the first diagnostics printed, then
+# close.txt's sent
+LSP_CLIENT = '''from std.process import command
+from std.io import buffered
+import std.bytes as bytes
+import std.fs as fs
+import std.num as num
+
+fun main() {
+    var child = match command("./myla-lsp.exe").spawn() {
+        Ok(c) => c
+        Err(e) => panic(f"spawn: {e}")
+    }
+    var w = match child.take_stdin() { Some(s) => s, None => panic("no input") }
+    var r = buffered(match child.take_stdout() { Some(s) => s, None => panic("no output") })
+    let sent = w.write(bytes.from_str(fs.read_to_string("open.txt").unwrap_or("")))
+    while true {
+        var length = 0
+        while true {
+            let line = match r.read_line() {
+                Ok(Some(l)) => l
+                _ => panic("the server ended")
+            }
+            if line == "\\r" || line == "" { break }
+            if line.starts_with("Content-Length: ") {
+                length = num.parse_int(line[16:line.len() - 1]).unwrap_or(0) as int
+            }
+        }
+        let body = match r.read_exact(length) {
+            Ok(Some(b)) => b
+            _ => panic("the server ended")
+        }
+        if body.contains("publishDiagnostics") {
+            print(body)
+            break
+        }
+    }
+    let closing = w.write(bytes.from_str(fs.read_to_string("close.txt").unwrap_or("")))
+    let closed = w.close()
+    let x = child.wait()
+}
+'''
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class HostModules(unittest.TestCase):
+    """MYLA-723: a `myla.exe` built for Windows runs, tests, checks and
+    serves a program with Windows' own std.platform, std.path and
+    std.path_style (the loader's `for_host`), as a native build for Windows
+    takes them (`for_target`); a module of the library named as the entry is
+    itself all the same (`myla test lib/std/path.my` runs path.my's cases).
+    MYLA-729: its interpreter's case root is under `%TEMP%`."""
+
+    @classmethod
+    def setUpClass(cls):
+        wine_env()
+        cls.tmp = tempfile.mkdtemp()
+        for exe, src in (("myla.exe", "selfhost/main.my"), ("myla-lsp.exe", "tools/lsp/main.my")):
+            subprocess.run([selfhost_tool("main"), "build", src, "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT,
+                            "-o", os.path.join(cls.tmp, exe)], cwd=_REPO, check=True, timeout=600)
+        for name, text in (("p.my", HOST_PATHS), ("t.my", HOST_TESTS), ("c.my", HOST_CHECKED)):
+            with open(os.path.join(cls.tmp, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def myla(self, *args: str, stdin: bytes = b"", cwd: str | None = None, exe: str = "myla.exe"):
+        ran = subprocess.run([*wine(), os.path.join(self.tmp, exe), *args], input=stdin, capture_output=True,
+                             cwd=cwd or self.tmp, timeout=600)
+        return ran.stdout.decode(), ran.stderr.decode(), ran.returncode
+
+    def test_run(self):
+        self.assertEqual(self.myla("run", "p.my"), ("a\nx86_64-windows\ntrue\n", "", 0))
+
+    def test_test_interpreted(self):
+        self.assertEqual(self.myla("test", "t.my"), ("PASS  up #1\nPASS  under_temp #1\n\n2/2 passed.\n", "", 0))
+
+    def test_check(self):
+        self.assertEqual(self.myla("check", "c.my"), ("ok\n", "", 0))
+
+    def test_repl(self):
+        out, err, code = self.myla("repl", stdin=b'import std.path as path\npath.parent("a\\\\b")\n')
+        self.assertEqual((out, err, code), ('Some("a")\n', "myla> myla> myla> \n", 0))
+
+    def test_the_language_server(self):
+        # driven by a Windows program of its own: the server waits for its
+        # input to pause before it checks (`ready`), which under Wine a Linux
+        # parent's pipe never shows (MYLA-708)
+        def frame(m: dict) -> str:
+            body = json.dumps(m)
+            return f"Content-Length: {len(body.encode())}\r\n\r\n{body}"
+        uri = "file:///c.my"
+        with open(os.path.join(self.tmp, "open.txt"), "w", encoding="utf-8", newline="") as fh:
+            fh.write(frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}})
+                     + frame({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {
+                         "uri": uri, "languageId": "myla", "version": 1, "text": HOST_CHECKED}}}))
+        with open(os.path.join(self.tmp, "close.txt"), "w", encoding="utf-8", newline="") as fh:
+            fh.write(frame({"jsonrpc": "2.0", "id": 2, "method": "shutdown"}) + frame({"jsonrpc": "2.0", "method": "exit"}))
+        with open(os.path.join(self.tmp, "client.my"), "w", encoding="utf-8") as fh:
+            fh.write(LSP_CLIENT)
+        subprocess.run([selfhost_tool("main"), "build", "client.my", "--target", "x86_64-windows", "--stdlib",
+                        STDLIB_ROOT, "-o", "client.exe"], cwd=self.tmp, check=True, timeout=300)
+        out, err, code = self.myla(exe="client.exe")
+        self.assertEqual((err, code), ("", 0))
+        got = json.loads(out)
+        self.assertEqual(got["method"], "textDocument/publishDiagnostics")
+        self.assertEqual(got["params"], {"uri": uri, "diagnostics": []})
+
+    def test_a_native_harness_is_built_under_temp(self):
+        # MYLA-729: under %TEMP%, joined with `\`; Wine has no LLVM for
+        # Windows, so the build fails and the harness is kept, its path in
+        # the message (Windows' runner builds and runs it: tools/myla-build)
+        with open(os.path.join(self.tmp, "sq.my"), "w", encoding="utf-8") as fh:
+            fh.write("#test(2)[4]\nfun sq(x: int) -> int {\n    return x * x\n}\n")
+        out, err, code = self.myla("test", "sq.my", "--native")
+        self.assertEqual((out, code), ("", 1))
+        import re
+        kept = re.search(r"\(kept at (C:\\users\\[^\\]+\\Temp\\myla-test-\d+)\\harness\.exe\.my\)\n$", err)
+        self.assertIsNotNone(kept, err)
+        unix = os.path.join(os.environ["WINEPREFIX"], "drive_c", *kept.group(1)[3:].split("\\"))
+        self.assertTrue(os.path.isfile(os.path.join(unix, "harness.exe.my")))
+        shutil.rmtree(unix)
+
+    def test_a_module_of_the_library_named_is_itself(self):
+        # path.my's own cases (Linux's rules), not its Windows copy's
+        linux = subprocess.run([selfhost_tool("main"), "test", "lib/std/path.my", "--stdlib", "lib"],
+                               capture_output=True, text=True, cwd=_REPO, timeout=600)
+        self.assertEqual((linux.stderr, linux.returncode), ("", 0))
+        self.assertEqual(self.myla("test", "lib/std/path.my", "--stdlib", "lib", cwd=_REPO), (linux.stdout, "", 0))
+
+
 # MYLA-707: the console as std.term's terminal and std.signal's signals.
 # One program, its first argument the case; `mode(fd)` is the console mode
 # `__term_get` keeps for the descriptor (D216's saved mode, 4 bytes).
@@ -1541,6 +1691,7 @@ import std.process as process
 import std.io as io
 import std.fs as fs
 import std.num as num
+import std.bytes as bytes
 from std.term import Key, Stream
 from std.signal import Signal
 from std.process import Stdio, ExitStatus
@@ -1834,6 +1985,31 @@ async fun read_line_listening() {
     let x = await c
 }
 
+// three lines of the console, read with reads of at most 1, 3 and 64
+// bytes, each read's bytes shown (a CR as `\\r`, a LF as `\\n`) (MYLA-734)
+fun pieces() {
+    var input = io.fd_stream(0)
+    for size in [1, 3, 64] {
+        print(f"ready {size}")
+        var shown = ""
+        var more = true
+        while more {
+            match input.read(size) {
+                Ok(b) => {
+                    let t = bytes.to_str(b)
+                    shown = shown + "[" + t.replace("\\r", "\\\\r").replace("\\n", "\\\\n") + "]"
+                    more = b.len() > 0 && !t.contains("\\n")
+                }
+                Err(e) => {
+                    shown = shown + f"error {e}"
+                    more = false
+                }
+            }
+        }
+        print(f"{size}: {shown}")
+    }
+}
+
 // the first signal written to the file `path` after "ready", then the exit
 // with 7: what a program does with the time Windows gives it once its
 // console is closed
@@ -1858,6 +2034,7 @@ async fun main() {
     if case == "size" { sizes() }
     if case == "interrupted" { await interrupted() }
     if case == "readline" { await read_line_listening() }
+    if case == "pieces" { pieces() }
     if case == "close" { await on_close(args[2]) }
     if case == "end" { await end(args[2]) }
     if case == "ends" { ends() }
@@ -2055,9 +2232,10 @@ class Console(unittest.TestCase):
             p.send(key)
             time.sleep(0.2)
         self.assertEqual([p.line() for _ in range(4)], ["key Char(q)", "key Char(x)", "key Enter", "restored true"])
-        # cooked again: a line, which Windows' console ends with CR LF
+        # cooked again: a line, whose CR LF the console's read gives as
+        # "\n" (MYLA-734)
         p.send(b"hello\r")
-        self.assertEqual(p.finish(), (["line hello\r"], 0))
+        self.assertEqual(p.finish(), (["line hello"], 0))
 
     def test_every_end_restores_the_console(self):
         lines, code = self.start("ends", threads="4").finish(timeout=120)
@@ -2158,7 +2336,20 @@ class Console(unittest.TestCase):
         p.proc.send_signal(signal.SIGINT)
         self.assertEqual(p.line(), "caught interrupt")
         p.send(b"hello\r")
-        self.assertEqual(p.finish(), (["line hello\r"], 0))
+        self.assertEqual(p.finish(), (["line hello"], 0))
+
+    def test_a_line_of_the_console_read_in_pieces(self):
+        # MYLA-734: the console's CR LF is "\n" however the reads cut the
+        # line, the CR at a full read's end too (its LF the next read's)
+        p = self.start("pieces")
+        got = []
+        for size in ("1", "3", "64"):
+            self.assertEqual(p.line(), f"ready {size}")
+            time.sleep(0.2)  # (Wine's console drops a line typed before the read)
+            p.send(b"hello\r")
+            got.append(p.line())
+        self.assertEqual(got, ["1: [h][e][l][l][o][\\n]", "3: [hel][lo][\\n]", "64: [hello\\n]"])
+        self.assertEqual(p.finish(), ([], 0))
 
     def test_the_time_a_signal_leaves(self):
         # `close`'s program with a Ctrl-C: Wine's console can't be closed
@@ -2334,13 +2525,13 @@ RUNNER_CASES = [
                {"wait": "restored true\n"},
                {"keys": ["h", "e", "l", "l", "o", "Enter"]}],
      "out": "raw line 0 echo 0 processed 0 vt 512\nkey Up\nkey Ctrl(c)\nkey Char(q)\nkey Alt(x)\nkey F5\n"
-            "key Delete\nkey Escape\nkey Enter\nrestored true\nline hello\r\n",
+            "key Delete\nkey Escape\nkey Enter\nrestored true\nline hello\n",
      "exit": 0, "seconds": 30},
     {"name": "UTF-8 typed into a cooked read (the console's input code page 65001)",
      "args": ["keys", "1"],
      "steps": [{"wait": "raw line"}, {"keys": ["x"]}, {"wait": "restored true\n"},
                {"keys": ["g", "r", "ö", "ß", "e", "Enter"]}],
-     "out": "raw line 0 echo 0 processed 0 vt 512\nkey Char(x)\nrestored true\nline größe\r\n",
+     "out": "raw line 0 echo 0 processed 0 vt 512\nkey Char(x)\nrestored true\nline größe\n",
      "exit": 0, "seconds": 30},
     {"name": "the window's size, through each stream that is the console (stdout is the file)",
      "args": ["size"], "before": "mode con: cols=101 lines=33", "steps": [],
@@ -2357,7 +2548,7 @@ RUNNER_CASES = [
      "args": ["readline"], "host": "pty",
      "steps": [{"wait": "ready\n"}, {"keys": ["Ctrl-c"]}, {"wait": "caught interrupt\n"},
                {"keys": ["h", "i", "Enter"]}],
-     "out": "ready\ncaught interrupt\nline hi\r\n", "exit": 0, "seconds": 30},
+     "out": "ready\ncaught interrupt\nline hi\n", "exit": 0, "seconds": 30},
     {"name": "the console closed: Terminate, and the program's own exit within Windows' 5 seconds",
      "args": ["close", "closed.txt"], "alone": True, "host": "pty",
      "steps": [{"wait_file": "closed.txt", "text": "ready\n"}, {"close": True}],
@@ -2377,6 +2568,13 @@ RUNNER_CASES = [
      "out": "return 0 restored true\nexit 3 restored true\npanic 1 restored true\nindex 1 restored true\n"
             "key 1 restored true\ndeep 1 restored true\nnested 1 restored true\nfails 1 restored true\n"
             "left 0 restored false\n", "exit": 0, "seconds": 60},
+    {"name": "MYLA-734: a cooked read's CR LF is \"\\n\", however the reads cut the line",
+     "args": ["pieces"],
+     "steps": [{"wait": "ready 1\n"}, {"keys": ["h", "e", "l", "l", "o", "Enter"]},
+               {"wait": "ready 3\n"}, {"keys": ["h", "e", "l", "l", "o", "Enter"]},
+               {"wait": "ready 64\n"}, {"keys": ["h", "e", "l", "l", "o", "Enter"]}],
+     "out": "ready 1\n1: [h][e][l][l][o][\\n]\nready 3\n3: [hel][lo][\\n]\nready 64\n64: [hello\\n]\n",
+     "exit": 0, "seconds": 30},
 ]
 
 

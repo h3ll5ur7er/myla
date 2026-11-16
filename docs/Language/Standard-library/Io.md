@@ -34,7 +34,7 @@ Reading goes through a buffered `Reader` ([[MYLA-78]]), a `Buffered` over the de
 | --- | --- |
 | `stdin() -> Reader` | A reader of the standard input |
 | `reader(fd: int32) -> Reader` | A reader of file descriptor `fd` |
-| `r.read_line() -> Result<Option<str>, IoError>` | The next line without its `"\n"` (a `"\r"` before it stays); a last line without `"\n"` counts; `None` at the end |
+| `r.read_line() -> Result<Option<str>, IoError>` | The next line without its `"\n"` (a `"\r"` before it stays: a file's CR LF; a line typed at Windows' console has none, as at a terminal, [[MYLA-734]]); a last line without `"\n"` counts; `None` at the end |
 | `r.read_exact(n: int32) -> Result<Option<str>, IoError>` | Exactly the next `n` bytes (`""` for `n <= 0`); `None` if the input ends first (those bytes stay unread, as after a failed read). Its reads ask for what is still needed, but at most 4 KiB more than it holds, so they double and a count far past the input's end isn't allocated up front ([[MYLA-550]]: `read_exact(2000000000)` of `abc` under a memory limit was `out of memory`) |
 | `r.read_to_end() -> Result<str, IoError>` | The rest of the input (`""` once it has ended) |
 | `r.ready(timeout_ms: int32) -> bool` | Whether a read won't block: bytes are buffered, or within `timeout_ms` milliseconds input arrives, the input ends or reading fails (0: don't wait; negative: wait as long as it takes) |
