@@ -5,6 +5,7 @@
 ## Requirements
 
 - **Linux on x86-64 or aarch64** (a PC, an ARM server, a Raspberry Pi 4 or 5 with a 64-bit OS) and its **GNU `as` and `ld`** (binutils: `sudo apt install binutils`): they build the toolchain from the machine's seed, and native programs. `just bootstrap` runs the same script as `scripts/bootstrap.sh` if `just` is installed.
+- **Or x86-64 Windows** with **Git Bash** (Git for Windows) and **LLVM** (clang, llvm-dlltool and lld-link on `PATH`; LLVM's installer puts them in `C:\Program Files\LLVM\bin`): `scripts/bootstrap.sh` runs in Git Bash from the Windows seed and builds `build/myla.exe` and `build/myla-lsp.exe`, which build Windows programs with the same tools (D214, [[MYLA-709]], [[Development/Bootstrap#on-windows]]).
 - **For the other targets** (optional): LLVM 18 or newer with the `lld` package, and something to run their programs on this machine. The tests of those targets skip without them. Each target's tools, found on `PATH` (its record in [[selfhost/target.my]], [[MYLA-700]]; a missing one is named in the error, with the target that needs it):
 
   | `--target` | Assembled by | Linked by | Its programs run on another machine under |
@@ -21,7 +22,7 @@
 scripts/bootstrap.sh            # output in ./build (gitignored); about 8 seconds (2026-10-25, 95c12aa)
 ```
 
-This builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly, so only `as` and `ld` are needed), checks that it compiles itself to a byte-identical fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server. Details, stages and timings: [[Development/Bootstrap]].
+This builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly, so only `as` and `ld` are needed; `bootstrap/seed-windows.s` on Windows), checks that it compiles itself to a byte-identical fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server. Details, stages and timings: [[Development/Bootstrap]].
 
 ## Run a program
 

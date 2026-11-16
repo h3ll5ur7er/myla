@@ -22,6 +22,10 @@ The console (MYLA-707): `Console` runs std.term and std.signal with a
 pseudo-terminal as Wine's console and a Unix SIGINT as Ctrl-C;
 `RUNNER_CASES` are what only Windows' own console shows (MYLA-708).
 
+The bootstrap on Windows (MYLA-709): `HostScript` checks that
+scripts/host.sh finds Windows and its seed, `BootstrapLink` that it builds a
+stage by `myla build --target x86_64-windows`'s command lines.
+
 Skipped where clang, llvm-dlltool, lld-link or Wine is missing (CI installs
 them, and MYLA_REQUIRE_TARGETS makes a missing one fail there).
 """
@@ -1325,6 +1329,128 @@ class FramesOnWindows(unittest.TestCase):
         self.assertEqual((built.stderr, built.returncode), ("", 0))
         ran = self.run_exe(threads="2")
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (FRAMES_OUT, b"", 0))
+
+
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+_HOST_SH = os.path.join(_REPO, "scripts", "host.sh")
+
+
+def host_sh(script: str, env: dict | None = None, cwd: str | None = None) -> subprocess.CompletedProcess:
+    """`script` run by bash after sourcing scripts/host.sh, with `env` added
+    to this process's environment."""
+    return subprocess.run(["bash", "-c", f'. "{_HOST_SH}"\n{script}'], capture_output=True, text=True,
+                          env={**os.environ, **(env or {})}, cwd=cwd or _REPO, timeout=300)
+
+
+class HostScript(unittest.TestCase):
+    """MYLA-709: scripts/host.sh finds Windows by Git Bash's `uname -s`
+    (MSYS2's `MINGW64_NT-…`, `MSYS_NT-…`; `MYLA_OS` in its place here), takes
+    the Windows seed there and names its programs `.exe`; Linux is as it was."""
+
+    def facts(self, **env: str) -> str:
+        done = host_sh('echo "$HOST_OS $HOST_TARGET $HOST_SEED [$EXE]"', {"AS": "true", "LD": "true",
+                                                                        "DLLTOOL": "true", **env})
+        return (done.stdout + done.stderr).strip()
+
+    def test_each_machine_its_seed(self):
+        self.assertEqual(self.facts(MYLA_OS="Linux", MYLA_ARCH="x86_64"), "linux x86_64-linux bootstrap/seed.s []")
+        self.assertEqual(self.facts(MYLA_OS="Linux", MYLA_ARCH="aarch64"),
+                         "linux aarch64-linux bootstrap/seed-aarch64.s []")
+        for name in ("MINGW64_NT-10.0-20348", "MSYS_NT-10.0-20348", "windows"):
+            self.assertEqual(self.facts(MYLA_OS=name, MYLA_ARCH="x86_64"),
+                             "windows x86_64-windows bootstrap/seed-windows.s [.exe]", name)
+        self.assertIn("the Windows seed is x86_64's", self.facts(MYLA_OS="windows", MYLA_ARCH="aarch64"))
+        self.assertIn("macOS is MYLA-164", self.facts(MYLA_OS="Darwin"))
+
+    def test_every_seed_is_committed(self):
+        done = host_sh('for e in $SEEDS; do echo "${e#*:}"; done', {"AS": "true", "LD": "true"})
+        seeds = done.stdout.split()
+        self.assertIn("bootstrap/seed-windows.s", seeds)
+        for seed in seeds:
+            self.assertTrue(os.path.isfile(os.path.join(_REPO, seed)), seed)
+
+
+_STUB = """#!/bin/sh
+# {name} as the test runs it: its command line logged, the files it reads kept
+printf '%s\\n' "{name} $*" >> "$STUB_LOG"
+for a in "$@"; do
+    case "$a" in *.s | *.def) cp "$a" "$STUB_KEEP/" ;; esac
+done
+exec "{real}" "$@"
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class BootstrapLink(unittest.TestCase):
+    """MYLA-709: the bootstrap on Windows assembles and links each stage as
+    `myla build --target x86_64-windows` does (scripts/host.sh's
+    `windows_asm_to_bin`, selfhost/driver.my's `cmd_build`): the same
+    command lines of clang, llvm-dlltool and lld-link, the same import lists,
+    read from the assembly's `# import` lines, and a program that runs."""
+
+    setUpClass = HelloWorld.setUpClass
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        stubs = os.path.join(self.tmp, "stubs")
+        os.mkdir(stubs)
+        for name in TOOLS:
+            path = os.path.join(stubs, name)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(_STUB.format(name=name, real=shutil.which(name)))
+            os.chmod(path, 0o755)
+        self.path = stubs + os.pathsep + os.environ.get("PATH", "")
+
+    def logged(self, where: str, argv: list[str], env: dict | None = None) -> tuple[list[str], dict]:
+        """The tools' command lines when `argv` runs in `where` (made), and
+        the import lists they read, by name."""
+        keep = os.path.join(where, "keep")
+        os.makedirs(keep)
+        log = os.path.join(where, "log")
+        done = subprocess.run(argv, capture_output=True, text=True, cwd=where, timeout=300,
+                              env={**os.environ, **(env or {}), "PATH": self.path, "STUB_LOG": log, "STUB_KEEP": keep})
+        self.assertEqual((done.stderr, done.returncode), ("", 0))
+        with open(log, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        defs = {}
+        for name in sorted(os.listdir(keep)):
+            if name.endswith(".def"):
+                with open(os.path.join(keep, name), encoding="utf-8") as fh:
+                    defs[name] = fh.read()
+        return lines, defs
+
+    def test_the_same_steps_as_myla_build(self):
+        src = os.path.join(self.tmp, "main.my")
+        with open(src, "w", encoding="utf-8") as fh:
+            # three DLLs: kernel32, bcrypt (std.random) and the synch API set (tasks)
+            fh.write('import std.random as random\n'
+                     'async fun twice(n: int) -> int {\n    return 2 * n\n}\n'
+                     'async fun main() {\n'
+                     '    var r = random.from_os()\n'
+                     '    let n = r.int_in(0, 10)\n'
+                     '    async let x = twice(21)\n'
+                     '    print(f"{await x} {n >= 0 && n < 10}")\n'
+                     '}\n')
+        built = os.path.join(self.tmp, "built")
+        os.mkdir(built)
+        by_myla, defs_myla = self.logged(built, [selfhost_tool("main"), "build", src, "--target", "x86_64-windows",
+                                                 "--stdlib", STDLIB_ROOT, "-o", "prog.exe"])
+        self.assertEqual([line.split()[0] for line in by_myla], ["clang", "llvm-dlltool", "llvm-dlltool",
+                                                                  "llvm-dlltool", "lld-link"])
+        # the assembly myla build assembled, built again by the bootstrap's steps
+        booted = os.path.join(self.tmp, "booted")
+        os.mkdir(booted)
+        shutil.copy(os.path.join(built, "keep", "prog.exe.s"), booted)
+        by_host, defs_host = self.logged(booted, ["bash", "-c", f'. "{_HOST_SH}"; asm_to_bin prog.exe.s prog.exe'],
+                                         {"MYLA_OS": "windows", "MYLA_ARCH": "x86_64"})
+        self.assertEqual(by_host, by_myla)
+        self.assertEqual(defs_host, defs_myla)
+        self.assertEqual(list(defs_host), ["prog.exe.api-ms-win-core-synch-l1-2-0.def", "prog.exe.bcrypt.def",
+                                           "prog.exe.kernel32.def"])
+        ran = subprocess.run([*wine(), os.path.join(booted, "prog.exe")], capture_output=True, timeout=120)
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"42 true\n", b"", 0))
 
 
 # MYLA-707: the console as std.term's terminal and std.signal's signals.
