@@ -238,9 +238,10 @@ pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, targ
     // harness imports too (through std.test): built as that module, with
     // the harness in it, it is loaded once (MYLA-397), the harness keyed
     // where `for_target` reads the module, however the file and the root
-    // are written (S3)
+    // are written (S3); so is a target's own copy of another module
+    // (`system_error_windows.my`, which std.rt imports as std.system_error)
     let entry = harness_entry(file, opts.stdlib_root, target.platform_file)
-    if entry != file { nopts.overrides[opts.stdlib_root + "/std/" + target.platform_file] = h.source }
+    if entry != file { nopts.overrides[copy_key(entry, opts.stdlib_root, target.platform_file)] = h.source }
     else { nopts.overrides[file] = h.source }
     // built checked: overflow traps under `myla test`, natively too (D175)
     if cmd_build(entry, out, nopts, false, true, target) != 0 {
@@ -299,17 +300,40 @@ pub fun scratch_sep() -> str {
 // The file a harness of `file`'s cases is built from for a target whose
 // platform module is `std/<own>` ("": `std/platform.my`): the standard
 // library's `std/platform.my` when `file` is that module (`for_target`
-// gives that path `file`'s text, the harness here), else `file` (MYLA-397).
+// gives that path `file`'s text, the harness here), and so `std/<name>.my`
+// when `file` is the target's own copy of a module (`std/path_windows.my`,
+// `std/system_error_windows.my`: MYLA-704, MYLA-716); else `file`
+// (MYLA-397).
 #test("lib/std/platform_wasm.my", "lib", "platform_wasm.my")["lib/std/platform.my"]
 #test("lib/./std/platform_aarch64.my", "lib", "platform_aarch64.my")["lib/std/platform.my"]
 #test("lib/std/platform_wasm.my", "lib", "platform_aarch64.my")["lib/std/platform_wasm.my"]
 #test("lib/std/platform.my", "lib", "")["lib/std/platform.my"]
 #test("lib/std/platform_wasm.my", "", "platform_wasm.my")["lib/std/platform_wasm.my"]
 #test("tests/platform_wasm.my", "lib", "platform_wasm.my")["tests/platform_wasm.my"]
+#test("lib/std/system_error_windows.my", "lib", "platform_windows.my")["lib/std/system_error.my"]
+#test("lib/std/path_windows.my", "lib", "platform_windows.my")["lib/std/path.my"]
+#test("lib/std/system_error_windows.my", "lib", "platform_wasm.my")["lib/std/system_error_windows.my"]
+#test("lib/std/system_error.my", "lib", "platform_windows.my")["lib/std/system_error.my"]
 fun harness_entry(file: str, stdlib_root: str, own: str) -> str {
     if own == "" || stdlib_root == "" { return file }
-    if absolute(file) != absolute(stdlib_root + "/std/" + own) { return file }
-    return stdlib_root + "/std/platform.my"
+    // (the modules a target may have a copy of its own of: std.loader's
+    // `for_target`)
+    for name in ["platform", "path", "path_style", "system_error"] {
+        if absolute(file) == absolute(stdlib_root + "/std/" + name + own[8:]) {
+            return stdlib_root + "/std/" + name + ".my"
+        }
+    }
+    return file
+}
+
+// Where `for_target` reads the target's copy of the module `entry` that
+// `harness_entry` gave (`std/<name>.my`), for a target whose platform
+// module is `std/<own>`: `std/<name>` and `own`'s ending.
+#test("lib/std/platform.my", "lib", "platform_wasm.my")["lib/std/platform_wasm.my"]
+#test("lib/std/system_error.my", "lib", "platform_windows.my")["lib/std/system_error_windows.my"]
+fun copy_key(entry: str, stdlib_root: str, own: str) -> str {
+    let base = entry[stdlib_root.len() + 5:entry.len() - 3]
+    return stdlib_root + "/std/" + base + own[8:]
 }
 
 // Whether `file` is the host's own platform module, `std/platform.my`,

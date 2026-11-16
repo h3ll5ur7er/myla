@@ -2409,9 +2409,7 @@ fun broken_pipe() {
 // target's std.system_error says it (Linux's as `strerror` does, Windows'
 // as its messages do, MYLA-716); else `errno` and the number std.ioerror's
 // `code_number` gives the cause.
-#test(284i64)["no space left on device"]
 #test(34i64)["bad file descriptor"]
-#test(327i64)["errno 71"]
 #test(11i64)["errno 22"]
 fun errno_text(code: int64) -> str {
     if code == os.BAD_HANDLE {
@@ -2421,6 +2419,14 @@ fun errno_text(code: int64) -> str {
         return system_error.error_text(code - os.OTHER)
     }
     return format("errno {}", code_number(code))
+}
+
+// A system's own code in the words of the target the case runs on (std.io's
+// `a_system_code_in_the_target_s_words`).
+#test
+fun a_system_code_in_the_target_s_words() {
+    assert(errno_text(os.OTHER + 28) == system_error.error_text(28), "a full disk")
+    assert(errno_text(os.OTHER + 71) == system_error.error_text(71), "a code without words")
 }
 
 // std.ioerror's `code_number`, which std.rt can't import (it is in every
