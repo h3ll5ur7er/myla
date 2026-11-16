@@ -458,6 +458,20 @@ impl CodeGen {
             "\tcall *(%rbx)", "\taddq $96, %rsp", "\tpopq %rbx", "\tret", ""] {
             self.raw(line)
         }
+        // `__win_wait_posted` (MYLA-706): the callback a wait of the
+        // system's thread pool calls (`RegisterWaitForSingleObject`, its
+        // context in %rcx), on a thread of the pool's, which has no state
+        // block of the runtime's: so it is these lines and nothing of
+        // Myla's. Its context is `[function][port][key][overlapped]
+        // [posted]`: it sets `posted` to 1, then calls the function (the
+        // address of `PostQueuedCompletionStatus`) with the port, no
+        // bytes, the key and the overlapped, which queues the packet that
+        // tells std.platform's poller the object was signalled.
+        for line in ["__win_wait_posted:", "\tsubq $40, %rsp", "\tmovq $1, 32(%rcx)", "\tmovq 16(%rcx), %r8",
+            "\tmovq 24(%rcx), %r9", "\txorl %edx, %edx", "\tmovq (%rcx), %rax", "\tmovq 8(%rcx), %rcx",
+            "\tcall *%rax", "\taddq $40, %rsp", "\tret", ""] {
+            self.raw(line)
+        }
     }
 
     // A call of kernel32's `name` from the runtime's own assembly, through

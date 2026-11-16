@@ -333,6 +333,11 @@ pub fun windows_dlls() -> [(str, [str])] {
     return [
         ("bcrypt.dll", ["BCryptGenRandom"]),
         ("api-ms-win-core-synch-l1-2-0.dll", ["WaitOnAddress", "WakeByAddressSingle"]),
+        ("ws2_32.dll", ["WSAStartup", "WSAGetLastError", "WSASocketW", "WSAIoctl", "WSARecv", "WSARecvFrom", "WSASend", "WSAPoll",
+                        "bind", "listen", "accept", "connect", "closesocket", "ioctlsocket", "getsockopt", "setsockopt",
+                        "getsockname", "getpeername", "shutdown", "send", "recv", "sendto", "recvfrom",
+                        "GetAddrInfoW", "FreeAddrInfoW"]),
+        ("iphlpapi.dll", ["GetNetworkParams"]),
     ]
 }
 
@@ -340,6 +345,7 @@ pub fun windows_dlls() -> [(str, [str])] {
 #test("WriteFile")["kernel32.dll"]
 #test("BCryptGenRandom")["bcrypt.dll"]
 #test("WaitOnAddress")["api-ms-win-core-synch-l1-2-0.dll"]
+#test("WSARecv")["ws2_32.dll"]
 pub fun windows_dll(name: str) -> str {
     for (dll, names) in windows_dlls() {
         for n in names { if n == name { return dll } }
@@ -2613,6 +2619,14 @@ impl CodeGen {
             // (std.platform's `workers_started`, MYLA-703)
             out.push("__win_threads:")
             out.push("\t.skip 16")
+            // std.platform's sockets and its I/O completion port: their
+            // lock, the port, the table of the handles it does overlapped
+            // I/O on, Winsock started, its extensions' addresses, the
+            // count naming its pipes, a wake-up posted, the handles closed
+            // later, those looked at each millisecond, Winsock's functions
+            // the poller calls (std.platform's `NET_…` words, MYLA-706)
+            out.push("__win_net:")
+            out.push("\t.skip 104")
             // with tasks, the offset in the TEB (`%gs`) of the TLS slot
             // holding each thread's block (`win_tls_block`)
             if self.frames {
