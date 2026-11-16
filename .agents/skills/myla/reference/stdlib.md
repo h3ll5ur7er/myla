@@ -635,7 +635,7 @@ Import: `import std.path as path`.
 - Prose: `docs/Language/Standard-library/Path.md`
 
 ## std.platform, std.platform_aarch64, std.platform_wasm, std.platform_windows, std.rt
-Runtime internals, not for programs. `std.rt` is the runtime written in Myla that a native build loads with every program (string concat/compare, maps, printing, files, processes, sockets `sock_*`, the heap, the executor/timers/notifiers, `exit_program`); it uses the `__load64`/`__store64`/`__syscall`… primitives that only the standard library may call (D152). `std.platform` is its OS layer: Linux x86-64; `platform_aarch64.my`, `platform_wasm.my` and `platform_windows.my` stand in for it on `--target aarch64-linux`, `wasm32-wasi` (WASI preview 1: no processes, no sockets, one worker) and `x86_64-windows` (kernel32: the standard streams, memory, clocks, files and directories (MYLA-704; std.path is `path_windows.my` there); processes, sockets, the terminal, signals and random bytes `Unsupported` until MYLA-705 to 707 and MYLA-722; workers as on Linux since MYLA-703); its interface is in Myla's terms (D209): errors as std.ioerror's cause codes, a file's kind, directory entries as names and kinds, `PROCESSES`/`SOCKETS` saying what a target lacks. The only thing a program can usefully take: `from std.platform import TARGET` (`pub const TARGET: str`, `"x86_64-linux"`, `"aarch64-linux"`, `"wasm32-wasi"` or `"x86_64-windows"`: the target being built for). Documented in `docs/Language/Standard-library/Rt.md`.
+Runtime internals, not for programs. `std.rt` is the runtime written in Myla that a native build loads with every program (string concat/compare, maps, printing, files, processes, sockets `sock_*`, the heap, the executor/timers/notifiers, `exit_program`); it uses the `__load64`/`__store64`/`__syscall`… primitives that only the standard library may call (D152). `std.platform` is its OS layer: Linux x86-64; `platform_aarch64.my`, `platform_wasm.my` and `platform_windows.my` stand in for it on `--target aarch64-linux`, `wasm32-wasi` (WASI preview 1: no processes, no sockets, one worker) and `x86_64-windows` (kernel32 and the system DLLs it names: the standard streams, memory, clocks, files and directories (MYLA-704; std.path is `path_windows.my` there), child processes (MYLA-705), random bytes over bcrypt (MYLA-722), the console as the terminal and Ctrl-C and the console's close as SIGINT and SIGTERM (MYLA-707), workers as on Linux (MYLA-703); sockets `Unsupported` until MYLA-706); its interface is in Myla's terms (D209): errors as std.ioerror's cause codes, a file's kind, directory entries as names and kinds, `PROCESSES`/`SOCKETS` saying what a target lacks. The only thing a program can usefully take: `from std.platform import TARGET` (`pub const TARGET: str`, `"x86_64-linux"`, `"aarch64-linux"`, `"wasm32-wasi"` or `"x86_64-windows"`: the target being built for). Documented in `docs/Language/Standard-library/Rt.md`.
 
 ## std.process: arguments, environment, exit, child processes
 Import: `import std.process as process`.
@@ -738,6 +738,7 @@ Import: `import std.signal as signal`.
   - **async** `s.next() -> Result<Signal, SignalError>`
   - `s.try_next() -> Option<Signal>`, `s.close()`
 - `pub async fun interrupted() -> Result<Signal, SignalError>` (must be awaited)
+- On Windows (MYLA-707) an interrupt is Ctrl-C or Ctrl-Break and a termination the console's close, a logoff or a shutdown; a Ctrl-C nobody takes ends the program with exit code 0xC000013A, and after a close a listener's program has about 5 seconds to end itself. On wasm32 `listen` is `Unsupported`.
 - Prose: `docs/Language/Standard-library/Signal.md`
 
 ## std.slice: slice indexing (compiler and runtime internal)
@@ -830,7 +831,7 @@ Import: `import std.term as term`.
 - Gotchas:
   - The escape functions *return* strings: print them yourself.
   - Restore raw mode with `defer { let r = raw.restore() }`.
-  - On wasm32, nothing is a terminal.
+  - On wasm32, nothing is a terminal. On Windows the terminal is the console (MYLA-707); `cbreak_mode` doesn't echo there, and a cooked line read from the console ends with `"\r"` (Windows' console gives CR LF).
 - Prose: `docs/Language/Standard-library/Term.md`
 
 ## std.test: helpers for `#test` functions and the native harness

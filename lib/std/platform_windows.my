@@ -24,10 +24,11 @@
 // directories and the working directory (MYLA-704); child processes
 // (MYLA-705); the workers' parking and the CPUs they may use (MYLA-703: the
 // threads, each one's state block and a stack overflow's report are the
-// runtime's, selfhost/runtime_x86.my); random bytes (bcrypt, MYLA-722).
-// What comes with the later steps fails with UNSUPPORTED (std.ioerror's
-// `Unsupported`, D129): sockets and the poller on an I/O completion port
-// (MYLA-706, SOCKETS), the terminal and signals (MYLA-707). Not for programs
+// runtime's, selfhost/runtime_x86.my); random bytes (bcrypt, MYLA-722);
+// the console as the terminal and its control events as signals
+// (MYLA-707). What comes with the later steps fails with UNSUPPORTED
+// (std.ioerror's `Unsupported`, D129): sockets and the poller on an I/O
+// completion port (MYLA-706, SOCKETS). Not for programs
 // (its primitives are the standard library's, D100).
 
 // The target this module is the platform layer of, as `--target` names it:
@@ -495,6 +496,9 @@ pub fun read(fd: int64, buf: int64, n: int64) -> int64 {
     __store64(done, 0)
     let r = __syscall5(__rt_get("__imp_ReadFile"), h, buf, len, done, 0)
     let got = __load64(done) & LOW32
+    if got == 0 && len > 0 && console_read_aborted(h) {
+        return read(fd, buf, n)
+    }
     if !ok(r) {
         let e = last_error()
         if e == 109 || e == 38 {
@@ -503,6 +507,21 @@ pub fun read(fd: int64, buf: int64, n: int64) -> int64 {
         return -access_cause(e)
     }
     return got
+}
+
+// Whether a read of `h` that gave nothing was a read of the console that a
+// Ctrl-C ended (ERROR_OPERATION_ABORTED, as Python's console reader takes
+// it), the error then cleared: the read goes on, as Linux restarts a read
+// that a signal std.signal catches interrupts (SA_RESTART); without a
+// listener the Ctrl-C ends the program meanwhile (MYLA-707).
+fun console_read_aborted(h: int64) -> bool {
+    if last_error() != 995 {
+        return false
+    }
+    // (another handle's error kept for the caller's cause)
+    let console = console_mode(h) >= 0
+    let c = __syscall(__rt_get("__imp_SetLastError"), if console { 0 } else { 995 }, 0, 0)
+    return console
 }
 
 // The cause of the error `e` of a read or a write: access denied, for a
@@ -2657,55 +2676,377 @@ pub fun net_config(which: int64) -> str {
 }
 
 // --- the terminal and signals: MYLA-707 ------------------------------------------------
-// Nothing is a terminal yet, its size is unknown, and raw mode, escape
-// sequences and signals fail with UNSUPPORTED (std.term's and std.signal's
-// `Unsupported`).
+// A terminal is the console (D216): a descriptor is one when its handle
+// has a console mode (`GetConsoleMode`), the console's input or one of its
+// screen buffers. Its size is a screen buffer's window
+// (`GetConsoleScreenBufferInfo`'s `srWindow`), the input's that of the
+// console's active screen buffer (`CONOUT$`), as Linux gives a terminal's
+// size on each of its descriptors. Its saved mode is the handle's console
+// mode, 4 bytes. Raw mode is the input without ENABLE_LINE_INPUT,
+// ENABLE_ECHO_INPUT and ENABLE_PROCESSED_INPUT (Ctrl-C a key, Enter a CR)
+// and with ENABLE_VIRTUAL_TERMINAL_INPUT (special keys as their escape
+// sequences); a key at a time is the input without ENABLE_LINE_INPUT and,
+// as Windows echoes only a line it edits, without ENABLE_ECHO_INPUT. Escape
+// sequences written are interpreted once ENABLE_VIRTUAL_TERMINAL_PROCESSING
+// is on, and the output mode before is put back at the exit with the code
+// pages (`console_back`).
+//
+// Signals come from the console's control handler (`SetConsoleCtrlHandler`):
+// the runtime's `__win_on_ctrl` (selfhost/runtime_x86.my), which Windows
+// calls on a thread of its own that has no state block of the runtime's
+// (the workers' TLS slot is empty there, D222), so it allocates nothing and
+// reaches only the process's words. Ctrl-C and Ctrl-Break are SIGINT (2),
+// the console's close, a logoff and a shutdown SIGTERM (15). While someone
+// listens (`__sig_pipe`'s count), the handler writes the number to the pipe
+// as a byte, as Linux's `__on_signal` writes to its self-pipe, and the
+// event is handled; after a close, a logoff or a shutdown, which Windows
+// ends the process for once its handlers return, it waits: the program has
+// until Windows' time limit (5 seconds for a close) to end itself. Else,
+// while std.term holds the console raw (`__exit_hook`), it runs
+// `raw_signal`, which puts the mode back (D192), and passes the event on
+// to Windows' default handler, which ends the process
+// (STATUS_CONTROL_C_EXIT). Else it passes the event on at once, as if it
+// weren't there: it is added the first time it is needed and stays.
+// `__sig_pipe`'s words: the pipe's write end, its read end plus one, how
+// many listen, a lock, whether the handler was added.
 
-pub fun term_is_tty(fd: int64) -> int64 {
+const ENABLE_PROCESSED_INPUT: int64 = 1
+const ENABLE_LINE_INPUT: int64 = 2
+const ENABLE_ECHO_INPUT: int64 = 4
+const ENABLE_VIRTUAL_TERMINAL_INPUT: int64 = 512
+const ENABLE_VIRTUAL_TERMINAL_PROCESSING: int64 = 4
+const CONSOLE_MODE_SIZE: int64 = 4
+
+// The console mode of the handle `h`, or -1 for a handle that has none
+// (not the console's).
+fun console_mode(h: int64) -> int64 {
+    if h == 0 {
+        return -1
+    }
+    let m = __alloc(8)
+    __store64(m, 0)
+    let r = __syscall(__rt_get("__imp_GetConsoleMode"), h, m, 0)
+    let mode = __load64(m) & LOW32
+    __free(m)
+    if !ok(r) {
+        return -1
+    }
+    return mode
+}
+
+// The handle `h` given the console mode `mode`: 0, or minus the cause.
+fun set_console_mode(h: int64, mode: int64) -> int64 {
+    if !ok(__syscall(__rt_get("__imp_SetConsoleMode"), h, mode, 0)) {
+        return failed()
+    }
     return 0
 }
 
+// Whether the descriptor `fd` is a terminal (the console's): 1 or 0.
+pub fun term_is_tty(fd: int64) -> int64 {
+    if console_mode(std_handle(fd)) < 0 {
+        return 0
+    }
+    return 1
+}
+
+// The size of the console `fd` is: its window's columns from bit 16 up and
+// its rows in the low 16 bits, or minus its cause (NOT_A_TERMINAL for a
+// descriptor that isn't the console's). The console's input has the size
+// of its active screen buffer (`CONOUT$`).
 pub fun term_size(fd: int64) -> int64 {
-    return ENOSYS
+    let h = std_handle(fd)
+    if console_mode(h) < 0 {
+        return -NOT_A_TERMINAL
+    }
+    var r = window_size(h)
+    if r < 0 {
+        let out = open_handle("CONOUT$", GENERIC_READ | GENERIC_WRITE, OPEN_EXISTING, 0)
+        if out >= 0 {
+            r = window_size(out)
+            let c = __syscall(__rt_get("__imp_CloseHandle"), out, 0, 0)
+        }
+    }
+    return r
 }
 
+// The window of the screen buffer `h` (`GetConsoleScreenBufferInfo`'s
+// `srWindow`: its left, top, right and bottom from byte 10), as
+// `term_size` gives it, or minus the cause.
+fun window_size(h: int64) -> int64 {
+    let info = __alloc(24)
+    var r = __syscall(__rt_get("__imp_GetConsoleScreenBufferInfo"), h, info, 0)
+    if ok(r) {
+        var cols = short_at(info + 14) - short_at(info + 10) + 1
+        let rows = short_at(info + 16) - short_at(info + 12) + 1
+        if cols > 32767 {
+            cols = 32767                                // what an `int` holds shifted
+        }
+        r = (cols << 16) | rows
+        if cols <= 0 || rows <= 0 {
+            r = -NOT_A_TERMINAL
+        }
+    } else {
+        r = failed()
+    }
+    __free(info)
+    return r
+}
+
+// The signed 16-bit number at `p`.
+fun short_at(p: int64) -> int64 {
+    let u = (__load8(p) as int64) | ((__load8(p + 1) as int64) << 8)
+    if u >= 32768 {
+        return u - 65536
+    }
+    return u
+}
+
+// The console mode of `fd`, written at `buf` (4 bytes): how many bytes, or
+// minus its cause.
 pub fun term_get_mode(fd: int64, buf: int64) -> int64 {
-    return ENOSYS
+    let m = console_mode(std_handle(fd))
+    if m < 0 {
+        return -NOT_A_TERMINAL
+    }
+    __store32(buf, m as uint32)
+    return CONSOLE_MODE_SIZE
 }
 
+// The console `fd` set to the mode `term_get_mode` gave, at once: 0, or
+// minus its cause (INVALID_INPUT for a block of another size).
 pub fun term_set_mode(fd: int64, mode: str) -> int64 {
-    return ENOSYS
+    let p = __addr_of(mode)
+    if __load64(p) != CONSOLE_MODE_SIZE {
+        return -INVALID_INPUT
+    }
+    let h = std_handle(fd)
+    if console_mode(h) < 0 {
+        return -NOT_A_TERMINAL
+    }
+    return set_console_mode(h, __load64(p + 8) & LOW32)
 }
 
+// The console's input `fd` made raw from its mode now: no line editing, no
+// echo, Ctrl-C a key, Enter a CR, special keys as escape sequences
+// (ENABLE_VIRTUAL_TERMINAL_INPUT; a console without it, without). 0, or
+// minus its cause.
 pub fun term_make_raw(fd: int64) -> int64 {
-    return ENOSYS
+    let h = std_handle(fd)
+    let m = console_mode(h)
+    if m < 0 {
+        return -NOT_A_TERMINAL
+    }
+    return keys_console_mode(h, raw_input_mode(m))
 }
 
+// The console's input `fd` a key at a time from its mode now: without line
+// editing, and so without echo (Windows echoes only a line it edits),
+// Ctrl-C still a signal. 0, or minus its cause.
 pub fun term_make_cbreak(fd: int64) -> int64 {
-    return ENOSYS
+    let h = std_handle(fd)
+    let m = console_mode(h)
+    if m < 0 {
+        return -NOT_A_TERMINAL
+    }
+    return keys_console_mode(h, cbreak_input_mode(m))
 }
 
+// The console's input `h` given the mode `m`, or, on a console without
+// ENABLE_VIRTUAL_TERMINAL_INPUT, `m` without it: 0, or minus the cause.
+fun keys_console_mode(h: int64, m: int64) -> int64 {
+    let r = set_console_mode(h, m)
+    if r < 0 {
+        return set_console_mode(h, m & ~ENABLE_VIRTUAL_TERMINAL_INPUT)
+    }
+    return r
+}
+
+// A raw console's input mode, from the mode `m`.
+#test(503)[1008]
+#test(0)[512]
+fun raw_input_mode(m: int64) -> int64 {
+    return (m & ~(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT
+}
+
+// The input mode a key at a time, from the mode `m`.
+#test(503)[1009]
+fun cbreak_input_mode(m: int64) -> int64 {
+    return (m & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT
+}
+
+// Escape sequences written to `fd` interpreted from now on
+// (ENABLE_VIRTUAL_TERMINAL_PROCESSING on its screen buffer): 0, or minus
+// its cause (NOT_A_TERMINAL for a descriptor that isn't the console's; the
+// console's input, which nothing is written to, as it is). The first
+// screen buffer it turns them on for and the mode it had are kept for the
+// exit (`console_back`).
 pub fun term_enable_vt(fd: int64) -> int64 {
-    return ENOSYS
+    let h = std_handle(fd)
+    let m = console_mode(h)
+    if m < 0 {
+        return -NOT_A_TERMINAL
+    }
+    // (the input's modes are others: its 4 is ENABLE_ECHO_INPUT)
+    if (m & ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0 || window_size(h) < 0 {
+        return 0
+    }
+    let r = set_console_mode(h, m | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+    let kept = __rt_addr("__win_console_cp") + 16
+    if r >= 0 && __load_acq64(kept) == 0 {
+        // (two workers at once keep the same handle and mode)
+        __store64(kept + 8, m)
+        __store_rel64(kept, h)
+    }
+    return r
 }
 
+// The console as the program found it, at its end: its code pages
+// (`windows_start`) and the output mode `term_enable_vt` changed. It
+// allocates nothing and reaches only the process's words, as the console's
+// control handler runs it too (`raw_signal`).
+fun console_back() {
+    let cp = __rt_addr("__win_console_cp")
+    if __load64(cp) != 0 {
+        let o = __syscall(__rt_get("__imp_SetConsoleOutputCP"), __load64(cp), 0, 0)
+    }
+    if __load64(cp + 8) != 0 {
+        let i = __syscall(__rt_get("__imp_SetConsoleCP"), __load64(cp + 8), 0, 0)
+    }
+    let h = __load_acq64(cp + 16)
+    if h != 0 {
+        let m = __syscall(__rt_get("__imp_SetConsoleMode"), h, __load64(cp + 24), 0)
+    }
+}
+
+// The interrupt and terminate signals caught (`on` 1), or back to what
+// they did before once the last of those who asked lets go (`on` 0).
+// Caught, each goes to a pipe (`CreatePipe`, not inherited) as a byte, 2
+// for an interrupt, 15 for termination, and `on` 1 gives its read end; let
+// go, what is queued is dropped.
 pub fun signal_listen(on: int64) -> int64 {
-    return ENOSYS
+    let st = sig_lock()
+    var r: int64 = 0
+    if on != 0 {
+        if __load64(st + 8) == 0 {
+            let ends = __alloc(16)
+            if ok(__syscall5(__rt_get("__imp_CreatePipe"), ends, ends + 8, 0, 0, 0)) {
+                __store64(st, __load64(ends + 8))
+                __store64(st + 8, __load64(ends) + 1)
+            } else {
+                r = failed()
+            }
+            __free(ends)
+        }
+        if r >= 0 {
+            r = ctrl_handler_added(st)
+        }
+        if r >= 0 {
+            __store64(st + 16, __load64(st + 16) + 1)
+            r = __load64(st + 8) - 1
+        }
+    } else if __load64(st + 16) > 0 {
+        __store64(st + 16, __load64(st + 16) - 1)
+        if __load64(st + 16) == 0 {
+            drain(__load64(st + 8) - 1)
+        }
+    }
+    __store_rel64(st + 24, 0)
+    return r
 }
 
+// `__sig_pipe`'s lock taken, spinning while another worker holds it: the
+// block's address.
+fun sig_lock() -> int64 {
+    let st = __rt_addr("__sig_pipe")
+    while __xchg64(st + 24, 1) != 0 {
+        __pause()
+    }
+    return st
+}
+
+// The console's control handler (`__win_on_ctrl`) added, the first time,
+// under `sig_lock`: 0, or minus the cause.
+fun ctrl_handler_added(st: int64) -> int64 {
+    if __load64(st + 32) != 0 {
+        return 0
+    }
+    if !ok(__syscall(__rt_get("__imp_SetConsoleCtrlHandler"), __rt_addr("__win_on_ctrl"), 1, 0)) {
+        return failed()
+    }
+    __store64(st + 32, 1)
+    return 0
+}
+
+// What the pipe's read end `h` holds, read and dropped, without waiting.
+fun drain(h: int64) {
+    let buf = __alloc(64)
+    while pipe_holds(h) {
+        if read(h, buf, 64) <= 0 {
+            break
+        }
+    }
+    __free(buf)
+}
+
+// Whether the pipe `h` holds bytes now (`PeekNamedPipe`).
+fun pipe_holds(h: int64) -> bool {
+    let avail = __alloc(8)
+    __store64(avail, 0)
+    let r = __syscall5(__rt_get("__imp_PeekNamedPipe"), h, 0, 0, 0, avail)
+    let holds = ok(r) && (__load64(avail) & LOW32) != 0
+    __free(avail)
+    return holds
+}
+
+// The descriptor `signal_listen(1)` gives (the pipe's read end), or -1
+// before the first listener: what std.rt checks a listener's handle holds.
 pub fun signal_fd() -> int64 {
-    return -1
+    return __load64(__rt_addr("__sig_pipe") + 8) - 1
 }
 
+// The next signal caught on the handle `h` that `signal_listen` gave, the
+// thread waiting for one: 2 or 15, 0 when the pipe ended, or minus its
+// cause.
 pub fun signal_take(h: int64) -> int64 {
-    return ENOSYS
+    let b = __alloc(8)
+    __store64(b, 0)
+    var r = read(h, b, 1)
+    if r > 0 {
+        r = __load8(b) as int64
+    }
+    __free(b)
+    return r
 }
 
-// No raw mode to put back, no signal to catch yet.
+// What the console's control handler runs for an interrupt or a request to
+// terminate while std.term holds the console raw and nobody listens (D192):
+// the mode before raw mode put back, as the exit hook does (D187; the
+// runtime's `__exit_hook`: the descriptor plus one, then the mode as a
+// string's cell, its 4 bytes at 32), and the console's code pages and
+// output mode (`console_back`); the handler then passes the event on to
+// Windows' default, which ends the process. It runs on a thread without a
+// state block, so it allocates nothing.
 pub fun raw_signal(sig: int64) {
+    let h = __rt_addr("__exit_hook")
+    let fd = __load64(h) - 1
+    if fd >= 0 {
+        __store64(h, 0)
+        let r = __syscall(__rt_get("__imp_SetConsoleMode"), std_handle(fd), __load64(h + 32) & LOW32, 0)
+    }
+    console_back()
 }
 
+// While the console is raw (`on`), the control handler there to put its
+// mode back on an interrupt or a request to terminate (`raw_signal`). It
+// asks the exit hook whether the console is raw, so raw mode left needs
+// nothing.
 pub fun raw_signals(on: bool) {
+    if on {
+        let st = sig_lock()
+        let r = ctrl_handler_added(st)
+        __store_rel64(st + 24, 0)
+    }
 }
 
 // --- memory ------------------------------------------------------------------------
@@ -3176,17 +3517,11 @@ pub fun unpark_one(addr: int64) {
 }
 
 // The process ended with the status `code`, all 32 bits of it (D216): the
-// console's code pages put back first (`windows_start`), and the workers
-// made all started (`workers_started`).
+// console as the program found it first (its code pages and output mode,
+// `console_back`), and the workers made all started (`workers_started`).
 pub fun exit(code: int64) {
     workers_started()
-    let cp = __rt_addr("__win_console_cp")
-    if __load64(cp) != 0 {
-        let o = __syscall(__rt_get("__imp_SetConsoleOutputCP"), __load64(cp), 0, 0)
-    }
-    if __load64(cp + 8) != 0 {
-        let i = __syscall(__rt_get("__imp_SetConsoleCP"), __load64(cp + 8), 0, 0)
-    }
+    console_back()
     let r = __syscall(__rt_get("__imp_ExitProcess"), code & LOW32, 0, 0)
 }
 

@@ -18,6 +18,10 @@ on Windows' paths (`std/path_windows.my`, the loader's copy for the target).
 Child processes (MYLA-705): `Children` runs std.process with a Windows
 program of its own as the child, and a test harness's cases as children.
 
+The console (MYLA-707): `Console` runs std.term and std.signal with a
+pseudo-terminal as Wine's console and a Unix SIGINT as Ctrl-C;
+`RUNNER_CASES` are what only Windows' own console shows (MYLA-708).
+
 Skipped where clang, llvm-dlltool, lld-link or Wine is missing (CI installs
 them, and MYLA_REQUIRE_TARGETS makes a missing one fail there).
 """
@@ -25,9 +29,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON, wine, wine_env
@@ -959,6 +965,674 @@ class FramesOnWindows(unittest.TestCase):
         self.assertEqual((built.stderr, built.returncode), ("", 0))
         ran = self.run_exe(threads="2")
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (FRAMES_OUT, b"", 0))
+
+
+# MYLA-707: the console as std.term's terminal and std.signal's signals.
+# One program, its first argument the case; `mode(fd)` is the console mode
+# `__term_get` keeps for the descriptor (D216's saved mode, 4 bytes).
+CONSOLE = """import std.term as term
+import std.signal as signal
+import std.task as task
+import std.process as process
+import std.io as io
+import std.fs as fs
+import std.num as num
+from std.term import Key, Stream
+from std.signal import Signal
+from std.process import Stdio, ExitStatus
+from std.ioerror import IoError
+
+fun down(n: int) -> int {
+    return down(n + 1) + 1
+}
+
+async fun fails() -> int {
+    await task.sleep(10)
+    panic("a task failed")
+}
+
+#allow(primitive)
+fun mode(fd: int) -> int {
+    let m = __term_get(fd)
+    if m.len() != 4 {
+        return -1
+    }
+    return (m[0] as int) | ((m[1] as int) << 8)
+}
+
+fun raw() -> term.RawMode {
+    return match term.raw_mode() {
+        Ok(r) => r
+        Err(e) => panic(f"raw_mode: {e}")
+    }
+}
+
+fun name(k: Key) -> str {
+    return match k {
+        Key.Char(c) => f"Char({c})"
+        Key.Ctrl(c) => f"Ctrl({c})"
+        Key.Alt(c) => f"Alt({c})"
+        Key.Up => "Up"
+        Key.Enter => "Enter"
+        Key.Escape => "Escape"
+        Key.Delete => "Delete"
+        Key.F(n) => f"F{n}"
+        _ => "another key"
+    }
+}
+
+fun code_of(st: Result<ExitStatus, IoError>) -> str {
+    return match st {
+        Ok(Exited(c)) => f"{c}"
+        Ok(Signaled(s)) => f"signal {s}"
+        Err(e) => f"{e}"
+    }
+}
+
+// the console's input raw, `count` keys read, the mode back, a line read
+fun read_keys(count: int) {
+    let before = mode(0)
+    let r = raw()
+    let m = mode(0)
+    print(f"raw line {m & 2} echo {m & 4} processed {m & 1} vt {m & 512}")
+    var kr = term.key_reader()
+    var n = 0
+    while n < count {
+        match kr.next() {
+            Ok(Some(k)) => print(f"key {name(k)}")
+            Ok(None) => print("end")
+            Err(e) => print(f"error: {e}")
+        }
+        n += 1
+    }
+    match r.restore() {
+        Ok(()) => print(f"restored {mode(0) == before}")
+        Err(e) => print(f"restore: {e}")
+    }
+    var input = io.stdin()
+    match input.read_line() {
+        Ok(Some(line)) => print(f"line {line}")
+        _ => print("no line")
+    }
+}
+
+// raw mode ended as `how` says (D187)
+#allow(primitive)
+async fun end(how: str) {
+    let r = raw()
+    if how == "nested" {
+        let inner = raw()
+        let x = inner.restore()
+        panic("after the inner one")
+    }
+    if how == "left" {
+        // raw mode left, then raw again behind the hook's back: it stays
+        let m = __term_get(0)
+        let x = r.restore()
+        let s = __term_set(0, m)
+        return
+    }
+    if how == "exit" {
+        process.exit(3)
+    }
+    if how == "panic" {
+        panic("boom")
+    }
+    let n = process.args().len()
+    if how == "index" {
+        let xs = [1]
+        print(xs[n])
+    }
+    if how == "key" {
+        let m: [int: int] = [:]
+        print(m[n])
+    }
+    if how == "deep" {
+        print(down(n))
+    }
+    if how == "fails" {
+        async let a = fails()
+        print(await a)
+    }
+}
+
+// each end of raw mode in a child on this console: its status, and whether
+// the console's mode is what it was
+fun ends() {
+    for how in ["return", "exit", "panic", "index", "key", "deep", "nested", "fails", "left"] {
+        let before = mode(0)
+        let cmd = process.command(process.args()[0]).arg("end").arg(how).stdin_from(Stdio.Inherit)
+        var child = match cmd.stdout_from(Stdio.Null).stderr_from(Stdio.Null).spawn() {
+            Ok(c) => c
+            Err(e) => panic(f"spawn: {e}")
+        }
+        print(f"{how} {code_of(child.wait())} restored {mode(0) == before}")
+    }
+}
+
+// raw mode until a Ctrl-C ends the program (D192), with a listener first
+// that takes one (`listen`)
+async fun wait(how: str) {
+    let r = raw()
+    if how == "listen" {
+        let s = match signal.listen() {
+            Ok(s) => s
+            Err(e) => panic(f"listen: {e}")
+        }
+        print("listening")
+        match await s.next() {
+            Ok(sig) => print(f"caught {sig}")
+            Err(e) => print(f"{e}")
+        }
+        s.close()
+    }
+    print("raw")
+    await task.sleep(30000)
+    print("not here")
+}
+
+// `wait` in a child on this console (its last argument `c` and the token),
+// its lines passed on, then its status and whether the console's mode is
+// what it was; this program listening meanwhile, as a console's Ctrl-C or
+// Ctrl-Break reaches every program on it
+fun ctrl(how: str, token: str) {
+    let s = match signal.listen() {
+        Ok(s) => s
+        Err(e) => panic(f"listen: {e}")
+    }
+    let before = mode(0)
+    let cmd = process.command(process.args()[0]).arg("wait").arg(how).arg("c" + token).stdin_from(Stdio.Inherit)
+    var child = match cmd.stderr_from(Stdio.Inherit).spawn() {
+        Ok(c) => c
+        Err(e) => panic(f"spawn: {e}")
+    }
+    var out = match child.take_stdout() {
+        Some(o) => io.buffered(o)
+        None => panic("no output")
+    }
+    var more = true
+    while more {
+        match out.read_line() {
+            Ok(Some(l)) => print(f"child {l}")
+            _ => { more = false }
+        }
+    }
+    print(f"exited {code_of(child.wait())} restored {mode(0) == before}")
+    s.close()
+}
+
+// the console's output mode, escape sequences turned on by a child, and
+// the mode again once it ended
+fun vt() {
+    let before = mode(1)
+    let cmd = process.command(process.args()[0]).arg("ansi").stdin_from(Stdio.Inherit)
+    var child = match cmd.stdout_from(Stdio.Inherit).stderr_from(Stdio.Inherit).spawn() {
+        Ok(c) => c
+        Err(e) => panic(f"spawn: {e}")
+    }
+    let st = code_of(child.wait())
+    print(f"vt:{(before & 4) == 0},{st},{mode(1) == before}")
+}
+
+fun ansi() {
+    print(f"ansi:{term.enable_ansi(Stream.Stdout)},{(mode(1) & 4) != 0}")
+}
+
+async fun ticker() -> int {
+    var n = 0
+    while !task.cancelled() {
+        var k = 0
+        while k < 10000 {
+            k += 1
+        }
+        await task.sleep(1)
+        n += 1
+    }
+    return n
+}
+
+// Ctrl-C after Ctrl-C to a listener while tasks keep the workers busy,
+// then the default again
+async fun storm(want: int) {
+    let s = match signal.listen() {
+        Ok(s) => s
+        Err(e) => panic(f"listen: {e}")
+    }
+    async let a = ticker()
+    async let b = ticker()
+    async let c = ticker()
+    print("ready")
+    var n = 0
+    var other = 0
+    while n < want && other == 0 {
+        match await s.next() {
+            Ok(Interrupt) => { n += 1 }
+            Ok(Terminate) => { other += 1 }
+            Err(e) => { other += 1 }
+        }
+    }
+    print(f"got {n} interrupts, {other} else")
+    task.cancel(a)
+    task.cancel(b)
+    task.cancel(c)
+    print(f"ticked {await a > 0 && await b > 0 && await c > 0}")
+    s.close()
+    print("default again")
+    await task.sleep(30000)
+    print("not here")
+}
+
+// the size of the console each stream is
+fun sizes() {
+    for (label, s) in [("stdin", Stream.Stdin), ("stdout", Stream.Stdout), ("stderr", Stream.Stderr)] {
+        match term.size_of(s) {
+            Some((c, r)) => print(f"{label} {c} {r}")
+            None => print(f"{label} none")
+        }
+    }
+}
+
+// the first interrupt or termination, then the default again
+async fun interrupted() {
+    print("ready")
+    match await signal.interrupted() {
+        Ok(sig) => print(f"got {sig}")
+        Err(e) => print(f"error: {e}")
+    }
+    print("again")
+    await task.sleep(30000)
+    print("not here")
+}
+
+async fun catch_one(s: signal.Signals) -> int {
+    match await s.next() {
+        Ok(sig) => print(f"caught {sig}")
+        Err(e) => print(f"{e}")
+    }
+    return 0
+}
+
+// a line read from the console while a listener takes a Ctrl-C (which
+// ends the console's read on Windows: it goes on)
+async fun read_line_listening() {
+    let s = match signal.listen() {
+        Ok(s) => s
+        Err(e) => panic(f"listen: {e}")
+    }
+    async let c = catch_one(s)
+    print("ready")
+    var input = io.stdin()
+    match input.read_line() {
+        Ok(Some(line)) => print(f"line {line}")
+        Ok(None) => print("end")
+        Err(e) => print(f"error: {e}")
+    }
+    let x = await c
+}
+
+// the first signal written to the file `path` after "ready", then the exit
+// with 7: what a program does with the time Windows gives it once its
+// console is closed
+async fun on_close(path: str) {
+    let s = match signal.listen() {
+        Ok(s) => s
+        Err(e) => panic(f"listen: {e}")
+    }
+    let w = fs.write_to_file(path, "ready\\n")
+    match await s.next() {
+        Ok(sig) => { let w2 = fs.write_to_file(path, f"ready\\ngot {sig}\\n") }
+        Err(e) => { let w2 = fs.write_to_file(path, f"ready\\n{e}\\n") }
+    }
+    process.exit(7)
+}
+
+#main
+async fun main() {
+    let args = process.args()
+    let case = args[1]
+    if case == "keys" { read_keys(num.parse_int(args[2]).unwrap_or(0) as int) }
+    if case == "size" { sizes() }
+    if case == "interrupted" { await interrupted() }
+    if case == "readline" { await read_line_listening() }
+    if case == "close" { await on_close(args[2]) }
+    if case == "end" { await end(args[2]) }
+    if case == "ends" { ends() }
+    if case == "wait" { await wait(args[2]) }
+    if case == "ctrl" { ctrl(args[2], args[3]) }
+    if case == "vt" { vt() }
+    if case == "ansi" { ansi() }
+    if case == "storm" { await storm(10) }
+}
+"""
+
+
+def unix_pids_with(word: str) -> list[int]:
+    """The processes whose command line has `word` (Wine's processes have
+    their Windows command line)."""
+    pids = []
+    for entry in os.listdir("/proc"):
+        if entry.isdecimal():
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                    words = fh.read().replace(b"\0", b" ").split()
+            except OSError:
+                continue
+            if word.encode() in words:
+                pids.append(int(entry))
+    return pids
+
+
+class ConsolePty:
+    """A Windows program under Wine with a pseudo-terminal, which Wine makes
+    its console, as its standard input (and its output too, `all_streams`),
+    its output's lines read as they come."""
+
+    def __init__(self, argv: list[str], env: dict | None = None, all_streams: bool = False):
+        # (Unix's modules: the file is imported on Windows too, for
+        # FramesOnWindows)
+        import fcntl
+        import pty
+        import termios
+        self.master, self.slave = pty.openpty()
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 33, 101, 0, 0))
+        out = self.slave if all_streams else subprocess.PIPE
+        self.proc = subprocess.Popen([*wine(), *argv], stdin=self.slave, stdout=out, stderr=out, env=env,
+                                     start_new_session=True)
+        self.all_streams = all_streams
+        self.buf = b""
+
+    def _more(self, timeout: float) -> bool:
+        import select
+        src = self.master if self.all_streams else self.proc.stdout.fileno()
+        r, _, _ = select.select([src], [], [], timeout)
+        if not r:
+            return False
+        try:
+            chunk = os.read(src, 65536)
+        except OSError:
+            return False
+        self.buf += chunk
+        if self.all_streams:
+            # Wine's console draws on a terminal: it hides the cursor around
+            # a write and ends a line with CR CR LF
+            self.buf = self.buf.replace(b"\x1b[?25l", b"").replace(b"\x1b[?25h", b"").replace(b"\r\r\n", b"\n")
+        return bool(chunk)
+
+    def line(self, timeout: float = 60) -> str:
+        """The next line of the output, without its newline ("" at its end)."""
+        deadline = time.time() + timeout
+        while b"\n" not in self.buf and time.time() < deadline:
+            if not self._more(0.1) and self.proc.poll() is not None and not self._more(0.1):
+                break
+        if b"\n" not in self.buf:
+            rest, self.buf = self.buf, b""
+            return rest.decode("utf-8", "replace")
+        got, self.buf = self.buf.split(b"\n", 1)
+        return got.decode("utf-8", "replace")
+
+    def send(self, data: bytes):
+        os.write(self.master, data)
+
+    def finish(self, timeout: float = 60) -> tuple[list[str], int]:
+        """The rest of the output's lines and the exit status."""
+        deadline = time.time() + timeout
+        while self.proc.poll() is None and time.time() < deadline:
+            self._more(0.1)
+        while self._more(0.1):
+            pass
+        if self.proc.poll() is None:
+            self.proc.kill()
+        code = self.proc.wait()
+        lines = self.buf.decode("utf-8", "replace").split("\n")
+        if lines[-1] == "":
+            lines.pop()
+        self.close()
+        return lines, code
+
+    def close(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait()
+        for f in (self.proc.stdout, self.proc.stderr):
+            if f:
+                f.close()
+        for fd in (self.master, self.slave):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class Console(unittest.TestCase):
+    """MYLA-707 (D216) under Wine, whose console is a pseudo-terminal this
+    side opens: the console as a terminal, raw mode on its input mode, the
+    mode back at every end of a program (D187) and on a Ctrl-C while raw
+    (D192), Ctrl-C (a Unix SIGINT to Wine, which makes it a CTRL_C_EVENT on
+    a thread of its own) as std.signal's interrupt on 1, 4 and 16 workers,
+    and the output mode put back at the exit. A program sharing the console
+    with its child reads the mode the child left, as the console outlives
+    the child. What Wine can't show is MYLA-708's runner's (`RUNNER_CASES`)."""
+
+    @classmethod
+    def setUpClass(cls):
+        wine_env()
+        cls.tmp = tempfile.mkdtemp()
+        with open(os.path.join(cls.tmp, "console.my"), "w", encoding="utf-8") as fh:
+            fh.write(CONSOLE)
+        cls.exe = os.path.join(cls.tmp, "console.exe")
+        subprocess.run([selfhost_tool("main"), "build", "console.my", "--target", "x86_64-windows", "--stdlib",
+                        STDLIB_ROOT, "-o", cls.exe], cwd=cls.tmp, check=True, timeout=300)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def start(self, *args: str, threads: str = "2", all_streams: bool = False) -> ConsolePty:
+        p = ConsolePty([self.exe, *args], env=dict(os.environ, MYLA_THREADS=threads), all_streams=all_streams)
+        self.addCleanup(p.close)
+        return p
+
+    def test_the_console_is_a_terminal(self):
+        # stdin the console, stdout and stderr pipes; the input's size is its
+        # screen buffer's (`CONOUT$`), whatever Wine makes it
+        src = ("import std.term as term\nfrom std.term import Stream\n\nfun main() {\n"
+               "    print(f\"tty {term.is_tty(Stream.Stdin)} {term.is_tty(Stream.Stdout)} "
+               "{term.is_tty(Stream.Stderr)}\")\n"
+               "    match term.size() {\n        Some((c, r)) => print(f\"size {c > 0 && r > 0}\")\n"
+               "        None => print(\"no size\")\n    }\n"
+               "    print(f\"ansi {term.enable_ansi(Stream.Stdout)} {term.enable_ansi(Stream.Stdin)}\")\n}\n")
+        with open(os.path.join(self.tmp, "tty.my"), "w", encoding="utf-8") as fh:
+            fh.write(src)
+        subprocess.run([selfhost_tool("main"), "build", "tty.my", "--target", "x86_64-windows", "--stdlib",
+                        STDLIB_ROOT, "-o", "tty.exe"], cwd=self.tmp, check=True, timeout=300)
+        p = ConsolePty([os.path.join(self.tmp, "tty.exe")])
+        self.addCleanup(p.close)
+        self.assertEqual(p.finish(), (["tty true false false", "size true", "ansi false true"], 0))
+
+    def test_raw_mode_and_back(self):
+        p = self.start("keys", "3")
+        self.assertEqual(p.line(), "raw line 0 echo 0 processed 0 vt 512")
+        for key in [b"q", b"x", b"\r"]:
+            p.send(key)
+            time.sleep(0.2)
+        self.assertEqual([p.line() for _ in range(4)], ["key Char(q)", "key Char(x)", "key Enter", "restored true"])
+        # cooked again: a line, which Windows' console ends with CR LF
+        p.send(b"hello\r")
+        self.assertEqual(p.finish(), (["line hello\r"], 0))
+
+    def test_every_end_restores_the_console(self):
+        lines, code = self.start("ends", threads="4").finish(timeout=120)
+        self.assertEqual((lines, code), (["return 0 restored true", "exit 3 restored true",
+                                          "panic 1 restored true", "index 1 restored true",
+                                          "key 1 restored true", "deep 1 restored true",
+                                          "nested 1 restored true", "fails 1 restored true",
+                                          "left 0 restored false"], 0))
+
+    def ctrl_c(self, word: str):
+        """A Ctrl-C to the child whose command line has `word` (its parent's
+        has it without the `c`)."""
+        pids = unix_pids_with("c" + word)
+        self.assertEqual(len(pids), 1, pids)
+        os.kill(pids[0], signal.SIGINT)
+
+    def test_a_ctrl_c_while_raw_puts_the_mode_back(self):
+        # D192: on a thread Windows makes, without a state block (D222);
+        # Windows' default then ends the child (STATUS_CONTROL_C_EXIT;
+        # Wine's exit code 0)
+        for threads in ["1", "4", "16"]:
+            for how in ["raw", "listen"]:
+                with self.subTest(threads=threads, how=how):
+                    token = f"t{os.getpid()}{threads}{how}"
+                    p = self.start("ctrl", how, token, threads=threads)
+                    if how == "listen":
+                        self.assertEqual(p.line(), "child listening")
+                        time.sleep(0.2)
+                        self.ctrl_c(token)
+                        self.assertEqual(p.line(), "child caught interrupt")
+                    self.assertEqual(p.line(), "child raw")
+                    time.sleep(0.2)
+                    self.ctrl_c(token)
+                    lines, code = p.finish(timeout=30)
+                    self.assertIn(lines, [["exited 0 restored true"], ["exited -1073741510 restored true"]])
+                    self.assertEqual(code, 0)
+
+    def test_ctrl_c_after_ctrl_c_on_many_workers(self):
+        for threads in ["1", "4", "16"]:
+            with self.subTest(threads=threads):
+                p = self.start("storm", threads=threads)
+                self.assertEqual(p.line(), "ready")
+                for _ in range(10):
+                    time.sleep(0.1)
+                    p.proc.send_signal(signal.SIGINT)
+                self.assertEqual([p.line() for _ in range(3)],
+                                 ["got 10 interrupts, 0 else", "ticked true", "default again"])
+                time.sleep(0.2)
+                start = time.time()
+                p.proc.send_signal(signal.SIGINT)
+                lines, code = p.finish(timeout=20)
+                # ended by the Ctrl-C (Wine's default handler: exit code 0)
+                self.assertEqual((lines, code), ([], 0))
+                self.assertLess(time.time() - start, 10)
+
+    def test_the_output_mode_is_put_back_at_the_exit(self):
+        # the child turns escape sequences on (`enable_ansi`) on the console
+        # it shares with this program, which finds its mode as before
+        lines, code = self.start("vt", all_streams=True).finish()
+        self.assertEqual((lines, code), (["ansi:true,true", "vt:true,0,true"], 0))
+
+    def test_interrupted_and_the_default_again(self):
+        p = self.start("interrupted")
+        self.assertEqual(p.line(), "ready")
+        time.sleep(0.2)
+        p.proc.send_signal(signal.SIGINT)
+        self.assertEqual([p.line(), p.line()], ["got interrupt", "again"])
+        time.sleep(0.2)
+        p.proc.send_signal(signal.SIGINT)
+        self.assertEqual(p.finish(timeout=20), ([], 0))
+
+    def test_a_read_of_the_console_while_a_listener_takes_a_ctrl_c(self):
+        p = self.start("readline")
+        self.assertEqual(p.line(), "ready")
+        time.sleep(0.2)
+        p.proc.send_signal(signal.SIGINT)
+        self.assertEqual(p.line(), "caught interrupt")
+        p.send(b"hello\r")
+        self.assertEqual(p.finish(), (["line hello\r"], 0))
+
+    def test_the_time_a_signal_leaves(self):
+        # `close`'s program with a Ctrl-C: Wine's console can't be closed
+        # under a program (MYLA-708's runner closes Windows' own)
+        path = os.path.join(self.tmp, "closed.txt")
+        p = self.start("close", path)
+        deadline = time.time() + 60
+        while not os.path.exists(path) and time.time() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.2)
+        p.proc.send_signal(signal.SIGINT)
+        self.assertEqual(p.finish(), ([], 7))
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "ready\ngot interrupt\n")
+
+    def test_the_sizes_without_a_console(self):
+        lines, code = self.start("size").finish()
+        # (stdin: Wine's console, whose screen buffer isn't the terminal's)
+        self.assertEqual((lines[1:], code), (["stdout none", "stderr none"], 0))
+        self.assertRegex(lines[0], r"^stdin \d+ \d+$")
+
+
+# MYLA-707's cases for MYLA-708's Windows runner, what Wine's console can't
+# show: each runs CONSOLE built as `console.exe` with its arguments in a
+# console of its own, its input that console and its output a file, as
+# `cmd /c "console.exe ARGS > out.txt"` started with CREATE_NEW_CONSOLE
+# gives (`close` writes its file itself and runs as `console.exe` alone,
+# so that its status is its own). `before` sets the console up (in the
+# same cmd line, with `&&`); each step of `steps` waits for the output
+# to have its text (`wait`), puts input events into the console's input
+# (`keys`: WriteConsoleInputW on CONIN$ from a process attached to the
+# console, `AttachConsole`; a name is that key pressed and let go, "x"
+# the character, "Ctrl-c" with LEFT_CTRL_PRESSED, "Alt-x" with
+# LEFT_ALT_PRESSED), sends a console control event to every process on
+# the console (`event`: GenerateConsoleCtrlEvent(event, 0) from the
+# attached process, which ignores them itself with
+# SetConsoleCtrlHandler(NULL, TRUE)) or closes the console's window
+# (`close`: WM_CLOSE to GetConsoleWindow()'s window, which is
+# CTRL_CLOSE_EVENT). `out` is the file's text at the end and `exit` the
+# status of `cmd` (that of console.exe), within `seconds`.
+STATUS_CONTROL_C_EXIT = 0xC000013A
+RUNNER_CASES = [
+    {"name": "raw keys from a real console, escape sequences through ENABLE_VIRTUAL_TERMINAL_INPUT",
+     "args": ["keys", "8"],
+     "steps": [{"wait": "raw line 0 echo 0 processed 0 vt 512\n"},
+               {"keys": ["Up", "Ctrl-c", "q", "Alt-x", "F5", "Delete", "Escape", "Enter"]},
+               {"wait": "restored true\n"},
+               {"keys": ["h", "e", "l", "l", "o", "Enter"]}],
+     "out": "raw line 0 echo 0 processed 0 vt 512\nkey Up\nkey Ctrl(c)\nkey Char(q)\nkey Alt(x)\nkey F5\n"
+            "key Delete\nkey Escape\nkey Enter\nrestored true\nline hello\r\n",
+     "exit": 0, "seconds": 30},
+    {"name": "UTF-8 typed into a cooked read (the console's input code page 65001)",
+     "args": ["keys", "1"],
+     "steps": [{"wait": "raw line"}, {"keys": ["x"]}, {"wait": "restored true\n"},
+               {"keys": ["g", "r", "ö", "ß", "e", "Enter"]}],
+     "out": "raw line 0 echo 0 processed 0 vt 512\nkey Char(x)\nrestored true\nline größe\r\n",
+     "exit": 0, "seconds": 30},
+    {"name": "the window's size, through each stream that is the console (stdout is the file)",
+     "args": ["size"], "before": "mode con: cols=101 lines=33", "steps": [],
+     "out": "stdin 101 33\nstdout none\nstderr 101 33\n", "exit": 0, "seconds": 30},
+    {"name": "a real Ctrl-C to a listener, then the default: STATUS_CONTROL_C_EXIT",
+     "args": ["interrupted"],
+     "steps": [{"wait": "ready\n"}, {"event": "CTRL_C_EVENT"}, {"wait": "again\n"}, {"event": "CTRL_C_EVENT"}],
+     "out": "ready\ngot interrupt\nagain\n", "exit": STATUS_CONTROL_C_EXIT, "seconds": 30},
+    {"name": "Ctrl-Break is an interrupt too",
+     "args": ["interrupted"],
+     "steps": [{"wait": "ready\n"}, {"event": "CTRL_BREAK_EVENT"}, {"wait": "again\n"}, {"event": "CTRL_BREAK_EVENT"}],
+     "out": "ready\ngot interrupt\nagain\n", "exit": STATUS_CONTROL_C_EXIT, "seconds": 30},
+    {"name": "Ctrl-C typed while a cooked read of the console waits: the read goes on (ERROR_OPERATION_ABORTED)",
+     "args": ["readline"],
+     "steps": [{"wait": "ready\n"}, {"keys": ["Ctrl-c"]}, {"wait": "caught interrupt\n"},
+               {"keys": ["h", "i", "Enter"]}],
+     "out": "ready\ncaught interrupt\nline hi\r\n", "exit": 0, "seconds": 30},
+    {"name": "the console closed: Terminate, and the program's own exit within Windows' 5 seconds",
+     "args": ["close", "closed.txt"], "alone": True,
+     "steps": [{"wait_file": "closed.txt", "text": "ready\n"}, {"close": True}],
+     "file": "ready\ngot terminate\n", "exit": 7, "seconds": 10},
+    {"name": "D192: Ctrl-Break while a child on this console is raw, then its mode back (the parent listens)",
+     "args": ["ctrl", "raw", "token"],
+     "steps": [{"wait": "child raw\n"}, {"event": "CTRL_BREAK_EVENT"}],
+     "out": f"child raw\nexited {STATUS_CONTROL_C_EXIT - (1 << 32)} restored true\n", "exit": 0, "seconds": 30},
+    {"name": "D192 with a listener in the raw child first",
+     "args": ["ctrl", "listen", "token"],
+     "steps": [{"wait": "child listening\n"}, {"event": "CTRL_BREAK_EVENT"}, {"wait": "child raw\n"},
+               {"event": "CTRL_BREAK_EVENT"}],
+     "out": f"child listening\nchild caught interrupt\nchild raw\nexited {STATUS_CONTROL_C_EXIT - (1 << 32)} "
+            "restored true\n", "exit": 0, "seconds": 30},
+    {"name": "D187 on Windows' console: every end of raw mode puts the mode back",
+     "args": ["ends"], "steps": [],
+     "out": "return 0 restored true\nexit 3 restored true\npanic 1 restored true\nindex 1 restored true\n"
+            "key 1 restored true\ndeep 1 restored true\nnested 1 restored true\nfails 1 restored true\n"
+            "left 0 restored false\n", "exit": 0, "seconds": 60},
+]
 
 
 if __name__ == "__main__":

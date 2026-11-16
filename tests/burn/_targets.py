@@ -78,6 +78,11 @@ _X86_TESTS = [
 
 _WINE_LINKS = "Wine shows a Unix symbolic link as what it names, not as a link (a reparse point)"
 _WIN_LINUX_TOOLS = "it runs Linux's tools, which a Windows program can't (test_process.WindowsChildren runs Windows' own)"
+# MYLA-707: Windows' console has no termios and its programs no Unix signals
+_WIN_TERMIOS = ("it reads the terminal's termios, which Wine's console sets itself, and sends Unix signals: "
+                "test_windows.Console checks the console's mode through a program sharing it")
+_WIN_SIGNALS = ("a Unix signal is Wine's (SIGINT a Ctrl-C, the rest end Wine), and Windows' default for a Ctrl-C "
+                "is an exit code (Wine's 0): test_windows.Console sends Ctrl-C, MYLA-708's runner the close")
 
 _BOTH = {
     **{t: _X86_CODE for t in _X86_TESTS},
@@ -158,8 +163,17 @@ SKIP: dict[str, dict[str, str]] = {
         **{f"test_reactor_scaling.{c}": "Windows' sockets come with MYLA-706 (its Readers run)"
            for c in ["RoundTrips", "Accepts", "Closed", "Lots"]},
         "test_router.Router": "Windows' sockets come with MYLA-706",
-        **{f"test_term.{c}": "Windows' console and signals come with MYLA-707 (TermOnWasm checks they are Unsupported)"
-           for c in ["Terminal", "Signals", "Primitives", "RawModeEnds"]},
+        # MYLA-707: the console and Ctrl-C under Wine, which
+        # test_windows.Console checks; what rests on Unix's signals and
+        # termios is Linux's
+        "test_term.RawModeEnds": _WIN_TERMIOS,
+        "test_term.Terminal.test_raw_mode_and_back":
+            "Wine's console has no virtual-terminal input (an arrow is dropped, Ctrl-C ends a read): "
+            "test_windows.Console reads plain keys, MYLA-708's runner the rest",
+        **{f"test_term.Signals.{t}": _WIN_SIGNALS
+           for t in ["test_awaited_while_another_task_runs", "test_interrupted_without_tasks",
+                     "test_a_program_that_never_listens_ends", "test_a_sent_sigsegv_ends_the_program",
+                     "test_an_ignored_signal_stays_ignored"]},
         # the start makes the command line and the environment UTF-8 in
         # the heap, so a cell freed then is taken again before a new one
         "test_selfhost_codegen.SelfHostedCodegenParity.test_a_runtime_variable_is_its_own_operand":

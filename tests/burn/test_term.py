@@ -20,9 +20,11 @@
 
 Each program runs in the self-hosted interpreter and built for the test's
 target, which must agree; `scripts/test-target.py` runs the suite for aarch64
-(qemu-user passes the terminal's ioctls and the signals through) and wasm32
+(qemu-user passes the terminal's ioctls and the signals through), wasm32
 (Node), where the terminal and signal classes are excused (`_targets.py`) and
-`TermOnWasm` checks the `Unsupported` instead."""
+`TermOnWasm` checks the `Unsupported` instead, and Windows (Wine, MYLA-707),
+where what rests on Unix's signals and termios is excused and
+`test_windows.Console` checks the console instead."""
 import fcntl
 import os
 import pty
@@ -50,6 +52,10 @@ from ._native import (
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 COLS, ROWS = 101, 33
+
+# what Wine's console adds to a program's output on a terminal, and what
+# the program wrote (`Pty`)
+WINE_DRAWING = [(b"\x1b[?25l", b""), (b"\x1b[?25h", b""), (b"\r\r\n", b"\r\n")]
 
 # the processes the tests started, killed after each test (a failed one may
 # leave its program waiting)
@@ -88,6 +94,11 @@ class Pty:
         except OSError:
             return False
         self.out += chunk
+        if TEST_TARGET == "x86_64-windows":
+            # Wine's console draws on the terminal: it hides the cursor
+            # around each write and ends a line with CR CR LF (MYLA-707)
+            for drawn, written in WINE_DRAWING:
+                self.out = self.out.replace(drawn, written)
         return bool(chunk)
 
     def expect(self, text: str, timeout: float = 60) -> str:
@@ -1030,8 +1041,7 @@ listen: signals are not supported on this target
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-@unittest.skipUnless(TEST_TARGET in ("wasm32-wasi", "x86_64-windows"),
-                     "the suites of a target without terminals and signals (wasm32; Windows until MYLA-707)")
+@unittest.skipUnless(TEST_TARGET == "wasm32-wasi", "the suites of a target without terminals and signals (wasm32)")
 class TermOnWasm(Case):
     def test_no_terminal_and_unsupported(self):
         with tempfile.TemporaryDirectory() as tmp:
