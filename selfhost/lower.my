@@ -5489,10 +5489,10 @@ impl Lower {
             return self.owned_value(cg, d, t)
         }
         // the test runner's environment, natively (D162): the harness of
-        // `myla test --native` sets MYLA_TEST_DIR and MYLA_TEST_PROGRAM for
-        // the case it runs
-        if nm == "__test_dir" || nm == "__test_program" {
-            let var_name = if nm == "__test_dir" { "MYLA_TEST_DIR" } else { "MYLA_TEST_PROGRAM" }
+        // `myla test --native` sets MYLA_TEST_DIR, MYLA_TEST_PROGRAM and
+        // MYLA_TEST_TOOL (itself, MYLA-727) for the case it runs
+        if nm == "__test_dir" || nm == "__test_program" || nm == "__test_tool" {
+            let var_name = if nm == "__test_dir" { "MYLA_TEST_DIR" } else if nm == "__test_program" { "MYLA_TEST_PROGRAM" } else { "MYLA_TEST_TOOL" }
             let sv = self.temp(Type.TStr)
             self.add(Inst.Str(sv, var_name))
             let d = self.temp(t)

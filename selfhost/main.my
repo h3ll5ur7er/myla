@@ -28,6 +28,7 @@
 from std.process import args, exit
 from std.io import eprintln, println
 from std.rt import heap_huge_pages
+from std.test import tool_mode
 from .repl import repl
 from .loader import load_options, LoadOptions, parse_package_flag
 from .stdroot import default_stdlib_root
@@ -171,6 +172,9 @@ fun main() {
         exit(2)
     }
     let cmd = argv[1]
+    // `myla --test-tool <step>…`: the child that the cases `myla test`
+    // interprets start (std.test's `tool_mode`, MYLA-727)
+    tool_mode(argv)
     if cmd == "--help" || cmd == "-h" || cmd == "help" {
         for l in usage_lines() { println(l) }
         exit(0)
