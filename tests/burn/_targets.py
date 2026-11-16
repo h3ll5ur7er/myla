@@ -126,9 +126,8 @@ SKIP: dict[str, dict[str, str]] = {
     # MYLA-702: Windows' first step has the standard streams, the heap, the
     # clocks, the arguments and the environment, and tasks (on as many
     # workers as on Linux since MYLA-703); files, directories and paths
-    # (MYLA-704); child processes (MYLA-705); what its later steps bring is
-    # `Unsupported` until then (D210), which NetOnWasm, TermOnWasm and
-    # HttpOnWasm check there too
+    # (MYLA-704); child processes (MYLA-705); sockets (MYLA-706); the
+    # console as the terminal and its control events as signals (MYLA-707)
     "x86_64-windows": {
         **_BOTH,
         "test_stdio.BrokenPipe.test_a_write_to_another_descriptor_reports_it":
@@ -158,11 +157,6 @@ SKIP: dict[str, dict[str, str]] = {
         "test_process.TestSubprocessParity.test_reports_terminating_signal":
             "Windows has no signals: `kill` ends a child with the exit code 1 (WindowsChildren checks it)",
         "test_process.TestSubprocessParity.test_a_child_gets_sigpipe_back": "Windows has no SIGPIPE",
-        **{f"test_net.{c}": "Windows' sockets come with MYLA-706 (NetOnWasm checks they are Unsupported)"
-           for c in ["Tcp", "Udp", "Dns", "Errors", "Primitives"]},
-        **{f"test_reactor_scaling.{c}": "Windows' sockets come with MYLA-706 (its Readers run)"
-           for c in ["RoundTrips", "Accepts", "Closed", "Lots"]},
-        "test_router.Router": "Windows' sockets come with MYLA-706",
         # MYLA-707: the console and Ctrl-C under Wine, which
         # test_windows.Console checks; what rests on Unix's signals and
         # termios is Linux's

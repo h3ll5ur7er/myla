@@ -1395,8 +1395,7 @@ class Errors(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-@unittest.skipUnless(TEST_TARGET in ("wasm32-wasi", "x86_64-windows"),
-                     "the suites of a target without sockets (wasm32; Windows until MYLA-706)")
+@unittest.skipUnless(TEST_TARGET == "wasm32-wasi", "the suites of a target without sockets (wasm32)")
 class NetOnWasm(unittest.TestCase):
     def test_every_operation_is_unsupported(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1565,8 +1564,17 @@ ello
         self.assertEqual(run_both(self.PROGRAM), (self.OUT, "", 0))
 
     def test_the_configuration(self):
-        out, err, code = run_both("#allow(primitive)\nfun main() {\n    print(__net_config(0))\n"
-                                  "    print(__net_config(7).len())\n}\n")
+        src = "#allow(primitive)\nfun main() {\n    print(__net_config(0))\n    print(__net_config(7).len())\n}\n"
+        if TEST_TARGET == "x86_64-windows":
+            # MYLA-706: Windows keeps its hosts file under %SystemRoot%
+            # (the interpreter is Linux's)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, src)
+                out, err, code = build_and_run_full(Program(path), argv0=path)
+            self.assertEqual((err, code), ("", 0))
+            self.assertRegex(out, r"(?i)^[a-z]:\\windows\\system32\\drivers\\etc\\hosts\n0\n$")
+            return
+        out, err, code = run_both(src)
         self.assertEqual((out, err, code), ("/etc/hosts\n0\n", "", 0))
 
 
