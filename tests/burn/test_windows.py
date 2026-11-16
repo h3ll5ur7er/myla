@@ -763,20 +763,27 @@ class Children(unittest.TestCase):
         # the harness once, which starts a child of itself for each case
         # (its scratch directory `c<k>`, where runs of the harness, MYLA-370,
         # have one for all), under Wine without Wine named again
-        source = ('from std.process import exit, env\n\n'
+        source = ('from std.process import exit, env\nimport std.test as test\nimport std.fs as fs\n\n'
                   '#test(1)[panic("boom")]\n#test(2)[2]\n#test(3)[panic("boom")]\n#test(4)[5]\n'
                   'fun f(x: int) -> int {\n    print(f"f {x}")\n    if x % 2 == 1 { panic("boom") }\n    return x\n}\n\n'
                   '#test()[exit(3)]\nfun g() {\n    print("g")\n    exit(3)\n}\n\n'
                   '#test\nfun last() {}\n\n'
-                  '#test()["/c6"]\nfun case_dir() -> str {\n    let d = env("MYLA_TEST_DIR").unwrap_or("")\n'
-                  '    return d[d.len() - 3:]\n}\n')
+                  '#test()["\\\\c6"]\nfun case_dir() -> str {\n    let d = env("MYLA_TEST_DIR").unwrap_or("")\n'
+                  '    return d[d.len() - 3:]\n}\n\n'
+                  # MYLA-728: under %TEMP%, not /tmp (Wine's is on C:, not Z:)
+                  '#test()[true]\nfun under_temp() -> bool {\n    let d = env("MYLA_TEST_DIR").unwrap_or("")\n'
+                  '    let t = env("TEMP").unwrap_or("?")\n'
+                  '    return d.starts_with(t + "\\\\myla-test-") && !d.starts_with("Z:")\n}\n\n'
+                  '#test\nfun a_temp_dir() {\n    let d = test.temp_dir()\n    test.expect(fs.is_dir(d))\n'
+                  '    test.expect(d.starts_with(env("MYLA_TEST_DIR").unwrap_or("?")))\n'
+                  '    test.expect(fs.write_to_file(d + "\\\\f.txt", "x").is_ok())\n}\n')
         with open(os.path.join(self.tmp, "t.my"), "w", encoding="utf-8") as fh:
             fh.write(source)
         env = dict(os.environ, MYLA_EMULATOR=" ".join(wine()))
         ran = subprocess.run([selfhost_tool("main"), "test", "t.my", "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT],
                              capture_output=True, text=True, cwd=self.tmp, timeout=600, env=env)
         want = ("PASS  f #1\nPASS  f #2\nPASS  f #3\nFAIL  f #4: expected 5, got 4\n      | f 4\n"
-                "PASS  g #1\nPASS  last\nPASS  case_dir #1\n\n6/7 passed.\n")
+                "PASS  g #1\nPASS  last\nPASS  case_dir #1\nPASS  under_temp #1\nPASS  a_temp_dir\n\n8/9 passed.\n")
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (want, "", 1))
 
 

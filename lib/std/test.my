@@ -32,7 +32,8 @@ pub fun fail(msg: str) {
 }
 
 // A fresh, empty directory for the running case, under the case's scratch
-// root (`$TMPDIR` or `/tmp`), which the runner removes when the case ends,
+// root (`$TMPDIR` or `/tmp`; on Windows `%TEMP%`, std.fs's `temp_root`),
+// which the runner removes when the case ends,
 // passed or failed; each call gives a new one (`std.fs`'s
 // `make_temp_dir_in`: `d` and 16 random hexadecimal digits). Outside `myla
 // test` there is no case, which is a runtime error.
@@ -301,14 +302,15 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
         }
         lead.push(program)
     }
-    var base = match env("TMPDIR") { Some(d) => d, None => "" }
-    if base == "" { base = "/tmp" }
-    let root = f"{base}/myla-test-{now_ns()}"
+    // the cases' scratch directories under the temporary root, `$TMPDIR`
+    // or `/tmp`; on Windows `%TEMP%`'s, joined with `\` (MYLA-728)
+    let sep = if style.WINDOWS { "\\" } else { "/" }
+    let root = f"{fs.temp_root()}{sep}myla-test-{now_ns()}"
     let nonce = new_nonce()
     let head = record_head(nonce)
     var lines: [str] = []
     while k < cases.len() {
-        let dir = f"{root}/c{k}"
+        let dir = f"{root}{sep}c{k}"
         var argv = lead
         argv.push("--case")
         argv.push(f"{k}")
