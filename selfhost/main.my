@@ -33,7 +33,7 @@ from .loader import load_options, LoadOptions, parse_package_flag
 from .stdroot import default_stdlib_root
 from .diag import render
 from .target import Target, host, parse_target, target_names
-from .driver import cmd_build, cmd_interp, cmd_test, cmd_test_native, load_and_check
+from .driver import cmd_build, cmd_interp, cmd_test, cmd_test_native, load_for_host
 from .interp import TestOptions, all_tests
 from .project_cmd import project_build, project_run, project_test, project_check, project_clean, project_new, project_fetch, ends_with
 
@@ -223,7 +223,7 @@ fun main() {
         exit(cmd_build(cl.file, cl.output, cl.opts, cl.debug, cl.checked, cl.target))
     }
     if cmd == "check" {
-        match load_and_check(cl.file, cl.opts) {
+        match load_for_host(cl.file, cl.opts) {
             Ok(ch) => {
                 print("ok")
                 exit(0)

@@ -12,11 +12,10 @@
 
 from std.io import write, eprintln
 from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir, remove_dir_all, read_to_string
-from std.process import args, command, env, ExitStatus
-from std.time import now_ns
+from std.process import args, command, ExitStatus
 from .loader import LoadOptions
 from .target import Target
-from .driver import cmd_build, cmd_interp, own_tests, native_tests, emulator, load_and_check, decode
+from .driver import cmd_build, cmd_interp, own_tests, native_tests, emulator, load_for_host, decode, scratch_dir, scratch_sep
 from .interp import TestOptions, selected
 from .stdroot import EMBEDDED_ROOT
 from .test_programs import test_program_of, test_program_report
@@ -234,14 +233,12 @@ fun run_test_program_natively(h: Here, path: str, opts: LoadOptions, target: Tar
         Some(tp) => tp,
         None => { return [format("FAIL  {}: not a test program\n", file)] },
     }
-    var base = match env("TMPDIR") { Some(d) => d, None => "" }
-    if base == "" { base = "/tmp" }
-    let dir = format("{}/myla-test-{}", base, now_ns())
+    let dir = scratch_dir()
     match make_dir_all(dir) {
         Ok(()) => {},
         Err(e) => { return [format("FAIL  {}: cannot create {}\n", file, dir)] },
     }
-    let out = dir + "/program" + target.exe_suffix
+    let out = dir + scratch_sep() + "program" + target.exe_suffix
     // checked, as `myla test` runs everything (D175)
     if cmd_build(file, out, opts, false, true, target) != 0 {
         let gone = remove_dir_all(dir)
@@ -310,7 +307,7 @@ pub fun project_check(base: LoadOptions) -> int32 {
     let opts = options(h, base)
     var status = 0
     for path in source_files(h.project.root.dir + "/src") {
-        match load_and_check(shown(h, path), opts) {
+        match load_for_host(shown(h, path), opts) {
             Ok(ch) => {},
             Err(msg) => {
                 eprintln(msg)

@@ -21,7 +21,7 @@ from std.term import Stream, TermError
 from .lexer import lex
 from .tokens import Token, TokenKind
 from .ast import Decl, DeclKind, Stmt, StmtKind, ElseTail
-from .loader import load_program_opts, load_options, file_of, normalize, Loaded, type_errors
+from .loader import load_program_opts, load_options, for_host, file_of, normalize, Loaded, type_errors
 from .checker import build_checker_lazy, Checker, Type, checker_on
 from .diag import render_one, Report, carets
 from .tokens import SrcSpan
@@ -148,7 +148,8 @@ impl Session {
         var opts = load_options(self.stdlib)
         opts.packages = self.packages
         opts.overrides[ENTRY] = t.source
-        let prog = match load_program_opts(ENTRY, opts) {
+        // the host's own modules (MYLA-723)
+        let prog = match load_program_opts(ENTRY, for_host(ENTRY, opts)) {
             Ok(p) => p,
             Err(r) => {
                 report_all(r, t, input)

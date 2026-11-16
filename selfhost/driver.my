@@ -15,7 +15,7 @@
 from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
-from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports, in_stdlib, normalize, is_std_module, std_tree_root
+from .loader import load_program_opts, LoadOptions, for_target, for_host, file_of, Loaded, type_errors, warning_reports, in_stdlib, normalize, is_std_module, std_tree_root
 from .stdroot import EMBEDDED_ROOT
 from .target import Target, Os, parse_target, host, toolchain, with_files, with_libs, missing_tool, unsupported
 from .diag import render, Report
@@ -27,7 +27,8 @@ from .harness import harness_source, Harness, runner_case
 from std.test import cut_run, case_outcome, case_lines, record_head
 from std.process import command, env
 from std.time import now_ns
-from std.fs import make_dir_all, remove_dir_all, exists, read_to_string, current_dir
+from std.fs import make_dir_all, remove_dir_all, exists, read_to_string, current_dir, temp_root
+import std.path_style as style // `WINDOWS`: the separator of the machine the tools run on
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
@@ -60,6 +61,14 @@ pub fun load_and_check(entry: str, given: LoadOptions) -> Result<Checked, str> {
         },
         Err(errs) => Err(render(type_errors(prog, errs))),
     }
+}
+
+// `load_and_check` for a program run, tested or checked on the machine the
+// tools run on, not built: with the host's own modules (`for_host`,
+// MYLA-723), as a build takes its target's.
+pub fun load_for_host(entry: str, given: LoadOptions) -> Result<Checked, str> {
+    let (file, opts) = own_library(entry, given)
+    return load_and_check(file, for_host(file, opts))
 }
 
 // Type-check `file`, then generate its assembly for `target` (`debug`: with DWARF
@@ -151,7 +160,7 @@ fun step_failed(out: Output, label: str) -> bool {
 // `myla test <file> [--only <text>] [--list]`: run (or list) the file's
 // own #test cases, printing the report; the exit status.
 pub fun cmd_test(file: str, opts: LoadOptions, sel: TestOptions) -> int32 {
-    match load_and_check(file, opts) {
+    match load_for_host(file, opts) {
         Ok(ch) => {
             var it = new_interp(ch.checker, [file])
             return it.run_tests(sel)
@@ -218,14 +227,12 @@ pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, targ
         Some(h) => h,
         None => { return Ok(TestRun { report: [], passed: 0, total: 0 }) },
     }
-    var base = match env("TMPDIR") { Some(d) => d, None => "" }
-    if base == "" { base = "/tmp" }
-    let dir = format("{}/myla-test-{}", base, now_ns())
+    let dir = scratch_dir()
     match make_dir_all(dir) {
         Ok(()) => {},
         Err(e) => { return Err("myla: cannot create " + dir) },
     }
-    let out = dir + "/harness" + target.exe_suffix
+    let out = dir + scratch_sep() + "harness" + target.exe_suffix
     var nopts = opts
     // the target's own platform module is its `std.platform`, which the
     // harness imports too (through std.test): built as that module, with
@@ -271,6 +278,22 @@ pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, targ
     // interpreter's `myla test` lets it through
     write(2, err)
     return Ok(harness_report(h, decode(o.stdout), err, code))
+}
+
+// A scratch directory's path for the toolchain's own files (`myla test
+// --native`'s harness, a project's test program built natively):
+// `myla-test-` and the time under std.fs's temporary root (`$TMPDIR` or
+// `/tmp`; on Windows `%TEMP%`), joined with the separator of the machine
+// the tools run on (`scratch_sep`), as std.test's case directories are
+// (MYLA-729, MYLA-728).
+pub fun scratch_dir() -> str {
+    return format("{}{}myla-test-{}", temp_root(), scratch_sep(), now_ns())
+}
+
+// The separator a scratch path is joined with: `\` where the tools run on
+// Windows (D229), else `/`.
+pub fun scratch_sep() -> str {
+    return if style.WINDOWS { "\\" } else { "/" }
 }
 
 // The file a harness of `file`'s cases is built from for a target whose
@@ -483,7 +506,7 @@ fun report_lines(text: str) -> [str] {
 // `myla run <file> [args]`: interpret the program with argv
 // `[file, args...]`; the exit status.
 pub fun cmd_interp(file: str, opts: LoadOptions, prog_args: [str]) -> int32 {
-    match load_and_check(file, opts) {
+    match load_for_host(file, opts) {
         Ok(ch) => {
             var argv = [file]
             for a in prog_args { argv.push(a) }
@@ -514,7 +537,7 @@ pub fun cmd_interp(file: str, opts: LoadOptions, prog_args: [str]) -> int32 {
 // The `#test` cases declared in `file` itself (not in the modules it links),
 // run as `myla test` does in a project (MYLA-94); Err: the diagnostic.
 pub fun own_tests(file: str, opts: LoadOptions, sel: TestOptions) -> Result<TestRun, str> {
-    let ch = load_and_check(file, opts)?
+    let ch = load_for_host(file, opts)?
     var it = new_interp(ch.checker, [file])
     return Ok(it.run_test_cases(sel))
 }

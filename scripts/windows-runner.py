@@ -291,6 +291,10 @@ TEST_FILE = ('#test(2)[4]\n#test(3)[10]\nfun square(x: int) -> int {\n    return
              '#test\nfun sums() {\n    assert(square(3) + square(4) == 25, "five squared")\n}\n')
 TYPE_ERROR = 'fun main() {\n    let x: int = "s"\n    print(x)\n}\n'
 HELLO = 'fun main() {\n    print("Hello from Myla on Windows")\n}\n'
+# MYLA-729: `myla.exe test --native` builds its harness under %TEMP%, joined
+# with `\` (the harness is the program its cases run as)
+NATIVE_UNDER_TEMP = ('from std.process import args, env\n\n#test()[true]\nfun built_under_temp() -> bool {\n'
+                     '    return args()[0].starts_with(env("TEMP").unwrap_or("?") + "\\\\myla-test-")\n}\n')
 
 
 def lsp_input() -> str:
@@ -307,7 +311,8 @@ def step(argv, stdout=None, stderr="", code=0, stdin="", env=None, timeout=120, 
     OUT (`bin/…`, `tools/…`) or in the case's directory (`./…`). `stdout`
     exactly (None: not checked) or containing each of `has`; `stderr`
     exactly (None: not checked); `subst`: @CWD@ and @ANCHOR@ in `stdout`
-    and `env` are the case's directory as Windows names it and its drive;
+    and `env` are the case's directory as Windows names it and its drive
+    (a variable of `env` that is None is removed);
     `path_dir`: that directory first on the program search path; `dialog`:
     lines expected and text sent before the rest is read; `expect_timeout`:
     it must still run after `timeout` seconds (then killed); `repeat`: it
@@ -531,7 +536,8 @@ def build(out: str, myla: str, jobs: int) -> int:
     tdir = os.path.join(scratch, "tool-cases")
     os.makedirs(tdir)
     tool_files = {}
-    for name, text in (("t.my", TEST_FILE), ("bad.my", TYPE_ERROR), ("hello.my", HELLO)):
+    for name, text in (("t.my", TEST_FILE), ("bad.my", TYPE_ERROR), ("hello.my", HELLO),
+                       ("paths.my", tw.HOST_PATHS), ("host.my", tw.HOST_TESTS), ("temp.my", NATIVE_UNDER_TEMP)):
         with open(os.path.join(tdir, name), "w", encoding="utf-8") as fh:
             fh.write(text)
         tool_files[name] = file("tools/" + name, text)
@@ -543,6 +549,13 @@ def build(out: str, myla: str, jobs: int) -> int:
                                    checked["code"])], tool_files)
     case("tools/myla-test", [step(["tools/myla.exe", "test", "t.my"], tested["stdout"], tested["stderr"],
                                   tested["code"])], tool_files)
+    # MYLA-723: the interpreter reads Windows' std.path, std.platform and
+    # std.path_style; MYLA-729: its case root is under %TEMP%, outside Wine's Z:
+    case("tools/myla-host-modules", [
+        step(["tools/myla.exe", "run", "paths.my"], "a\nx86_64-windows\ntrue\n"),
+        step(["tools/myla.exe", "test", "host.my"], "PASS  up #1\nPASS  under_temp #1\n\n2/2 passed.\n",
+             env={"TMPDIR": None}),
+    ], tool_files)
     case("tools/myla-lsp", [step(["tools/myla-lsp.exe"], None, None, stdin=lsp_input(),
                                  has=['"id":1,"result":{', '"id":2,"result":null'])])
     # building on Windows itself, with the LLVM there (D211)
@@ -554,6 +567,9 @@ def build(out: str, myla: str, jobs: int) -> int:
         # a harness of the file's cases, its cases its children (MYLA-705)
         step(["tools/myla.exe", "test", "t.my", "--native"], native["stdout"], native["stderr"], native["code"],
              env={"TMPDIR": "@CWD@"}, subst=True, needs=LLVM_TOOLS, timeout=300),
+        # and under %TEMP% without TMPDIR (MYLA-729)
+        step(["tools/myla.exe", "test", "temp.my", "--native"], "PASS  built_under_temp #1\n\n1/1 passed.\n",
+             env={"TMPDIR": None}, needs=LLVM_TOOLS, timeout=300),
     ], tool_files)
 
     def make(b: tuple[str, str, str]) -> str:
@@ -657,7 +673,10 @@ class Runner:
             return text
         env = dict(self.env)
         for k, v in s["env"].items():
-            env[k] = put(v)
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = put(v)
         if s["path_dir"]:
             if self.wine:
                 env["WINEPATH"] = subst["@CWD@"]

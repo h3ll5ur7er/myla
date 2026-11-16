@@ -31,6 +31,7 @@ them, and MYLA_REQUIRE_TARGETS makes a missing one fail there).
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -1529,6 +1530,155 @@ class BootstrapLink(unittest.TestCase):
                                            "prog.exe.kernel32.def"])
         ran = subprocess.run([*wine(), os.path.join(booted, "prog.exe")], capture_output=True, timeout=120)
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"42 true\n", b"", 0))
+
+
+# MYLA-723: what a program run on the machine the tools run on reads of the
+# standard library's modules that a target has copies of
+HOST_PATHS = ('import std.path as path\nimport std.platform as platform\nimport std.path_style as style\n\n'
+              'fun main() {\n    print(path.parent("a\\\\b").unwrap_or("none"))\n    print(platform.TARGET)\n'
+              '    print(style.WINDOWS)\n}\n')
+HOST_TESTS = ('import std.path as path\nimport std.test as test\nfrom std.process import env\n\n'
+              '#test("a\\\\b")[Some("a")]\nfun up(p: str) -> Option<str> {\n    return path.parent(p)\n}\n\n'
+              # MYLA-729: the interpreter's case root under %TEMP%, joined with `\`
+              '#test()[true]\nfun under_temp() -> bool {\n    let d = test.temp_dir()\n'
+              '    return d.starts_with(env("TEMP").unwrap_or("?") + "\\\\myla-test-")\n}\n')
+# what only Windows' std.platform declares: checked against Linux's, an error
+HOST_CHECKED = 'import std.platform as platform\n\nfun never() {\n    platform.windows_start()\n}\n\nfun main() {}\n'
+
+
+# A client of the language server for HostModules: myla-lsp.exe as its
+# child, open.txt's messages sent, the first diagnostics printed, then
+# close.txt's sent
+LSP_CLIENT = '''from std.process import command
+from std.io import buffered
+import std.bytes as bytes
+import std.fs as fs
+import std.num as num
+
+fun main() {
+    var child = match command("./myla-lsp.exe").spawn() {
+        Ok(c) => c
+        Err(e) => panic(f"spawn: {e}")
+    }
+    var w = match child.take_stdin() { Some(s) => s, None => panic("no input") }
+    var r = buffered(match child.take_stdout() { Some(s) => s, None => panic("no output") })
+    let sent = w.write(bytes.from_str(fs.read_to_string("open.txt").unwrap_or("")))
+    while true {
+        var length = 0
+        while true {
+            let line = match r.read_line() {
+                Ok(Some(l)) => l
+                _ => panic("the server ended")
+            }
+            if line == "\\r" || line == "" { break }
+            if line.starts_with("Content-Length: ") {
+                length = num.parse_int(line[16:line.len() - 1]).unwrap_or(0) as int
+            }
+        }
+        let body = match r.read_exact(length) {
+            Ok(Some(b)) => b
+            _ => panic("the server ended")
+        }
+        if body.contains("publishDiagnostics") {
+            print(body)
+            break
+        }
+    }
+    let closing = w.write(bytes.from_str(fs.read_to_string("close.txt").unwrap_or("")))
+    let closed = w.close()
+    let x = child.wait()
+}
+'''
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class HostModules(unittest.TestCase):
+    """MYLA-723: a `myla.exe` built for Windows runs, tests, checks and
+    serves a program with Windows' own std.platform, std.path and
+    std.path_style (the loader's `for_host`), as a native build for Windows
+    takes them (`for_target`); a module of the library named as the entry is
+    itself all the same (`myla test lib/std/path.my` runs path.my's cases).
+    MYLA-729: its interpreter's case root is under `%TEMP%`."""
+
+    @classmethod
+    def setUpClass(cls):
+        wine_env()
+        cls.tmp = tempfile.mkdtemp()
+        for exe, src in (("myla.exe", "selfhost/main.my"), ("myla-lsp.exe", "tools/lsp/main.my")):
+            subprocess.run([selfhost_tool("main"), "build", src, "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT,
+                            "-o", os.path.join(cls.tmp, exe)], cwd=_REPO, check=True, timeout=600)
+        for name, text in (("p.my", HOST_PATHS), ("t.my", HOST_TESTS), ("c.my", HOST_CHECKED)):
+            with open(os.path.join(cls.tmp, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def myla(self, *args: str, stdin: bytes = b"", cwd: str | None = None, exe: str = "myla.exe"):
+        ran = subprocess.run([*wine(), os.path.join(self.tmp, exe), *args], input=stdin, capture_output=True,
+                             cwd=cwd or self.tmp, timeout=600)
+        return ran.stdout.decode(), ran.stderr.decode(), ran.returncode
+
+    def test_run(self):
+        self.assertEqual(self.myla("run", "p.my"), ("a\nx86_64-windows\ntrue\n", "", 0))
+
+    def test_test_interpreted(self):
+        self.assertEqual(self.myla("test", "t.my"), ("PASS  up #1\nPASS  under_temp #1\n\n2/2 passed.\n", "", 0))
+
+    def test_check(self):
+        self.assertEqual(self.myla("check", "c.my"), ("ok\n", "", 0))
+
+    def test_repl(self):
+        out, err, code = self.myla("repl", stdin=b'import std.path as path\npath.parent("a\\\\b")\n')
+        self.assertEqual((out, err, code), ('Some("a")\n', "myla> myla> myla> \n", 0))
+
+    def test_the_language_server(self):
+        # driven by a Windows program of its own: the server waits for its
+        # input to pause before it checks (`ready`), which under Wine a Linux
+        # parent's pipe never shows (MYLA-708)
+        def frame(m: dict) -> str:
+            body = json.dumps(m)
+            return f"Content-Length: {len(body.encode())}\r\n\r\n{body}"
+        uri = "file:///c.my"
+        with open(os.path.join(self.tmp, "open.txt"), "w", encoding="utf-8", newline="") as fh:
+            fh.write(frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}})
+                     + frame({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {
+                         "uri": uri, "languageId": "myla", "version": 1, "text": HOST_CHECKED}}}))
+        with open(os.path.join(self.tmp, "close.txt"), "w", encoding="utf-8", newline="") as fh:
+            fh.write(frame({"jsonrpc": "2.0", "id": 2, "method": "shutdown"}) + frame({"jsonrpc": "2.0", "method": "exit"}))
+        with open(os.path.join(self.tmp, "client.my"), "w", encoding="utf-8") as fh:
+            fh.write(LSP_CLIENT)
+        subprocess.run([selfhost_tool("main"), "build", "client.my", "--target", "x86_64-windows", "--stdlib",
+                        STDLIB_ROOT, "-o", "client.exe"], cwd=self.tmp, check=True, timeout=300)
+        out, err, code = self.myla(exe="client.exe")
+        self.assertEqual((err, code), ("", 0))
+        got = json.loads(out)
+        self.assertEqual(got["method"], "textDocument/publishDiagnostics")
+        self.assertEqual(got["params"], {"uri": uri, "diagnostics": []})
+
+    def test_a_native_harness_is_built_under_temp(self):
+        # MYLA-729: under %TEMP%, joined with `\`; Wine has no LLVM for
+        # Windows, so the build fails and the harness is kept, its path in
+        # the message (Windows' runner builds and runs it: tools/myla-build)
+        with open(os.path.join(self.tmp, "sq.my"), "w", encoding="utf-8") as fh:
+            fh.write("#test(2)[4]\nfun sq(x: int) -> int {\n    return x * x\n}\n")
+        out, err, code = self.myla("test", "sq.my", "--native")
+        self.assertEqual((out, code), ("", 1))
+        import re
+        kept = re.search(r"\(kept at (C:\\users\\[^\\]+\\Temp\\myla-test-\d+)\\harness\.exe\.my\)\n$", err)
+        self.assertIsNotNone(kept, err)
+        unix = os.path.join(os.environ["WINEPREFIX"], "drive_c", *kept.group(1)[3:].split("\\"))
+        self.assertTrue(os.path.isfile(os.path.join(unix, "harness.exe.my")))
+        shutil.rmtree(unix)
+
+    def test_a_module_of_the_library_named_is_itself(self):
+        # path.my's own cases (Linux's rules), not its Windows copy's
+        linux = subprocess.run([selfhost_tool("main"), "test", "lib/std/path.my", "--stdlib", "lib"],
+                               capture_output=True, text=True, cwd=_REPO, timeout=600)
+        self.assertEqual((linux.stderr, linux.returncode), ("", 0))
+        self.assertEqual(self.myla("test", "lib/std/path.my", "--stdlib", "lib", cwd=_REPO), (linux.stdout, "", 0))
 
 
 # MYLA-707: the console as std.term's terminal and std.signal's signals.

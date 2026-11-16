@@ -12,7 +12,7 @@
 from std.io import stdin
 from std.json import Json, field
 from std.fs import read_to_string
-from ...selfhost.loader import load_program_opts, normalize, type_errors, warning_reports, source_text, in_stdlib
+from ...selfhost.loader import load_program_opts, for_host, normalize, type_errors, warning_reports, source_text, in_stdlib
 from ...selfhost.diag import Report, all_reports, caret_range, warning_name
 from ...selfhost.checker import build_checker_lazy
 from ...selfhost.tokens import SrcSpan
@@ -196,7 +196,8 @@ impl Server {
         var found: Option<Report> = None
         // the warnings of a program that checks (D95)
         var warned: [Report] = []
-        match load_program_opts(path, ctx.opts) {
+        // with the host's own modules, as `myla check` (MYLA-723)
+        match load_program_opts(path, for_host(path, ctx.opts)) {
             Err(r) => { found = Some(r) },
             Ok(prog) => {
                 // a file of the standard library may use its primitives (D152)
