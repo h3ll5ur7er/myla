@@ -458,6 +458,20 @@ impl CodeGen {
             "\tcall *(%rbx)", "\taddq $96, %rsp", "\tpopq %rbx", "\tret", ""] {
             self.raw(line)
         }
+        // `__win_wait_posted` (MYLA-706): the callback a wait of the
+        // system's thread pool calls (`RegisterWaitForSingleObject`, its
+        // context in %rcx), on a thread of the pool's, which has no state
+        // block of the runtime's: so it is these lines and nothing of
+        // Myla's. Its context is `[function][port][key][overlapped]
+        // [posted]`: it sets `posted` to 1, then calls the function (the
+        // address of `PostQueuedCompletionStatus`) with the port, no
+        // bytes, the key and the overlapped, which queues the packet that
+        // tells std.platform's poller the object was signalled.
+        for line in ["__win_wait_posted:", "\tsubq $40, %rsp", "\tmovq $1, 32(%rcx)", "\tmovq 16(%rcx), %r8",
+            "\tmovq 24(%rcx), %r9", "\txorl %edx, %edx", "\tmovq (%rcx), %rax", "\tmovq 8(%rcx), %rcx",
+            "\tcall *%rax", "\taddq $40, %rsp", "\tret", ""] {
+            self.raw(line)
+        }
     }
 
     // A call of kernel32's `name` from the runtime's own assembly, through
@@ -537,6 +551,7 @@ impl CodeGen {
         self.raw(".Lwin_fault_other:")
         self.raw("\txorl %eax, %eax")
         self.raw("\tret")
+        self.emit_windows_ctrl_handler()
         // (no block to run the exit hook with: ExitProcess at once)
         self.raw("__win_no_slot:")
         self.raw("\tandq $-16, %rsp")
@@ -549,6 +564,92 @@ impl CodeGen {
         self.raw(".Lmsg_win_no_slot:")
         self.raw("\t.ascii \"runtime error: no thread-local storage slot left\\n\"")
         self.raw("")
+    }
+
+    // `__win_on_ctrl` (MYLA-707, D216), the console's control handler that
+    // std.platform adds (`SetConsoleCtrlHandler`): Windows calls it with
+    // the event in %ecx, Win64's, on a thread of its own, which has no state
+    // block (the workers' TLS slot is empty there), so it reaches only the
+    // process's words. Ctrl-C and Ctrl-Break (0, 1) are SIGINT, the
+    // console's close, a logoff and a shutdown (2, 5, 6) SIGTERM; anything
+    // else is passed on (FALSE). A Ctrl-C or a Ctrl-Break is counted first
+    // (`__win_console_cp`'s fifth word, a locked add): Windows ends a read
+    // of the console's lines with it, giving 0 bytes and no error, and
+    // std.platform's `read` tells that from the input's end by the count
+    // (MYLA-708). While someone listens (`__sig_pipe`'s
+    // count), the signal's number goes to std.signal's pipe as a byte (its
+    // write end the first word), as Linux's `__on_signal` writes it, and
+    // the event is handled (TRUE); after a SIGTERM's, the thread waits,
+    // since Windows ends the process once its handlers return, so that the
+    // program can end itself first. Else, while std.term holds the console
+    // raw (`__exit_hook`), `__on_raw_signal` puts its mode back (D192) and
+    // the event goes on to the next handler, Windows' default, which ends
+    // the process. The registers Win64 keeps and Myla's code doesn't (%rdi,
+    // %rsi, %xmm6 to %xmm15) are saved with the rest it keeps; the stack
+    // aligned to 16 bytes, the shadow space, the fifth argument at 32, the
+    // byte at 40, the count written at 48, the vector registers from 56.
+    fun emit_windows_ctrl_handler(var self) {
+        let saved = ["%rbx", "%rbp", "%rdi", "%rsi", "%r12", "%r13", "%r14", "%r15"]
+        self.raw("__win_on_ctrl:")
+        for r in saved { self.raw(f"\tpushq {r}") }
+        self.raw("\tsubq $216, %rsp")
+        var x = 6
+        while x <= 15 {
+            self.raw(format("\tmovdqu %xmm{}, {}(%rsp)", x, 56 + 16 * (x - 6)))
+            x += 1
+        }
+        self.raw("\tmovl $2, %ebx")
+        self.raw("\tcmpl $1, %ecx")
+        self.raw("\tja .Lwin_ctrl_term")
+        self.raw("\tlock incq __win_console_cp+32(%rip)")
+        self.raw("\tjmp .Lwin_ctrl_signal")
+        self.raw(".Lwin_ctrl_term:")
+        self.raw("\tmovl $15, %ebx")
+        for ev in [2, 5] {
+            self.raw(f"\tcmpl ${ev}, %ecx")
+            self.raw("\tje .Lwin_ctrl_signal")
+        }
+        self.raw("\tcmpl $6, %ecx")
+        self.raw("\tjne .Lwin_ctrl_pass")
+        self.raw(".Lwin_ctrl_signal:")
+        self.raw("\tcmpq $0, __sig_pipe+16(%rip)")
+        self.raw("\tje .Lwin_ctrl_raw")
+        self.raw("\tmovb %bl, 40(%rsp)")
+        self.raw("\tmovq __sig_pipe(%rip), %rcx")
+        self.raw("\tleaq 40(%rsp), %rdx")
+        self.raw("\tmovl $1, %r8d")
+        self.raw("\tleaq 48(%rsp), %r9")
+        self.raw("\tmovq $0, 32(%rsp)")
+        self.win_call("WriteFile")
+        self.raw("\tcmpl $15, %ebx")
+        self.raw("\tjne .Lwin_ctrl_handled")
+        self.raw(".Lwin_ctrl_wait:")
+        self.raw("\tmovl $-1, %ecx")
+        self.win_call("Sleep")
+        self.raw("\tjmp .Lwin_ctrl_wait")
+        self.raw(".Lwin_ctrl_handled:")
+        self.raw("\tmovl $1, %eax")
+        self.raw("\tjmp .Lwin_ctrl_ret")
+        self.raw(".Lwin_ctrl_raw:")
+        self.raw("\tcmpq $0, __exit_hook(%rip)")
+        self.raw("\tje .Lwin_ctrl_pass")
+        self.raw("\tmovl %ebx, %edi")
+        self.raw("\tcall __on_raw_signal")
+        self.raw(".Lwin_ctrl_pass:")
+        self.raw("\txorl %eax, %eax")
+        self.raw(".Lwin_ctrl_ret:")
+        x = 6
+        while x <= 15 {
+            self.raw(format("\tmovdqu {}(%rsp), %xmm{}", 56 + 16 * (x - 6), x))
+            x += 1
+        }
+        self.raw("\taddq $216, %rsp")
+        var k = saved.len() - 1
+        while k >= 0 {
+            self.raw(f"\tpopq {saved[k]}")
+            k -= 1
+        }
+        self.raw("\tret")
     }
 
     // The `len` bytes at `label` written to the standard error

@@ -312,6 +312,47 @@ pub fun codegen_on(src: str) -> CodeGen {
     return new_codegen(checker_on(src))
 }
 
+// A Windows code generator that has noted the import slots `syms`
+// (`note_import`), for `windows_imports`' cases.
+fun codegen_imports(syms: [str]) -> CodeGen {
+    var g = codegen_on("fun main() {}")
+    g.windows = true
+    for s in syms { g.note_import(s) }
+    return g
+}
+
+// The system DLLs other than kernel32 that a Windows program calls into
+// (D212), each with the functions of it std.platform calls: a function
+// listed here is imported from its DLL, any other from kernel32.dll
+// (`windows_dll`). A new DLL, or a new function of one, is a line here and
+// nothing else: the driver makes an import library of each DLL the program
+// calls (`windows_imports`, MYLA-722). The API set's DLL is the documented
+// home of WaitOnAddress and WakeByAddressSingle, which kernel32 doesn't
+// export (Windows 8 on).
+pub fun windows_dlls() -> [(str, [str])] {
+    return [
+        ("bcrypt.dll", ["BCryptGenRandom"]),
+        ("api-ms-win-core-synch-l1-2-0.dll", ["WaitOnAddress", "WakeByAddressSingle"]),
+        ("ws2_32.dll", ["WSAStartup", "WSAGetLastError", "WSASocketW", "WSAIoctl", "WSARecv", "WSARecvFrom", "WSASend", "WSAPoll",
+                        "bind", "listen", "accept", "connect", "closesocket", "ioctlsocket", "getsockopt", "setsockopt",
+                        "getsockname", "getpeername", "shutdown", "send", "recv", "sendto", "recvfrom",
+                        "GetAddrInfoW", "FreeAddrInfoW"]),
+        ("iphlpapi.dll", ["GetNetworkParams"]),
+    ]
+}
+
+// The DLL a Windows program imports the function `name` from.
+#test("WriteFile")["kernel32.dll"]
+#test("BCryptGenRandom")["bcrypt.dll"]
+#test("WaitOnAddress")["api-ms-win-core-synch-l1-2-0.dll"]
+#test("WSARecv")["ws2_32.dll"]
+pub fun windows_dll(name: str) -> str {
+    for (dll, names) in windows_dlls() {
+        for n in names { if n == name { return dll } }
+    }
+    return "kernel32.dll"
+}
+
 pub fun new_codegen(c: Checker) -> CodeGen {
     var handed: [str: [int32]] = [:]
     for k in c.handovers.keys() {
@@ -402,12 +443,32 @@ impl CodeGen {
     }
 
     // The functions of the system's DLLs the program calls through their
-    // import slots (`__imp_<name>`, MYLA-702), in the order the code first
-    // names them: what the driver makes its import library of (D211, D212);
-    // [] but on Windows.
-    fun windows_imports(self) -> [str] {
+    // import slots (`__imp_<name>`, MYLA-702), by DLL (`windows_dll`):
+    // kernel32's first, then the others in `windows_dlls`' order, each
+    // DLL's functions in the order the code first names them, a DLL none of
+    // whose functions is called left out. What the driver makes the import
+    // libraries of, one a DLL (D211, D212, MYLA-722); [] but on Windows.
+    #test(codegen_imports(["__imp_WriteFile", "__imp_BCryptGenRandom", "__imp_WakeByAddressSingle", "__imp_ExitProcess", "__imp_WaitOnAddress", "__imp_WriteFile"]))[[("kernel32.dll", ["WriteFile", "ExitProcess"]), ("bcrypt.dll", ["BCryptGenRandom"]), ("api-ms-win-core-synch-l1-2-0.dll", ["WakeByAddressSingle", "WaitOnAddress"])]]
+    #test(codegen_imports(["__imp_ExitProcess"]))[[("kernel32.dll", ["ExitProcess"])]]
+    #test(codegen_imports([]))[[]]
+    fun windows_imports(self) -> [(str, [str])] {
+        var dlls = ["kernel32.dll"]
+        for d in windows_dlls() { dlls.push(d.0) }
+        var out: [(str, [str])] = []
+        for dll in dlls {
+            var names: [str] = []
+            for k in self.imports.keys() { if windows_dll(k) == dll { names.push(k) } }
+            if names.len() > 0 { out.push((dll, names)) }
+        }
+        return out
+    }
+
+    // The import libraries as comments at the assembly's end, a line a DLL
+    // (`# import <dll> <function> …`), for a build of the text by another
+    // tool than the driver (tests/burn/_native.py's `windows_imports`).
+    fun windows_import_lines(self) -> [str] {
         var out: [str] = []
-        for k in self.imports.keys() { out.push(k) }
+        for (dll, names) in self.windows_imports() { out.push("# import " + dll + " " + names.join(" ")) }
         return out
     }
 
@@ -2540,9 +2601,12 @@ impl CodeGen {
         if self.windows {
             // the console's code pages before the program set them to
             // UTF-8, put back at its end (std.platform's `windows_start`,
-            // D215)
+            // D215), then the screen buffer whose output mode
+            // `term_enable_vt` changed and that mode (MYLA-707), then how
+            // many Ctrl-Cs and Ctrl-Breaks the console's control handler
+            // took (`__win_on_ctrl`; std.platform's `read`, MYLA-708)
             out.push("__win_console_cp:")
-            out.push("\t.skip 16")
+            out.push("\t.skip 40")
             // what VirtualQuery answers `unmap_memory`, and how many bytes
             // a read or a write moved: the platform's own words, as those
             // run while the heap grows or report that it can't; with tasks
@@ -2553,16 +2617,19 @@ impl CodeGen {
                 out.push("__win_io:")
                 out.push("\t.skip 8")
             }
-            // WaitOnAddress and WakeByAddressSingle, which kernel32 doesn't
-            // export: their addresses, found at the start (std.platform's
-            // `windows_start`, MYLA-703; 0 where the system has none)
-            out.push("__win_synch:")
-            out.push("\t.skip 16")
             // how many worker threads `__start_workers` made, and how many
             // of them started (`__win_worker`), which the exit waits for
             // (std.platform's `workers_started`, MYLA-703)
             out.push("__win_threads:")
             out.push("\t.skip 16")
+            // std.platform's sockets and its I/O completion port: their
+            // lock, the port, the table of the handles it does overlapped
+            // I/O on, Winsock started, its extensions' addresses, the
+            // count naming its pipes, a wake-up posted, the handles closed
+            // later, those looked at each millisecond, Winsock's functions
+            // the poller calls (std.platform's `NET_…` words, MYLA-706)
+            out.push("__win_net:")
+            out.push("\t.skip 104")
             // with tasks, the offset in the TEB (`%gs`) of the TLS slot
             // holding each thread's block (`win_tls_block`)
             if self.frames {
@@ -2574,6 +2641,8 @@ impl CodeGen {
         if self.line_files.len() > 0 { for l in self.dbg_sections() { out.push(l) } }
         // (an ELF note: COFF has no executable stack to mark)
         if !self.windows { out.push("\t.section .note.GNU-stack,\"\",@progbits") }
+        // the import libraries' functions (MYLA-722)
+        if self.windows { for l in self.windows_import_lines() { out.push(l) } }
         out.push("")
         return join_lines(out)
     }

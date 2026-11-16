@@ -11,7 +11,7 @@ Found while building [[MYLA-702]]. Windows commits a thread's stack a page at a 
 Wine maps the whole stack it reserves, so the suites under Wine can't show this ([[MYLA-708]]'s Windows runner can). The main thread reserves 120 MiB (`/stack:125829120`) and commits as it grows.
 
 - [x] On Windows, a prologue whose frame is 4 KiB or more touches each page from the top down (a loop of `subq $4096, %rsp; orq $0, (%rsp)`, or a call of a probe routine of the runtime's), as `__chkstk` does; Linux's code unchanged
-- [ ] A test: a recursion through a function with a 64 KiB frame, on the Windows runner ([[MYLA-708]]) — written (`tests/burn/test_windows.py`, `FramesOnWindows`), skipped under Wine, which commits the whole stack: it runs on Windows itself, which only [[MYLA-708]]'s runner has
+- [ ] A test: a recursion through a function with a 64 KiB frame, on the Windows runner ([[MYLA-708]]) — written (`tests/burn/test_windows.py`'s `FRAMES`): `FramesOnWindows` runs it under Wine, which commits the whole stack, and [[MYLA-708]]'s `windows` job on Windows itself (`scripts/windows-runner.py`'s `frames/64-kib`, on 1, 2 and 16 workers); open until that job's first run, on the pull request
 - [x] Workers' stacks ([[MYLA-703]]) get the same: `CreateThread`'s stack is committed the same way
 
 ## What changed

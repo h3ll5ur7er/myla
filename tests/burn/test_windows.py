@@ -8,7 +8,8 @@ as on Linux. What isn't there yet says so (D210): random bytes are
 `Unsupported`. MYLA-703: tasks run on `MYLA_THREADS` workers,
 threads of their own, and a stack overflow is reported as on Linux
 (`Workers`); MYLA-717: a frame of a page or more is probed (`StackProbes`,
-and `FramesOnWindows` on Windows itself, MYLA-708's runner).
+and `FramesOnWindows`, which Windows itself runs on MYLA-708's runner,
+`scripts/windows-runner.py`).
 
 Files, directories and paths (MYLA-704): std.fs over kernel32 in UTF-16,
 Windows' errors as Linux's causes where a program sees them, and std.path
@@ -17,6 +18,10 @@ on Windows' paths (`std/path_windows.my`, the loader's copy for the target).
 Child processes (MYLA-705): `Children` runs std.process with a Windows
 program of its own as the child, and a test harness's cases as children.
 
+The console (MYLA-707): `Console` runs std.term and std.signal with a
+pseudo-terminal as Wine's console and a Unix SIGINT as Ctrl-C;
+`RUNNER_CASES` are what only Windows' own console shows (MYLA-708).
+
 Skipped where clang, llvm-dlltool, lld-link or Wine is missing (CI installs
 them, and MYLA_REQUIRE_TARGETS makes a missing one fail there).
 """
@@ -24,10 +29,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import struct
 import subprocess
-import sys
 import tempfile
+import time
 import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON, wine, wine_env
@@ -86,6 +92,22 @@ def pe_facts(path: str) -> dict:
     return {"machine": machine, "pe32plus": magic == 0x20B, "subsystem": subsystem, "dlls": dlls}
 
 
+def coff_imports(path: str) -> dict[str, list[str]]:
+    """The functions the PE file `path` imports, by DLL (lowercase), as
+    `llvm-readobj --coff-imports` lists them (MYLA-722)."""
+    listed = subprocess.run(["llvm-readobj", "--coff-imports", path], capture_output=True, text=True, check=True).stdout
+    out: dict[str, list[str]] = {}
+    dll = ""
+    for line in listed.splitlines():
+        words = line.split()
+        if words[:1] == ["Name:"]:
+            dll = words[1].lower()
+            out[dll] = []
+        elif words[:1] == ["Symbol:"]:
+            out[dll].append(words[1])
+    return out
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
 class HelloWorld(unittest.TestCase):
@@ -121,6 +143,10 @@ class HelloWorld(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(self.tmp)), ["a.exe", "main.my"])
         facts = pe_facts(os.path.join(self.tmp, "a.exe"))
         self.assertEqual(facts, {"machine": 0x8664, "pe32plus": True, "subsystem": 3, "dlls": ["kernel32.dll"]})
+        # (MYLA-722: WaitOnAddress is imported where the program parks, not
+        # looked up at every start)
+        self.assertEqual(list(coff_imports(os.path.join(self.tmp, "a.exe"))), ["kernel32.dll"])
+        self.assertNotIn("GetProcAddress", coff_imports(os.path.join(self.tmp, "a.exe"))["kernel32.dll"])
         ran = self.run_exe(exe="a.exe")
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"hello, world\n", b"", 0))
 
@@ -200,18 +226,71 @@ class HelloWorld(unittest.TestCase):
         ran = self.run_exe(stdin="one\ntw\u00f6\n".encode())
         self.assertEqual((ran.stdout.decode(), ran.stderr, ran.returncode), ("<one>\n<tw\u00f6>\n", b"", 0))
 
-    def test_what_isnt_there_yet_says_so(self):
-        # D210: random bytes are `Unsupported` until MYLA-722, and with them
-        # a temporary directory's name
-        src = ('import std.fs as fs\n'
+    def test_a_socket_imports_winsock(self):
+        # MYLA-706: sockets over ws2_32 (D212), which only a program that
+        # opens one imports (Unsupported until then, D210)
+        src = ('import std.net as net\n'
                'fun main() {\n'
-               '    match fs.make_temp_dir() {\n'
-               '        Ok(d) => { print("made") },\n'
+               '    match net.udp_bind(net.parse_addr("127.0.0.1:0").expect("addr")) {\n'
+               '        Ok(s) => { print("bound") },\n'
                '        Err(e) => { print(f"{e}") },\n'
                '    }\n'
                '}\n')
         ran = self.build_and_run(src)
-        self.assertEqual((ran.stdout, ran.returncode), (b"unsupported (Unsupported)\n", 0))
+        self.assertEqual((ran.stdout, ran.returncode), (b"bound\n", 0))
+        self.assertIn("ws2_32.dll", pe_facts(os.path.join(self.tmp, "prog.exe"))["dlls"])
+
+    def test_an_import_library_per_dll(self):
+        # MYLA-722: random bytes from bcrypt (D212), the workers' parking
+        # from the API set of WaitOnAddress, each DLL's import library made
+        # of the functions the program calls of it (the code generator's
+        # `windows_dll`), none left beside the program; one that calls only
+        # kernel32's functions imports only kernel32 (the hello world above)
+        src = ('import std.uuid as uuid\n'
+               'import std.random as random\n'
+               'async fun twice(n: int) -> int {\n    return 2 * n\n}\n'
+               'async fun main() {\n'
+               '    let a = f"{uuid.v4()}"\n'
+               '    let b = f"{uuid.v4()}"\n'
+               '    print(a.len() == 36 && a[14] == \'4\' && a != b)\n'
+               '    var r = random.from_os()\n'
+               '    var seen: [int: bool] = [:]\n'
+               '    for i in 0..100 { seen[r.int_in(0, 1000000)] = true }\n'
+               '    print(seen.len() > 90)\n'
+               '    async let x = twice(21)\n'
+               '    print(await x)\n'
+               '}\n')
+        built = self.build(src)
+        self.assertEqual((built.stderr, built.returncode), ("", 0))
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["main.my", "prog.exe"])
+        exe = os.path.join(self.tmp, "prog.exe")
+        self.assertEqual(pe_facts(exe)["dlls"], ["kernel32.dll", "bcrypt.dll", "api-ms-win-core-synch-l1-2-0.dll"])
+        imports = coff_imports(exe)
+        self.assertEqual(imports["bcrypt.dll"], ["BCryptGenRandom"])
+        self.assertEqual(sorted(imports["api-ms-win-core-synch-l1-2-0.dll"]), ["WaitOnAddress", "WakeByAddressSingle"])
+        self.assertNotIn("GetProcAddress", imports["kernel32.dll"])
+        ran = self.run_exe()
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"true\ntrue\n42\n", b"", 0))
+
+    def test_temporary_files_and_directories(self):
+        # MYLA-722: their random names, under %TEMP% (D227)
+        src = ('import std.fs as fs\n'
+               'from std.process import env\n'
+               'fun main() {\n'
+               '    let root = env("TEMP").unwrap_or("")\n'
+               '    let d = fs.make_temp_dir().expect("dir")\n'
+               '    let e = fs.make_temp_dir().expect("dir")\n'
+               '    print(root != "" && d.starts_with(root + "\\\\myla-") && d.len() == root.len() + 22 && d != e)\n'
+               '    print(fs.is_dir(d))\n'
+               '    let (p, file) = fs.make_temp_file().expect("file")\n    var f = file\n'
+               '    let c = f.close()\n'
+               '    print(fs.is_file(p) && p.starts_with(root + "\\\\myla-"))\n'
+               '    for x in [d, e] { fs.remove_dir(x).expect("rmdir") }\n'
+               '    fs.remove_file(p).expect("rm")\n'
+               '    print(fs.exists(d) || fs.exists(p))\n'
+               '}\n')
+        ran = self.build_and_run(src)
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"true\ntrue\ntrue\nfalse\n", b"", 0))
 
     def test_files_and_directories(self):
         # MYLA-704: names in UTF-8 made UTF-16, an append at the end, a
@@ -620,6 +699,15 @@ def big_frame_program(main: str) -> str:
     return "".join(out) + main
 
 
+# MYLA-717's recursion through the 64 KiB frame on the main thread, 100 deep,
+# and in two tasks, 60 deep each, with MYLA_THREADS=2, and what it prints
+# (`FramesOnWindows` under Wine, scripts/windows-runner.py on Windows, MYLA-708)
+FRAMES = big_frame_program("async fun work() -> int64 {\n    return down(60, 0)\n}\n\n"
+                           "async fun main() {\n    async let a = work()\n    async let b = work()\n"
+                           "    print(down(100, 0))\n    print(await a + await b)\n}\n")
+FRAMES_OUT = b"3836\n4632\n"
+
+
 def reserved_bytes(pid: int) -> int:
     """How much of the address space of the process `pid` is reserved with
     nothing behind it (Linux's `---p` mappings: under Wine, the reserved
@@ -692,21 +780,386 @@ class Children(unittest.TestCase):
         # the harness once, which starts a child of itself for each case
         # (its scratch directory `c<k>`, where runs of the harness, MYLA-370,
         # have one for all), under Wine without Wine named again
-        source = ('from std.process import exit, env\n\n'
+        source = ('from std.process import exit, env\nimport std.test as test\nimport std.fs as fs\n\n'
                   '#test(1)[panic("boom")]\n#test(2)[2]\n#test(3)[panic("boom")]\n#test(4)[5]\n'
                   'fun f(x: int) -> int {\n    print(f"f {x}")\n    if x % 2 == 1 { panic("boom") }\n    return x\n}\n\n'
                   '#test()[exit(3)]\nfun g() {\n    print("g")\n    exit(3)\n}\n\n'
                   '#test\nfun last() {}\n\n'
-                  '#test()["/c6"]\nfun case_dir() -> str {\n    let d = env("MYLA_TEST_DIR").unwrap_or("")\n'
-                  '    return d[d.len() - 3:]\n}\n')
+                  '#test()["\\\\c6"]\nfun case_dir() -> str {\n    let d = env("MYLA_TEST_DIR").unwrap_or("")\n'
+                  '    return d[d.len() - 3:]\n}\n\n'
+                  # MYLA-728: under %TEMP%, not /tmp (Wine's is on C:, not Z:)
+                  '#test()[true]\nfun under_temp() -> bool {\n    let d = env("MYLA_TEST_DIR").unwrap_or("")\n'
+                  '    let t = env("TEMP").unwrap_or("?")\n'
+                  '    return d.starts_with(t + "\\\\myla-test-") && !d.starts_with("Z:")\n}\n\n'
+                  '#test\nfun a_temp_dir() {\n    let d = test.temp_dir()\n    test.expect(fs.is_dir(d))\n'
+                  '    test.expect(d.starts_with(env("MYLA_TEST_DIR").unwrap_or("?")))\n'
+                  '    test.expect(fs.write_to_file(d + "\\\\f.txt", "x").is_ok())\n}\n')
         with open(os.path.join(self.tmp, "t.my"), "w", encoding="utf-8") as fh:
             fh.write(source)
         env = dict(os.environ, MYLA_EMULATOR=" ".join(wine()))
         ran = subprocess.run([selfhost_tool("main"), "test", "t.my", "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT],
                              capture_output=True, text=True, cwd=self.tmp, timeout=600, env=env)
         want = ("PASS  f #1\nPASS  f #2\nPASS  f #3\nFAIL  f #4: expected 5, got 4\n      | f 4\n"
-                "PASS  g #1\nPASS  last\nPASS  case_dir #1\n\n6/7 passed.\n")
+                "PASS  g #1\nPASS  last\nPASS  case_dir #1\nPASS  under_temp #1\nPASS  a_temp_dir\n\n8/9 passed.\n")
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (want, "", 1))
+
+
+# What `Sockets` runs (MYLA-706): many connections echoed through loopback,
+# each a pair of tasks, beside children and an HTTP server of the program's
+# own that answers its own client (the helper's `cat` as the children).
+SOCKETS = r"""import std.task as task
+import std.net as net
+import std.http as http
+import std.bytes as bytes
+from std.net import TcpListener, TcpStream
+from std.http import Request, Response
+from std.process import command, args, ExitStatus
+
+// MYLA-706: many sockets at once on the I/O completion port, beside
+// children: `clients` connections echoed through loopback, each its own
+// pair of tasks, while `kids` children echo their input and an HTTP server
+// in this program answers its own client.
+
+// One connection served: what it sends echoed until its end.
+async fun echo(s: TcpStream) -> int {
+    var c = s
+    var total = 0
+    while true {
+        let chunk = match await c.read_async(65536) {
+            Ok(b) => b
+            Err(e) => { return -1 }
+        }
+        if chunk.len() == 0 {
+            break
+        }
+        match await c.write_async(chunk) {
+            Ok(n) => { total += n }
+            Err(e) => { return -2 }
+        }
+    }
+    let gone = c.close()
+    return total
+}
+
+// `n` connections accepted, each echoed in a task of its own: the bytes
+// echoed.
+async fun serve(l: TcpListener, n: int) -> int {
+    var fs: [async () -> int] = []
+    for k in 0..n {
+        let s = match await l.accept_async() {
+            Ok(s) => s
+            Err(e) => { return -1 }
+        }
+        fs.push(async () => await echo(s))
+    }
+    var total = 0
+    for x in await task.all(fs) {
+        if x < 0 {
+            return x
+        }
+        total += x
+    }
+    return total
+}
+
+// A client: `rounds` messages of `size` bytes sent and read back: 1 when
+// all came back as sent.
+async fun client(port: int, k: int, rounds: int, size: int) -> int {
+    var s = match await net.connect_async(net.addr(net.loopback(), port)) {
+        Ok(s) => s
+        Err(e) => { return 0 }
+    }
+    var msg: [uint8] = []
+    for i in 0..size {
+        msg.push(97u8 + ((i + k) % 26) as uint8)
+    }
+    for r in 0..rounds {
+        match await s.write_async(msg) {
+            Ok(_) => {}
+            Err(e) => { return 0 }
+        }
+        var got: [uint8] = []
+        while got.len() < size {
+            match await s.read_async(size - got.len()) {
+                Ok(b) => {
+                    if b.len() == 0 {
+                        return 0
+                    }
+                    for x in b {
+                        got.push(x)
+                    }
+                }
+                Err(e) => { return 0 }
+            }
+        }
+        if got != msg {
+            return 0
+        }
+    }
+    let c = s.close()
+    return 1
+}
+
+// A child echoing its input (the helper's `cat`): 1 when it gave it back.
+async fun kid(k: int) -> int {
+    let want = f"child {k}\n"
+    return match await command("./helper.exe").arg("cat").stdin(want).output_async() {
+        Ok(o) => if bytes.to_str(o.stdout) == want && o.status == ExitStatus.Exited(0) { 1 } else { 0 }
+        Err(e) => 0
+    }
+}
+
+fun handle(r: Request) -> Response {
+    return http.response(200, f"hello {r.method} {r.path()}")
+}
+
+// Its own HTTP server asked `n` times: the answers that were right.
+async fun ask(port: int, n: int) -> int {
+    var c = http.client()
+    var right = 0
+    for i in 0..n {
+        match await c.get_async(f"http://127.0.0.1:{port}/p{i}") {
+            Ok(r) => {
+                if r.status == 200 && r.text() == f"hello GET /p{i}" {
+                    right += 1
+                }
+            }
+            Err(e) => {}
+        }
+    }
+    c.close()
+    return right
+}
+
+fun number(s: str) -> int {
+    var n = 0
+    for c in s {
+        n = n * 10 + (c - '0')
+    }
+    return n
+}
+
+#main
+async fun main() {
+    let a = args()
+    let clients = number(a[1])
+    let kids = number(a[2])
+    var l = match net.listen_with(net.addr(net.loopback(), 0), 1024) {
+        Ok(l) => l
+        Err(e) => { panic(f"listen: {e}") }
+    }
+    let port = match l.local_addr() {
+        Ok(x) => x.port
+        Err(e) => { panic("addr") }
+    }
+    var hl = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic(f"listen: {e}") }
+    }
+    let hport = match hl.local_addr() {
+        Ok(x) => x.port
+        Err(e) => { panic("addr") }
+    }
+    async let served = serve(l, clients)
+    async let answered = http.serve_n(hl, 20, handle)
+    var fs: [async () -> int] = []
+    for k in 0..clients {
+        // small messages, and every tenth one past what a socket buffers
+        var size = 100 + k
+        if k % 10 == 0 {
+            size = 300000
+        }
+        fs.push(async () => await client(port, k, 3, size))
+    }
+    for k in 0..kids {
+        fs.push(async () => await kid(k))
+    }
+    fs.push(async () => await ask(hport, 20))
+    var ok = 0
+    for x in await task.all(fs) {
+        ok += x
+    }
+    let echoed = await served
+    let http_served = match await answered {
+        Ok(n) => n
+        Err(e) => -1
+    }
+    let c1 = l.close()
+    let c2 = hl.close()
+    print(f"{ok - 20} of {clients + kids} right, http {http_served}, echoed {echoed > 0}")
+}
+"""
+
+# A socket closed while its last send still goes on: the peer gets every
+# byte, then the end (MYLA-706's `ws_close_later`; without it the reader
+# got 3,919,872 of the 4,000,000 bytes).
+CLOSED_WHILE_SENDING = r"""import std.task as task
+import std.net as net
+from std.net import TcpListener, TcpStream
+
+// A socket closed while its last send still goes on: the peer still gets
+// every byte, then the end (MYLA-706's `ws_close_later`).
+async fun server(l: TcpListener, n: int) -> int {
+    var s = match await l.accept_async() {
+        Ok(s) => s
+        Err(e) => { return -1 }
+    }
+    var big: [uint8] = []
+    for i in 0..n {
+        big.push(97u8 + (i % 26) as uint8)
+    }
+    let w = match await s.write_async(big) {
+        Ok(k) => k
+        Err(e) => -2
+    }
+    let c = s.close()
+    return w
+}
+
+async fun client(port: int) -> int {
+    var s = match await net.connect_async(net.addr(net.loopback(), port)) {
+        Ok(s) => s
+        Err(e) => { return -1 }
+    }
+    // let the server write and close before reading anything
+    await task.sleep(300)
+    var total = 0
+    while true {
+        match await s.read_async(65536) {
+            Ok(b) => {
+                if b.len() == 0 {
+                    break
+                }
+                total += b.len()
+            }
+            Err(e) => { return -2 }
+        }
+    }
+    let c = s.close()
+    return total
+}
+
+#main
+async fun main() {
+    var l = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic("listen") }
+    }
+    let port = match l.local_addr() {
+        Ok(x) => x.port
+        Err(e) => { panic("addr") }
+    }
+    for round in 0..3 {
+        async let wrote = server(l, 4000000)
+        async let read = client(port)
+        let a = await wrote
+        let b = await read
+        print(f"{a} {b}")
+    }
+}
+"""
+
+# MYLA-726: a child's input written by one task while another reads its
+# output, more than the pipes hold, so each waits for the other: on one
+# worker only `write_async` suspending its task lets the reader run (std.
+# process's own `input_written_while_output_read` with a Windows `cat`).
+INPUT_WHILE_OUTPUT = r"""import std.task as task
+from std.process import command, Child, ChildStdin, ChildStdout, ExitStatus
+from std.io import buffered
+
+// MYLA-726: a child's input written by one task while another reads its
+// output, more than the pipes hold, so each waits for the other: on one
+// worker only `write_async` lets the reader run.
+async fun feed(w: ChildStdin, rounds: int, n: int) -> int {
+    var inp = w
+    var piece: [uint8] = []
+    for i in 0..n {
+        piece.push(97u8 + (i % 26) as uint8)
+    }
+    piece.push(10u8)
+    var total = 0
+    for k in 0..rounds {
+        match await inp.write_async(piece) {
+            Ok(m) => { total += m }
+            Err(e) => { return -1 }
+        }
+    }
+    match inp.close() {
+        Ok(_) => {}
+        Err(e) => { return -2 }
+    }
+    return total
+}
+
+async fun drink(r: ChildStdout) -> int {
+    var out = buffered(r)
+    return match await out.read_to_end_async() {
+        Ok(s) => s.len()
+        Err(e) => -1
+    }
+}
+
+#main
+async fun main() {
+    var child = match command("./helper.exe").arg("cat").spawn() {
+        Ok(c) => c
+        Err(e) => { panic(f"spawn: {e}") }
+    }
+    let w = child.take_stdin().expect("stdin")
+    let r = child.take_stdout().expect("stdout")
+    async let wrote = feed(w, 10, 59999)
+    async let got = drink(r)
+    let a = await wrote
+    let b = await got
+    let st = match child.wait() {
+        Ok(ExitStatus.Exited(c)) => c
+        _ => -1
+    }
+    print(f"{a} {b} {st}")
+}
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class Sockets(unittest.TestCase):
+    """MYLA-706: sockets over Winsock and the poller on an I/O completion
+    port: TCP through loopback, many connections at once beside children
+    and an HTTP exchange within the program, on 1, 4 and 16 workers; a
+    close that waits for its send; and MYLA-726, a child's input pipe
+    written through the port, so `write_async` suspends its task."""
+
+    setUpClass = Children.setUpClass
+    setUp = Children.setUp
+    build = Children.build
+
+    def run_exe(self, *args: str, threads: str, timeout: float = 120) -> subprocess.CompletedProcess:
+        return subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe"), *args], capture_output=True,
+                              cwd=self.tmp, timeout=timeout, env=dict(os.environ, MYLA_THREADS=threads))
+
+    def test_many_sockets_and_children_at_once(self):
+        self.build("helper", HELPER)
+        self.build("prog", SOCKETS)
+        for threads in ["1", "4", "16"]:
+            ran = self.run_exe("200", "50", threads=threads)
+            self.assertEqual((ran.stdout, ran.stderr, ran.returncode),
+                             (b"250 of 250 right, http 20, echoed true\n", b"", 0), f"{threads} workers")
+
+    def test_a_close_waits_for_its_send(self):
+        self.build("prog", CLOSED_WHILE_SENDING)
+        for threads in ["1", "4"]:
+            ran = self.run_exe(threads=threads)
+            self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"4000000 4000000\n" * 3, b"", 0),
+                             f"{threads} workers")
+
+    def test_a_childs_input_written_while_its_output_is_read(self):
+        # at BASE (9738e37) one worker never ended (`timeout 30`: 124)
+        self.build("helper", HELPER)
+        self.build("prog", INPUT_WHILE_OUTPUT)
+        for threads in ["1", "2", "4"]:
+            ran = self.run_exe(threads=threads, timeout=60)
+            self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"600000 600000 0\n", b"", 0),
+                             f"{threads} workers")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -854,25 +1307,746 @@ class StackProbes(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-@unittest.skipUnless(sys.platform == "win32", "Wine commits a thread's whole stack, so a frame past its guard page "
-                     "works there anyway: MYLA-708's Windows runner runs this")
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
 class FramesOnWindows(unittest.TestCase):
-    """MYLA-717 on Windows itself: a recursion through a function with a
-    64 KiB frame, on the main thread and on a worker, whose stacks Windows
-    commits as they grow."""
+    """MYLA-717: a recursion through a function with a 64 KiB frame, on the
+    main thread and on a worker. Wine commits a thread's whole stack, so a
+    frame past its guard page works here anyway: this shows the program
+    right, and Windows itself, which commits a stack as it grows, runs it on
+    MYLA-708's runner (`scripts/windows-runner.py`'s `frames/64-kib`)."""
+
+    setUpClass = HelloWorld.setUpClass
+    setUp = HelloWorld.setUp
+    build = HelloWorld.build
+    run_exe = Workers.run_exe
 
     def test_a_recursion_through_a_64_kib_frame(self):
-        main = ("async fun work() -> int64 {\n    return down(60, 0)\n}\n\n"
-                "async fun main() {\n    async let a = work()\n    async let b = work()\n"
-                "    print(down(100, 0))\n    print(await a + await b)\n}\n")
+        built = self.build(FRAMES)
+        self.assertEqual((built.stderr, built.returncode), ("", 0))
+        ran = self.run_exe(threads="2")
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (FRAMES_OUT, b"", 0))
+
+
+# MYLA-707: the console as std.term's terminal and std.signal's signals.
+# One program, its first argument the case; `mode(fd)` is the console mode
+# `__term_get` keeps for the descriptor (D216's saved mode, 4 bytes).
+CONSOLE = """import std.term as term
+import std.signal as signal
+import std.task as task
+import std.process as process
+import std.io as io
+import std.fs as fs
+import std.num as num
+from std.term import Key, Stream
+from std.signal import Signal
+from std.process import Stdio, ExitStatus
+from std.ioerror import IoError
+
+fun down(n: int) -> int {
+    return down(n + 1) + 1
+}
+
+async fun fails() -> int {
+    await task.sleep(10)
+    panic("a task failed")
+}
+
+#allow(primitive)
+fun mode(fd: int) -> int {
+    let m = __term_get(fd)
+    if m.len() != 4 {
+        return -1
+    }
+    return (m[0] as int) | ((m[1] as int) << 8)
+}
+
+fun raw() -> term.RawMode {
+    return match term.raw_mode() {
+        Ok(r) => r
+        Err(e) => panic(f"raw_mode: {e}")
+    }
+}
+
+fun name(k: Key) -> str {
+    return match k {
+        Key.Char(c) => f"Char({c})"
+        Key.Ctrl(c) => f"Ctrl({c})"
+        Key.Alt(c) => f"Alt({c})"
+        Key.Up => "Up"
+        Key.Enter => "Enter"
+        Key.Escape => "Escape"
+        Key.Delete => "Delete"
+        Key.F(n) => f"F{n}"
+        _ => "another key"
+    }
+}
+
+fun code_of(st: Result<ExitStatus, IoError>) -> str {
+    return match st {
+        Ok(Exited(c)) => f"{c}"
+        Ok(Signaled(s)) => f"signal {s}"
+        Err(e) => f"{e}"
+    }
+}
+
+// the console's input raw, `count` keys read, the mode back, a line read
+fun read_keys(count: int) {
+    let before = mode(0)
+    let r = raw()
+    let m = mode(0)
+    print(f"raw line {m & 2} echo {m & 4} processed {m & 1} vt {m & 512}")
+    var kr = term.key_reader()
+    var n = 0
+    while n < count {
+        match kr.next() {
+            Ok(Some(k)) => print(f"key {name(k)}")
+            Ok(None) => print("end")
+            Err(e) => print(f"error: {e}")
+        }
+        n += 1
+    }
+    match r.restore() {
+        Ok(()) => print(f"restored {mode(0) == before}")
+        Err(e) => print(f"restore: {e}")
+    }
+    var input = io.stdin()
+    match input.read_line() {
+        Ok(Some(line)) => print(f"line {line}")
+        _ => print("no line")
+    }
+}
+
+// raw mode ended as `how` says (D187)
+#allow(primitive)
+async fun end(how: str) {
+    let r = raw()
+    if how == "nested" {
+        let inner = raw()
+        let x = inner.restore()
+        panic("after the inner one")
+    }
+    if how == "left" {
+        // raw mode left, then raw again behind the hook's back: it stays
+        let m = __term_get(0)
+        let x = r.restore()
+        let s = __term_set(0, m)
+        return
+    }
+    if how == "exit" {
+        process.exit(3)
+    }
+    if how == "panic" {
+        panic("boom")
+    }
+    let n = process.args().len()
+    if how == "index" {
+        let xs = [1]
+        print(xs[n])
+    }
+    if how == "key" {
+        let m: [int: int] = [:]
+        print(m[n])
+    }
+    if how == "deep" {
+        print(down(n))
+    }
+    if how == "fails" {
+        async let a = fails()
+        print(await a)
+    }
+}
+
+// each end of raw mode in a child on this console: its status, and whether
+// the console's mode is what it was
+fun ends() {
+    for how in ["return", "exit", "panic", "index", "key", "deep", "nested", "fails", "left"] {
+        let before = mode(0)
+        let cmd = process.command(process.args()[0]).arg("end").arg(how).stdin_from(Stdio.Inherit)
+        var child = match cmd.stdout_from(Stdio.Null).stderr_from(Stdio.Null).spawn() {
+            Ok(c) => c
+            Err(e) => panic(f"spawn: {e}")
+        }
+        print(f"{how} {code_of(child.wait())} restored {mode(0) == before}")
+    }
+}
+
+// raw mode until a Ctrl-C ends the program (D192), with a listener first
+// that takes one (`listen`)
+async fun wait(how: str) {
+    let r = raw()
+    if how == "listen" {
+        let s = match signal.listen() {
+            Ok(s) => s
+            Err(e) => panic(f"listen: {e}")
+        }
+        print("listening")
+        match await s.next() {
+            Ok(sig) => print(f"caught {sig}")
+            Err(e) => print(f"{e}")
+        }
+        s.close()
+    }
+    print("raw")
+    await task.sleep(30000)
+    print("not here")
+}
+
+// `wait` in a child on this console (its last argument `c` and the token),
+// its lines passed on, then its status and whether the console's mode is
+// what it was; this program listening meanwhile, as a console's Ctrl-C or
+// Ctrl-Break reaches every program on it
+fun ctrl(how: str, token: str) {
+    let s = match signal.listen() {
+        Ok(s) => s
+        Err(e) => panic(f"listen: {e}")
+    }
+    let before = mode(0)
+    let cmd = process.command(process.args()[0]).arg("wait").arg(how).arg("c" + token).stdin_from(Stdio.Inherit)
+    var child = match cmd.stderr_from(Stdio.Inherit).spawn() {
+        Ok(c) => c
+        Err(e) => panic(f"spawn: {e}")
+    }
+    var out = match child.take_stdout() {
+        Some(o) => io.buffered(o)
+        None => panic("no output")
+    }
+    var more = true
+    while more {
+        match out.read_line() {
+            Ok(Some(l)) => print(f"child {l}")
+            _ => { more = false }
+        }
+    }
+    print(f"exited {code_of(child.wait())} restored {mode(0) == before}")
+    s.close()
+}
+
+// the console's output mode, escape sequences turned on by a child, and
+// the mode again once it ended
+fun vt() {
+    let before = mode(1)
+    let cmd = process.command(process.args()[0]).arg("ansi").stdin_from(Stdio.Inherit)
+    var child = match cmd.stdout_from(Stdio.Inherit).stderr_from(Stdio.Inherit).spawn() {
+        Ok(c) => c
+        Err(e) => panic(f"spawn: {e}")
+    }
+    let st = code_of(child.wait())
+    print(f"vt:{(before & 4) == 0},{st},{mode(1) == before}")
+}
+
+fun ansi() {
+    print(f"ansi:{term.enable_ansi(Stream.Stdout)},{(mode(1) & 4) != 0}")
+}
+
+async fun ticker() -> int {
+    var n = 0
+    while !task.cancelled() {
+        var k = 0
+        while k < 10000 {
+            k += 1
+        }
+        await task.sleep(1)
+        n += 1
+    }
+    return n
+}
+
+// Ctrl-C after Ctrl-C to a listener while tasks keep the workers busy,
+// then the default again
+async fun storm(want: int) {
+    let s = match signal.listen() {
+        Ok(s) => s
+        Err(e) => panic(f"listen: {e}")
+    }
+    async let a = ticker()
+    async let b = ticker()
+    async let c = ticker()
+    print("ready")
+    var n = 0
+    var other = 0
+    while n < want && other == 0 {
+        match await s.next() {
+            Ok(Interrupt) => { n += 1 }
+            Ok(Terminate) => { other += 1 }
+            Err(e) => { other += 1 }
+        }
+    }
+    print(f"got {n} interrupts, {other} else")
+    task.cancel(a)
+    task.cancel(b)
+    task.cancel(c)
+    print(f"ticked {await a > 0 && await b > 0 && await c > 0}")
+    s.close()
+    print("default again")
+    await task.sleep(30000)
+    print("not here")
+}
+
+// the size of the console each stream is
+fun sizes() {
+    for (label, s) in [("stdin", Stream.Stdin), ("stdout", Stream.Stdout), ("stderr", Stream.Stderr)] {
+        match term.size_of(s) {
+            Some((c, r)) => print(f"{label} {c} {r}")
+            None => print(f"{label} none")
+        }
+    }
+}
+
+// the first interrupt or termination, then the default again
+async fun interrupted() {
+    print("ready")
+    match await signal.interrupted() {
+        Ok(sig) => print(f"got {sig}")
+        Err(e) => print(f"error: {e}")
+    }
+    print("again")
+    await task.sleep(30000)
+    print("not here")
+}
+
+async fun catch_one(s: signal.Signals) -> int {
+    match await s.next() {
+        Ok(sig) => print(f"caught {sig}")
+        Err(e) => print(f"{e}")
+    }
+    return 0
+}
+
+// a line read from the console while a listener takes a Ctrl-C (which
+// ends the console's read on Windows: it goes on)
+async fun read_line_listening() {
+    let s = match signal.listen() {
+        Ok(s) => s
+        Err(e) => panic(f"listen: {e}")
+    }
+    async let c = catch_one(s)
+    print("ready")
+    var input = io.stdin()
+    match input.read_line() {
+        Ok(Some(line)) => print(f"line {line}")
+        Ok(None) => print("end")
+        Err(e) => print(f"error: {e}")
+    }
+    let x = await c
+}
+
+// the first signal written to the file `path` after "ready", then the exit
+// with 7: what a program does with the time Windows gives it once its
+// console is closed
+async fun on_close(path: str) {
+    let s = match signal.listen() {
+        Ok(s) => s
+        Err(e) => panic(f"listen: {e}")
+    }
+    let w = fs.write_to_file(path, "ready\\n")
+    match await s.next() {
+        Ok(sig) => { let w2 = fs.write_to_file(path, f"ready\\ngot {sig}\\n") }
+        Err(e) => { let w2 = fs.write_to_file(path, f"ready\\n{e}\\n") }
+    }
+    process.exit(7)
+}
+
+#main
+async fun main() {
+    let args = process.args()
+    let case = args[1]
+    if case == "keys" { read_keys(num.parse_int(args[2]).unwrap_or(0) as int) }
+    if case == "size" { sizes() }
+    if case == "interrupted" { await interrupted() }
+    if case == "readline" { await read_line_listening() }
+    if case == "close" { await on_close(args[2]) }
+    if case == "end" { await end(args[2]) }
+    if case == "ends" { ends() }
+    if case == "wait" { await wait(args[2]) }
+    if case == "ctrl" { ctrl(args[2], args[3]) }
+    if case == "vt" { vt() }
+    if case == "ansi" { ansi() }
+    if case == "storm" { await storm(10) }
+}
+"""
+
+
+def unix_pids_with(word: str) -> list[int]:
+    """The processes whose command line has `word` (Wine's processes have
+    their Windows command line)."""
+    pids = []
+    for entry in os.listdir("/proc"):
+        if entry.isdecimal():
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                    words = fh.read().replace(b"\0", b" ").split()
+            except OSError:
+                continue
+            if word.encode() in words:
+                pids.append(int(entry))
+    return pids
+
+
+class ConsolePty:
+    """A Windows program under Wine with a pseudo-terminal, which Wine makes
+    its console, as its standard input (and its output too, `all_streams`),
+    its output's lines read as they come."""
+
+    def __init__(self, argv: list[str], env: dict | None = None, all_streams: bool = False):
+        # (Unix's modules: the file is imported on Windows too, for
+        # FramesOnWindows)
+        import fcntl
+        import pty
+        import termios
+        self.master, self.slave = pty.openpty()
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 33, 101, 0, 0))
+        out = self.slave if all_streams else subprocess.PIPE
+        self.proc = subprocess.Popen([*wine(), *argv], stdin=self.slave, stdout=out, stderr=out, env=env,
+                                     start_new_session=True)
+        self.all_streams = all_streams
+        self.buf = b""
+
+    def _more(self, timeout: float) -> bool:
+        import select
+        src = self.master if self.all_streams else self.proc.stdout.fileno()
+        r, _, _ = select.select([src], [], [], timeout)
+        if not r:
+            return False
+        try:
+            chunk = os.read(src, 65536)
+        except OSError:
+            return False
+        self.buf += chunk
+        if self.all_streams:
+            # Wine's console draws on a terminal: it hides the cursor around
+            # a write and ends a line with CR CR LF
+            self.buf = self.buf.replace(b"\x1b[?25l", b"").replace(b"\x1b[?25h", b"").replace(b"\r\r\n", b"\n")
+        return bool(chunk)
+
+    def line(self, timeout: float = 60) -> str:
+        """The next line of the output, without its newline ("" at its end)."""
+        deadline = time.time() + timeout
+        while b"\n" not in self.buf and time.time() < deadline:
+            if not self._more(0.1) and self.proc.poll() is not None and not self._more(0.1):
+                break
+        if b"\n" not in self.buf:
+            rest, self.buf = self.buf, b""
+            return rest.decode("utf-8", "replace")
+        got, self.buf = self.buf.split(b"\n", 1)
+        return got.decode("utf-8", "replace")
+
+    def send(self, data: bytes):
+        os.write(self.master, data)
+
+    def finish(self, timeout: float = 60) -> tuple[list[str], int]:
+        """The rest of the output's lines and the exit status."""
+        deadline = time.time() + timeout
+        while self.proc.poll() is None and time.time() < deadline:
+            self._more(0.1)
+        while self._more(0.1):
+            pass
+        if self.proc.poll() is None:
+            self.proc.kill()
+        code = self.proc.wait()
+        lines = self.buf.decode("utf-8", "replace").split("\n")
+        if lines[-1] == "":
+            lines.pop()
+        self.close()
+        return lines, code
+
+    def close(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait()
+        for f in (self.proc.stdout, self.proc.stderr):
+            if f:
+                f.close()
+        for fd in (self.master, self.slave):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class Console(unittest.TestCase):
+    """MYLA-707 (D216) under Wine, whose console is a pseudo-terminal this
+    side opens: the console as a terminal, raw mode on its input mode, the
+    mode back at every end of a program (D187) and on a Ctrl-C while raw
+    (D192), Ctrl-C (a Unix SIGINT to Wine, which makes it a CTRL_C_EVENT on
+    a thread of its own) as std.signal's interrupt on 1, 4 and 16 workers,
+    and the output mode put back at the exit. A program sharing the console
+    with its child reads the mode the child left, as the console outlives
+    the child. What Wine can't show is MYLA-708's runner's (`RUNNER_CASES`)."""
+
+    @classmethod
+    def setUpClass(cls):
+        wine_env()
+        cls.tmp = tempfile.mkdtemp()
+        with open(os.path.join(cls.tmp, "console.my"), "w", encoding="utf-8") as fh:
+            fh.write(CONSOLE)
+        cls.exe = os.path.join(cls.tmp, "console.exe")
+        subprocess.run([selfhost_tool("main"), "build", "console.my", "--target", "x86_64-windows", "--stdlib",
+                        STDLIB_ROOT, "-o", cls.exe], cwd=cls.tmp, check=True, timeout=300)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def start(self, *args: str, threads: str = "2", all_streams: bool = False) -> ConsolePty:
+        p = ConsolePty([self.exe, *args], env=dict(os.environ, MYLA_THREADS=threads), all_streams=all_streams)
+        self.addCleanup(p.close)
+        return p
+
+    def test_the_console_is_a_terminal(self):
+        # stdin the console, stdout and stderr pipes; the input's size is its
+        # screen buffer's (`CONOUT$`), whatever Wine makes it
+        src = ("import std.term as term\nfrom std.term import Stream\n\nfun main() {\n"
+               "    print(f\"tty {term.is_tty(Stream.Stdin)} {term.is_tty(Stream.Stdout)} "
+               "{term.is_tty(Stream.Stderr)}\")\n"
+               "    match term.size() {\n        Some((c, r)) => print(f\"size {c > 0 && r > 0}\")\n"
+               "        None => print(\"no size\")\n    }\n"
+               "    print(f\"ansi {term.enable_ansi(Stream.Stdout)} {term.enable_ansi(Stream.Stdin)}\")\n}\n")
+        with open(os.path.join(self.tmp, "tty.my"), "w", encoding="utf-8") as fh:
+            fh.write(src)
+        subprocess.run([selfhost_tool("main"), "build", "tty.my", "--target", "x86_64-windows", "--stdlib",
+                        STDLIB_ROOT, "-o", "tty.exe"], cwd=self.tmp, check=True, timeout=300)
+        p = ConsolePty([os.path.join(self.tmp, "tty.exe")])
+        self.addCleanup(p.close)
+        self.assertEqual(p.finish(), (["tty true false false", "size true", "ansi false true"], 0))
+
+    def test_raw_mode_and_back(self):
+        p = self.start("keys", "3")
+        self.assertEqual(p.line(), "raw line 0 echo 0 processed 0 vt 512")
+        for key in [b"q", b"x", b"\r"]:
+            p.send(key)
+            time.sleep(0.2)
+        self.assertEqual([p.line() for _ in range(4)], ["key Char(q)", "key Char(x)", "key Enter", "restored true"])
+        # cooked again: a line, which Windows' console ends with CR LF
+        p.send(b"hello\r")
+        self.assertEqual(p.finish(), (["line hello\r"], 0))
+
+    def test_every_end_restores_the_console(self):
+        lines, code = self.start("ends", threads="4").finish(timeout=120)
+        self.assertEqual((lines, code), (["return 0 restored true", "exit 3 restored true",
+                                          "panic 1 restored true", "index 1 restored true",
+                                          "key 1 restored true", "deep 1 restored true",
+                                          "nested 1 restored true", "fails 1 restored true",
+                                          "left 0 restored false"], 0))
+
+    def ctrl_c(self, word: str):
+        """A Ctrl-C to the child whose command line has `word` (its parent's
+        has it without the `c`)."""
+        pids = unix_pids_with("c" + word)
+        self.assertEqual(len(pids), 1, pids)
+        os.kill(pids[0], signal.SIGINT)
+
+    def test_a_ctrl_c_while_raw_puts_the_mode_back(self):
+        # D192: on a thread Windows makes, without a state block (D222);
+        # Windows' default then ends the child (STATUS_CONTROL_C_EXIT;
+        # Wine's exit code 0)
+        for threads in ["1", "4", "16"]:
+            for how in ["raw", "listen"]:
+                with self.subTest(threads=threads, how=how):
+                    token = f"t{os.getpid()}{threads}{how}"
+                    p = self.start("ctrl", how, token, threads=threads)
+                    if how == "listen":
+                        self.assertEqual(p.line(), "child listening")
+                        time.sleep(0.2)
+                        self.ctrl_c(token)
+                        self.assertEqual(p.line(), "child caught interrupt")
+                    self.assertEqual(p.line(), "child raw")
+                    time.sleep(0.2)
+                    self.ctrl_c(token)
+                    lines, code = p.finish(timeout=30)
+                    self.assertIn(lines, [["exited 0 restored true"], ["exited -1073741510 restored true"]])
+                    self.assertEqual(code, 0)
+
+    def test_ctrl_c_after_ctrl_c_on_many_workers(self):
+        for threads in ["1", "4", "16"]:
+            with self.subTest(threads=threads):
+                p = self.start("storm", threads=threads)
+                self.assertEqual(p.line(), "ready")
+                for _ in range(10):
+                    time.sleep(0.1)
+                    p.proc.send_signal(signal.SIGINT)
+                self.assertEqual([p.line() for _ in range(3)],
+                                 ["got 10 interrupts, 0 else", "ticked true", "default again"])
+                time.sleep(0.2)
+                start = time.time()
+                p.proc.send_signal(signal.SIGINT)
+                lines, code = p.finish(timeout=20)
+                # ended by the Ctrl-C (Wine's default handler: exit code 0)
+                self.assertEqual((lines, code), ([], 0))
+                self.assertLess(time.time() - start, 10)
+
+    def test_the_output_mode_is_put_back_at_the_exit(self):
+        # the child turns escape sequences on (`enable_ansi`) on the console
+        # it shares with this program, which finds its mode as before
+        lines, code = self.start("vt", all_streams=True).finish()
+        self.assertEqual((lines, code), (["ansi:true,true", "vt:true,0,true"], 0))
+
+    def test_interrupted_and_the_default_again(self):
+        p = self.start("interrupted")
+        self.assertEqual(p.line(), "ready")
+        time.sleep(0.2)
+        p.proc.send_signal(signal.SIGINT)
+        self.assertEqual([p.line(), p.line()], ["got interrupt", "again"])
+        time.sleep(0.2)
+        p.proc.send_signal(signal.SIGINT)
+        self.assertEqual(p.finish(timeout=20), ([], 0))
+
+    def test_a_read_of_the_console_while_a_listener_takes_a_ctrl_c(self):
+        p = self.start("readline")
+        self.assertEqual(p.line(), "ready")
+        time.sleep(0.2)
+        p.proc.send_signal(signal.SIGINT)
+        self.assertEqual(p.line(), "caught interrupt")
+        p.send(b"hello\r")
+        self.assertEqual(p.finish(), (["line hello\r"], 0))
+
+    def test_the_time_a_signal_leaves(self):
+        # `close`'s program with a Ctrl-C: Wine's console can't be closed
+        # under a program (MYLA-708's runner closes Windows' own)
+        path = os.path.join(self.tmp, "closed.txt")
+        p = self.start("close", path)
+        deadline = time.time() + 60
+        while not os.path.exists(path) and time.time() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.2)
+        p.proc.send_signal(signal.SIGINT)
+        self.assertEqual(p.finish(), ([], 7))
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "ready\ngot interrupt\n")
+
+    def test_the_sizes_without_a_console(self):
+        lines, code = self.start("size").finish()
+        # (stdin: Wine's console, whose screen buffer isn't the terminal's)
+        self.assertEqual((lines[1:], code), (["stdout none", "stderr none"], 0))
+        self.assertRegex(lines[0], r"^stdin \d+ \d+$")
+
+
+# A case of std.platform's Windows module that only Windows runs (its own
+# cases run on the host too, interpreted and natively): a Ctrl-C to a
+# console of the case's own (`AllocConsole`, after leaving any it shares,
+# so no other process gets it) while it listens; how many the console's
+# control handler counted (`__win_console_cp`'s word that `read` tells a
+# read of lines a Ctrl-C ended by, MYLA-708) and what it wrote to the
+# signals' pipe, which it does after counting.
+CTRL_COUNTED = '''
+#test()[(1, 2)]
+fun ctrl_counted() -> (int64, int64) {
+    let left = __syscall(__rt_get("__imp_FreeConsole"), 0, 0, 0)
+    let made = __syscall(__rt_get("__imp_AllocConsole"), 0, 0, 0)
+    let h = signal_listen(1)
+    let before = __load_acq64(__rt_addr("__win_console_cp") + CTRLS_TAKEN)
+    let sent = __syscall(__rt_get("__imp_GenerateConsoleCtrlEvent"), 0, 0, 0)
+    let sig = signal_take(h)
+    let counted = __load_acq64(__rt_addr("__win_console_cp") + CTRLS_TAKEN) - before
+    let off = signal_listen(0)
+    let freed = __syscall(__rt_get("__imp_FreeConsole"), 0, 0, 0)
+    return (counted, sig)
+}
+'''
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class ControlHandler(unittest.TestCase):
+    """MYLA-708: Windows gives a read of the console's lines that a Ctrl-C
+    ended 0 bytes and no error, which `read` tells from the end by the
+    control handler's count of Ctrl-Cs and Ctrl-Breaks. Wine doesn't end
+    the read (the runner's terminal/06-readline does that part); this is
+    the count, `CTRL_COUNTED` appended to a copy of the library's module."""
+
+    setUpClass = HelloWorld.setUpClass
+
+    def test_the_handler_counts_a_ctrl_c(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with open(os.path.join(tmp, "main.my"), "w", encoding="utf-8") as fh:
-                fh.write(big_frame_program(main))
-            subprocess.run([selfhost_tool("main"), "build", "main.my", "--target", "x86_64-windows", "--stdlib",
-                            STDLIB_ROOT, "-o", "prog.exe"], cwd=tmp, check=True, timeout=300)
-            ran = subprocess.run([os.path.join(tmp, "prog.exe")], capture_output=True, timeout=120,
-                                 env=dict(os.environ, MYLA_THREADS="2"))
-        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"3836\n4632\n", b"", 0))
+            shutil.copytree(os.path.join(STDLIB_ROOT, "std"), os.path.join(tmp, "std"))
+            module = os.path.join(tmp, "std", "platform_windows.my")
+            with open(module, "a", encoding="utf-8") as fh:
+                fh.write(CTRL_COUNTED)
+            ran = subprocess.run([selfhost_tool("main"), "test", module, "--target", "x86_64-windows", "--stdlib", tmp,
+                                  "--only", "ctrl_counted"], capture_output=True, text=True, timeout=600,
+                                 env=dict(os.environ, MYLA_EMULATOR=" ".join(wine())))
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("PASS  ctrl_counted #1\n\n1/1 passed.\n", "", 0))
+
+
+# MYLA-707's cases for MYLA-708's Windows runner, what Wine's console can't
+# show: each runs CONSOLE built as `console.exe` with its arguments in a
+# console of its own, its input that console and its output a file, as
+# `cmd /c "console.exe ARGS > out.txt"` started with CREATE_NEW_CONSOLE
+# gives (`close` writes its file itself and runs as `console.exe` alone,
+# so that its status is its own). `before` sets the console up (in the
+# same cmd line, with `&&`); each step of `steps` waits for the output
+# to have its text (`wait`), puts input events into the console's input
+# (`keys`: WriteConsoleInputW on CONIN$ from a process attached to the
+# console, `AttachConsole`; a name is that key pressed and let go, "x"
+# the character, "Ctrl-c" with LEFT_CTRL_PRESSED, "Alt-x" with
+# LEFT_ALT_PRESSED), sends a console control event to every process on
+# the console (`event`: GenerateConsoleCtrlEvent(event, 0) from the
+# attached process, which ignores them itself with
+# SetConsoleCtrlHandler(NULL, TRUE)) or closes the console's window
+# (`close`: WM_CLOSE to GetConsoleWindow()'s window, which is
+# CTRL_CLOSE_EVENT). `out` is the file's text at the end and `exit` the
+# status of `cmd` (that of console.exe), within `seconds`. The runner
+# names console.exe by its whole path, so that it finds itself when it
+# starts itself as a child (MYLA-708). With `"host": "pty"` the console is
+# a pseudo console (ConPTY) instead: `keys` are typed into it as a
+# terminal types them (a Ctrl-C is ETX, which the pseudo console makes a
+# real Ctrl-C: keys written with WriteConsoleInputW never are, conhost's
+# input buffer takes them as they are), and `close` is ClosePseudoConsole
+# (CTRL_CLOSE_EVENT without a window to close).
+STATUS_CONTROL_C_EXIT = 0xC000013A
+RUNNER_CASES = [
+    {"name": "raw keys from a real console, escape sequences through ENABLE_VIRTUAL_TERMINAL_INPUT",
+     "args": ["keys", "8"],
+     "steps": [{"wait": "raw line 0 echo 0 processed 0 vt 512\n"},
+               {"keys": ["Up", "Ctrl-c", "q", "Alt-x", "F5", "Delete", "Escape", "Enter"]},
+               {"wait": "restored true\n"},
+               {"keys": ["h", "e", "l", "l", "o", "Enter"]}],
+     "out": "raw line 0 echo 0 processed 0 vt 512\nkey Up\nkey Ctrl(c)\nkey Char(q)\nkey Alt(x)\nkey F5\n"
+            "key Delete\nkey Escape\nkey Enter\nrestored true\nline hello\r\n",
+     "exit": 0, "seconds": 30},
+    {"name": "UTF-8 typed into a cooked read (the console's input code page 65001)",
+     "args": ["keys", "1"],
+     "steps": [{"wait": "raw line"}, {"keys": ["x"]}, {"wait": "restored true\n"},
+               {"keys": ["g", "r", "ö", "ß", "e", "Enter"]}],
+     "out": "raw line 0 echo 0 processed 0 vt 512\nkey Char(x)\nrestored true\nline größe\r\n",
+     "exit": 0, "seconds": 30},
+    {"name": "the window's size, through each stream that is the console (stdout is the file)",
+     "args": ["size"], "before": "mode con: cols=101 lines=33", "steps": [],
+     "out": "stdin 101 33\nstdout none\nstderr 101 33\n", "exit": 0, "seconds": 30},
+    {"name": "a real Ctrl-C to a listener, then the default: STATUS_CONTROL_C_EXIT",
+     "args": ["interrupted"],
+     "steps": [{"wait": "ready\n"}, {"event": "CTRL_C_EVENT"}, {"wait": "again\n"}, {"event": "CTRL_C_EVENT"}],
+     "out": "ready\ngot interrupt\nagain\n", "exit": STATUS_CONTROL_C_EXIT, "seconds": 30},
+    {"name": "Ctrl-Break is an interrupt too",
+     "args": ["interrupted"],
+     "steps": [{"wait": "ready\n"}, {"event": "CTRL_BREAK_EVENT"}, {"wait": "again\n"}, {"event": "CTRL_BREAK_EVENT"}],
+     "out": "ready\ngot interrupt\nagain\n", "exit": STATUS_CONTROL_C_EXIT, "seconds": 30},
+    {"name": "Ctrl-C typed while a cooked read of the console waits: the read goes on (ERROR_OPERATION_ABORTED)",
+     "args": ["readline"], "host": "pty",
+     "steps": [{"wait": "ready\n"}, {"keys": ["Ctrl-c"]}, {"wait": "caught interrupt\n"},
+               {"keys": ["h", "i", "Enter"]}],
+     "out": "ready\ncaught interrupt\nline hi\r\n", "exit": 0, "seconds": 30},
+    {"name": "the console closed: Terminate, and the program's own exit within Windows' 5 seconds",
+     "args": ["close", "closed.txt"], "alone": True, "host": "pty",
+     "steps": [{"wait_file": "closed.txt", "text": "ready\n"}, {"close": True}],
+     "file": "ready\ngot terminate\n", "exit": 7, "seconds": 10},
+    {"name": "D192: Ctrl-Break while a child on this console is raw, then its mode back (the parent listens)",
+     "args": ["ctrl", "raw", "token"],
+     "steps": [{"wait": "child raw\n"}, {"event": "CTRL_BREAK_EVENT"}],
+     "out": f"child raw\nexited {STATUS_CONTROL_C_EXIT - (1 << 32)} restored true\n", "exit": 0, "seconds": 30},
+    {"name": "D192 with a listener in the raw child first",
+     "args": ["ctrl", "listen", "token"],
+     "steps": [{"wait": "child listening\n"}, {"event": "CTRL_BREAK_EVENT"}, {"wait": "child raw\n"},
+               {"event": "CTRL_BREAK_EVENT"}],
+     "out": f"child listening\nchild caught interrupt\nchild raw\nexited {STATUS_CONTROL_C_EXIT - (1 << 32)} "
+            "restored true\n", "exit": 0, "seconds": 30},
+    {"name": "D187 on Windows' console: every end of raw mode puts the mode back",
+     "args": ["ends"], "steps": [],
+     "out": "return 0 restored true\nexit 3 restored true\npanic 1 restored true\nindex 1 restored true\n"
+            "key 1 restored true\ndeep 1 restored true\nnested 1 restored true\nfails 1 restored true\n"
+            "left 0 restored false\n", "exit": 0, "seconds": 60},
+]
 
 
 if __name__ == "__main__":

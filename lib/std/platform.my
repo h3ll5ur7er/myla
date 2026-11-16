@@ -1654,7 +1654,8 @@ pub fun term_make_raw(fd: int64) -> int64 {
 // ICANON, VMIN 1 and VTIME 0, everything else kept (echo, the signal keys,
 // a CR read as a line end). 0, or minus its cause. A port does the same to
 // its console (Windows: SetConsoleMode on the input without
-// ENABLE_LINE_INPUT).
+// ENABLE_LINE_INPUT and, as Windows echoes only a line it edits,
+// ENABLE_ECHO_INPUT).
 pub fun term_make_cbreak(fd: int64) -> int64 {
     let t = __alloc(64)
     var r = sys(SYS_IOCTL, fd, TCGETS, t)

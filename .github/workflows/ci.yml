@@ -7,7 +7,9 @@
 # of test_regex. The runners are
 # pinned (ubuntu-24.04: its python3 is 3.12, which gdb embeds). The vscode-extension job typechecks, lints and tests the VS
 # Code extension and uploads its .vsix. On a push to master the bootstrap
-# jobs upload the commit's seeds and each machine's myla and myla-lsp (D207).
+# jobs upload the commit's seeds and each machine's myla and myla-lsp (D207),
+# and the windows job, which runs on windows-latest what windows-build builds
+# for x86_64-windows on Linux (MYLA-708, D213), myla.exe and myla-lsp.exe.
 # See docs/Development/Testing.md.
 name: CI
 
@@ -237,6 +239,76 @@ jobs:
       # reorder (MYLA-297)
       - name: The runtime's litmus programs, 1,000 runs each on 4 and 16 workers
         run: python3 scripts/stress-native.py --runs 1000 --workers 4,16 --only t23_results_seen_by_their_awaiter --only t24_cancelled_sleepers --only t25_timers_fire --only t26_tasks_yield --only t27_children_read_as_they_write
+
+  windows-build:
+    # what the windows job runs, built here for x86_64-windows (D214):
+    # the examples, the concurrency stress programs, test_windows.py's
+    # programs (its process cases, FramesOnWindows' 64 KiB frame, MYLA-717),
+    # console cases, a read of the standard input with a time limit,
+    # myla.exe and myla-lsp.exe, and what each must print and exit with
+    # (the examples' from the interpreter here), in one artifact (MYLA-708)
+    name: Windows programs, built on Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: clang, lld (lld-link) and llvm (llvm-dlltool)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm
+      # the myla that builds them, the burn tests' own (no bootstrap when cached)
+      - uses: actions/cache@v6
+        with:
+          path: build/test-tools
+          key: test-tools-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed.s') }}
+      - name: The programs and their cases
+        run: python3 scripts/windows-runner.py build build/windows-bundle
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-bundle
+          path: build/windows-bundle
+          if-no-files-found: error
+          retention-days: 3
+
+  windows:
+    # what Wine can't prove (D213), as bootstrap-arm64 is for aarch64: the
+    # programs of windows-build run on Windows itself, each against what it
+    # must print and exit with (scripts/windows-runner.py run; the targets
+    # job runs the burn suites under Wine). Windows commits a stack as it
+    # grows (MYLA-717's probes), a pipe is a named pipe (a read with a time
+    # limit), processes and the console are Windows' own; and myla.exe
+    # builds a program here with the image's LLVM (clang, lld-link,
+    # llvm-dlltool; skipped, and said, where one is missing). On a push to
+    # master it uploads myla.exe and myla-lsp.exe (D207)
+    name: Windows (the programs built on Linux, myla.exe)
+    needs: windows-build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: windows-bundle
+          path: windows-bundle
+      - name: Every case, the stress programs' 3 times on 1, 4 and 16 workers
+        run: python scripts/windows-runner.py run windows-bundle --runs 3
+      # a failed case's directory is kept, with what its programs left there
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: windows-failed-cases
+          path: windows-bundle/work
+          if-no-files-found: ignore
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: myla-x86_64-windows-${{ github.sha }}
+          path: |
+            windows-bundle/tools/myla.exe
+            windows-bundle/tools/myla-lsp.exe
+          if-no-files-found: error
+          retention-days: 90
 
   vscode-extension:
     name: VS Code extension (typecheck, lint, tests, .vsix)

@@ -158,7 +158,7 @@ On x86-64 Windows ([[MYLA-704]]) std.fs works over kernel32 through std.platform
 - `current_dir()` is Windows' own path (`C:\Users\me`; under Wine the Unix root is `Z:\`); `make_dir_all` starts after a UNC path's server and share.
 - `mode` (of `make_dir` and `OpenOptions.mode`) isn't used: Windows has no permission bits but the read-only attribute, and a new file isn't read-only (D218).
 - A `File` opened to append writes at the end whatever its cursor (`FILE_APPEND_DATA` without `FILE_WRITE_DATA`). Seeking a pipe or the console is ESPIPE's `Other(29)`.
-- The temporary files' names need random bytes, which come with [[MYLA-722]]: until then `make_temp_dir` and `make_temp_file` are `Unsupported` there.
+- The temporary files and directories go under `%TMPDIR%`, `%TEMP%` or `%TMP%`, else the working directory (D227), their names joined with `\` and made of random bytes from `BCryptGenRandom` ([[MYLA-722]]).
 
 A symbolic link is a reparse point (a symbolic link's or a junction's tag) and `Symlink` as on Linux; Wine shows a Unix link as what it names, so the suites check links on Windows itself ([[MYLA-708]]).
 

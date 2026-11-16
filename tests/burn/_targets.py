@@ -76,9 +76,13 @@ _X86_TESTS = [
     "test_selfhost_codegen.SelfHostedCodegenParity.test_derived_eq_on_a_plain_enum_compares_tags",
 ]
 
-_WIN_RANDOM = "random bytes (bcrypt, D212, a second import library) come with MYLA-722"
 _WINE_LINKS = "Wine shows a Unix symbolic link as what it names, not as a link (a reparse point)"
 _WIN_LINUX_TOOLS = "it runs Linux's tools, which a Windows program can't (test_process.WindowsChildren runs Windows' own)"
+# MYLA-707: Windows' console has no termios and its programs no Unix signals
+_WIN_TERMIOS = ("it reads the terminal's termios, which Wine's console sets itself, and sends Unix signals: "
+                "test_windows.Console checks the console's mode through a program sharing it")
+_WIN_SIGNALS = ("a Unix signal is Wine's (SIGINT a Ctrl-C, the rest end Wine), and Windows' default for a Ctrl-C "
+                "is an exit code (Wine's 0): test_windows.Console sends Ctrl-C, MYLA-708's runner the close")
 
 _BOTH = {
     **{t: _X86_CODE for t in _X86_TESTS},
@@ -122,14 +126,12 @@ SKIP: dict[str, dict[str, str]] = {
     # MYLA-702: Windows' first step has the standard streams, the heap, the
     # clocks, the arguments and the environment, and tasks (on as many
     # workers as on Linux since MYLA-703); files, directories and paths
-    # (MYLA-704); child processes (MYLA-705); what its later steps bring is
-    # `Unsupported` until then (D210), which NetOnWasm, TermOnWasm and
-    # HttpOnWasm check there too
+    # (MYLA-704); child processes (MYLA-705); sockets (MYLA-706); the
+    # console as the terminal and its control events as signals (MYLA-707)
     "x86_64-windows": {
         **_BOTH,
         "test_stdio.BrokenPipe.test_a_write_to_another_descriptor_reports_it":
             "a Windows descriptor is a handle: Wine hands a program no Unix descriptor 3",
-        "test_platform_primitives.Entropy": _WIN_RANDOM,
         "test_platform_primitives.Descriptors.test_the_mode_given":
             "Windows has no permission bits but the read-only attribute (D218): the mode given isn't used",
         # MYLA-704: Windows' links are reparse points, which Wine doesn't
@@ -155,13 +157,17 @@ SKIP: dict[str, dict[str, str]] = {
         "test_process.TestSubprocessParity.test_reports_terminating_signal":
             "Windows has no signals: `kill` ends a child with the exit code 1 (WindowsChildren checks it)",
         "test_process.TestSubprocessParity.test_a_child_gets_sigpipe_back": "Windows has no SIGPIPE",
-        **{f"test_net.{c}": "Windows' sockets come with MYLA-706 (NetOnWasm checks they are Unsupported)"
-           for c in ["Tcp", "Udp", "Dns", "Errors", "Primitives"]},
-        **{f"test_reactor_scaling.{c}": "Windows' sockets come with MYLA-706 (its Readers run)"
-           for c in ["RoundTrips", "Accepts", "Closed", "Lots"]},
-        "test_router.Router": "Windows' sockets come with MYLA-706",
-        **{f"test_term.{c}": "Windows' console and signals come with MYLA-707 (TermOnWasm checks they are Unsupported)"
-           for c in ["Terminal", "Signals", "Primitives", "RawModeEnds"]},
+        # MYLA-707: the console and Ctrl-C under Wine, which
+        # test_windows.Console checks; what rests on Unix's signals and
+        # termios is Linux's
+        "test_term.RawModeEnds": _WIN_TERMIOS,
+        "test_term.Terminal.test_raw_mode_and_back":
+            "Wine's console has no virtual-terminal input (an arrow is dropped, Ctrl-C ends a read): "
+            "test_windows.Console reads plain keys, MYLA-708's runner the rest",
+        **{f"test_term.Signals.{t}": _WIN_SIGNALS
+           for t in ["test_awaited_while_another_task_runs", "test_interrupted_without_tasks",
+                     "test_a_program_that_never_listens_ends", "test_a_sent_sigsegv_ends_the_program",
+                     "test_an_ignored_signal_stays_ignored"]},
         # the start makes the command line and the environment UTF-8 in
         # the heap, so a cell freed then is taken again before a new one
         "test_selfhost_codegen.SelfHostedCodegenParity.test_a_runtime_variable_is_its_own_operand":
@@ -180,9 +186,6 @@ SKIP_PROGRAMS: dict[str, dict[str, str]] = {
     },
     "x86_64-windows": {
         "io_through_the_ir": "it runs Linux's /bin/echo, which a Windows program can't (MYLA-705)",
-        **{f"std.{m}": _WIN_RANDOM for m in ["random", "uuid"]},
-        # their cases' temporary directories are named with random bytes
-        **{f"std.{m}": _WIN_RANDOM + " (the temporary directories' names)" for m in ["fs", "test"]},
         # its children are cat, sh and head (MYLA-705)
         "std.process": _WIN_LINUX_TOOLS,
     },
