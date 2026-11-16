@@ -24,11 +24,11 @@
 // directories and the working directory (MYLA-704); child processes
 // (MYLA-705); the workers' parking and the CPUs they may use (MYLA-703: the
 // threads, each one's state block and a stack overflow's report are the
-// runtime's, selfhost/runtime_x86.my); random bytes (bcrypt, MYLA-722).
-// What comes with the later steps fails with UNSUPPORTED (std.ioerror's
-// `Unsupported`, D129): sockets and the poller on an I/O completion port
-// (MYLA-706, SOCKETS), the terminal and signals (MYLA-707). Not for programs
-// (its primitives are the standard library's, D100).
+// runtime's, selfhost/runtime_x86.my); random bytes (bcrypt, MYLA-722);
+// sockets over Winsock 2 and the poller on an I/O completion port
+// (MYLA-706). What comes with the later steps fails with UNSUPPORTED
+// (std.ioerror's `Unsupported`, D129): the terminal and signals (MYLA-707).
+// Not for programs (its primitives are the standard library's, D100).
 
 // The target this module is the platform layer of, as `--target` names it:
 // the target a program built with it runs on (x86-64 Windows).
@@ -85,7 +85,7 @@ pub const KIND_OTHER: int64 = 8
 // without sockets every `sock_` function fails with UNSUPPORTED, until
 // their step (MYLA-706).
 pub const PROCESSES: bool = true
-pub const SOCKETS: bool = false
+pub const SOCKETS: bool = true
 // Whether memory unmapped goes back to the system (VirtualFree).
 pub const RETURNS_MEMORY: bool = true
 // Whether `advise_huge_pages` can back memory with huge pages (large pages
@@ -491,6 +491,9 @@ pub fun read(fd: int64, buf: int64, n: int64) -> int64 {
     if len > 1073741824 {
         len = 1073741824
     }
+    if fd > 2 && ws_kind(h) == K_PIPE_IN {
+        return pipe_read(h, buf, len)
+    }
     let done = __rt_addr("__win_io")
     __store64(done, 0)
     let r = __syscall5(__rt_get("__imp_ReadFile"), h, buf, len, done, 0)
@@ -503,6 +506,97 @@ pub fun read(fd: int64, buf: int64, n: int64) -> int64 {
         return -access_cause(e)
     }
     return got
+}
+
+// The kind of the watched handle of `h` (K_PIPE_IN, …), 0 for a handle
+// that has none (a file, the console, an anonymous pipe).
+fun ws_kind(h: int64) -> int64 {
+    net_lock()
+    let ws = ws_find(h)
+    var k: int64 = 0
+    if ws != 0 {
+        k = __load64(ws + WS_KIND)
+    }
+    net_unlock()
+    return k
+}
+
+// Up to `n` bytes of our end `h` of a child's output pipe (overlapped,
+// MYLA-706) read to `buf`, the thread waiting as a plain read does: how
+// many (0 at the end), or minus the cause. Its OVERLAPPED's event is one
+// of its own with the low bit set, so the port gets no packet for it.
+fun pipe_read(h: int64, buf: int64, n: int64) -> int64 {
+    let ev = __syscall5(__rt_get("__imp_CreateEventW"), 0, 1, 0, 0, 0)
+    if ev == 0 {
+        return failed()
+    }
+    let ov = __alloc(40)
+    __store64(ov, 0)
+    __store64(ov + 8, 0)
+    __store64(ov + 16, 0)
+    __store64(ov + 24, ev | 1)
+    var r = __syscall5(__rt_get("__imp_ReadFile"), h, buf, n, 0, ov)
+    var e: int64 = 0
+    if !ok(r) {
+        e = last_error()
+    }
+    if ok(r) || e == WSA_IO_PENDING {
+        while __load_acq64(ov) == STATUS_PENDING {
+            let w = __syscall(__rt_get("__imp_WaitForSingleObject"), ev, WAIT_INFINITE, 0)
+        }
+        r = __syscall5(__rt_get("__imp_GetOverlappedResult"), h, ov, ov + 32, 0, 0)
+        e = 0
+        if !ok(r) {
+            e = last_error()
+        }
+    }
+    let got = __load64(ov + 32) & LOW32
+    __free(ov)
+    let c = __syscall(__rt_get("__imp_CloseHandle"), ev, 0, 0)
+    if e == 109 || e == 38 || e == 233 {
+        return 0  // BROKEN_PIPE, HANDLE_EOF, PIPE_NOT_CONNECTED
+    }
+    if e != 0 {
+        return -access_cause(e)
+    }
+    return got
+}
+
+// Up to `n` bytes at `buf` written to our end `h` of a child's input pipe
+// (overlapped, MYLA-706, MYLA-726): a copy of at most SEND_ROOM of them
+// written overlapped, how many (once the write before has ended, waited
+// for here; how it failed, if it did, is this one's error). A write that
+// goes on when this returns is the poller's to hear of: until it ends,
+// `poll_write` says there is no room, so `write_async`'s task waits with
+// the task suspended, not its worker.
+fun pipe_write(ws: int64, h: int64, buf: int64, n: int64) -> int64 {
+    if (__load64(ws + WS_FLAGS) & F_SENDING) != 0 {
+        let done = op_wait(ws, WS_SEND, __load64(ws + WS_SEND_EVENT), -1)
+        let st = __load_acq64(ws + WS_SEND)
+        ws_flag(h, F_SENDING, false)
+        if status_cause(st) != 0 {
+            return -status_cause(st)
+        }
+    }
+    var len = n
+    if len > SEND_ROOM {
+        len = SEND_ROOM
+    }
+    if !send_room(ws, len) {
+        return failed()
+    }
+    __copy_bytes(__load64(ws + WS_BUF), buf, len)
+    net_lock()
+    op_reset(ws, WS_SEND, __load64(ws + WS_SEND_EVENT))
+    __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) | F_SENDING)
+    let r = __syscall5(__rt_get("__imp_WriteFile"), h, __load64(ws + WS_BUF), len, 0, ws + WS_SEND)
+    let going = op_started(ws, call_going(r), F_SENDING)
+    let e = last_error()
+    net_unlock()
+    if !going {
+        return -access_cause(e)
+    }
+    return len
 }
 
 // The cause of the error `e` of a read or a write: access denied, for a
@@ -523,6 +617,15 @@ pub fun write(fd: int64, buf: int64, n: int64) -> int64 {
     var len = n
     if len > 1073741824 {
         len = 1073741824
+    }
+    if fd > 2 {
+        let ws = ws_hold(h)
+        if ws != 0 && __load64(ws + WS_KIND) == K_PIPE_OUT {
+            let r = pipe_write(ws, h, buf, len)
+            ws_release(ws)
+            return r
+        }
+        ws_release(ws)
     }
     // (how many bytes, in a block of the runtime's: a write reports
     // running out of memory, so it can't allocate)
@@ -545,6 +648,9 @@ pub fun close(fd: int64) -> int64 {
     if h == 0 {
         return -BAD_HANDLE
     }
+    if fd > 2 && !ws_closed(h) {
+        return 0
+    }
     let r = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
     if fd > 2 {
         if !ok(r) {
@@ -557,6 +663,47 @@ pub fun close(fd: int64) -> int64 {
         return failed()
     }
     return 0
+}
+
+// The watched handle of `h` (if it has one) closed, before the handle is:
+// true when the caller closes the handle now, false when it is closed later
+// (our end of a child's input pipe whose write goes on: once it ends,
+// `ws_close_later`). A process's wait of the pool's is given back first,
+// once its callback has returned (UnregisterWaitEx), as a wait on a closed
+// handle is undefined.
+fun ws_closed(h: int64) -> bool {
+    var wait: int64 = 0
+    net_lock()
+    ws_later()
+    let ws = ws_take(h)
+    if ws == 0 {
+        net_unlock()
+        return true
+    }
+    if __load64(ws + WS_KIND) == K_PIPE_OUT && ws_going(ws, WS_SEND, F_SENDING) &&
+            ws_close_later(ws, __rt_get("__imp_CloseHandle")) {
+        net_unlock()
+        return false
+    }
+    if (__load64(ws + WS_FLAGS) & F_WAITING) != 0 {
+        __store64(ws + WS_FLAGS, (__load64(ws + WS_FLAGS) & ~F_WAITING) | F_CLOSED)
+        wait = __load64(ws + WS_WAIT)
+    }
+    if wait == 0 {
+        ws_drop(ws)
+        net_unlock()
+        return true
+    }
+    net_unlock()
+    let u = __syscall(__rt_get("__imp_UnregisterWaitEx"), wait, UNTIL_DONE, 0)
+    net_lock()
+    if __load_acq64(ws + WS_POST + 32) == 0 {
+        // (it never posted: no packet is due for it)
+        __store64(ws + WS_REFS, __load64(ws + WS_REFS) - 1)
+    }
+    ws_drop(ws)
+    net_unlock()
+    return true
 }
 
 // 1 when a read of `fd` won't block (input, its end, or an error), 0 when
@@ -603,10 +750,24 @@ pub fun poll_read(fd: int64, timeout_ms: int64) -> int64 {
     return ready
 }
 
-// 1: a write to a standard stream blocks until it is done, as a blocking
-// descriptor's does.
+// 1 when a write of `fd` won't wait: our end of a child's input pipe once
+// its write before has ended (MYLA-726), waited for at most `timeout_ms`
+// (negative: no limit), 0 when that ran out; anything else (a write to a
+// standard stream blocks until it is done, as a blocking descriptor's
+// does) 1.
 pub fun poll_write(fd: int64, timeout_ms: int64) -> int64 {
-    return 1
+    let h = std_handle(fd)
+    if fd <= 2 || h == 0 {
+        return 1
+    }
+    let ws = ws_hold(h)
+    var r: int64 = 1
+    if ws != 0 && __load64(ws + WS_KIND) == K_PIPE_OUT && ws_going(ws, WS_SEND, F_SENDING) &&
+            !op_wait(ws, WS_SEND, __load64(ws + WS_SEND_EVENT), timeout_ms) {
+        r = 0
+    }
+    ws_release(ws)
+    return r
 }
 
 // The `n` bytes at `p` written to `fd`, a write at a time: 0, or the first
@@ -2098,6 +2259,58 @@ fun input_file(text: str) -> int64 {
     return -OTHER
 }
 
+// A pipe for a child's standard stream (MYLA-706): a named pipe of this
+// process's (`\\.\pipe\myla-<pid>-<n>`, one instance, no remote
+// client), whose end here is overlapped (a watched handle, on the port in
+// a program with tasks, so the poller hears when it holds bytes or has room
+// again, MYLA-726) and the child's plain, as a program expects its
+// standard streams, and inheritable. `to_child`: the child reads it (its
+// input), else writes it. Our end at `out`, the child's after it: 0, or
+// minus the cause.
+fun pipe_pair(to_child: bool, out: int64) -> int64 {
+    let pid = __syscall(__rt_get("__imp_GetCurrentProcessId"), 0, 0, 0) & LOW32
+    let k = __fetch_add64(net() + NET_PIPES, 1)
+    let name = spawn_wide("\\\\.\\pipe\\myla-" + decimal(pid) + "-" + decimal(k))
+    // PIPE_ACCESS_OUTBOUND or _INBOUND, FILE_FLAG_OVERLAPPED,
+    // FILE_FLAG_FIRST_PIPE_INSTANCE; PIPE_TYPE_BYTE | PIPE_WAIT |
+    // PIPE_REJECT_REMOTE_CLIENTS; one instance, 64 KiB each way
+    var access: int64 = 1074266113
+    var child_access = GENERIC_WRITE
+    var kind = K_PIPE_IN
+    if to_child {
+        access = 1074266114
+        child_access = GENERIC_READ
+        kind = K_PIPE_OUT
+    }
+    let ours = win_call(__rt_get("__imp_CreateNamedPipeW"), [name, access, 8, 1, 65536, 65536, 0, 0])
+    if ours == -1 {
+        __free(name)
+        return failed()
+    }
+    let theirs = win_call(__rt_get("__imp_CreateFileW"), [name, child_access, 0, 0, OPEN_EXISTING, 0, 0])
+    var e: int64 = 0
+    if theirs == -1 {
+        e = failed()
+    }
+    __free(name)
+    if e == 0 {
+        e = inheritable(theirs)
+    }
+    if e == 0 && ws_new(ours, kind, with_tasks()) == 0 {
+        e = -(OTHER + 24)
+    }
+    if e < 0 {
+        let c = close(ours)
+        if theirs != -1 {
+            let d = __syscall(__rt_get("__imp_CloseHandle"), theirs, 0, 0)
+        }
+        return e
+    }
+    __store64(out, ours)
+    __store64(out + 8, theirs)
+    return 0
+}
+
 // The child's three streams as `how` (three letters of `stdio_mode`) and
 // `opts` say.
 fun child_streams(how: str, opts: [str]) -> Streams {
@@ -2109,21 +2322,13 @@ fun child_streams(how: str, opts: [str]) -> Streams {
         let c = how[k]
         var h: int64 = 0
         if c == 'p' {
-            // both ends this process's only, the child's made inheritable
-            if ok(__syscall5(__rt_get("__imp_CreatePipe"), pipe, pipe + 8, 0, 65536, 0)) {
-                if k == 0 {
-                    h = __load64(pipe)
-                    s.ours[0] = __load64(pipe + 8)
-                } else {
-                    h = __load64(pipe + 8)
-                    s.ours[k] = __load64(pipe)
-                }
-                let r = inheritable(h)
-                if r < 0 {
-                    s.cause = -r
-                }
+            // ours overlapped, the child's plain and made inheritable
+            let r = pipe_pair(k == 0, pipe)
+            if r < 0 {
+                s.cause = -r
             } else {
-                s.cause = -failed()
+                s.ours[k] = __load64(pipe)
+                h = __load64(pipe + 8)
             }
         } else if c == 'n' || (c == 't' && (opts.len() < 3 || opts[2] == "")) {
             if null_h == 0 {
@@ -2203,7 +2408,7 @@ fun close_streams(s: Streams, all: bool) {
     if all {
         for h in s.ours {
             if h >= 0 {
-                let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+                let c = close(h)
             }
         }
     }
@@ -2426,7 +2631,7 @@ pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
     }
     if h[2] >= 0 {
         // (an input pipe nobody writes: its end at once)
-        let c = __syscall(__rt_get("__imp_CloseHandle"), h[2] as int64, 0, 0)
+        let c = close(h[2] as int64)
     }
     var o = h[3] as int64
     var e = h[4] as int64
@@ -2449,7 +2654,7 @@ pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
         }
         let got = read(src, buf, 65536)
         if got <= 0 {
-            let c = __syscall(__rt_get("__imp_CloseHandle"), src, 0, 0)
+            let c = close(src)
             if src == o {
                 o = -1
             } else {
@@ -2586,74 +2791,1446 @@ pub fun kill(pid: int64, sig: int64) -> int64 {
     return r
 }
 
-// --- sockets: MYLA-706 (ws2_32, D212) --------------------------------------------------
+// --- sockets and the I/O completion port (MYLA-706: ws2_32, D212) ----------------------
+// What std.net needs, over Winsock 2 (`WSAStartup` before the first socket,
+// `sock_open`). A socket is a SOCKET, which std.rt's handle table holds
+// (D181), as an address record crosses this layer (`sockaddr_of`,
+// `record_into`: Windows' AF_INET6 is 23). The functions are Linux's:
+// sockets start blocking, std.net makes them non-blocking, and an operation
+// that would wait fails with WOULD_BLOCK (IN_PROGRESS for a connect), which
+// Winsock's own non-blocking calls give as WSAEWOULDBLOCK; its codes are
+// std.ioerror's causes (`wsa_cause`).
+//
+// The poller (below) waits on one I/O completion port of the process's
+// (`net_port`), which is a completion queue, not a readiness one: a packet
+// comes when an overlapped operation ends, or when someone posts one. What
+// std.rt waits for is readiness (D124), so each handle the port serves has
+// a state of the platform's (a "watched handle", `ws_*`) with an operation
+// in flight that ends when the handle may have become ready, and the packet
+// only says "look at it again": the poller then looks (`ws_level`: WSAPoll,
+// PeekNamedPipe, the operations' own status) and gives the event, or
+// starts the operation again. The operations, for each handle that can be
+// waited for:
+// - a stream socket to receive from, a datagram socket, our end of a
+//   child's output pipe: a read of no bytes (`WSARecv`, `WSARecvFrom` with
+//   MSG_PEEK, `ReadFile`), which ends when bytes are there (or the end, or
+//   an error) and takes none of them;
+// - a listener: `AcceptEx` on a socket of its own, whose connection the next
+//   `sock_accept` takes before any `accept` would;
+// - a connect: `ConnectEx` (a non-blocking socket on the port is connected
+//   so), which ends with the connection made or refused;
+// - a send that would block, and every write of a child's input pipe: the
+//   bytes (a copy) sent or written overlapped, which ends once they are
+//   gone; meanwhile the next one is WOULD_BLOCK (`poll_write` 0), so a task
+//   waits for room as on Linux (MYLA-726);
+// - a child's end (its process handle): a wait of the thread pool's
+//   (`RegisterWaitForSingleObject`), whose callback, the runtime's
+//   `__win_wait_posted`, posts the packet.
+// Level-triggered once, as std.rt asks: a handle armed again while still
+// ready is looked at and ready at once. Only a program with tasks puts its
+// handles on the port (a program without them has no poller): there
+// everything is Winsock's plain non-blocking calls and `WSAPoll`.
+//
+// A watched handle is the table's (`ws_find`, by the handle's value) until
+// it is closed, and freed once no packet is due for it (`refs`): a packet
+// names it by the OVERLAPPED it holds, never by the handle, so one that
+// comes after a close (an operation cancelled) finds it closed and is
+// dropped, whatever handle took its number. A send or a write still going
+// when its handle is closed would be cancelled with it, its bytes lost
+// (Linux sends what a closed socket's buffer holds): such a close waits, on
+// a thread of the pool's, for that operation's end (`ws_close_later`).
+// The net state, `__win_net` (selfhost/codegen.my), and each watched
+// handle's are under one spin lock, held for loads and stores and for
+// calls that only start an operation, never for one that waits.
 
+// `__win_net`: the lock, the port, the table (its words, its room, its
+// slots used), Winsock started, AcceptEx's and ConnectEx's addresses, the
+// count naming the pipes, a wake-up posted, the handles closed later, how
+// many armed handles are looked at each millisecond, Winsock's functions
+// the poller calls (`ws2`)
+const NET_PORT: int64 = 8
+const NET_TABLE: int64 = 16
+const NET_CAP: int64 = 24
+const NET_USED: int64 = 32
+const NET_WINSOCK: int64 = 40
+const NET_ACCEPTEX: int64 = 48
+const NET_CONNECTEX: int64 = 56
+const NET_PIPES: int64 = 64
+const NET_WAKE: int64 = 72
+const NET_LATER: int64 = 80
+const NET_PEEKS: int64 = 88
+const NET_WS2: int64 = 96
+
+// a watched handle: its handle, kind, flags, the events armed (1 to read,
+// 2 to write) and their token, the packets due, its event (the operations
+// of reading, accepting and connecting signal it), the events an operation
+// that failed to start makes ready, the connection AcceptEx gave and the
+// socket it takes the next one on, the bytes of a send or a write (and
+// their room), the pool's wait, the last wait that looked at it, the
+// event of its send or write, the next closed later; then its operations,
+// each an OVERLAPPED and the watched handle's address: the read of no
+// bytes, the send or write, AcceptEx's or ConnectEx's (a process's wait's
+// packet), the posted packet; the context of `__win_wait_posted`, a WSABUF,
+// AcceptEx's addresses
+const WS_HANDLE: int64 = 0
+const WS_KIND: int64 = 8
+const WS_FLAGS: int64 = 16
+const WS_WANT: int64 = 24
+const WS_TOKEN: int64 = 32
+const WS_REFS: int64 = 40
+const WS_EVENT: int64 = 48
+const WS_FORCED: int64 = 56
+const WS_ACCEPTED: int64 = 64
+const WS_ACCEPTING: int64 = 72
+const WS_BUF: int64 = 80
+const WS_BUF_CAP: int64 = 88
+const WS_WAIT: int64 = 96
+const WS_MARK: int64 = 104
+const WS_SEND_EVENT: int64 = 112
+const WS_NEXT: int64 = 120
+const WS_PROBE: int64 = 128
+const WS_SEND: int64 = 168
+const WS_ACCEPT: int64 = 208
+const WS_NUDGE: int64 = 248
+const WS_POST: int64 = 288
+const WS_WSABUF: int64 = 328
+const WS_ADDRS: int64 = 344
+const WS_SIZE: int64 = 440
+
+// its kinds: a stream socket, a datagram socket, our end of a pipe we
+// read or write (overlapped), a process, a pipe not ours (an inherited
+// standard input: looked at each millisecond, as it can't be waited for)
+const K_STREAM: int64 = 1
+const K_DGRAM: int64 = 2
+const K_PIPE_IN: int64 = 3
+const K_PIPE_OUT: int64 = 4
+const K_PROCESS: int64 = 5
+const K_PIPE: int64 = 6
+
+// its flags: closed (in no table); on the port; non-blocking; bound;
+// listening; the connect's context set; the read of no bytes, the send or
+// write, AcceptEx, ConnectEx started (going on while its status is
+// STATUS_PENDING); the process waited for; a packet posted; closed later
+const F_CLOSED: int64 = 1
+const F_ASSOC: int64 = 2
+const F_NONBLOCK: int64 = 4
+const F_BOUND: int64 = 8
+const F_LISTENING: int64 = 16
+const F_UPDATED: int64 = 32
+const F_PROBING: int64 = 64
+const F_SENDING: int64 = 128
+const F_ACCEPTING: int64 = 256
+const F_CONNECTING: int64 = 512
+const F_WAITING: int64 = 1024
+const F_NUDGED: int64 = 2048
+const F_LATER: int64 = 4096
+
+// an OVERLAPPED's status while its operation goes on
+const STATUS_PENDING: int64 = 259
+const WSA_IO_PENDING: int64 = 997
+const WSAEWOULDBLOCK: int64 = 10035
+const WSAEMSGSIZE: int64 = 10040
+// the most bytes a send or a write takes when it would wait (a copy)
+const SEND_ROOM: int64 = 262144
+// WSAPoll's events: to read, to write, an error, a hang-up
+const POLLRDNORM: int64 = 256
+const POLLWRNORM: int64 = 16
+const POLL_ERRORS: int64 = 7
+// RegisterWaitForSingleObject's WT_EXECUTEONLYONCE, UnregisterWaitEx's
+// "until the callback has returned"
+const WT_ONCE: int64 = 8
+const UNTIL_DONE: int64 = -1
+
+// Winsock's functions that the poller and the functions every socket
+// reaches call (`ws2`): WSAPoll, WSARecv, WSARecvFrom, WSAGetLastError,
+// getsockname, WSASocketW, closesocket, WSAIoctl. `winsock` keeps their
+// addresses, so the poller names no function of ws2_32's, and a program
+// that opens no socket doesn't import it (MYLA-722).
+const W_POLL: int64 = 0
+const W_RECV: int64 = 1
+const W_RECV_FROM: int64 = 2
+const W_ERROR: int64 = 3
+const W_SOCKNAME: int64 = 4
+const W_SOCKET: int64 = 5
+const W_CLOSE: int64 = 6
+const W_IOCTL: int64 = 7
+
+// The address of Winsock's function `i` (W_POLL, …), 0 before `winsock`.
+fun ws2(i: int64) -> int64 {
+    let t = __load_acq64(net() + NET_WS2)
+    if t == 0 {
+        return 0
+    }
+    return __load64(t + 8 * i)
+}
+
+// The net state's words.
+fun net() -> int64 {
+    return __rt_addr("__win_net")
+}
+
+// The net lock taken, spinning while another thread holds it (giving the
+// CPU up now and then: under Wine a call it is held across takes a trip to
+// Wine's server).
+fun net_lock() {
+    var spins = 0
+    while __xchg64(net(), 1) != 0 {
+        spins += 1
+        if spins < 64 {
+            __pause()
+        } else {
+            let y = __syscall(__rt_get("__imp_SwitchToThread"), 0, 0, 0)
+            spins = 0
+        }
+    }
+}
+
+// The net lock given back.
+fun net_unlock() {
+    __store_rel64(net(), 0)
+}
+
+// Whether the program has tasks, so a poller (a program without them waits
+// for a socket in `sock_poll` only, and nothing takes the port's packets).
+fun with_tasks() -> bool {
+    return __tasks_waiting() >= 0
+}
+
+// The process's I/O completion port, made the first time: its handle, or 0.
+fun net_port() -> int64 {
+    let n = net()
+    let p = __load_acq64(n + NET_PORT)
+    if p != 0 {
+        return p
+    }
+    net_lock()
+    if __load64(n + NET_PORT) == 0 {
+        let made = __syscall5(__rt_get("__imp_CreateIoCompletionPort"), -1, 0, 0, 0, 0)
+        __store_rel64(n + NET_PORT, made)
+    }
+    net_unlock()
+    return __load64(n + NET_PORT)
+}
+
+// Winsock started (`WSAStartup`, version 2.2), once: 0, or minus the cause.
+fun winsock() -> int64 {
+    let n = net()
+    if __load_acq64(n + NET_WINSOCK) == 1 {
+        return 0
+    }
+    net_lock()
+    var r: int64 = 0
+    if __load64(n + NET_WINSOCK) == 0 {
+        let data = __alloc(512)   // WSADATA
+        let e = __syscall(__rt_get("__imp_WSAStartup"), 514, data, 0) & LOW32
+        __free(data)
+        if e != 0 {
+            r = -wsa_cause(e)
+        } else {
+            let t = __alloc(64)
+            __store64(t + 8 * W_POLL, __rt_get("__imp_WSAPoll"))
+            __store64(t + 8 * W_RECV, __rt_get("__imp_WSARecv"))
+            __store64(t + 8 * W_RECV_FROM, __rt_get("__imp_WSARecvFrom"))
+            __store64(t + 8 * W_ERROR, __rt_get("__imp_WSAGetLastError"))
+            __store64(t + 8 * W_SOCKNAME, __rt_get("__imp_getsockname"))
+            __store64(t + 8 * W_SOCKET, __rt_get("__imp_WSASocketW"))
+            __store64(t + 8 * W_CLOSE, __rt_get("__imp_closesocket"))
+            __store64(t + 8 * W_IOCTL, __rt_get("__imp_WSAIoctl"))
+            __store_rel64(n + NET_WS2, t)
+            __store_rel64(n + NET_WINSOCK, 1)
+        }
+    }
+    net_unlock()
+    return r
+}
+
+// The calling thread's last Winsock error (0 before Winsock started).
+fun wsa_error() -> int64 {
+    let f = ws2(W_ERROR)
+    if f == 0 {
+        return 0
+    }
+    return __syscall(f, 0, 0, 0) & LOW32
+}
+
+// What a failed Winsock call gives: minus the cause of its error.
+fun wsa_failed() -> int64 {
+    return -wsa_cause(wsa_error())
+}
+
+// Whether a Winsock call's int result (its low 32 bits) is SOCKET_ERROR.
+fun wsa_bad(r: int64) -> bool {
+    return (r & LOW32) == LOW32
+}
+
+// The cause of the Winsock error `e` (winsock2.h's WSAE… codes), as
+// [[Language/Standard-library/Net#porting-sockets-to-another-system]] says;
+// one without a cause OTHER plus Linux's errno of the same meaning; one
+// that isn't Winsock's as `cause` maps kernel32's.
+#test(10035)[32]
+#test(10036)[33]
+#test(10061)[12]
+#test(10054)[13]
+#test(10053)[14]
+#test(10057)[15]
+#test(10048)[16]
+#test(10049)[17]
+#test(10060)[18]
+#test(10065)[19]
+#test(10051)[20]
+#test(10047)[9]
+#test(10022)[11]
+#test(10038)[34]
+#test(10004)[7]
+#test(10058)[10]
+#test(10055)[361]
+#test(10040)[346]
+#test(995)[8]
+fun wsa_cause(e: int64) -> int64 {
+    if e == 10035 { return WOULD_BLOCK }                                     // WSAEWOULDBLOCK
+    if e == 10036 { return IN_PROGRESS }                                     // WSAEINPROGRESS
+    if e == 10061 { return CONNECTION_REFUSED }
+    if e == 10054 || e == 10052 { return CONNECTION_RESET }                  // WSAECONNRESET, WSAENETRESET
+    if e == 10053 { return CONNECTION_ABORTED }
+    if e == 10057 { return NOT_CONNECTED }
+    if e == 10048 { return ADDR_IN_USE }
+    if e == 10049 { return ADDR_NOT_AVAILABLE }
+    if e == 10060 { return TIMED_OUT }
+    if e == 10065 { return HOST_UNREACHABLE }
+    if e == 10051 { return NETWORK_UNREACHABLE }
+    if e == 10047 || e == 10043 || e == 10045 { return UNSUPPORTED }         // WSAEAFNOSUPPORT, WSAEPROTONOSUPPORT, WSAEOPNOTSUPP
+    if e == 10022 { return INVALID_INPUT }                                   // WSAEINVAL
+    if e == 10038 || e == 10009 || e == 6 { return BAD_HANDLE }              // WSAENOTSOCK, WSAEBADF, an invalid handle
+    if e == 10004 { return INTERRUPTED }
+    if e == 10013 { return PERMISSION_DENIED }                               // WSAEACCES
+    if e == 10058 { return BROKEN_PIPE }                                     // WSAESHUTDOWN: Linux's EPIPE
+    if e == 10037 { return OTHER + 114 }                                     // WSAEALREADY: EALREADY
+    if e == 10040 { return OTHER + 90 }                                      // WSAEMSGSIZE: EMSGSIZE
+    if e == 10050 { return OTHER + 100 }                                     // WSAENETDOWN: ENETDOWN
+    if e == 10055 { return OTHER + 105 }                                     // WSAENOBUFS: ENOBUFS
+    if e == 10056 { return OTHER + 106 }                                     // WSAEISCONN: EISCONN
+    if e == 10064 { return OTHER + 112 }                                     // WSAEHOSTDOWN: EHOSTDOWN
+    if e == 10024 { return OTHER + 24 }                                      // WSAEMFILE: EMFILE
+    if e == 10014 { return OTHER + 14 }                                      // WSAEFAULT: EFAULT
+    return cause(e)
+}
+
+// The cause of the NTSTATUS an overlapped operation ended with (its
+// OVERLAPPED's `Internal`): 0 for success, and for a read of no bytes that
+// found a datagram (STATUS_BUFFER_OVERFLOW) or the end; Linux's EIO's
+// `Other` for one not mapped.
+#test(0)[0]
+#test(2147483653i64)[0]
+#test(3221226038i64)[12]
+#test(3221225997i64)[13]
+#test(3221225803i64)[10]
+#test(3221225760i64)[8]
+#test(3221225473i64)[261]
+fun status_cause(s: int64) -> int64 {
+    if s == 0 || s == 2147483653i64 || s == 3221225489i64 { return 0 }       // SUCCESS, BUFFER_OVERFLOW, END_OF_FILE
+    if s == 3221226038i64 { return CONNECTION_REFUSED }                      // CONNECTION_REFUSED
+    if s == 3221225997i64 || s == 3221225996i64 { return CONNECTION_RESET }   // CONNECTION_RESET, _DISCONNECTED
+    if s == 3221226049i64 { return CONNECTION_ABORTED }
+    if s == 3221226044i64 { return NETWORK_UNREACHABLE }
+    if s == 3221226045i64 { return HOST_UNREACHABLE }
+    if s == 3221225653i64 { return TIMED_OUT }                               // IO_TIMEOUT
+    if s == 3221225760i64 { return CANCELLED }                               // CANCELLED
+    if s == 3221225803i64 || s == 3221225649i64 || s == 3221225648i64 { return BROKEN_PIPE }  // PIPE_BROKEN, _CLOSING, _DISCONNECTED
+    if s == 3221225480i64 { return BAD_HANDLE }                              // INVALID_HANDLE
+    if s == 3221225506i64 { return PERMISSION_DENIED }                       // ACCESS_DENIED
+    if s == 3221225485i64 { return INVALID_INPUT }                           // INVALID_PARAMETER
+    return OTHER + 5
+}
+
+// --- the watched handles' table
+
+// The watched handle of the handle `h`, or 0 (the lock held). The table
+// is open addressing on the handle's value, 1 the mark of a slot freed
+// (no handle is 1).
+fun ws_find(h: int64) -> int64 {
+    let n = net()
+    let t = __load64(n + NET_TABLE)
+    if t == 0 || h == 0 {
+        return 0
+    }
+    let cap = __load64(n + NET_CAP)
+    var i = ws_slot(h, cap)
+    while true {
+        let k = __load64(t + 16 * i)
+        if k == h {
+            return __load64(t + 16 * i + 8)
+        }
+        if k == 0 {
+            return 0
+        }
+        i = (i + 1) & (cap - 1)
+    }
+    return 0
+}
+
+// The first slot of the handle `h` in a table of `cap` slots.
+#test(4i64, 64i64)[1]
+#test(8i64, 64i64)[2]
+fun ws_slot(h: int64, cap: int64) -> int64 {
+    return (h >> 2) & (cap - 1)
+}
+
+// The watched handle `ws` put in the table under its handle (the lock
+// held), the table grown to twice its room once it is half used.
+fun ws_put(ws: int64) {
+    let n = net()
+    var cap = __load64(n + NET_CAP)
+    if __load64(n + NET_TABLE) == 0 || 2 * (__load64(n + NET_USED) + 1) > cap {
+        let old = __load64(n + NET_TABLE)
+        let old_cap = cap
+        cap = 64
+        while 4 * (ws_count(old, old_cap) + 1) > cap {
+            cap = 2 * cap
+        }
+        let t = __alloc(16 * cap)
+        var k: int64 = 0
+        while k < 2 * cap {
+            __store64(t + 8 * k, 0)
+            k += 1
+        }
+        __store64(n + NET_TABLE, t)
+        __store64(n + NET_CAP, cap)
+        __store64(n + NET_USED, 0)
+        var i: int64 = 0
+        while i < old_cap {
+            let key = __load64(old + 16 * i)
+            if key > 1 {
+                ws_insert(key, __load64(old + 16 * i + 8))
+            }
+            i += 1
+        }
+        if old != 0 {
+            __free(old)
+        }
+    }
+    ws_insert(__load64(ws + WS_HANDLE), ws)
+}
+
+// How many handles the table `t` of `cap` slots holds.
+fun ws_count(t: int64, cap: int64) -> int64 {
+    var c: int64 = 0
+    var i: int64 = 0
+    while i < cap {
+        if __load64(t + 16 * i) > 1 {
+            c += 1
+        }
+        i += 1
+    }
+    return c
+}
+
+// `ws` under the handle `h` in a free slot (the table has room).
+fun ws_insert(h: int64, ws: int64) {
+    let n = net()
+    let t = __load64(n + NET_TABLE)
+    let cap = __load64(n + NET_CAP)
+    var i = ws_slot(h, cap)
+    while __load64(t + 16 * i) > 1 {
+        i = (i + 1) & (cap - 1)
+    }
+    if __load64(t + 16 * i) == 0 {
+        __store64(n + NET_USED, __load64(n + NET_USED) + 1)
+    }
+    __store64(t + 16 * i, h)
+    __store64(t + 16 * i + 8, ws)
+}
+
+// The handle `h` taken out of the table (the lock held): its watched
+// handle, or 0.
+fun ws_take(h: int64) -> int64 {
+    let n = net()
+    let t = __load64(n + NET_TABLE)
+    if t == 0 || h == 0 {
+        return 0
+    }
+    let cap = __load64(n + NET_CAP)
+    var i = ws_slot(h, cap)
+    while true {
+        let k = __load64(t + 16 * i)
+        if k == h {
+            let ws = __load64(t + 16 * i + 8)
+            __store64(t + 16 * i, 1)
+            __store64(t + 16 * i + 8, 0)
+            return ws
+        }
+        if k == 0 {
+            return 0
+        }
+        i = (i + 1) & (cap - 1)
+    }
+    return 0
+}
+
+// A new watched handle for the handle `h` of the kind `kind`, put on the
+// port when `assoc` (and the program has one), and in the table: its
+// address, or 0 when no event could be made.
+fun ws_new(h: int64, kind: int64, assoc: bool) -> int64 {
+    let ev = __syscall5(__rt_get("__imp_CreateEventW"), 0, 1, 0, 0, 0)   // manual reset, not signalled
+    if ev == 0 {
+        return 0
+    }
+    let ws = __alloc(WS_SIZE)
+    var k: int64 = 0
+    while k < WS_SIZE {
+        __store64(ws + k, 0)
+        k += 8
+    }
+    __store64(ws + WS_HANDLE, h)
+    __store64(ws + WS_KIND, kind)
+    __store64(ws + WS_EVENT, ev)
+    for op in [WS_PROBE, WS_SEND, WS_ACCEPT, WS_NUDGE] {
+        __store64(ws + op + 32, ws)
+    }
+    var flags: int64 = 0
+    if assoc {
+        let port = net_port()
+        if port != 0 && __syscall5(__rt_get("__imp_CreateIoCompletionPort"), h, port, 0, 0, 0) == port {
+            flags = F_ASSOC
+        }
+    }
+    __store64(ws + WS_FLAGS, flags)
+    net_lock()
+    let old = ws_take(h)
+    if old != 0 {
+        // (a handle closed behind the table's back: CloseHandle on a
+        // handle given to the program by another call)
+        ws_drop(old)
+    }
+    ws_put(ws)
+    net_unlock()
+    return ws
+}
+
+// The watched handle `ws` closed for the table (the lock held, it is in
+// none): freed now unless a packet is due for it or it closes later.
+fun ws_drop(ws: int64) {
+    __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) | F_CLOSED)
+    ws_unused(ws)
+}
+
+// `ws` freed if it is closed, no packet is due for it and it doesn't close
+// later (the lock held).
+fun ws_unused(ws: int64) {
+    let f = __load64(ws + WS_FLAGS)
+    if (f & F_CLOSED) == 0 || (f & F_LATER) != 0 || __load64(ws + WS_REFS) != 0 {
+        return
+    }
+    let c = __syscall(__rt_get("__imp_CloseHandle"), __load64(ws + WS_EVENT), 0, 0)
+    if __load64(ws + WS_SEND_EVENT) != 0 {
+        let d = __syscall(__rt_get("__imp_CloseHandle"), __load64(ws + WS_SEND_EVENT), 0, 0)
+    }
+    if __load64(ws + WS_BUF) != 0 {
+        __free(__load64(ws + WS_BUF))
+    }
+    __free(ws)
+}
+
+// The watched handle of `h` (0 for none), held: not freed, even if
+// another worker closes `h` meanwhile, until `ws_release`.
+fun ws_hold(h: int64) -> int64 {
+    net_lock()
+    let ws = ws_find(h)
+    if ws != 0 {
+        __store64(ws + WS_REFS, __load64(ws + WS_REFS) + 1)
+    }
+    net_unlock()
+    return ws
+}
+
+// The watched handle `ws` (from `ws_hold`, 0 for none) no longer held.
+fun ws_release(ws: int64) {
+    if ws == 0 {
+        return
+    }
+    net_lock()
+    __store64(ws + WS_REFS, __load64(ws + WS_REFS) - 1)
+    ws_unused(ws)
+    net_unlock()
+}
+
+// Whether `ws`'s operation at `op` (flagged `flag` when started) goes on.
+fun ws_going(ws: int64, op: int64, flag: int64) -> bool {
+    return (__load64(ws + WS_FLAGS) & flag) != 0 && __load_acq64(ws + op) == STATUS_PENDING
+}
+
+// `ws`'s operation at `op` made ready to start, signalling `event`
+// (0: none).
+fun op_reset(ws: int64, op: int64, event: int64) {
+    let o = ws + op
+    __store64(o, 0)
+    __store64(o + 8, 0)
+    __store64(o + 16, 0)
+    __store64(o + 24, event)
+}
+
+// The operation `ws`'s `op` started, flagged `flag`, `going` when the call
+// that started it says it ended or goes on (`call_going`, `wsa_going`): a
+// packet is due then, when `ws` is on the port; else its flag taken off.
+// Gives `going`. The lock held.
+fun op_started(ws: int64, going: bool, flag: int64) -> bool {
+    if going {
+        if (__load64(ws + WS_FLAGS) & F_ASSOC) != 0 {
+            __store64(ws + WS_REFS, __load64(ws + WS_REFS) + 1)
+        }
+        return true
+    }
+    __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) & ~flag)
+    return false
+}
+
+// Whether an overlapped call that gave the BOOL `r` ended or goes on.
+fun call_going(r: int64) -> bool {
+    return ok(r) || last_error() == WSA_IO_PENDING
+}
+
+// Whether an overlapped Winsock call that gave `r` (0 for success) ended or
+// goes on.
+fun wsa_going(r: int64) -> bool {
+    return (r & LOW32) == 0 || wsa_error() == WSA_IO_PENDING
+}
+
+// The thread blocked until `ws`'s operation at `op` ends, for at most
+// `timeout_ms` (negative: no limit), waiting on `event`, which it
+// signals: whether it ended.
+fun op_wait(ws: int64, op: int64, event: int64, timeout_ms: int64) -> bool {
+    let start = clock_ns()
+    while __load_acq64(ws + op) == STATUS_PENDING {
+        let r = __syscall(__rt_get("__imp_ResetEvent"), event, 0, 0)
+        if __load_acq64(ws + op) != STATUS_PENDING {
+            return true
+        }
+        var left = WAIT_INFINITE
+        if timeout_ms >= 0 {
+            left = timeout_ms - (clock_ns() - start) / 1000000
+            if left <= 0 {
+                return false
+            }
+        }
+        let w = __syscall(__rt_get("__imp_WaitForSingleObject"), event, left, 0)
+    }
+    return true
+}
+
+// A packet posted for `ws` ("look at it now"), unless one is due already
+// (the lock held).
+fun ws_nudge(ws: int64) {
+    let f = __load64(ws + WS_FLAGS)
+    if (f & F_NUDGED) != 0 {
+        return
+    }
+    let port = __load64(net() + NET_PORT)
+    if port == 0 {
+        return
+    }
+    if ok(__syscall5(__rt_get("__imp_PostQueuedCompletionStatus"), port, 0, 0, ws + WS_NUDGE, 0)) {
+        __store64(ws + WS_FLAGS, f | F_NUDGED)
+        __store64(ws + WS_REFS, __load64(ws + WS_REFS) + 1)
+    }
+}
+
+// The handle of `ws` closed once its send or write ends, by a wait of the
+// thread pool's on that operation's event (`__win_wait_posted` calls
+// `close_fn`, closesocket or CloseHandle, with the handle): true, or false
+// when no wait could be made (the caller closes it now). `ws` is out of
+// the table and closed later (F_LATER), on the list `ws_later` frees from.
+// The lock held.
+fun ws_close_later(ws: int64, close_fn: int64) -> bool {
+    let ctx = ws + WS_POST
+    __store64(ctx, close_fn)
+    __store64(ctx + 8, __load64(ws + WS_HANDLE))
+    __store64(ctx + 16, 0)
+    __store64(ctx + 24, 0)
+    __store64(ctx + 32, 0)
+    let r = win_call(__rt_get("__imp_RegisterWaitForSingleObject"),
+        [ws + WS_WAIT, __load64(ws + WS_SEND_EVENT), __rt_addr("__win_wait_posted"), ctx, WAIT_INFINITE, WT_ONCE])
+    if !ok(r) {
+        return false
+    }
+    let n = net()
+    __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) | F_CLOSED | F_LATER)
+    __store64(ws + WS_NEXT, __load64(n + NET_LATER))
+    __store64(n + NET_LATER, ws)
+    return true
+}
+
+// The handles closed later whose operation has ended and whose wait has
+// closed them: their waits given back and their states freed once no
+// packet is due for them (the lock held).
+fun ws_later() {
+    let n = net()
+    var prev: int64 = 0
+    var ws = __load64(n + NET_LATER)
+    while ws != 0 {
+        let next = __load64(ws + WS_NEXT)
+        if __load_acq64(ws + WS_POST + 32) != 0 && __load64(ws + WS_REFS) == 0 {
+            if prev == 0 {
+                __store64(n + NET_LATER, next)
+            } else {
+                __store64(prev + WS_NEXT, next)
+            }
+            let u = __syscall(__rt_get("__imp_UnregisterWaitEx"), __load64(ws + WS_WAIT), 0, 0)
+            __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) & ~F_LATER)
+            ws_unused(ws)
+        } else {
+            prev = ws
+        }
+        ws = next
+    }
+}
+
+// --- sockets
+
+// A new socket of the family `family` (4: IPv4, 6: IPv6, both an IPv6
+// socket's by default, as Linux's) and the kind `kind` (1: a stream, TCP;
+// 2: datagrams, UDP), blocking, not inherited, overlapped: its handle. A
+// datagram socket doesn't fail its next receive after an ICMP "port
+// unreachable" (SIO_UDP_CONNRESET off), as Linux's unconnected one doesn't.
 pub fun sock_open(family: int64, kind: int64) -> int64 {
-    return ENOSYS
+    var af: int64 = 2               // AF_INET
+    if family == 6 {
+        af = 23                     // AF_INET6
+    } else if family != 4 {
+        return -UNSUPPORTED
+    }
+    if kind != 1 && kind != 2 {
+        return -INVALID_INPUT
+    }
+    let started = winsock()
+    if started < 0 {
+        return started
+    }
+    var proto: int64 = 6            // IPPROTO_TCP
+    if kind == 2 {
+        proto = 17                  // IPPROTO_UDP
+    }
+    // WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT
+    let s = win_call(__rt_get("__imp_WSASocketW"), [af, kind, proto, 0, 0, 129])
+    if s == -1 || s == 0 {
+        return wsa_failed()
+    }
+    let v = __alloc(8)
+    __store64(v, 0)
+    if af == 23 {
+        let o = win_call(__rt_get("__imp_setsockopt"), [s, 41, 27, v, 4])        // IPPROTO_IPV6, IPV6_V6ONLY: 0
+    }
+    if kind == 2 {
+        let got = __alloc(8)
+        let o = win_call(__rt_get("__imp_WSAIoctl"), [s, 2550136844i64, v, 4, 0, 0, got, 0, 0])  // SIO_UDP_CONNRESET
+        __free(got)
+    }
+    __free(v)
+    if !sock_watched(s, kind) {
+        let c = __syscall(__rt_get("__imp_closesocket"), s, 0, 0)
+        return -(OTHER + 24)
+    }
+    return s
 }
 
+// The socket `s` of the kind `kind` (1, 2) a watched handle, on the port in
+// a program with tasks: whether one could be made.
+fun sock_watched(s: int64, kind: int64) -> bool {
+    var k = K_STREAM
+    if kind == 2 {
+        k = K_DGRAM
+    }
+    return ws_new(s, k, with_tasks()) != 0
+}
+
+// The socket `h` in non-blocking mode (`on` 1) or blocking (0)
+// (`ioctlsocket`'s FIONBIO). 0, or minus its cause.
 pub fun sock_nonblocking(h: int64, on: int64) -> int64 {
-    return ENOSYS
+    let v = __alloc(8)
+    __store64(v, on)
+    let r = __syscall(__rt_get("__imp_ioctlsocket"), h, 2147772030i64, v)   // FIONBIO
+    __free(v)
+    if wsa_bad(r) {
+        return wsa_failed()
+    }
+    ws_flag(h, F_NONBLOCK, on != 0)
+    return 0
 }
 
+// The flag `flag` of `h`'s watched handle set (`on`) or taken off.
+fun ws_flag(h: int64, flag: int64, on: bool) {
+    net_lock()
+    let ws = ws_find(h)
+    if ws != 0 {
+        if on {
+            __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) | flag)
+        } else {
+            __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) & ~flag)
+        }
+    }
+    net_unlock()
+}
+
+// The address record `rec` as a `sockaddr_in` or `sockaddr_in6` (Windows'
+// AF_INET6 is 23) in a new block of 32 bytes, which the caller frees, its
+// length stored at `len`; 0 for a record that is neither.
+fun sockaddr_of(rec: str, len: int64) -> int64 {
+    let p = __addr_of(rec)
+    let n = __load64(p)
+    let sa = __alloc(32)
+    __store64(sa, 0)
+    __store64(sa + 8, 0)
+    __store64(sa + 16, 0)
+    __store64(sa + 24, 0)
+    if n == 7 && __load8(p + 8) == 4u8 {
+        __store8(sa, 2u8)                       // AF_INET (little-endian)
+        __store8(sa + 2, __load8(p + 9))        // the port, big-endian
+        __store8(sa + 3, __load8(p + 10))
+        __copy_bytes(sa + 4, p + 11, 4)
+        __store64(len, 16)
+        return sa
+    }
+    if n == 19 && __load8(p + 8) == 6u8 {
+        __store8(sa, 23u8)                      // AF_INET6
+        __store8(sa + 2, __load8(p + 9))
+        __store8(sa + 3, __load8(p + 10))
+        __copy_bytes(sa + 8, p + 11, 16)        // after the flow information
+        __store64(len, 28)
+        return sa
+    }
+    __free(sa)
+    return 0
+}
+
+// The address record of the `sockaddr` at `sa` written at `at` (room for
+// 19 bytes): its length, 7 or 19; 0 for another family.
+fun record_into(sa: int64, at: int64) -> int64 {
+    let fam = (__load8(sa) as int64) | ((__load8(sa + 1) as int64) << 8)
+    var n: int64 = 0
+    if fam == 2 {
+        __store8(at, 4u8)
+        __copy_bytes(at + 3, sa + 4, 4)
+        n = 7
+    } else if fam == 23 {
+        __store8(at, 6u8)
+        __copy_bytes(at + 3, sa + 8, 16)
+        n = 19
+    }
+    if n > 0 {
+        __store8(at + 1, __load8(sa + 2))
+        __store8(at + 2, __load8(sa + 3))
+    }
+    return n
+}
+
+// The socket `h` bound to the address record `rec` (port 0: one the
+// system picks): 0, or minus its cause (ADDR_IN_USE, ADDR_NOT_AVAILABLE, …).
 pub fun sock_bind(h: int64, rec: str) -> int64 {
-    return ENOSYS
+    let len = __alloc(8)
+    let sa = sockaddr_of(rec, len)
+    if sa == 0 {
+        __free(len)
+        return -INVALID_INPUT
+    }
+    let r = __syscall(__rt_get("__imp_bind"), h, sa, __load64(len))
+    __free(sa)
+    __free(len)
+    if wsa_bad(r) {
+        return wsa_failed()
+    }
+    ws_flag(h, F_BOUND, true)
+    return 0
 }
 
+// The stream socket `h` listening, at most `backlog` connections queued.
 pub fun sock_listen(h: int64, backlog: int64) -> int64 {
-    return ENOSYS
+    if wsa_bad(__syscall(__rt_get("__imp_listen"), h, backlog, 0)) {
+        return wsa_failed()
+    }
+    ws_flag(h, F_LISTENING, true)
+    return 0
 }
 
+// The next connection queued on the listening socket `h`: a new socket,
+// blocking, not inherited (WOULD_BLOCK when `h` is non-blocking and none is
+// queued). The one AcceptEx took for a waiting task comes first.
 pub fun sock_accept(h: int64) -> int64 {
-    return ENOSYS
+    var a: int64 = 0
+    net_lock()
+    let ws = ws_find(h)
+    if ws != 0 {
+        if __load64(ws + WS_ACCEPTED) != 0 {
+            a = __load64(ws + WS_ACCEPTED)
+            __store64(ws + WS_ACCEPTED, 0)
+        } else if (__load64(ws + WS_FLAGS) & F_ACCEPTING) != 0 && __load_acq64(ws + WS_ACCEPT) != STATUS_PENDING {
+            accept_ended(ws)
+            a = __load64(ws + WS_ACCEPTED)
+            __store64(ws + WS_ACCEPTED, 0)
+        }
+    }
+    net_unlock()
+    if a != 0 {
+        let lh = __alloc(8)
+        __store64(lh, h)
+        let u = win_call(__rt_get("__imp_setsockopt"), [a, 65535, 28683, lh, 8])   // SO_UPDATE_ACCEPT_CONTEXT
+        __free(lh)
+    } else {
+        a = __syscall(__rt_get("__imp_accept"), h, 0, 0)
+        if a == -1 || a == 0 {
+            return wsa_failed()
+        }
+        // (Winsock's takes the listener's non-blocking mode)
+        let v = __alloc(8)
+        __store64(v, 0)
+        let b = __syscall(__rt_get("__imp_ioctlsocket"), a, 2147772030i64, v)
+        __free(v)
+    }
+    if !sock_watched(a, 1) {
+        let c = __syscall(__rt_get("__imp_closesocket"), a, 0, 0)
+        return -(OTHER + 24)
+    }
+    return a
 }
 
+// `ws`'s AcceptEx ended (the lock held): the connection it took is
+// `accepted`, or its socket closed when it failed.
+fun accept_ended(ws: int64) {
+    __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) & ~F_ACCEPTING)
+    let s = __load64(ws + WS_ACCEPTING)
+    __store64(ws + WS_ACCEPTING, 0)
+    if s == 0 {
+        return
+    }
+    if __load64(ws + WS_ACCEPT) == 0 && __load64(ws + WS_ACCEPTED) == 0 {
+        __store64(ws + WS_ACCEPTED, s)
+    } else {
+        let c = __syscall(__rt_get("__imp_closesocket"), s, 0, 0)
+    }
+}
+
+// The address of the Winsock extension whose GUID's 16 bytes are `guid`
+// (`WSAIoctl`'s SIO_GET_EXTENSION_FUNCTION_POINTER on the socket `s`),
+// kept at the net state's `at`: 0 when there is none.
+fun extension(s: int64, at: int64, guid: [int64]) -> int64 {
+    let n = net()
+    let known = __load_acq64(n + at)
+    if known != 0 {
+        return known
+    }
+    let g = __alloc(16)
+    __store64(g, guid[0])
+    __store64(g + 8, guid[1])
+    let out = __alloc(16)
+    __store64(out, 0)
+    let r = win_call(ws2(W_IOCTL), [s, 3355443206i64, g, 16, out, 8, out + 8, 0, 0])
+    let f = __load64(out)
+    __free(g)
+    __free(out)
+    if (r & LOW32) == 0 && f != 0 {
+        __store_rel64(n + at, f)
+        return f
+    }
+    return 0
+}
+
+// AcceptEx's address (WSAID_ACCEPTEX), and ConnectEx's (WSAID_CONNECTEX).
+fun accept_ex(s: int64) -> int64 {
+    return extension(s, NET_ACCEPTEX, [1283468361458941425i64, -7880938297915028843i64])
+}
+
+fun connect_ex(s: int64) -> int64 {
+    return extension(s, NET_CONNECTEX, [5071297216797345721i64, 4469387828705814926i64])
+}
+
+// The socket `h` connected to the address record `rec`: 0, or minus the
+// cause; IN_PROGRESS for a non-blocking socket whose connection goes on (it
+// becomes writable once it is made or has failed: `sock_error` tells which).
+// A non-blocking socket on the port connects with ConnectEx (bound first to
+// any address of its family), so the poller hears of the end.
 pub fun sock_connect(h: int64, rec: str) -> int64 {
-    return ENOSYS
+    let len = __alloc(8)
+    let sa = sockaddr_of(rec, len)
+    if sa == 0 {
+        __free(len)
+        return -INVALID_INPUT
+    }
+    let ws = ws_hold(h)
+    var r: int64 = 0
+    if ws != 0 && (__load64(ws + WS_FLAGS) & (F_ASSOC | F_NONBLOCK)) == (F_ASSOC | F_NONBLOCK) && connect_ex(h) != 0 {
+        r = connect_overlapped(ws, h, sa, __load64(len))
+    } else if wsa_bad(__syscall(__rt_get("__imp_connect"), h, sa, __load64(len))) {
+        let e = wsa_error()
+        if e == WSAEWOULDBLOCK {
+            r = -IN_PROGRESS
+        } else {
+            r = -wsa_cause(e)
+        }
+    }
+    ws_release(ws)
+    __free(sa)
+    __free(len)
+    return r
 }
 
+// `sock_connect` through ConnectEx: IN_PROGRESS, or minus the cause.
+fun connect_overlapped(ws: int64, h: int64, sa: int64, len: int64) -> int64 {
+    if (__load64(ws + WS_FLAGS) & F_BOUND) == 0 {
+        let any = __alloc(32)
+        __store64(any, 0)
+        __store64(any + 8, 0)
+        __store64(any + 16, 0)
+        __store64(any + 24, 0)
+        __store8(any, __load8(sa))
+        let b = __syscall(__rt_get("__imp_bind"), h, any, len)
+        __free(any)
+        if wsa_bad(b) {
+            return wsa_failed()
+        }
+        ws_flag(h, F_BOUND, true)
+    }
+    net_lock()
+    op_reset(ws, WS_ACCEPT, __load64(ws + WS_EVENT))
+    __store64(ws + WS_FLAGS, (__load64(ws + WS_FLAGS) | F_CONNECTING) & ~F_UPDATED)
+    let r = win_call(connect_ex(h), [h, sa, len, 0, 0, 0, ws + WS_ACCEPT])
+    let going = op_started(ws, call_going(r), F_CONNECTING)
+    let e = wsa_error()
+    net_unlock()
+    if !going {
+        return -wsa_cause(e)
+    }
+    return -IN_PROGRESS
+}
+
+// The error pending on the socket `h` (SO_ERROR, or how its ConnectEx
+// ended), taken: 0 for none, else its cause, positive (a connect in
+// progress that failed: CONNECTION_REFUSED). A connection ConnectEx made
+// gets its context then (SO_UPDATE_CONNECT_CONTEXT), so that its addresses
+// and `shutdown` work.
 pub fun sock_error(h: int64) -> int64 {
-    return ENOSYS
+    let ws = ws_hold(h)
+    if ws != 0 && (__load64(ws + WS_FLAGS) & F_CONNECTING) != 0 {
+        let st = __load_acq64(ws + WS_ACCEPT)
+        var c: int64 = 0
+        if st != STATUS_PENDING {
+            ws_flag(h, F_CONNECTING, false)
+            c = status_cause(st)
+            if c == 0 && (__load64(ws + WS_FLAGS) & F_UPDATED) == 0 {
+                let u = win_call(__rt_get("__imp_setsockopt"), [h, 65535, 28688, 0, 0])   // SO_UPDATE_CONNECT_CONTEXT
+                ws_flag(h, F_UPDATED, true)
+            }
+        }
+        ws_release(ws)
+        return c
+    }
+    ws_release(ws)
+    let v = __alloc(16)
+    __store64(v, 0)
+    __store64(v + 8, 4)
+    let r = win_call(__rt_get("__imp_getsockopt"), [h, 65535, 4103, v, v + 8])   // SOL_SOCKET, SO_ERROR
+    let e = __load64(v) & LOW32
+    __free(v)
+    if wsa_bad(r) {
+        return wsa_failed()
+    }
+    if e == 0 {
+        return 0
+    }
+    return wsa_cause(e)
 }
 
+// Up to `n` bytes at `p` sent on the connected socket `h`: how many (no
+// signal on Windows). A non-blocking socket on the port whose send would
+// wait sends a copy of them (at most SEND_ROOM) overlapped, its end the
+// poller's to hear of; until it ends the next send is WOULD_BLOCK, and how
+// it failed, if it did, is the next one's error.
 pub fun sock_send(h: int64, p: int64, n: int64) -> int64 {
-    return ENOSYS
+    var len = n
+    if len > 1073741824 {
+        len = 1073741824
+    }
+    let ws = ws_hold(h)
+    let r = send_with(ws, h, p, len)
+    ws_release(ws)
+    return r
 }
 
+// `sock_send` of `len` bytes with `h`'s watched handle `ws` (0: none) held.
+fun send_with(ws: int64, h: int64, p: int64, len: int64) -> int64 {
+    if ws != 0 && (__load64(ws + WS_FLAGS) & F_SENDING) != 0 {
+        if (__load64(ws + WS_FLAGS) & F_NONBLOCK) == 0 {
+            let done = op_wait(ws, WS_SEND, __load64(ws + WS_SEND_EVENT), -1)
+        }
+        let st = __load_acq64(ws + WS_SEND)
+        if st == STATUS_PENDING {
+            return -WOULD_BLOCK
+        }
+        ws_flag(h, F_SENDING, false)
+        if status_cause(st) != 0 {
+            return -status_cause(st)
+        }
+    }
+    let r = win_call(__rt_get("__imp_send"), [h, p, len, 0])
+    if !wsa_bad(r) {
+        return r & LOW32
+    }
+    let e = wsa_error()
+    if e == WSAEWOULDBLOCK && ws != 0 && (__load64(ws + WS_FLAGS) & F_ASSOC) != 0 {
+        return send_overlapped(ws, h, p, len)
+    }
+    return -wsa_cause(e)
+}
+
+// Room for `n` bytes in `ws`'s buffer, and its event for sends and writes
+// (the lock not held): false when it couldn't be made.
+fun send_room(ws: int64, n: int64) -> bool {
+    if __load64(ws + WS_SEND_EVENT) == 0 {
+        let ev = __syscall5(__rt_get("__imp_CreateEventW"), 0, 1, 0, 0, 0)
+        if ev == 0 {
+            return false
+        }
+        __store64(ws + WS_SEND_EVENT, ev)
+    }
+    if __load64(ws + WS_BUF_CAP) < n {
+        if __load64(ws + WS_BUF) != 0 {
+            __free(__load64(ws + WS_BUF))
+        }
+        __store64(ws + WS_BUF, __alloc(n))
+        __store64(ws + WS_BUF_CAP, n)
+    }
+    return true
+}
+
+// `sock_send`'s overlapped send of at most SEND_ROOM of the `n` bytes at
+// `p`: how many it took, or minus the cause.
+fun send_overlapped(ws: int64, h: int64, p: int64, n: int64) -> int64 {
+    var len = n
+    if len > SEND_ROOM {
+        len = SEND_ROOM
+    }
+    if !send_room(ws, len) {
+        return -WOULD_BLOCK
+    }
+    __copy_bytes(__load64(ws + WS_BUF), p, len)
+    __store64(ws + WS_WSABUF, len)
+    __store64(ws + WS_WSABUF + 8, __load64(ws + WS_BUF))
+    net_lock()
+    op_reset(ws, WS_SEND, __load64(ws + WS_SEND_EVENT))
+    __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) | F_SENDING)
+    let r = win_call(__rt_get("__imp_WSASend"), [h, ws + WS_WSABUF, 1, 0, 0, ws + WS_SEND, 0])
+    let going = op_started(ws, wsa_going(r), F_SENDING)
+    let e = wsa_error()
+    net_unlock()
+    if !going {
+        return -wsa_cause(e)
+    }
+    return len
+}
+
+// Up to `n` bytes received on the connected socket `h` at `p`: how many,
+// 0 when the peer ended the stream.
 pub fun sock_recv(h: int64, p: int64, n: int64) -> int64 {
-    return ENOSYS
+    var len = n
+    if len > 1073741824 {
+        len = 1073741824
+    }
+    let r = win_call(__rt_get("__imp_recv"), [h, p, len, 0])
+    if wsa_bad(r) {
+        return wsa_failed()
+    }
+    return r & LOW32
 }
 
+// The `n` bytes at `p` sent as one datagram on the socket `h` to the
+// address record `rec`: how many.
 pub fun sock_send_to(h: int64, p: int64, n: int64, rec: str) -> int64 {
-    return ENOSYS
+    let len = __alloc(8)
+    let sa = sockaddr_of(rec, len)
+    if sa == 0 {
+        __free(len)
+        return -INVALID_INPUT
+    }
+    let r = win_call(__rt_get("__imp_sendto"), [h, p, n, 0, sa, __load64(len)])
+    __free(sa)
+    __free(len)
+    if wsa_bad(r) {
+        return wsa_failed()
+    }
+    return r & LOW32
 }
 
+// The next datagram on the socket `h`: its first `n` bytes at `p` (the rest
+// of a longer one dropped: WSAEMSGSIZE is no error), its sender's address
+// record at `sender` (room for 19 bytes): how many bytes.
 pub fun sock_recv_from(h: int64, p: int64, n: int64, sender: int64) -> int64 {
-    return ENOSYS
+    let sa = __alloc(48)
+    __store64(sa, 0)
+    __store64(sa + 32, 28)
+    let r = win_call(__rt_get("__imp_recvfrom"), [h, p, n, 0, sa, sa + 32])
+    var got = r & LOW32
+    if wsa_bad(r) {
+        let e = wsa_error()
+        if e == WSAEMSGSIZE {
+            got = n
+        } else {
+            got = -wsa_cause(e)
+        }
+    }
+    if got >= 0 {
+        let k = record_into(sa, sender)
+    }
+    __free(sa)
+    return got
 }
 
+// The address record of the socket `h`'s own end (`peer` 0, getsockname)
+// or of its peer (1, getpeername) written at `at` (room for 19 bytes): its
+// length, or minus its cause (NOT_CONNECTED: no peer).
 pub fun sock_addr(h: int64, peer: int64, at: int64) -> int64 {
-    return ENOSYS
+    let sa = __alloc(48)
+    __store64(sa, 0)
+    __store64(sa + 32, 28)
+    var f = __rt_get("__imp_getsockname")
+    if peer != 0 {
+        f = __rt_get("__imp_getpeername")
+    }
+    let r = __syscall(f, h, sa, sa + 32)
+    var n: int64 = 0
+    if wsa_bad(r) {
+        n = wsa_failed()
+    } else {
+        n = record_into(sa, at)
+    }
+    __free(sa)
+    return n
 }
 
+// The socket `h`'s receiving (`how` 1), sending (2) or both (3) ended
+// (SD_RECEIVE, SD_SEND, SD_BOTH).
 pub fun sock_shutdown(h: int64, how: int64) -> int64 {
-    return ENOSYS
+    if how < 1 || how > 3 {
+        return -INVALID_INPUT
+    }
+    if wsa_bad(__syscall(__rt_get("__imp_shutdown"), h, how - 1, 0)) {
+        return wsa_failed()
+    }
+    return 0
 }
 
+// The option `opt` of the socket `h` set to `value` (0 off, 1 on): 1 no
+// delay (TCP_NODELAY), 2 broadcast (SO_BROADCAST), 3 a listener's address
+// reused while old connections to it linger, which Windows allows anyway
+// (its own SO_REUSEADDR would let another program take the port): nothing.
 pub fun sock_option(h: int64, opt: int64, value: int64) -> int64 {
-    return ENOSYS
+    var level: int64 = 65535      // SOL_SOCKET
+    var name: int64 = 0
+    if opt == 1 {
+        level = 6                 // IPPROTO_TCP
+        name = 1                  // TCP_NODELAY
+    } else if opt == 2 {
+        name = 32                 // SO_BROADCAST
+    } else if opt == 3 {
+        return 0
+    } else {
+        return -INVALID_INPUT
+    }
+    let v = __alloc(8)
+    __store64(v, value)
+    let r = win_call(__rt_get("__imp_setsockopt"), [h, level, name, v, 4])
+    __free(v)
+    if wsa_bad(r) {
+        return wsa_failed()
+    }
+    return 0
 }
 
+// Whether the socket `h` is ready for what `events` asks (1: to receive or
+// accept, 2: to send, or a connect's end), waiting at most `timeout_ms`
+// milliseconds (negative: no limit): the events ready, an error or a
+// hang-up counting as both (the operation then reports it); 0 when the time
+// ran out. A socket's own operations (a send, ConnectEx, AcceptEx) are
+// waited for on their events; otherwise `WSAPoll`.
 pub fun sock_poll(h: int64, events: int64, timeout_ms: int64) -> int64 {
-    return ENOSYS
+    let ws = ws_hold(h)
+    let r = poll_with(ws, h, events, timeout_ms)
+    ws_release(ws)
+    return r
 }
 
+// `sock_poll` with `h`'s watched handle `ws` (0: none) held.
+fun poll_with(ws: int64, h: int64, events: int64, timeout_ms: int64) -> int64 {
+    let start = clock_ns()
+    while true {
+        var left = timeout_ms
+        if timeout_ms > 0 {
+            left = timeout_ms - (clock_ns() - start) / 1000000
+            if left < 0 {
+                left = 0
+            }
+        }
+        if ws != 0 {
+            let f = __load64(ws + WS_FLAGS)
+            if (events & 2) != 0 && ws_going(ws, WS_SEND, F_SENDING) {
+                if !op_wait(ws, WS_SEND, __load64(ws + WS_SEND_EVENT), left) {
+                    return 0
+                }
+                return 2
+            }
+            if (events & 2) != 0 && ws_going(ws, WS_ACCEPT, F_CONNECTING) {
+                if !op_wait(ws, WS_ACCEPT, __load64(ws + WS_EVENT), left) {
+                    return 0
+                }
+                return 2
+            }
+            if (events & 1) != 0 && (f & F_LISTENING) != 0 && (__load64(ws + WS_ACCEPTED) != 0 ||
+                    ((f & F_ACCEPTING) != 0 && __load_acq64(ws + WS_ACCEPT) != STATUS_PENDING)) {
+                return 1
+            }
+            if (events & 1) != 0 && ws_going(ws, WS_ACCEPT, F_ACCEPTING) {
+                // (a connection AcceptEx would take never makes the
+                // listener readable): its event or WSAPoll, a slice at a time
+                var slice: int64 = 10
+                if left >= 0 && left < slice {
+                    slice = left
+                }
+                let w = __syscall(__rt_get("__imp_WaitForSingleObject"), __load64(ws + WS_EVENT), slice, 0)
+                let r = wsa_poll(h, events, 0)
+                if r != 0 {
+                    return r
+                }
+                if left == 0 {
+                    return 0
+                }
+                continue
+            }
+        }
+        return wsa_poll(h, events, left)
+    }
+    return 0
+}
+
+// `WSAPoll` of the socket `h` for `events` (1, 2), at most `timeout_ms`:
+// the events ready (an error or a hang-up counting as both), 0 when the
+// time ran out, or minus the cause.
+fun wsa_poll(h: int64, events: int64, timeout_ms: int64) -> int64 {
+    var want: int64 = 0
+    if (events & 1) != 0 { want |= POLLRDNORM }
+    if (events & 2) != 0 { want |= POLLWRNORM }
+    let pfd = __alloc(16)
+    __store64(pfd, h)
+    __store64(pfd + 8, want)
+    var limit = timeout_ms
+    if limit < 0 {
+        limit = -1
+    }
+    let r = __syscall(ws2(W_POLL), pfd, 1, limit)
+    let got = (__load64(pfd + 8) >> 16) & 65535
+    __free(pfd)
+    if wsa_bad(r) {
+        return wsa_failed()
+    }
+    if (r & LOW32) == 0 {
+        return 0
+    }
+    return poll_ready(got, events)
+}
+
+// The portable readiness of WSAPoll's `revents` for the `events` asked.
+#test(256i64, 3i64)[1]
+#test(16i64, 3i64)[2]
+#test(2i64, 1i64)[1]
+#test(1i64, 3i64)[3]
+fun poll_ready(got: int64, events: int64) -> int64 {
+    var out: int64 = 0
+    if (got & POLLRDNORM) != 0 { out |= 1 }
+    if (got & POLLWRNORM) != 0 { out |= 2 }
+    if (got & POLL_ERRORS) != 0 { out |= 3 }   // POLLERR, POLLHUP, POLLNVAL
+    return out & events
+}
+
+// The socket `h` closed (`closesocket`), its watched handle with it; one
+// whose overlapped send still goes on is closed once it ends
+// (`ws_close_later`), so its bytes go as Linux sends a closed socket's.
 pub fun sock_close(h: int64) -> int64 {
-    return ENOSYS
+    var spare: int64 = 0
+    var accepted: int64 = 0
+    net_lock()
+    ws_later()
+    let ws = ws_take(h)
+    if ws != 0 {
+        if ws_going(ws, WS_SEND, F_SENDING) && ws_close_later(ws, __rt_get("__imp_closesocket")) {
+            net_unlock()
+            return 0
+        }
+        spare = __load64(ws + WS_ACCEPTING)
+        accepted = __load64(ws + WS_ACCEPTED)
+        __store64(ws + WS_ACCEPTED, 0)
+        ws_drop(ws)
+    }
+    net_unlock()
+    let r = __syscall(__rt_get("__imp_closesocket"), h, 0, 0)
+    if spare != 0 {
+        // (AcceptEx's socket: its operation ends cancelled)
+        let c = __syscall(__rt_get("__imp_closesocket"), spare, 0, 0)
+    }
+    if accepted != 0 {
+        let c = __syscall(__rt_get("__imp_closesocket"), accepted, 0, 0)
+    }
+    if wsa_bad(r) {
+        return wsa_failed()
+    }
+    return 0
 }
 
+// What std.net reads of the system's configuration: `which` 0, the path of
+// the hosts file (`%SystemRoot%\System32\drivers\etc\hosts`); 1, the name
+// servers `GetNetworkParams` (iphlpapi) gives, as resolv.conf's
+// `nameserver` lines; "" for none.
 pub fun net_config(which: int64) -> str {
+    if which == 0 {
+        var root = env_value("SystemRoot")
+        if root == "" {
+            root = "C:\\Windows"
+        }
+        return root + "\\System32\\drivers\\etc\\hosts"
+    }
+    if which == 1 {
+        return name_servers()
+    }
     return ""
+}
+
+// The name servers of `GetNetworkParams`' FIXED_INFO (its DnsServerList at
+// 272: a list of IP_ADDR_STRING, the next at 0 and the address's text at
+// 8) as `nameserver` lines.
+fun name_servers() -> str {
+    let size = __alloc(8)
+    __store64(size, 0)
+    let first = __syscall(__rt_get("__imp_GetNetworkParams"), 0, size, 0) & LOW32
+    let n = __load64(size) & LOW32
+    if first != 111 || n == 0 {   // ERROR_BUFFER_OVERFLOW: the size it needs
+        __free(size)
+        return ""
+    }
+    let info = __alloc(n)
+    let r = __syscall(__rt_get("__imp_GetNetworkParams"), info, size, 0) & LOW32
+    var out = StringBuilder()
+    if r == 0 {
+        var node = info + 272
+        while node != 0 {
+            var line = StringBuilder()
+            var k: int64 = 0
+            while k < 16 && __load8(node + 8 + k) != 0u8 {
+                line.append_byte(__load8(node + 8 + k))
+                k += 1
+            }
+            let text = line.build()
+            if text.len() > 0 {
+                out.append("nameserver " + text + "\n", 0, text.len() + 12)
+            }
+            node = __load64(node)
+        }
+    }
+    __free(info)
+    __free(size)
+    return out.build()
 }
 
 // --- the terminal and signals: MYLA-707 ------------------------------------------------
@@ -2789,55 +4366,50 @@ pub fun sleep_ns(n: int64) {
     let r = __syscall(__rt_get("__imp_Sleep"), ms, 0, 0)
 }
 
-// --- the poller (D124): timers, pipes and processes until MYLA-706 ----------------------
-// What a task waits for besides a timer, for now: a pipe (a child's stream,
-// the standard input when it is one) until it holds bytes or its writer
-// closed it, and a process (a child's `exited`) until it ended (MYLA-705).
-// A watch is armed once (one that fired waits for `poller_watch` again, as
-// EPOLLONESHOT's). A wait looks at each armed watch (`PeekNamedPipe`, a
-// process's handle), then waits for the processes and its wake-up event
-// (`WaitForMultipleObjects`, which `poller_wake` sets), a millisecond at a
-// time while a pipe is watched (an anonymous pipe can't be waited for).
-// MYLA-706 puts it on an I/O completion port, with sockets. Anything else
-// (the console, a file) can't be watched: ready at once, as a regular file
-// is on Linux.
+// --- the poller (D124) on the I/O completion port (MYLA-706) ---------------------------
+// What a task waits for besides a timer: a socket (`poller_watch_socket`),
+// a pipe of a child's until it holds bytes or ends and a child's process
+// until it ended (`poller_watch`, MYLA-705), the room in a child's input
+// pipe (`poller_watch_socket` with 2, MYLA-726). The wait is
+// `GetQueuedCompletionStatusEx` on the process's port (`net_port`) with the
+// nearest timer's time limit; `poller_wake` posts a packet of no
+// operation, at most one at a time (the net state's `NET_WAKE`), as Linux's
+// eventfd counts its wake-ups into one.
 //
-// The workers are threads (MYLA-703): one waits in the poller (std.rt's
-// `__exec_polling`) while any other may watch, forget or wake, under
-// std.rt's watch lock only. So the poller's block has a lock of its own
-// (a spin lock: it is held for a few loads and stores, never across a
-// system call), and a wait works on a copy: it copies the armed watches
-// (their descriptors, tokens, kinds and handles) under the lock, looks at
-// them and waits without it, and takes it again to record an event only
-// for a watch that is still there, armed and the same (one forgotten
-// meanwhile is ignored). A watch made or armed while a wait goes on wakes
-// it, so the new one is waited for at once. A handle closed while a wait
-// holds it in its copy would be a wait on a closed (or reused) handle, which
-// Windows leaves undefined: `poller_forget` therefore wakes a wait that
-// copied the watches and returns only once that wait is over (its count of
-// waits moved on), and std.rt forgets a watch whose last waiter went before
-// it closes the handle (`watch_unlink`). A handle closed while frames still
-// wait on it (std.rt's `watches_closed`) isn't forgotten first: the wait's
-// check drops its event, and the wait holds the object it was given until
-// it returns (MYLA-706's completion port ends this).
-// No copy is a `DuplicateHandle` of its own: a duplicate of a pipe's read
-// end would keep the pipe open after this process closed it (the child's
-// writes would not fail), and it would cost two calls a handle a wait.
+// A watch arms the handle's watched handle (`ws_watch`: its token and its
+// events) and posts it a packet, so the waiting worker looks at it at once:
+// every packet, an operation's end or one posted, means "look at this
+// handle again". The wait looks (`ws_level`) at the handles its packets
+// named that are still armed: one ready gives its event and is disarmed
+// (a watch fires once, as EPOLLONESHOT's); one not ready gets the operation
+// that ends when it may be (`ws_notify`, above), and stays armed. So a
+// handle armed again while it is ready is ready at once (level-triggered,
+// std.rt's `poll_events`), and a wake-up that comes early (another task
+// took what was there) costs a look. A pipe that isn't ours (an inherited
+// standard input) and a datagram socket's room can't be waited for: armed,
+// they are looked at each millisecond (the wait's limit is a millisecond
+// while there is one: `NET_PEEKS`). Anything else (the console, a file)
+// can't be watched: ready at once, as a regular file is on Linux.
 //
-// The block: `[lock][cap][count][watches][wake event][waiting][waits]
-// [events][events' cap][copy][copy's cap]`; a watch `[fd][token][armed]
-// [kind]`, a copy's entry `[fd][token][kind][handle]`. The watches are the
-// lock's; the events and the copy are the waiting worker's own (one waits
-// at a time, and it alone reads the events, `poller_event`, before its
-// next wait).
+// One worker waits at a time (std.rt's `__exec_polling`); the others watch,
+// forget and wake meanwhile, each under the net lock. No handle is held by
+// a wait (it holds packets, which name watched handles that live until
+// none is due), so a forget only disarms, and a handle can be closed while
+// a wait goes on: its operations end cancelled, and their packets find
+// it closed (D226's copy and its wait for the forgetting worker are gone).
+//
+// The poller's block: `[port][entries][tokens][readies][room][wait]`: the
+// port, room for 64 OVERLAPPED_ENTRYs, the events of the last wait (their
+// tokens and readiness, room for `room`), the count of its waits (the
+// mark that a wait looks at a handle once). The events are the waiting
+// worker's own (one waits at a time, and it alone reads them,
+// `poller_event`, before its next wait).
 
-// What a watch watches: a pipe, or a handle waited for.
+// What a watch watches: a pipe, or a handle waited for (`handle_kind`).
 const WATCH_PIPE: int64 = 1
 const WATCH_WAITABLE: int64 = 2
-// a watch's and a copy's bytes
-const WATCH: int64 = 32
-// the most handles WaitForMultipleObjects takes (MAXIMUM_WAIT_OBJECTS)
-const MOST_WAITED: int64 = 64
+// the most packets one wait takes
+const ENTRIES: int64 = 64
 
 // How the poller watches the handle `h` (`GetFileType`): a pipe as one,
 // one of no file's type (a process) as a handle waited for, anything else
@@ -2855,283 +4427,432 @@ fun handle_kind(h: int64) -> int64 {
 
 // A new poller: its block, or minus the cause.
 pub fun poller_new() -> int64 {
-    let wake = __syscall5(__rt_get("__imp_CreateEventW"), 0, 0, 0, 0, 0)
-    if wake == 0 {
+    let port = net_port()
+    if port == 0 {
         return failed()
     }
-    let p = __alloc(88)
-    __store64(p, 0)
-    __store64(p + 8, 16)
-    __store64(p + 16, 0)
-    __store64(p + 24, __alloc(16 * WATCH))
-    __store64(p + 32, wake)
+    let p = __alloc(48)
+    __store64(p, port)
+    __store64(p + 8, __alloc(32 * ENTRIES))
+    __store64(p + 16, __alloc(8 * ENTRIES))
+    __store64(p + 24, __alloc(8 * ENTRIES))
+    __store64(p + 32, ENTRIES)
     __store64(p + 40, 0)
-    __store64(p + 48, 0)
-    __store64(p + 56, __alloc(16 * 8))
-    __store64(p + 64, 16)
-    __store64(p + 72, __alloc(16 * WATCH))
-    __store64(p + 80, 16)
     return p
-}
-
-// The poller's lock taken, spinning while another worker holds it.
-fun poller_lock(p: int64) {
-    while __xchg64(p, 1) != 0 {
-        __pause()
-    }
-}
-
-// The poller's lock given back.
-fun poller_unlock(p: int64) {
-    __store_rel64(p, 0)
-}
-
-// The watch of `fd` in the poller `p`, or 0 (the lock held).
-fun watch_of(p: int64, fd: int64) -> int64 {
-    let ws = __load64(p + 24)
-    var k: int64 = 0
-    while k < __load64(p + 16) {
-        if __load64(ws + WATCH * k) == fd {
-            return ws + WATCH * k
-        }
-        k += 1
-    }
-    return 0
-}
-
-// The armed watches of `p` copied for a wait, and the wait counted as
-// going on (`waiting`): how many (the lock held).
-fun poller_copy(p: int64) -> int64 {
-    let count = __load64(p + 16)
-    if count > __load64(p + 80) {
-        __free(__load64(p + 72))
-        __store64(p + 72, __alloc(count * WATCH))
-        __store64(p + 80, count)
-    }
-    let ws = __load64(p + 24)
-    let copy = __load64(p + 72)
-    var n: int64 = 0
-    var k: int64 = 0
-    while k < count {
-        let w = ws + WATCH * k
-        if __load64(w + 16) != 0 {
-            let c = copy + WATCH * n
-            __store64(c, __load64(w))
-            __store64(c + 8, __load64(w + 8))
-            __store64(c + 16, __load64(w + 24))
-            __store64(c + 24, std_handle(__load64(w)))
-            n += 1
-        }
-        k += 1
-    }
-    __store64(p + 40, 1)
-    return n
-}
-
-// The wait that copied the watches over (the lock not held): no longer
-// waiting, its count of waits moved on, for `poller_forget`.
-fun poller_done(p: int64) {
-    poller_lock(p)
-    __store64(p + 40, 0)
-    __store64(p + 48, __load64(p + 48) + 1)
-    poller_unlock(p)
-}
-
-// Of the `n` copied watches, those ready now (looked at without the lock)
-// recorded as the events of this wait, each disarmed, if its watch is still
-// there, armed and the same: how many.
-fun poller_ready(p: int64, n: int64) -> int64 {
-    let copy = __load64(p + 72)
-    var ready: [int64] = []
-    var i: int64 = 0
-    while i < n {
-        let c = copy + WATCH * i
-        let h = __load64(c + 24)
-        var yes = true
-        if __load64(c + 16) == WATCH_PIPE {
-            yes = pipe_ready(h)
-        } else {
-            yes = (__syscall(__rt_get("__imp_WaitForSingleObject"), h, 0, 0) & LOW32) != WAITED_OUT
-        }
-        if yes {
-            ready.push(i)
-        }
-        i += 1
-    }
-    if ready.len() == 0 {
-        return 0
-    }
-    // the events: this worker's own, as large as they need be
-    let want = ready.len() as int64
-    if want > __load64(p + 64) {
-        __free(__load64(p + 56))
-        __store64(p + 56, __alloc(8 * want))
-        __store64(p + 64, want)
-    }
-    let events = __load64(p + 56)
-    var got: int64 = 0
-    poller_lock(p)
-    for k in ready {
-        let c = copy + WATCH * k
-        let w = watch_of(p, __load64(c))
-        if w != 0 && __load64(w + 16) != 0 && __load64(w + 8) == __load64(c + 8) {
-            __store64(w + 16, 0)
-            __store64(events + 8 * got, __load64(c + 8))
-            got += 1
-        }
-    }
-    poller_unlock(p)
-    return got
 }
 
 // Waiting in the poller `p` (from `poller_new`) for at most `timeout_ms`
 // milliseconds (negative: no limit), or until `poller_wake`: how many
-// events (0 when the time ran out, or for a wake-up). Without a watch and
-// without a limit, at once (no event can come). One worker waits at a time
-// (std.rt's `__exec_polling`); the others watch, forget and wake meanwhile.
+// events (0 when the time ran out, or for a wake-up). One worker waits at
+// a time (std.rt's `__exec_polling`); the others watch, forget and wake
+// meanwhile.
 pub fun poller_wait(p: int64, timeout_ms: int64) -> int64 {
     let start = clock_ns()
-    let handles = __alloc(8 * MOST_WAITED)
-    var result: int64 = 0
+    let entries = __load64(p + 8)
+    let got = __alloc(8)
+    var events: int64 = 0
     while true {
-        poller_lock(p)
-        let n = poller_copy(p)
-        poller_unlock(p)
-        let got = poller_ready(p, n)
-        if got > 0 || timeout_ms == 0 {
-            result = got
-            break
-        }
-        // the wake-up event and the processes, the pipes looked at again
-        // a millisecond later
-        let copy = __load64(p + 72)
-        __store64(handles, __load64(p + 32))
-        var count: int64 = 1
-        var pipes = false
-        var i: int64 = 0
-        while i < n {
-            let c = copy + WATCH * i
-            if __load64(c + 16) == WATCH_PIPE || count == MOST_WAITED {
-                pipes = true
-            } else {
-                __store64(handles + 8 * count, __load64(c + 24))
-                count += 1
-            }
-            i += 1
-        }
-        if count == 1 && !pipes && timeout_ms < 0 {
-            break
-        }
-        var left = WAIT_INFINITE
-        if timeout_ms > 0 {
-            left = timeout_ms - (clock_ns() - start) / 1000000
-            if left <= 0 {
-                break
+        var limit = WAIT_INFINITE
+        if timeout_ms >= 0 {
+            limit = timeout_ms - (clock_ns() - start) / 1000000
+            if limit < 0 {
+                limit = 0
             }
         }
-        if pipes && (left == WAIT_INFINITE || left > 1) {
-            left = 1
+        let peeking = __load_acq64(net() + NET_PEEKS) != 0
+        if peeking && (limit == WAIT_INFINITE || limit > 1) {
+            limit = 1
         }
-        let r = __syscall5(__rt_get("__imp_WaitForMultipleObjects"), count, handles, 0, left, 0) & LOW32
-        if r == 0 {
-            break          // woken
+        __store64(got, 0)
+        let r = win_call(__rt_get("__imp_GetQueuedCompletionStatusEx"), [__load64(p), entries, ENTRIES, got, limit, 0])
+        var n: int64 = 0
+        if ok(r) {
+            n = __load64(got) & LOW32
         }
-        poller_done(p)
+        __store64(p + 40, __load64(p + 40) + 1)
+        let (looked, woken) = poller_take(p, entries, n, peeking)
+        events = poller_look(p, looked)
+        if events > 0 || woken || limit == 0 {
+            break
+        }
+        if timeout_ms >= 0 && (clock_ns() - start) / 1000000 >= timeout_ms {
+            break
+        }
     }
-    poller_done(p)
-    __free(handles)
-    return result
+    __free(got)
+    return events
+}
+
+// The `n` packets at `entries` taken (the lock held for them): each the
+// end of an operation of a watched handle, or one posted for it, unless it
+// is a wake-up. A closed one is freed once none is due for it; one armed
+// is to be looked at (once a wait, and kept from being freed meanwhile:
+// a packet's due), and so is each armed one looked at each millisecond
+// when `peeking`. The handles to look at, and whether a wake-up came.
+fun poller_take(p: int64, entries: int64, n: int64, peeking: bool) -> ([int64], bool) {
+    let mark = __load64(p + 40)
+    var looked: [int64] = []
+    var woken = false
+    net_lock()
+    var i: int64 = 0
+    while i < n {
+        let ov = __load64(entries + 32 * i + 8)
+        if ov == 0 {
+            woken = true
+            __store64(net() + NET_WAKE, 0)
+        } else {
+            let ws = __load64(ov + 32)
+            __store64(ws + WS_REFS, __load64(ws + WS_REFS) - 1)
+            if ov == ws + WS_NUDGE {
+                __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) & ~F_NUDGED)
+            }
+            if ov == ws + WS_ACCEPT && (__load64(ws + WS_FLAGS) & F_WAITING) != 0 {
+                // a process's wait of the pool's: done once, given back
+                __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) & ~F_WAITING)
+                let u = __syscall(__rt_get("__imp_UnregisterWaitEx"), __load64(ws + WS_WAIT), 0, 0)
+            }
+            if (__load64(ws + WS_FLAGS) & F_CLOSED) != 0 {
+                ws_unused(ws)
+            } else if __load64(ws + WS_WANT) != 0 && __load64(ws + WS_MARK) != mark {
+                __store64(ws + WS_MARK, mark)
+                __store64(ws + WS_REFS, __load64(ws + WS_REFS) + 1)
+                looked.push(ws)
+            }
+        }
+        i += 1
+    }
+    if peeking {
+        let t = __load64(net() + NET_TABLE)
+        var k: int64 = 0
+        while t != 0 && k < __load64(net() + NET_CAP) {
+            let ws = __load64(t + 16 * k + 8)
+            if __load64(t + 16 * k) > 1 && ws_peeked(ws) && __load64(ws + WS_MARK) != mark {
+                __store64(ws + WS_MARK, mark)
+                __store64(ws + WS_REFS, __load64(ws + WS_REFS) + 1)
+                looked.push(ws)
+            }
+            k += 1
+        }
+    }
+    ws_later()
+    net_unlock()
+    return (looked, woken)
+}
+
+// Whether the armed `ws` is looked at each millisecond: a pipe not ours
+// armed to read, a datagram socket armed to write.
+fun ws_peeked(ws: int64) -> bool {
+    let want = __load64(ws + WS_WANT)
+    let kind = __load64(ws + WS_KIND)
+    return (kind == K_PIPE && (want & 1) != 0) || (kind == K_DGRAM && (want & 2) != 0)
+}
+
+// The handles `looked` looked at (without the lock: what they are ready
+// for), then, under it, each still armed given its event if it is ready
+// (and disarmed), else its operation that ends when it may be: how many
+// events, in the poller's block.
+fun poller_look(p: int64, looked: [int64]) -> int64 {
+    if looked.len() == 0 {
+        return 0
+    }
+    var ready: [int64] = []
+    for ws in looked {
+        ready.push(ws_level(ws))
+    }
+    let want = looked.len() as int64
+    if want > __load64(p + 32) {
+        __free(__load64(p + 16))
+        __free(__load64(p + 24))
+        __store64(p + 16, __alloc(8 * want))
+        __store64(p + 24, __alloc(8 * want))
+        __store64(p + 32, want)
+    }
+    let tokens = __load64(p + 16)
+    let readies = __load64(p + 24)
+    var events: int64 = 0
+    net_lock()
+    var i = 0
+    while i < looked.len() {
+        let ws = looked[i]
+        __store64(ws + WS_REFS, __load64(ws + WS_REFS) - 1)
+        let armed = __load64(ws + WS_WANT)
+        if (__load64(ws + WS_FLAGS) & F_CLOSED) != 0 {
+            ws_unused(ws)
+        } else if armed != 0 {
+            let r = (ready[i] | __load64(ws + WS_FORCED)) & armed
+            if r != 0 {
+                __store64(tokens + 8 * events, __load64(ws + WS_TOKEN))
+                __store64(readies + 8 * events, r)
+                events += 1
+                ws_disarm(ws)
+            } else {
+                ws_notify(ws)
+            }
+        }
+        i += 1
+    }
+    net_unlock()
+    return events
+}
+
+// `ws` disarmed (the lock held), no longer looked at each millisecond.
+fun ws_disarm(ws: int64) {
+    if ws_peeked(ws) {
+        __store64(net() + NET_PEEKS, __load64(net() + NET_PEEKS) - 1)
+    }
+    __store64(ws + WS_WANT, 0)
+    __store64(ws + WS_FORCED, 0)
+}
+
+// What the armed `ws` is ready for now, of what it is armed for (1 to read,
+// 2 to write; an error or a hang-up counts as both, as on Linux): a stream
+// socket to read when WSAPoll says so (a listener when AcceptEx took a
+// connection), to write when no send or connect of its goes on; a datagram
+// socket as WSAPoll says; a pipe to read when it holds bytes or ended, ours
+// to write when no write of its goes on; a process once it ended. The lock
+// not held (a handle closed meanwhile only makes a wake-up early).
+fun ws_level(ws: int64) -> int64 {
+    let want = __load64(ws + WS_WANT)
+    let kind = __load64(ws + WS_KIND)
+    let h = __load64(ws + WS_HANDLE)
+    let f = __load64(ws + WS_FLAGS)
+    var r: int64 = 0
+    if (want & 1) != 0 {
+        if kind == K_STREAM && (f & F_LISTENING) != 0 {
+            if __load64(ws + WS_ACCEPTED) != 0 || ((f & F_ACCEPTING) != 0 && __load_acq64(ws + WS_ACCEPT) != STATUS_PENDING) {
+                r |= 1
+            }
+        } else if kind == K_STREAM || kind == K_DGRAM {
+            r |= wsa_poll(h, 1, 0)
+        } else if kind == K_PIPE_IN || kind == K_PIPE {
+            if pipe_ready(h) {
+                r |= 1
+            }
+        } else if kind == K_PROCESS {
+            if (__syscall(__rt_get("__imp_WaitForSingleObject"), h, 0, 0) & LOW32) != WAITED_OUT {
+                r |= 1
+            }
+        }
+    }
+    if (want & 2) != 0 {
+        if kind == K_DGRAM {
+            r |= wsa_poll(h, 2, 0)
+        } else if !ws_going(ws, WS_SEND, F_SENDING) && !ws_going(ws, WS_ACCEPT, F_CONNECTING) {
+            r |= 2
+        }
+    }
+    if r < 0 {
+        r = 3
+    }
+    return r
+}
+
+// The operation started that ends when the armed `ws` may be ready (the
+// lock held), unless one goes on: a read of no bytes (a stream socket, a
+// datagram socket with MSG_PEEK, our pipe), AcceptEx (a listener), the
+// pool's wait (a process); a send, a connect or a write ends of itself. One
+// that can't start makes `ws` ready (its forced events, and a packet
+// posted): the operation the task tries then reports why.
+fun ws_notify(ws: int64) {
+    let want = __load64(ws + WS_WANT)
+    let kind = __load64(ws + WS_KIND)
+    let h = __load64(ws + WS_HANDLE)
+    let f = __load64(ws + WS_FLAGS)
+    if (want & 1) == 0 || ((f & F_ASSOC) == 0 && kind != K_PROCESS) {
+        return
+    }
+    var good = true
+    if kind == K_STREAM && (f & F_LISTENING) != 0 {
+        if __load64(ws + WS_ACCEPTED) == 0 && (f & F_ACCEPTING) == 0 {
+            good = accept_start(ws, h)
+        }
+    } else if kind == K_STREAM || kind == K_DGRAM || kind == K_PIPE_IN {
+        if !ws_going(ws, WS_PROBE, F_PROBING) {
+            op_reset(ws, WS_PROBE, __load64(ws + WS_EVENT))
+            __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) | F_PROBING)
+            __store64(ws + WS_WSABUF, 0)
+            __store64(ws + WS_WSABUF + 8, ws + WS_ADDRS)
+            if kind == K_PIPE_IN {
+                let r = __syscall5(__rt_get("__imp_ReadFile"), h, ws + WS_ADDRS, 0, 0, ws + WS_PROBE)
+                good = op_started(ws, call_going(r), F_PROBING)
+            } else {
+                // the flags (MSG_PEEK for a datagram, which a read of no
+                // bytes would drop) and an address's room, after the WSABUF
+                let flags = ws + WS_ADDRS + 48
+                __store64(flags, 0)
+                var r: int64 = 0
+                if kind == K_DGRAM {
+                    __store64(flags, 2)
+                    __store64(flags + 8, 28)
+                    r = win_call(ws2(W_RECV_FROM), [h, ws + WS_WSABUF, 1, 0, flags, ws + WS_ADDRS, flags + 8, ws + WS_PROBE, 0])
+                } else {
+                    r = win_call(ws2(W_RECV), [h, ws + WS_WSABUF, 1, 0, flags, ws + WS_PROBE, 0])
+                }
+                good = op_started(ws, wsa_going(r), F_PROBING)
+            }
+        }
+    } else if kind == K_PROCESS {
+        if (f & F_WAITING) == 0 {
+            good = process_wait(ws, h)
+        }
+    }
+    if !good {
+        __store64(ws + WS_FORCED, 3)
+        ws_nudge(ws)
+    }
+}
+
+// The listener `ws` (handle `h`) given AcceptEx on a new socket of its
+// family (the lock held): whether it started.
+fun accept_start(ws: int64, h: int64) -> bool {
+    let fn = accept_ex(h)
+    let addrs = __alloc(48)
+    __store64(addrs + 32, 28)
+    var af: int64 = 2
+    if !wsa_bad(__syscall(ws2(W_SOCKNAME), h, addrs, addrs + 32)) && __load8(addrs) == 23u8 {
+        af = 23
+    }
+    __free(addrs)
+    if fn == 0 {
+        return false
+    }
+    let s = win_call(ws2(W_SOCKET), [af, 1, 6, 0, 0, 129])
+    if s == -1 || s == 0 {
+        return false
+    }
+    __store64(ws + WS_ACCEPTING, s)
+    op_reset(ws, WS_ACCEPT, __load64(ws + WS_EVENT))
+    __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) | F_ACCEPTING)
+    // no bytes received with the connection; each address's room 16 more
+    // than sockaddr_in6's 28, as AcceptEx asks
+    let r = win_call(fn, [h, s, ws + WS_ADDRS, 0, 44, 44, ws + WS_ADDRS + 88, ws + WS_ACCEPT])
+    if !op_started(ws, call_going(r), F_ACCEPTING) {
+        __store64(ws + WS_ACCEPTING, 0)
+        let c = __syscall(ws2(W_CLOSE), s, 0, 0)
+        return false
+    }
+    return true
+}
+
+// The process `ws` (handle `h`) waited for by the thread pool, whose
+// callback posts the packet of `ws`'s WS_ACCEPT (the lock held): whether
+// the wait was made.
+fun process_wait(ws: int64, h: int64) -> bool {
+    let ctx = ws + WS_POST
+    __store64(ctx, __rt_get("__imp_PostQueuedCompletionStatus"))
+    __store64(ctx + 8, __load64(net() + NET_PORT))
+    __store64(ctx + 16, 0)
+    __store64(ctx + 24, ws + WS_ACCEPT)
+    __store64(ctx + 32, 0)
+    let r = win_call(__rt_get("__imp_RegisterWaitForSingleObject"),
+        [ws + WS_WAIT, h, __rt_addr("__win_wait_posted"), ctx, WAIT_INFINITE, WT_ONCE])
+    if !ok(r) {
+        return false
+    }
+    __store64(ws + WS_FLAGS, __load64(ws + WS_FLAGS) | F_WAITING)
+    __store64(ws + WS_REFS, __load64(ws + WS_REFS) + 1)
+    return true
 }
 
 // The token of event `i` of the last `poller_wait` (of the program's
-// poller, std.rt's `__exec_poller`, as Linux's are in its `__poll_buf`),
-// read by the worker that waited.
+// poller, std.rt's `__exec_poller`), read by the worker that waited.
 pub fun poller_event(i: int64) -> int64 {
-    return __load64(__load64(__rt_get("__exec_poller") + 56) + 8 * i)
+    return __load64(__load64(__rt_get("__exec_poller") + 16) + 8 * i)
 }
 
-// What event `i` found its descriptor ready for: to read (a pipe that holds
-// bytes or ended, a process that ended).
+// What event `i` found its handle ready for: 1 to read (or its end, a
+// process's end), 2 to write, 3 both (an error or a hang-up counts as
+// either), as `poller_watch_socket`'s `events`.
 pub fun poller_event_ready(i: int64) -> int64 {
-    return 1
+    return __load64(__load64(__rt_get("__exec_poller") + 24) + 8 * i)
 }
 
 // The descriptor `fd` watched by the poller `p` until it is readable (a
-// pipe) or has ended (a process), once: the next wait gives `token`; `again`
-// changes nothing here (a watch that fired is armed again either way). A
-// wait going on is woken, to wait for it too. UNSUPPORTED for one it can't
-// watch, which is ready now.
+// pipe, its end too) or has ended (a process), once: a later wait gives
+// `token`. UNSUPPORTED for one it can't watch, which is ready now.
 pub fun poller_watch(p: int64, fd: int64, token: int64, again: bool) -> int64 {
-    let h = std_handle(fd)
-    var kind: int64 = 0
-    if h != 0 {
-        kind = handle_kind(h)
-    }
-    if kind == 0 {
+    return ws_watch(std_handle(fd), 1, token)
+}
+
+// The handle `h` (a socket, or our end of a pipe: a child's input waited
+// for room, MYLA-726) watched until it is ready for `events` (1: to receive
+// or accept, 2: to send or a connect's end; an error or a hang-up always
+// counts), once: a later wait gives `token`. A handle armed already is
+// armed again with the new `events` (std.rt gives the union of what its
+// waiters ask). `again` changes nothing here.
+pub fun poller_watch_socket(p: int64, h: int64, events: int64, token: int64, again: bool) -> int64 {
+    return ws_watch(h, events & 3, token)
+}
+
+// The handle `h` armed for `want` with `token`, and a packet posted for it,
+// so that the waiting worker looks at it now: 0, or UNSUPPORTED for a
+// handle the poller can't watch (not one of a watched handle's kinds).
+// One that has no watched handle yet (a process, a pipe not ours) gets
+// one here.
+fun ws_watch(h: int64, want: int64, token: int64) -> int64 {
+    if h == 0 || want == 0 {
         return -UNSUPPORTED
     }
-    poller_lock(p)
-    var w = watch_of(p, fd)
-    if w == 0 {
-        var cap = __load64(p + 8)
-        let n = __load64(p + 16)
-        if n == cap {
-            // twice the room (the watches are the lock's: no wait reads them)
-            let ws = __alloc(2 * cap * WATCH)
-            __copy_bytes(ws, __load64(p + 24), cap * WATCH)
-            __free(__load64(p + 24))
-            __store64(p + 24, ws)
-            cap = 2 * cap
-            __store64(p + 8, cap)
+    net_lock()
+    var ws = ws_find(h)
+    net_unlock()
+    if ws == 0 {
+        let kind = handle_kind(h)
+        if kind == 0 {
+            return -UNSUPPORTED
         }
-        w = __load64(p + 24) + WATCH * n
-        __store64(w, fd)
-        __store64(p + 16, n + 1)
+        var k = K_PROCESS
+        if kind == WATCH_PIPE {
+            k = K_PIPE
+        }
+        ws = ws_new(h, k, false)
+        if ws == 0 {
+            return -UNSUPPORTED
+        }
     }
-    __store64(w + 8, token)
-    __store64(w + 16, 1)
-    __store64(w + 24, kind)
-    let waiting = __load64(p + 40)
-    poller_unlock(p)
-    if waiting != 0 {
-        poller_wake(p)
+    net_lock()
+    if ws_peeked(ws) {
+        __store64(net() + NET_PEEKS, __load64(net() + NET_PEEKS) - 1)
     }
+    __store64(ws + WS_WANT, want)
+    __store64(ws + WS_TOKEN, token)
+    if ws_peeked(ws) {
+        __store64(net() + NET_PEEKS, __load64(net() + NET_PEEKS) + 1)
+    }
+    ws_nudge(ws)
+    net_unlock()
     return 0
 }
 
-// The descriptor `fd` no longer watched by the poller `p`. A wait that
-// copied the watches is woken, and this returns once it is over, so the
-// handle can be closed then (no wait holds it).
+// The descriptor `fd` no longer watched by the poller `p`: disarmed (an
+// operation going on ends as it will, its packet then only looked at).
 pub fun poller_forget(p: int64, fd: int64) {
-    poller_lock(p)
-    let w = watch_of(p, fd)
-    if w != 0 {
-        let n = __load64(p + 16) - 1
-        __copy_bytes(w, __load64(p + 24) + WATCH * n, WATCH)
-        __store64(p + 16, n)
-    }
-    let waiting = __load64(p + 40)
-    let waits = __load64(p + 48)
-    poller_unlock(p)
-    if w != 0 && waiting != 0 {
-        poller_wake(p)
-        while __load_acq64(p + 48) == waits {
-            let y = __syscall(__rt_get("__imp_SwitchToThread"), 0, 0, 0)
-        }
-    }
+    ws_forget(std_handle(fd))
 }
 
-pub fun poller_watch_socket(p: int64, h: int64, events: int64, token: int64, again: bool) -> int64 {
-    return ENOSYS
-}
-
+// The socket `h` no longer watched by the poller `p`.
 pub fun poller_forget_socket(p: int64, h: int64) {
+    ws_forget(h)
+}
+
+// The handle `h` disarmed.
+fun ws_forget(h: int64) {
+    net_lock()
+    let ws = ws_find(h)
+    if ws != 0 {
+        ws_disarm(ws)
+    }
+    net_unlock()
 }
 
 // The worker waiting in the poller `p` woken (or the next wait returns at
-// once): its event set.
+// once): a packet of no operation posted, unless one is due already.
 pub fun poller_wake(p: int64) {
-    let r = __syscall(__rt_get("__imp_SetEvent"), __load64(p + 32), 0, 0)
+    if __xchg64(net() + NET_WAKE, 1) == 0 {
+        if !ok(__syscall5(__rt_get("__imp_PostQueuedCompletionStatus"), __load64(p), 0, 0, 0, 0)) {
+            __store64(net() + NET_WAKE, 0)
+        }
+    }
 }
 
 // --- workers (MYLA-703) ------------------------------------------------------------

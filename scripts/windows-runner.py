@@ -5,7 +5,7 @@ D213, D214).
   windows-runner.py build OUT [--myla PATH] [--jobs N]
       On Linux: builds for x86_64-windows the examples, the concurrency
       stress programs, tests/burn/test_windows.py's programs (its HELPER and
-      process cases, FramesOnWindows' 64 KiB frame, console cases of its
+      process and socket cases, FramesOnWindows' 64 KiB frame, console cases of its
       own), a read of the standard input with a time limit, and myla.exe and
       myla-lsp.exe, into OUT, and writes OUT/cases.json: each case's
       commands and what each must print and exit with (the examples' from
@@ -433,6 +433,30 @@ def build(out: str, myla: str, jobs: int) -> int:
     case("process/many-children",
          [step(["./prog.exe"], "400\n", None, env={"MYLA_THREADS": w}, timeout=300) for w in ("4", "16")],
          dict(helper, **{"prog.exe": "bin/many-children.exe"}))
+
+    # sockets and the poller on an I/O completion port (MYLA-706): a TCP
+    # echo through loopback (test_net's), an HTTP server and its client in
+    # one program (test_http's), test_windows.Sockets' many connections
+    # beside children and its close that waits for its send; MYLA-726: a
+    # child's input written while its output is read, on one worker too
+    from tests.burn import test_http as th, test_net as tn
+    program("bin/net-echo.exe", tn.ECHO)
+    program("bin/http-one-program.exe", th.ONE_PROGRAM)
+    program("bin/sockets.exe", tw.SOCKETS)
+    program("bin/closed-while-sending.exe", tw.CLOSED_WHILE_SENDING)
+    program("bin/input-while-output.exe", tw.INPUT_WHILE_OUTPUT)
+    case("net/echo", [step(["bin/net-echo.exe"], tn.ECHO_OUT, env={"MYLA_THREADS": w}) for w in ("1", "4")])
+    case("net/http-one-program", [step(["bin/http-one-program.exe"], th.ONE_PROGRAM_OUT, env={"MYLA_THREADS": w})
+                                  for w in ("1", "4")])
+    case("net/sockets-and-children",
+         [step(["./prog.exe", "200", "50"], "250 of 250 right, http 20, echoed true\n", env={"MYLA_THREADS": w},
+               timeout=300) for w in STRESS_WORKERS],
+         dict(helper, **{"prog.exe": "bin/sockets.exe"}))
+    case("net/a-close-waits-for-its-send",
+         [step(["bin/closed-while-sending.exe"], "4000000 4000000\n" * 3, env={"MYLA_THREADS": w}) for w in ("1", "4")])
+    case("process/input-while-output",
+         [step(["./prog.exe"], "600000 600000 0\n", env={"MYLA_THREADS": w}, timeout=60) for w in ("1", "2", "4")],
+         dict(helper, **{"prog.exe": "bin/input-while-output.exe"}))
 
     # the examples, against what the interpreter gives here
     examples = sorted(f for f in os.listdir(os.path.join(_REPO, "examples")) if f.endswith(".my"))

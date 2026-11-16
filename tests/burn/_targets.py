@@ -153,11 +153,6 @@ SKIP: dict[str, dict[str, str]] = {
         "test_process.TestSubprocessParity.test_reports_terminating_signal":
             "Windows has no signals: `kill` ends a child with the exit code 1 (WindowsChildren checks it)",
         "test_process.TestSubprocessParity.test_a_child_gets_sigpipe_back": "Windows has no SIGPIPE",
-        **{f"test_net.{c}": "Windows' sockets come with MYLA-706 (NetOnWasm checks they are Unsupported)"
-           for c in ["Tcp", "Udp", "Dns", "Errors", "Primitives"]},
-        **{f"test_reactor_scaling.{c}": "Windows' sockets come with MYLA-706 (its Readers run)"
-           for c in ["RoundTrips", "Accepts", "Closed", "Lots"]},
-        "test_router.Router": "Windows' sockets come with MYLA-706",
         **{f"test_term.{c}": "Windows' console and signals come with MYLA-707 (TermOnWasm checks they are Unsupported)"
            for c in ["Terminal", "Signals", "Primitives", "RawModeEnds"]},
         # the start makes the command line and the environment UTF-8 in

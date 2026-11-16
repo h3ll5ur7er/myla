@@ -220,8 +220,9 @@ class HelloWorld(unittest.TestCase):
         ran = self.run_exe(stdin="one\ntw\u00f6\n".encode())
         self.assertEqual((ran.stdout.decode(), ran.stderr, ran.returncode), ("<one>\n<tw\u00f6>\n", b"", 0))
 
-    def test_what_isnt_there_yet_says_so(self):
-        # D210: sockets are `Unsupported` until MYLA-706
+    def test_a_socket_imports_winsock(self):
+        # MYLA-706: sockets over ws2_32 (D212), which only a program that
+        # opens one imports (Unsupported until then, D210)
         src = ('import std.net as net\n'
                'fun main() {\n'
                '    match net.udp_bind(net.parse_addr("127.0.0.1:0").expect("addr")) {\n'
@@ -230,7 +231,8 @@ class HelloWorld(unittest.TestCase):
                '    }\n'
                '}\n')
         ran = self.build_and_run(src)
-        self.assertEqual((ran.stdout, ran.returncode), (b"unsupported (Unsupported)\n", 0))
+        self.assertEqual((ran.stdout, ran.returncode), (b"bound\n", 0))
+        self.assertIn("ws2_32.dll", pe_facts(os.path.join(self.tmp, "prog.exe"))["dlls"])
 
     def test_an_import_library_per_dll(self):
         # MYLA-722: random bytes from bcrypt (D212), the workers' parking
@@ -794,6 +796,364 @@ class Children(unittest.TestCase):
         want = ("PASS  f #1\nPASS  f #2\nPASS  f #3\nFAIL  f #4: expected 5, got 4\n      | f 4\n"
                 "PASS  g #1\nPASS  last\nPASS  case_dir #1\nPASS  under_temp #1\nPASS  a_temp_dir\n\n8/9 passed.\n")
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (want, "", 1))
+
+
+# What `Sockets` runs (MYLA-706): many connections echoed through loopback,
+# each a pair of tasks, beside children and an HTTP server of the program's
+# own that answers its own client (the helper's `cat` as the children).
+SOCKETS = r"""import std.task as task
+import std.net as net
+import std.http as http
+import std.bytes as bytes
+from std.net import TcpListener, TcpStream
+from std.http import Request, Response
+from std.process import command, args, ExitStatus
+
+// MYLA-706: many sockets at once on the I/O completion port, beside
+// children: `clients` connections echoed through loopback, each its own
+// pair of tasks, while `kids` children echo their input and an HTTP server
+// in this program answers its own client.
+
+// One connection served: what it sends echoed until its end.
+async fun echo(s: TcpStream) -> int {
+    var c = s
+    var total = 0
+    while true {
+        let chunk = match await c.read_async(65536) {
+            Ok(b) => b
+            Err(e) => { return -1 }
+        }
+        if chunk.len() == 0 {
+            break
+        }
+        match await c.write_async(chunk) {
+            Ok(n) => { total += n }
+            Err(e) => { return -2 }
+        }
+    }
+    let gone = c.close()
+    return total
+}
+
+// `n` connections accepted, each echoed in a task of its own: the bytes
+// echoed.
+async fun serve(l: TcpListener, n: int) -> int {
+    var fs: [async () -> int] = []
+    for k in 0..n {
+        let s = match await l.accept_async() {
+            Ok(s) => s
+            Err(e) => { return -1 }
+        }
+        fs.push(async () => await echo(s))
+    }
+    var total = 0
+    for x in await task.all(fs) {
+        if x < 0 {
+            return x
+        }
+        total += x
+    }
+    return total
+}
+
+// A client: `rounds` messages of `size` bytes sent and read back: 1 when
+// all came back as sent.
+async fun client(port: int, k: int, rounds: int, size: int) -> int {
+    var s = match await net.connect_async(net.addr(net.loopback(), port)) {
+        Ok(s) => s
+        Err(e) => { return 0 }
+    }
+    var msg: [uint8] = []
+    for i in 0..size {
+        msg.push(97u8 + ((i + k) % 26) as uint8)
+    }
+    for r in 0..rounds {
+        match await s.write_async(msg) {
+            Ok(_) => {}
+            Err(e) => { return 0 }
+        }
+        var got: [uint8] = []
+        while got.len() < size {
+            match await s.read_async(size - got.len()) {
+                Ok(b) => {
+                    if b.len() == 0 {
+                        return 0
+                    }
+                    for x in b {
+                        got.push(x)
+                    }
+                }
+                Err(e) => { return 0 }
+            }
+        }
+        if got != msg {
+            return 0
+        }
+    }
+    let c = s.close()
+    return 1
+}
+
+// A child echoing its input (the helper's `cat`): 1 when it gave it back.
+async fun kid(k: int) -> int {
+    let want = f"child {k}\n"
+    return match await command("./helper.exe").arg("cat").stdin(want).output_async() {
+        Ok(o) => if bytes.to_str(o.stdout) == want && o.status == ExitStatus.Exited(0) { 1 } else { 0 }
+        Err(e) => 0
+    }
+}
+
+fun handle(r: Request) -> Response {
+    return http.response(200, f"hello {r.method} {r.path()}")
+}
+
+// Its own HTTP server asked `n` times: the answers that were right.
+async fun ask(port: int, n: int) -> int {
+    var c = http.client()
+    var right = 0
+    for i in 0..n {
+        match await c.get_async(f"http://127.0.0.1:{port}/p{i}") {
+            Ok(r) => {
+                if r.status == 200 && r.text() == f"hello GET /p{i}" {
+                    right += 1
+                }
+            }
+            Err(e) => {}
+        }
+    }
+    c.close()
+    return right
+}
+
+fun number(s: str) -> int {
+    var n = 0
+    for c in s {
+        n = n * 10 + (c - '0')
+    }
+    return n
+}
+
+#main
+async fun main() {
+    let a = args()
+    let clients = number(a[1])
+    let kids = number(a[2])
+    var l = match net.listen_with(net.addr(net.loopback(), 0), 1024) {
+        Ok(l) => l
+        Err(e) => { panic(f"listen: {e}") }
+    }
+    let port = match l.local_addr() {
+        Ok(x) => x.port
+        Err(e) => { panic("addr") }
+    }
+    var hl = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic(f"listen: {e}") }
+    }
+    let hport = match hl.local_addr() {
+        Ok(x) => x.port
+        Err(e) => { panic("addr") }
+    }
+    async let served = serve(l, clients)
+    async let answered = http.serve_n(hl, 20, handle)
+    var fs: [async () -> int] = []
+    for k in 0..clients {
+        // small messages, and every tenth one past what a socket buffers
+        var size = 100 + k
+        if k % 10 == 0 {
+            size = 300000
+        }
+        fs.push(async () => await client(port, k, 3, size))
+    }
+    for k in 0..kids {
+        fs.push(async () => await kid(k))
+    }
+    fs.push(async () => await ask(hport, 20))
+    var ok = 0
+    for x in await task.all(fs) {
+        ok += x
+    }
+    let echoed = await served
+    let http_served = match await answered {
+        Ok(n) => n
+        Err(e) => -1
+    }
+    let c1 = l.close()
+    let c2 = hl.close()
+    print(f"{ok - 20} of {clients + kids} right, http {http_served}, echoed {echoed > 0}")
+}
+"""
+
+# A socket closed while its last send still goes on: the peer gets every
+# byte, then the end (MYLA-706's `ws_close_later`; without it the reader
+# got 3,919,872 of the 4,000,000 bytes).
+CLOSED_WHILE_SENDING = r"""import std.task as task
+import std.net as net
+from std.net import TcpListener, TcpStream
+
+// A socket closed while its last send still goes on: the peer still gets
+// every byte, then the end (MYLA-706's `ws_close_later`).
+async fun server(l: TcpListener, n: int) -> int {
+    var s = match await l.accept_async() {
+        Ok(s) => s
+        Err(e) => { return -1 }
+    }
+    var big: [uint8] = []
+    for i in 0..n {
+        big.push(97u8 + (i % 26) as uint8)
+    }
+    let w = match await s.write_async(big) {
+        Ok(k) => k
+        Err(e) => -2
+    }
+    let c = s.close()
+    return w
+}
+
+async fun client(port: int) -> int {
+    var s = match await net.connect_async(net.addr(net.loopback(), port)) {
+        Ok(s) => s
+        Err(e) => { return -1 }
+    }
+    // let the server write and close before reading anything
+    await task.sleep(300)
+    var total = 0
+    while true {
+        match await s.read_async(65536) {
+            Ok(b) => {
+                if b.len() == 0 {
+                    break
+                }
+                total += b.len()
+            }
+            Err(e) => { return -2 }
+        }
+    }
+    let c = s.close()
+    return total
+}
+
+#main
+async fun main() {
+    var l = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic("listen") }
+    }
+    let port = match l.local_addr() {
+        Ok(x) => x.port
+        Err(e) => { panic("addr") }
+    }
+    for round in 0..3 {
+        async let wrote = server(l, 4000000)
+        async let read = client(port)
+        let a = await wrote
+        let b = await read
+        print(f"{a} {b}")
+    }
+}
+"""
+
+# MYLA-726: a child's input written by one task while another reads its
+# output, more than the pipes hold, so each waits for the other: on one
+# worker only `write_async` suspending its task lets the reader run (std.
+# process's own `input_written_while_output_read` with a Windows `cat`).
+INPUT_WHILE_OUTPUT = r"""import std.task as task
+from std.process import command, Child, ChildStdin, ChildStdout, ExitStatus
+from std.io import buffered
+
+// MYLA-726: a child's input written by one task while another reads its
+// output, more than the pipes hold, so each waits for the other: on one
+// worker only `write_async` lets the reader run.
+async fun feed(w: ChildStdin, rounds: int, n: int) -> int {
+    var inp = w
+    var piece: [uint8] = []
+    for i in 0..n {
+        piece.push(97u8 + (i % 26) as uint8)
+    }
+    piece.push(10u8)
+    var total = 0
+    for k in 0..rounds {
+        match await inp.write_async(piece) {
+            Ok(m) => { total += m }
+            Err(e) => { return -1 }
+        }
+    }
+    match inp.close() {
+        Ok(_) => {}
+        Err(e) => { return -2 }
+    }
+    return total
+}
+
+async fun drink(r: ChildStdout) -> int {
+    var out = buffered(r)
+    return match await out.read_to_end_async() {
+        Ok(s) => s.len()
+        Err(e) => -1
+    }
+}
+
+#main
+async fun main() {
+    var child = match command("./helper.exe").arg("cat").spawn() {
+        Ok(c) => c
+        Err(e) => { panic(f"spawn: {e}") }
+    }
+    let w = child.take_stdin().expect("stdin")
+    let r = child.take_stdout().expect("stdout")
+    async let wrote = feed(w, 10, 59999)
+    async let got = drink(r)
+    let a = await wrote
+    let b = await got
+    let st = match child.wait() {
+        Ok(ExitStatus.Exited(c)) => c
+        _ => -1
+    }
+    print(f"{a} {b} {st}")
+}
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class Sockets(unittest.TestCase):
+    """MYLA-706: sockets over Winsock and the poller on an I/O completion
+    port: TCP through loopback, many connections at once beside children
+    and an HTTP exchange within the program, on 1, 4 and 16 workers; a
+    close that waits for its send; and MYLA-726, a child's input pipe
+    written through the port, so `write_async` suspends its task."""
+
+    setUpClass = Children.setUpClass
+    setUp = Children.setUp
+    build = Children.build
+
+    def run_exe(self, *args: str, threads: str, timeout: float = 120) -> subprocess.CompletedProcess:
+        return subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe"), *args], capture_output=True,
+                              cwd=self.tmp, timeout=timeout, env=dict(os.environ, MYLA_THREADS=threads))
+
+    def test_many_sockets_and_children_at_once(self):
+        self.build("helper", HELPER)
+        self.build("prog", SOCKETS)
+        for threads in ["1", "4", "16"]:
+            ran = self.run_exe("200", "50", threads=threads)
+            self.assertEqual((ran.stdout, ran.stderr, ran.returncode),
+                             (b"250 of 250 right, http 20, echoed true\n", b"", 0), f"{threads} workers")
+
+    def test_a_close_waits_for_its_send(self):
+        self.build("prog", CLOSED_WHILE_SENDING)
+        for threads in ["1", "4"]:
+            ran = self.run_exe(threads=threads)
+            self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"4000000 4000000\n" * 3, b"", 0),
+                             f"{threads} workers")
+
+    def test_a_childs_input_written_while_its_output_is_read(self):
+        # at BASE (9738e37) one worker never ended (`timeout 30`: 124)
+        self.build("helper", HELPER)
+        self.build("prog", INPUT_WHILE_OUTPUT)
+        for threads in ["1", "2", "4"]:
+            ran = self.run_exe(threads=threads, timeout=60)
+            self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"600000 600000 0\n", b"", 0),
+                             f"{threads} workers")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
