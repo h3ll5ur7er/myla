@@ -79,7 +79,7 @@ None of this has run on Windows yet: the pull request's run of the `windows` job
 - `console/random` on Windows' own `BCryptGenRandom` and `%TEMP%`.
 - Windows' own `CreateProcessW`, `cmd`, PATH and PATHEXT, `TerminateProcess` and 400 children at once; the console's and the C runtime's splitting of a command line Python wrote (`list2cmdline`); a stack overflow's exception on a real guard page; `WaitOnAddress` and the workers on the runner's processors; a drive letter for the working directory.
 
-## Proposals
+## Proposals (accepted 2026-11-16: D233, D234 and D235)
 
 1. **The Windows tools are published by the `windows` job, after its run passed** (built): `myla-x86_64-windows-<sha>`, a zip of `myla.exe` and `myla-lsp.exe` (an artifact's own; no tarball, as no executable bit is to be kept). Alternatives: from `windows-build`, as soon as they are built (as `bootstrap` publishes what it built and checked on its machine, but nothing would have run them), or a tarball as the Linux tools are. Proposed row: *"CI publishes each master commit's `myla.exe` and `myla-lsp.exe` as the artifact `myla-x86_64-windows-<sha>` (90 days) from the `windows` job, once they ran there: built on Linux by `windows-build` with the programs it runs (D207, D213, D214, [[MYLA-708]])."*
 2. **A missing LLVM tool on the runner skips `tools/myla-build` with an annotation** (built), as the task asked, rather than failing the job as `MYLA_REQUIRE_TARGETS` fails the Linux ones. Alternative: fail, since the image ships them (a later image without one would then turn the job red instead of yellow).
