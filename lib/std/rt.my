@@ -3566,17 +3566,36 @@ pub fun actor_leave(rec: int64) {
 // whose task failed (D97, `__task_fail`) comes back to its start on that
 // stack: it keeps nothing from one frame to the next.
 pub fun exec_run() {
+    // with descriptors watched: the turns since the clock was read, how
+    // many go between two reads, when it was read and when this worker
+    // glanced at the poller
     var turns: int64 = 0
+    var every: int64 = 1
+    var read_at: int64 = 0
+    var glanced: int64 = 0
     while true {
         if __rt_get("__timer_count") != 0 {
             timers_fire()
         }
-        // descriptors watched: a glance at the poller now and then, for
-        // workers too busy to poll (D124)
+        // descriptors watched: a glance at the poller once GLANCE_NS has
+        // passed since this worker's last, for workers too busy to poll
+        // (D124, MYLA-755: a glance every 64 turns came seconds apart
+        // while every worker ran slow frames)
         if __rt_get("__watch_count") != 0 {
             turns += 1
-            if (turns & 63) == 0 {
-                exec_glance()
+            if turns >= every {
+                let now = os.clock_ns()
+                every = glance_every(every, now - read_at)
+                turns = 0
+                read_at = now
+                if glanced == 0 {
+                    // (the first turn with descriptors watched counts as
+                    // a glance: the frames queued run first, as before)
+                    glanced = now
+                } else if now - glanced >= GLANCE_NS {
+                    glanced = now
+                    exec_glance()
+                }
             }
         }
         let fr = exec_find()
@@ -3605,6 +3624,41 @@ pub fun exec_run() {
             __xchg64(__rt_addr("__exec_cur"), 0)
         }
     }
+}
+
+// A busy worker glances at the poller once GLANCE_NS has passed since its
+// last glance (MYLA-755), as Go's sysmon polls the network once 10 ms have
+// passed without a poll: a ready descriptor waits about that long, or until
+// a frame suspends, whatever the run queues hold. The clock is read every
+// so many turns (`glance_every`): about every GLANCE_READ_NS, at most every
+// GLANCE_TURNS turns, so short turns pay a read of it every 64 (on Linux a
+// system call, as a glance every 64 turns was) and long ones a read each.
+const GLANCE_NS: int64 = 1000000
+const GLANCE_READ_NS: int64 = 250000
+const GLANCE_TURNS: int64 = 64
+
+// The turns between reads of the clock next, from `every` and the `since`
+// ns those `every` took: as many as take about GLANCE_READ_NS, from 1 to
+// GLANCE_TURNS, at most twice as many as before (so turns that become
+// long at once are read each from the next read on).
+#test(64i64, 1000000000i64)[1i64]
+#test(64i64, 4000000i64)[4i64]
+#test(1i64, 1000i64)[2i64]
+#test(64i64, 1000i64)[64i64]
+#test(8i64, 250000i64)[8i64]
+#test(1i64, 0i64)[2i64]
+fun glance_every(every: int64, since: int64) -> int64 {
+    var next = every * 2
+    if since > 0 && every * GLANCE_READ_NS / since < next {
+        next = every * GLANCE_READ_NS / since
+    }
+    if next < 1 {
+        return 1
+    }
+    if next > GLANCE_TURNS {
+        return GLANCE_TURNS
+    }
+    return next
 }
 
 // No frame found: this worker counts itself idle and only glances at the

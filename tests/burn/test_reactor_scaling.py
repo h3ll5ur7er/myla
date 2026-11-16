@@ -26,6 +26,11 @@ woken and all but one watched again.
 - `Readers`: 500 tasks read one pipe to its end (`read_to_end_async`), each
   woken in turn as the input comes and ends; every byte is read once and
   every task ends (on every target: wasm32's poller too).
+- `BusyWorkers`: as many tasks as workers, each running frames of 20 ms, the
+  first writing a byte after 200 ms to a socket a task waits on: the reader
+  is woken within 200 ms on 1 and 2 workers (MYLA-755: a busy worker
+  glances at the poller once a millisecond has passed). Before the fix:
+  1,060 and 1,040 ms (a glance every 64 frames).
 """
 from __future__ import annotations
 
@@ -313,11 +318,57 @@ async fun readers(n: int) -> int {
     return total
 }
 
+// `frames` frames of 20 ms, each a yield after it, so the worker that runs
+// it stays busy; after frame `write_at` a byte written on `s`: when.
+async fun busy_frames(s: TcpStream, frames: int, write_at: int) -> int64 {
+    var c = s
+    var wrote: int64 = 0
+    for f in 0..frames {
+        let end = time.now_ns() + 20000000
+        while time.now_ns() < end {
+        }
+        if f == write_at {
+            let w = c.write([1u8])
+            wrote = time.now_ns()
+        }
+        await task.yield()
+    }
+    return wrote
+}
+
+// When a read waiting on `s` was woken.
+async fun woken_at(s: TcpStream) -> int64 {
+    var c = s
+    return match await c.read_async(1) {
+        Ok(b) => time.now_ns()
+        Err(e) => { panic(f"read: {e}") }
+    }
+}
+
+// `n` tasks busy for 2 s, frames of 20 ms (as many as the workers: none is
+// idle to poll), the first writing a byte after 200 ms to a socket a task
+// waits to read: the ms from the write to the reader's wake-up.
+async fun busy(n: int) -> int64 {
+    let l = listener()
+    let a = connected(port_of(l))
+    let b = match l.accept() { Ok(s) => s, Err(e) => { panic(f"accept: {e}") } }
+    async let r = woken_at(b)
+    var hs: [async () -> int64] = []
+    for i in 0..n {
+        let at = if i == 0 { 10 } else { -1 }
+        hs.push(async () => await busy_frames(a, 100, at))
+    }
+    let wrote = (await task.all(hs))[0]
+    return (await r - wrote) / 1000000
+}
+
 #main
 async fun main() {
     let a = args()
     let n = match num.parse_int(a[2]) { Some(v) => v as int, None => 0 }
-    if a[1] == "round-trips" {
+    if a[1] == "busy" {
+        print(await busy(n))
+    } else if a[1] == "round-trips" {
         print(await round_trips(n))
     } else if a[1] == "closed" {
         print(await closed())
@@ -394,6 +445,17 @@ class Closed(_Built):
         # descriptor started with the closed one's watch (EBADF, as
         # interpreted)
         self.assertEqual(self.run_text("closed", 0), "error error 9 (Other(9)), read 3\n")
+
+
+class BusyWorkers(_Built):
+    def test_a_ready_socket_waits_a_turn_with_every_worker_busy(self):
+        # every worker busy with frames of 20 ms: a busy worker glances at
+        # the poller once a millisecond has passed (MYLA-755), where it did
+        # every 64 frames, 1.28 s of these
+        for workers in [1, 2]:
+            with self.subTest(workers=workers):
+                waited = int(self.run_text("busy", workers, workers=workers))
+                self.assertLess(waited, 200, f"a ready socket waited {waited} ms on {workers} busy workers")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

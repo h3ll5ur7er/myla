@@ -2969,13 +2969,20 @@ const WS_SIZE: int64 = 440
 
 // its kinds: a stream socket, a datagram socket, our end of a pipe we
 // read or write (overlapped), a process, a pipe not ours (an inherited
-// standard input: looked at each millisecond, as it can't be waited for)
+// standard input: looked at each millisecond, as it can't be waited for),
+// the read end of std.signal's pipe (looked at when the console's control
+// handler posts SIGNAL_KEY's packet, MYLA-744)
 const K_STREAM: int64 = 1
 const K_DGRAM: int64 = 2
 const K_PIPE_IN: int64 = 3
 const K_PIPE_OUT: int64 = 4
 const K_PROCESS: int64 = 5
 const K_PIPE: int64 = 6
+const K_SIGNAL: int64 = 7
+// the completion key of the packet of no operation that the console's
+// control handler (`__win_on_ctrl`, selfhost/runtime_x86.my) posts once it
+// has written a signal to std.signal's pipe; `poller_wake`'s has the key 0
+const SIGNAL_KEY: int64 = 1
 
 // its flags: closed (in no table); on the port; non-blocking; bound;
 // listening; the connect's context set; the read of no bytes, the send or
@@ -4327,9 +4334,13 @@ fun name_servers() -> str {
 // reaches only the process's words. Ctrl-C and Ctrl-Break are SIGINT (2),
 // the console's close, a logoff and a shutdown SIGTERM (15). While someone
 // listens (`__sig_pipe`'s count), the handler writes the number to the pipe
-// as a byte, as Linux's `__on_signal` writes to its self-pipe, and the
-// event is handled; after a close, a logoff or a shutdown, which Windows
-// ends the process for once its handlers return, it waits: the program has
+// as a byte, as Linux's `__on_signal` writes to its self-pipe, then posts a
+// packet of no operation with SIGNAL_KEY to the poller's port (once there
+// is one), which makes the waiting worker look at the pipe: the port can't
+// wait on an anonymous pipe (MYLA-744: it was looked at each millisecond
+// while a task listened), and the event is handled; after a close, a
+// logoff or a shutdown, which Windows ends the process for once its
+// handlers return, it waits: the program has
 // until Windows' time limit (5 seconds for a close) to end itself. Else,
 // while std.term holds the console raw (`__exit_hook`), it runs
 // `raw_signal`, which puts the mode back (D192), and passes the event on
@@ -4779,8 +4790,10 @@ pub fun sleep_ns(n: int64) {
 // that ends when it may be (`ws_notify`, above), and stays armed. So a
 // handle armed again while it is ready is ready at once (level-triggered,
 // std.rt's `poll_events`), and a wake-up that comes early (another task
-// took what was there) costs a look. A pipe that isn't ours (an inherited
-// standard input) and a datagram socket's room can't be waited for: armed,
+// took what was there) costs a look. std.signal's pipe is looked at when
+// the console's control handler posts a packet for it (SIGNAL_KEY,
+// MYLA-744). A pipe that isn't ours (an inherited standard input) and a
+// datagram socket's room can't be waited for: armed,
 // they are looked at each millisecond (the wait's limit is a millisecond
 // while there is one: `NET_PEEKS`). Anything else (the console, a file)
 // can't be watched: ready at once, as a regular file is on Linux.
@@ -4915,10 +4928,10 @@ fun poller_drain(p: int64, got: int64, n: int64, peeking: bool) -> ([int64], boo
 
 // The `n` packets at `entries` taken (the lock held for them): each the
 // end of an operation of a watched handle, or one posted for it, unless it
-// is a wake-up. A closed one is freed once none is due for it; one armed
-// is to be looked at (once a wait, and kept from being freed meanwhile:
-// a packet's due), and so is each armed one looked at each millisecond
-// when `peeking`. The handles to look at, and whether a wake-up came.
+// is a wake-up or a signal's (SIGNAL_KEY: std.signal's pipe looked at). A
+// closed one is freed once none is due for it; one armed is to be looked at
+// (once a wait, and kept from being freed meanwhile: a packet's due), and
+// so is each armed one looked at each millisecond when `peeking`. The handles to look at, and whether a wake-up came.
 fun poller_take(p: int64, entries: int64, n: int64, peeking: bool) -> ([int64], bool) {
     let mark = __load64(p + 40)
     var looked: [int64] = []
@@ -4927,7 +4940,15 @@ fun poller_take(p: int64, entries: int64, n: int64, peeking: bool) -> ([int64], 
     var i: int64 = 0
     while i < n {
         let ov = __load64(entries + 32 * i + 8)
-        if ov == 0 {
+        if ov == 0 && __load64(entries + 32 * i) == SIGNAL_KEY {
+            // a signal in std.signal's pipe: its watch, armed, looked at
+            let ws = ws_find(signal_fd())
+            if ws != 0 && __load64(ws + WS_WANT) != 0 && __load64(ws + WS_MARK) != mark {
+                __store64(ws + WS_MARK, mark)
+                __store64(ws + WS_REFS, __load64(ws + WS_REFS) + 1)
+                looked.push(ws)
+            }
+        } else if ov == 0 {
             woken = true
             __store64(net() + NET_WAKE, 0)
         } else {
@@ -5054,7 +5075,7 @@ fun ws_level(ws: int64) -> int64 {
             }
         } else if kind == K_STREAM || kind == K_DGRAM {
             r |= wsa_poll(h, 1, 0)
-        } else if kind == K_PIPE_IN || kind == K_PIPE {
+        } else if kind == K_PIPE_IN || kind == K_PIPE || kind == K_SIGNAL {
             if pipe_ready(h) {
                 r |= 1
             }
@@ -5235,7 +5256,9 @@ fun ws_watch(h: int64, want: int64, token: int64) -> int64 {
             return -UNSUPPORTED
         }
         var k = K_PROCESS
-        if kind == WATCH_PIPE {
+        if h == signal_fd() {
+            k = K_SIGNAL
+        } else if kind == WATCH_PIPE {
             k = K_PIPE
         }
         if ws_new(h, k, false) == 0 {

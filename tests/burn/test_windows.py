@@ -1886,6 +1886,38 @@ def unix_pids_with(word: str) -> list[int]:
     return pids
 
 
+def cpu_seconds(pids: list[int]) -> float:
+    """The CPU seconds the processes `pids` used so far, every thread's
+    (`/proc/<pid>/stat`'s utime and stime); a process gone counts none."""
+    total = 0
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
+                fields = fh.read().rsplit(")", 1)[1].split()
+        except OSError:
+            continue
+        total += int(fields[11]) + int(fields[12])
+    return total / os.sysconf("SC_CLK_TCK")
+
+
+def wine_server_pids() -> list[int]:
+    """The processes of the Wine server of this process's prefix."""
+    pids = []
+    for entry in os.listdir("/proc"):
+        if entry.isdecimal():
+            try:
+                with open(f"/proc/{entry}/comm", encoding="utf-8") as fh:
+                    if not fh.read().startswith("wineserver"):
+                        continue
+                with open(f"/proc/{entry}/environ", "rb") as fh:
+                    env = fh.read().split(b"\0")
+            except OSError:
+                continue
+            if ("WINEPREFIX=" + os.environ.get("WINEPREFIX", "")).encode() in env:
+                pids.append(int(entry))
+    return pids
+
+
 class ConsolePty:
     """A Windows program under Wine with a pseudo-terminal, which Wine makes
     its console, as its standard input (and its output too, `all_streams`),
@@ -1975,7 +2007,8 @@ class Console(unittest.TestCase):
     mode back at every end of a program (D187) and on a Ctrl-C while raw
     (D192), Ctrl-C (a Unix SIGINT to Wine, which makes it a CTRL_C_EVENT on
     a thread of its own) as std.signal's interrupt on 1, 4 and 16 workers,
-    and the output mode put back at the exit. A program sharing the console
+    a listener waiting without the CPU (MYLA-744), and the output mode put
+    back at the exit. A program sharing the console
     with its child reads the mode the child left, as the console outlives
     the child. What Wine can't show is MYLA-708's runner's (`RUNNER_CASES`)."""
 
@@ -2095,6 +2128,28 @@ class Console(unittest.TestCase):
         time.sleep(0.2)
         p.proc.send_signal(signal.SIGINT)
         self.assertEqual(p.finish(timeout=20), ([], 0))
+
+    def test_a_listener_alone_uses_no_cpu(self):
+        # MYLA-744: the console's control handler posts a packet to the
+        # poller's port, which waits for it without a time limit; it looked
+        # at the signals' pipe each millisecond (Wine's server too: each
+        # wait's end is a request of its)
+        server = wine_server_pids()
+        for threads in ["1", "4", "16"]:
+            with self.subTest(threads=threads):
+                p = self.start("interrupted", threads=threads)
+                self.assertEqual(p.line(), "ready")
+                time.sleep(0.5)
+                before = cpu_seconds([p.proc.pid, *server])
+                time.sleep(2)
+                used = cpu_seconds([p.proc.pid, *server]) - before
+                p.proc.send_signal(signal.SIGINT)
+                self.assertEqual([p.line(), p.line()], ["got interrupt", "again"])
+                time.sleep(0.2)
+                p.proc.send_signal(signal.SIGINT)
+                self.assertEqual(p.finish(timeout=20), ([], 0))
+                # CPU seconds in 2 s of waiting: about none
+                self.assertLess(used, 0.05, f"{used:.2f} s of CPU in 2 s waiting for a signal")
 
     def test_a_read_of_the_console_while_a_listener_takes_a_ctrl_c(self):
         p = self.start("readline")
