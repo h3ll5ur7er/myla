@@ -406,12 +406,13 @@ pub fun for_target(opts: LoadOptions, t: Target) -> LoadOptions {
 // the language server): the host's own modules, as `for_target` gives a
 // native build its target's, so that a `myla.exe` built for Windows reads
 // Windows' std.path and std.platform (MYLA-723); as they are on x86-64
-// Linux. The modules a copy replaces are themselves when one is `entry`:
-// `myla test lib/std/path.my` runs path.my's cases on every host. `opts`
-// is rooted where the program is loaded from (the driver's `own_library`).
+// Linux. The modules a copy replaces (std.system_error's too, MYLA-716)
+// are themselves when one is `entry`: `myla test lib/std/path.my` runs
+// path.my's cases on every host. `opts` is rooted where the program is
+// loaded from (the driver's `own_library`).
 pub fun for_host(entry: str, opts: LoadOptions) -> LoadOptions {
     var o = for_target(opts, host())
-    for name in ["platform", "path", "path_style"] {
+    for name in ["platform", "path", "path_style", "system_error"] {
         let key = opts.stdlib_root + "/std/" + name + ".my"
         if o.overrides.contains(key) && same_file(entry, key) {
             let text = match override_text(entry, opts.overrides) {
