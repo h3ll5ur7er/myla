@@ -1,0 +1,30 @@
+// std.system_error for x86-64 Windows (MYLA-716): the words for Windows'
+// own error codes (winerror.h's, and Winsock's WSAE… codes), which the
+// loader takes for `std/system_error.my` there (`for_target`, beside
+// `platform_windows.my`). A failed write says what Windows' own message
+// for the code says (`FormatMessage`'s English text, from a small letter
+// and without its full stop), as Linux's says what `strerror` does.
+//
+// The code is what an `IoError.Other` holds past the causes (D219):
+// Windows' own number, `Other(112)` a full disk.
+
+// What Windows' own code `n` means, for the errors a write meets (a full
+// disk, a device's error, a file too large, a quota); else the number as
+// Windows names it.
+#test(112i64)["there is not enough space on the disk"]
+#test(39i64)["the disk is full"]
+#test(1117i64)["the request could not be performed because of an I/O device error"]
+#test(23i64)["data error (cyclic redundancy check)"]
+#test(223i64)["the file size exceeds the limit allowed and cannot be saved"]
+#test(1295i64)["the requested file operation failed because the storage quota was exceeded"]
+#test(28i64)["Windows error 28"]
+#test(1392i64)["Windows error 1392"]
+pub fun error_text(n: int64) -> str {
+    if n == 112 { return "there is not enough space on the disk" }      // ERROR_DISK_FULL
+    if n == 39 { return "the disk is full" }                            // ERROR_HANDLE_DISK_FULL
+    if n == 1117 { return "the request could not be performed because of an I/O device error" }  // ERROR_IO_DEVICE
+    if n == 23 { return "data error (cyclic redundancy check)" }        // ERROR_CRC
+    if n == 223 { return "the file size exceeds the limit allowed and cannot be saved" }  // ERROR_FILE_TOO_LARGE
+    if n == 1295 { return "the requested file operation failed because the storage quota was exceeded" }  // ERROR_DISK_QUOTA_EXCEEDED
+    return f"Windows error {n}"
+}

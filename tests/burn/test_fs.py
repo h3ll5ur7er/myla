@@ -546,6 +546,12 @@ ERRNOS_OUTPUT = """a loop: Other(40)
 a long name: Other(36)
 not there: NotFound
 """
+# Windows' own codes (MYLA-716): CANT_RESOLVE_FILENAME, which Wine gives a
+# loop of links, and FILENAME_EXCED_RANGE
+ERRNOS_OUTPUT_WINDOWS = """a loop: Other(1921)
+a long name: Other(206)
+not there: NotFound
+"""
 
 # Removing and renaming (MYLA-96): files, empty and full directories, a
 # tree holding a symbolic link to a directory outside it (removed, not
@@ -843,7 +849,10 @@ class DirectoryParity(unittest.TestCase):
 
         for impl, result in self.run_all("errnos", ERRNOS, prepare).items():
             with self.subTest(implementation=impl):
-                self.assertEqual(result, (ERRNOS_OUTPUT, "", 0))
+                want = ERRNOS_OUTPUT
+                if TEST_TARGET == "x86_64-windows" and impl.endswith("native"):
+                    want = ERRNOS_OUTPUT_WINDOWS
+                self.assertEqual(result, (want, "", 0))
 
     def test_symbolic_links(self) -> None:
         # MYLA-363: a link's own kind, and walks that don't follow links (or

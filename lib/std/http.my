@@ -3282,12 +3282,15 @@ const STOP: int = 2
 const FAIL: int = 3
 
 // A connection aborted before it was accepted, or a signal: again; too
-// many open descriptors (EMFILE, ENFILE): a little later; none waits any
-// more (`TimedOut`: an accept that doesn't wait) or cancelled: stop;
-// anything else fails.
+// many open descriptors or handles: a little later (std.ioerror's
+// TOO_MANY_OPEN and TOO_MANY_OPEN_SYSTEM, `Other(24)` and `Other(23)` on
+// every target: Linux's EMFILE and ENFILE, Windows' WSAEMFILE and
+// TOO_MANY_OPEN_FILES, MYLA-716); none waits any more (`TimedOut`: an
+// accept that doesn't wait) or cancelled: stop; anything else fails.
 #test(IoError.Cancelled)[2]
 #test(IoError.ConnectionAborted)[0]
 #test(IoError.Other(24))[1]
+#test(IoError.Other(23))[1]
 #test(IoError.Other(9))[3]
 #test(IoError.Unsupported)[3]
 #test(IoError.TimedOut)[2]
