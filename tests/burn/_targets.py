@@ -76,7 +76,6 @@ _X86_TESTS = [
     "test_selfhost_codegen.SelfHostedCodegenParity.test_derived_eq_on_a_plain_enum_compares_tags",
 ]
 
-_WIN_RANDOM = "random bytes (bcrypt, D212, a second import library) come with MYLA-722"
 _WINE_LINKS = "Wine shows a Unix symbolic link as what it names, not as a link (a reparse point)"
 _WIN_LINUX_TOOLS = "it runs Linux's tools, which a Windows program can't (test_process.WindowsChildren runs Windows' own)"
 
@@ -129,7 +128,6 @@ SKIP: dict[str, dict[str, str]] = {
         **_BOTH,
         "test_stdio.BrokenPipe.test_a_write_to_another_descriptor_reports_it":
             "a Windows descriptor is a handle: Wine hands a program no Unix descriptor 3",
-        "test_platform_primitives.Entropy": _WIN_RANDOM,
         "test_platform_primitives.Descriptors.test_the_mode_given":
             "Windows has no permission bits but the read-only attribute (D218): the mode given isn't used",
         # MYLA-704: Windows' links are reparse points, which Wine doesn't
@@ -180,9 +178,6 @@ SKIP_PROGRAMS: dict[str, dict[str, str]] = {
     },
     "x86_64-windows": {
         "io_through_the_ir": "it runs Linux's /bin/echo, which a Windows program can't (MYLA-705)",
-        **{f"std.{m}": _WIN_RANDOM for m in ["random", "uuid"]},
-        # their cases' temporary directories are named with random bytes
-        **{f"std.{m}": _WIN_RANDOM + " (the temporary directories' names)" for m in ["fs", "test"]},
         # its children are cat, sh and head (MYLA-705)
         "std.process": _WIN_LINUX_TOOLS,
     },

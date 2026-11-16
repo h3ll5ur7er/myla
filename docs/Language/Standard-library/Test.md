@@ -46,7 +46,7 @@ fun main() {
 | `expect_eq<T: Eq + Format>(got: T, want: T)` | Fails with `expected <want>, got <got>` unless they are equal; `T` is a type `==` compares and `{}` shows: an integer, float, `char`, `bool`, `str`, or a type implementing `Eq` and `Format` |
 | `expect_ne<T: Eq + Format>(got: T, other: T)` | Fails with `expected two different values, both are <got>` when they are equal |
 | `fail(msg: str)` | Fails the case with `msg` |
-| `temp_dir() -> str` | A fresh, empty directory for the running case under `$TMPDIR` (else `/tmp`); each call gives another, and the runner removes them all when the case ends, passed or failed. A runtime error outside a case (`myla run`). It is `std.fs`'s `make_temp_dir_in` in the case's scratch root: `d` and 16 random hexadecimal digits, mode 0700 ([[MYLA-339]]) |
+| `temp_dir() -> str` | A fresh, empty directory for the running case under `$TMPDIR` (else `/tmp`; on Windows `%TEMP%`, std.fs's `temp_root`, [[MYLA-728]]); each call gives another, and the runner removes them all when the case ends, passed or failed. A runtime error outside a case (`myla run`). It is `std.fs`'s `make_temp_dir_in` in the case's scratch root: `d` and 16 random hexadecimal digits, mode 0700 ([[MYLA-339]]) |
 | `temp_file() -> str` | A fresh, empty file for the running case, the same way (`make_temp_file_in`: `f` and 16 random digits, mode 0600), removed with the case's directories; a runtime error outside a case |
 | `program() -> str` | The path of the project's program, which `myla test` builds before the files of `tests/` run ([[MYLA-306]]); a runtime error elsewhere |
 
