@@ -20,7 +20,7 @@ fun main() {
 | `write(fd: int32, s: str) -> Result<(), IoError>` | Writes the bytes of `s` to file descriptor `fd`, all of them, or the error that stopped it (D146); a pipe nobody reads any more is `BrokenPipe` |
 | `println(s)` | `s` and a newline to stdout |
 | `eprint(s)`, `eprintln(s)` | To stderr, without / with a newline |
-| `errno_text(code: int32) -> str` | The `<cause>` of `write failed: <cause>` below, for the cause code (`__io_errno()`'s, D209) of a failed write: ENOSPC's (`256 + 28`) is `"no space left on device"`, a handle that isn't open `"bad file descriptor"`, one it doesn't name `"errno 77"` (the number std.ioerror's `code_number` gives) |
+| `errno_text(code: int32) -> str` | The `<cause>` of `write failed: <cause>` below, for the cause code (`__io_errno()`'s, D209) of a failed write: a handle that isn't open is `"bad file descriptor"`; a system's own code (from `256` on) the target's words for it, [[Language/Standard-library/Ioerror#system-codes|std.system_error]]'s ([[MYLA-716]]): on Linux and wasm32 ENOSPC's (`256 + 28`) is `"no space left on device"` and one it doesn't name `"errno 77"`, on Windows `ERROR_DISK_FULL`'s (`256 + 112`) `"there is not enough space on the disk"` and one it doesn't name `"Windows error 1392"`; a cause std numbers itself `"errno 22"` (the number std.ioerror's `code_number` gives) |
 
 Output isn't buffered: what a program wrote is out before it waits for input.
 
