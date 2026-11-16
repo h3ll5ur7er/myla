@@ -553,6 +553,23 @@ a long name: Other(206)
 not there: NotFound
 """
 
+# A device's kind (MYLA-716): wasm32 gave WASI's character and block devices
+# and sockets `Other`, as its made-up modes had; they are what Linux calls
+# them.
+DEVICE_KIND = """import std.fs as fs
+
+fun main() {
+    match fs.metadata("/dev/null") {
+        Ok(m) => print(match m.kind {
+            CharDevice => "/dev/null: a character device"
+            Other => "/dev/null: other"
+            _ => "/dev/null: something else"
+        })
+        Err(e) => print(f"/dev/null: {e}")
+    }
+}
+"""
+
 # Removing and renaming (MYLA-96): files, empty and full directories, a
 # tree holding a symbolic link to a directory outside it (removed, not
 # followed), and the errors.
@@ -853,6 +870,13 @@ class DirectoryParity(unittest.TestCase):
                 if TEST_TARGET == "x86_64-windows" and impl.endswith("native"):
                     want = ERRNOS_OUTPUT_WINDOWS
                 self.assertEqual(result, (want, "", 0))
+
+    def test_a_device_s_kind(self) -> None:
+        if TEST_TARGET == "x86_64-windows":
+            self.skipTest("Windows has no /dev/null")
+        for impl, result in self.run_all("device", DEVICE_KIND).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, ("/dev/null: a character device\n", "", 0))
 
     def test_symbolic_links(self) -> None:
         # MYLA-363: a link's own kind, and walks that don't follow links (or

@@ -429,17 +429,25 @@ pub fun path_kind(path: str) -> int64 {
 }
 
 // The kind of WASI's file type `t` (3 a directory, 4 a regular file, 7 a
-// symbolic link, 0 unknown); its devices and sockets (1, 2, 5, 6) are
-// KIND_OTHER, as the made-up modes before D209 gave them (MYLA-716).
+// symbolic link, 1 a block and 2 a character device, 5 and 6 a datagram and
+// a stream socket, 0 unknown), as Linux's modules give them (MYLA-716: the
+// devices and sockets were KIND_OTHER, as the made-up modes before D209).
 #test(3)[2]
 #test(4)[1]
 #test(7)[3]
-#test(2)[8]
+#test(1)[5]
+#test(2)[4]
+#test(5)[7]
+#test(6)[7]
 #test(0)[0]
+#test(9)[8]
 fun kind_of_type(t: int64) -> int64 {
     if t == 4 { return KIND_FILE }
     if t == 3 { return KIND_DIR }
     if t == 7 { return KIND_SYMLINK }
+    if t == 2 { return KIND_CHAR_DEVICE }
+    if t == 1 { return KIND_BLOCK_DEVICE }
+    if t == 5 || t == 6 { return KIND_SOCKET }
     if t == 0 { return KIND_UNKNOWN }
     return KIND_OTHER
 }
