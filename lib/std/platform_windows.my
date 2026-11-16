@@ -4397,8 +4397,8 @@ fun name_servers() -> str {
 // wait on an anonymous pipe (MYLA-744: it was looked at each millisecond
 // while a task listened), and the event is handled; after a close, a
 // logoff or a shutdown, which Windows ends the process for once its
-// handlers return, it waits: the program has
-// until Windows' time limit (5 seconds for a close) to end itself. Else,
+// handlers return, it waits: the program has until Windows' time limit
+// (5 seconds for a close) to end itself. Else,
 // while std.term holds the console raw (`__exit_hook`), it runs
 // `raw_signal`, which puts the mode back (D192), and passes the event on
 // to Windows' default handler, which ends the process
@@ -4988,7 +4988,8 @@ fun poller_drain(p: int64, got: int64, n: int64, peeking: bool) -> ([int64], boo
 // is a wake-up or a signal's (SIGNAL_KEY: std.signal's pipe looked at). A
 // closed one is freed once none is due for it; one armed is to be looked at
 // (once a wait, and kept from being freed meanwhile: a packet's due), and
-// so is each armed one looked at each millisecond when `peeking`. The handles to look at, and whether a wake-up came.
+// so is each armed one looked at each millisecond when `peeking`. The
+// handles to look at, and whether a wake-up came.
 fun poller_take(p: int64, entries: int64, n: int64, peeking: bool) -> ([int64], bool) {
     let mark = __load64(p + 40)
     var looked: [int64] = []
