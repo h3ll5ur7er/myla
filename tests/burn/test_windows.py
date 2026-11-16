@@ -1939,7 +1939,14 @@ class Console(unittest.TestCase):
 # SetConsoleCtrlHandler(NULL, TRUE)) or closes the console's window
 # (`close`: WM_CLOSE to GetConsoleWindow()'s window, which is
 # CTRL_CLOSE_EVENT). `out` is the file's text at the end and `exit` the
-# status of `cmd` (that of console.exe), within `seconds`.
+# status of `cmd` (that of console.exe), within `seconds`. The runner
+# names console.exe by its whole path, so that it finds itself when it
+# starts itself as a child (MYLA-708). With `"host": "pty"` the console is
+# a pseudo console (ConPTY) instead: `keys` are typed into it as a
+# terminal types them (a Ctrl-C is ETX, which the pseudo console makes a
+# real Ctrl-C: keys written with WriteConsoleInputW never are, conhost's
+# input buffer takes them as they are), and `close` is ClosePseudoConsole
+# (CTRL_CLOSE_EVENT without a window to close).
 STATUS_CONTROL_C_EXIT = 0xC000013A
 RUNNER_CASES = [
     {"name": "raw keys from a real console, escape sequences through ENABLE_VIRTUAL_TERMINAL_INPUT",
@@ -1969,12 +1976,12 @@ RUNNER_CASES = [
      "steps": [{"wait": "ready\n"}, {"event": "CTRL_BREAK_EVENT"}, {"wait": "again\n"}, {"event": "CTRL_BREAK_EVENT"}],
      "out": "ready\ngot interrupt\nagain\n", "exit": STATUS_CONTROL_C_EXIT, "seconds": 30},
     {"name": "Ctrl-C typed while a cooked read of the console waits: the read goes on (ERROR_OPERATION_ABORTED)",
-     "args": ["readline"],
+     "args": ["readline"], "host": "pty",
      "steps": [{"wait": "ready\n"}, {"keys": ["Ctrl-c"]}, {"wait": "caught interrupt\n"},
                {"keys": ["h", "i", "Enter"]}],
      "out": "ready\ncaught interrupt\nline hi\r\n", "exit": 0, "seconds": 30},
     {"name": "the console closed: Terminate, and the program's own exit within Windows' 5 seconds",
-     "args": ["close", "closed.txt"], "alone": True,
+     "args": ["close", "closed.txt"], "alone": True, "host": "pty",
      "steps": [{"wait_file": "closed.txt", "text": "ready\n"}, {"close": True}],
      "file": "ready\ngot terminate\n", "exit": 7, "seconds": 10},
     {"name": "D192: Ctrl-Break while a child on this console is raw, then its mode back (the parent listens)",
