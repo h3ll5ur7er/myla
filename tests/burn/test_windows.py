@@ -1691,6 +1691,7 @@ import std.process as process
 import std.io as io
 import std.fs as fs
 import std.num as num
+import std.bytes as bytes
 from std.term import Key, Stream
 from std.signal import Signal
 from std.process import Stdio, ExitStatus
@@ -1984,6 +1985,31 @@ async fun read_line_listening() {
     let x = await c
 }
 
+// three lines of the console, read with reads of at most 1, 3 and 64
+// bytes, each read's bytes shown (a CR as `\\r`, a LF as `\\n`) (MYLA-734)
+fun pieces() {
+    var input = io.fd_stream(0)
+    for size in [1, 3, 64] {
+        print(f"ready {size}")
+        var shown = ""
+        var more = true
+        while more {
+            match input.read(size) {
+                Ok(b) => {
+                    let t = bytes.to_str(b)
+                    shown = shown + "[" + t.replace("\\r", "\\\\r").replace("\\n", "\\\\n") + "]"
+                    more = b.len() > 0 && !t.contains("\\n")
+                }
+                Err(e) => {
+                    shown = shown + f"error {e}"
+                    more = false
+                }
+            }
+        }
+        print(f"{size}: {shown}")
+    }
+}
+
 // the first signal written to the file `path` after "ready", then the exit
 // with 7: what a program does with the time Windows gives it once its
 // console is closed
@@ -2008,6 +2034,7 @@ async fun main() {
     if case == "size" { sizes() }
     if case == "interrupted" { await interrupted() }
     if case == "readline" { await read_line_listening() }
+    if case == "pieces" { pieces() }
     if case == "close" { await on_close(args[2]) }
     if case == "end" { await end(args[2]) }
     if case == "ends" { ends() }
@@ -2172,9 +2199,10 @@ class Console(unittest.TestCase):
             p.send(key)
             time.sleep(0.2)
         self.assertEqual([p.line() for _ in range(4)], ["key Char(q)", "key Char(x)", "key Enter", "restored true"])
-        # cooked again: a line, which Windows' console ends with CR LF
+        # cooked again: a line, whose CR LF the console's read gives as
+        # "\n" (MYLA-734)
         p.send(b"hello\r")
-        self.assertEqual(p.finish(), (["line hello\r"], 0))
+        self.assertEqual(p.finish(), (["line hello"], 0))
 
     def test_every_end_restores_the_console(self):
         lines, code = self.start("ends", threads="4").finish(timeout=120)
@@ -2253,7 +2281,20 @@ class Console(unittest.TestCase):
         p.proc.send_signal(signal.SIGINT)
         self.assertEqual(p.line(), "caught interrupt")
         p.send(b"hello\r")
-        self.assertEqual(p.finish(), (["line hello\r"], 0))
+        self.assertEqual(p.finish(), (["line hello"], 0))
+
+    def test_a_line_of_the_console_read_in_pieces(self):
+        # MYLA-734: the console's CR LF is "\n" however the reads cut the
+        # line, the CR at a full read's end too (its LF the next read's)
+        p = self.start("pieces")
+        got = []
+        for size in ("1", "3", "64"):
+            self.assertEqual(p.line(), f"ready {size}")
+            time.sleep(0.2)  # (Wine's console drops a line typed before the read)
+            p.send(b"hello\r")
+            got.append(p.line())
+        self.assertEqual(got, ["1: [h][e][l][l][o][\\n]", "3: [hel][lo][\\n]", "64: [hello\\n]"])
+        self.assertEqual(p.finish(), ([], 0))
 
     def test_the_time_a_signal_leaves(self):
         # `close`'s program with a Ctrl-C: Wine's console can't be closed
@@ -2429,13 +2470,13 @@ RUNNER_CASES = [
                {"wait": "restored true\n"},
                {"keys": ["h", "e", "l", "l", "o", "Enter"]}],
      "out": "raw line 0 echo 0 processed 0 vt 512\nkey Up\nkey Ctrl(c)\nkey Char(q)\nkey Alt(x)\nkey F5\n"
-            "key Delete\nkey Escape\nkey Enter\nrestored true\nline hello\r\n",
+            "key Delete\nkey Escape\nkey Enter\nrestored true\nline hello\n",
      "exit": 0, "seconds": 30},
     {"name": "UTF-8 typed into a cooked read (the console's input code page 65001)",
      "args": ["keys", "1"],
      "steps": [{"wait": "raw line"}, {"keys": ["x"]}, {"wait": "restored true\n"},
                {"keys": ["g", "r", "ö", "ß", "e", "Enter"]}],
-     "out": "raw line 0 echo 0 processed 0 vt 512\nkey Char(x)\nrestored true\nline größe\r\n",
+     "out": "raw line 0 echo 0 processed 0 vt 512\nkey Char(x)\nrestored true\nline größe\n",
      "exit": 0, "seconds": 30},
     {"name": "the window's size, through each stream that is the console (stdout is the file)",
      "args": ["size"], "before": "mode con: cols=101 lines=33", "steps": [],
@@ -2452,7 +2493,7 @@ RUNNER_CASES = [
      "args": ["readline"], "host": "pty",
      "steps": [{"wait": "ready\n"}, {"keys": ["Ctrl-c"]}, {"wait": "caught interrupt\n"},
                {"keys": ["h", "i", "Enter"]}],
-     "out": "ready\ncaught interrupt\nline hi\r\n", "exit": 0, "seconds": 30},
+     "out": "ready\ncaught interrupt\nline hi\n", "exit": 0, "seconds": 30},
     {"name": "the console closed: Terminate, and the program's own exit within Windows' 5 seconds",
      "args": ["close", "closed.txt"], "alone": True, "host": "pty",
      "steps": [{"wait_file": "closed.txt", "text": "ready\n"}, {"close": True}],
@@ -2472,6 +2513,13 @@ RUNNER_CASES = [
      "out": "return 0 restored true\nexit 3 restored true\npanic 1 restored true\nindex 1 restored true\n"
             "key 1 restored true\ndeep 1 restored true\nnested 1 restored true\nfails 1 restored true\n"
             "left 0 restored false\n", "exit": 0, "seconds": 60},
+    {"name": "MYLA-734: a cooked read's CR LF is \"\\n\", however the reads cut the line",
+     "args": ["pieces"],
+     "steps": [{"wait": "ready 1\n"}, {"keys": ["h", "e", "l", "l", "o", "Enter"]},
+               {"wait": "ready 3\n"}, {"keys": ["h", "e", "l", "l", "o", "Enter"]},
+               {"wait": "ready 64\n"}, {"keys": ["h", "e", "l", "l", "o", "Enter"]}],
+     "out": "ready 1\n1: [h][e][l][l][o][\\n]\nready 3\n3: [hel][lo][\\n]\nready 64\n64: [hello\\n]\n",
+     "exit": 0, "seconds": 30},
 ]
 
 
