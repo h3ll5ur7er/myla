@@ -646,7 +646,10 @@ class Runner:
     def run_step(self, s: dict, work: str, subst: dict) -> str:
         """What step `s` did wrong, "" for nothing."""
         if s["drive"]:
-            return self.drive_console(s["drive"], work)
+            try:
+                return self.drive_console(s["drive"], work)
+            except Exception as e:   # the driver's own failure fails the case, not the run
+                return f"the console driver failed: {e!r}"
         def put(text: str) -> str:
             if s["subst"]:
                 for k, v in subst.items():
@@ -711,19 +714,18 @@ class Runner:
 
     def drive_console(self, rc: dict, work: str) -> str:
         """test_windows' RUNNER_CASE `rc` (its comment says what each field
-        means): CONSOLE, copied to `work` as console.exe, in a console of
-        its own (`cmd /c "[before &&] console.exe ARGS > out.txt"`, or
-        console.exe alone), driven by `console_action` in a process of this
-        script attached to that console; what it did wrong, "" for nothing."""
+        means): CONSOLE, copied to `work` as console.exe, in a console of its
+        own, `console_command`'s, driven; what it did wrong, "" for nothing.
+        The console is a classic one (CREATE_NEW_CONSOLE), whose input
+        `console-action` writes and whose processes it signals from a
+        process of this script attached to it, or with `"host": "pty"` a
+        pseudo console (`Pty`), whose input is typed as a terminal types it.
+        Whatever the case left running on its console is ended before the
+        next case (`end_console_case`)."""
         deadline = time.monotonic() + rc["seconds"]
         out_path = os.path.join(work, "out.txt")
-        if rc.get("alone"):
-            command = [os.path.join(work, "console.exe"), *rc["args"]]
-        else:
-            line = "console.exe " + " ".join(rc["args"]) + " > out.txt"
-            if rc.get("before"):
-                line = rc["before"] + " && " + line
-            command = f'cmd /c "{line}"'
+        pty = rc.get("host") == "pty"
+        command = console_command(rc, os.path.join(work, "console.exe"), pty)
 
         def text(path: str) -> str:
             try:
@@ -732,9 +734,21 @@ class Runner:
             except OSError:
                 return ""
 
+        def wrote() -> str:
+            """What the case's files and console hold, for a failure's report."""
+            said = [f"out.txt {text(out_path)!r}"]
+            if rc.get("alone"):
+                said = [f"{rc['args'][1]} {text(os.path.join(work, rc['args'][1]))!r}"]
+            screen = proc.screen() if pty else console_screen(proc.pid)
+            return "; ".join(said + [f"its console {screen!r}"])
+
         # what this process ignores its children would too (Ctrl-C's flag)
         ctypes_kernel32().SetConsoleCtrlHandler(None, False)
-        proc = subprocess.Popen(command, cwd=work, env=self.env, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        if pty:
+            proc = Pty(command, work)
+        else:
+            proc = subprocess.Popen(command, cwd=work, env=self.env, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        code = None
         try:
             for k, st in enumerate(rc["steps"]):
                 if "wait" in st or "wait_file" in st:
@@ -742,9 +756,14 @@ class Runner:
                     want = st.get("wait", st.get("text"))
                     while want not in text(path):
                         if time.monotonic() > deadline or proc.poll() is not None:
-                            return (f"step {k + 1}: {want!r} not written (exit {proc.poll()}); "
-                                    f"it wrote {text(path)!r}")
+                            return f"step {k + 1}: {want!r} not written (exit {proc.poll()}); {wrote()}"
                         time.sleep(0.05)
+                    continue
+                if pty and "keys" in st:
+                    proc.type(vt_input(st["keys"]))
+                    continue
+                if pty and "close" in st:
+                    proc.close_console()
                     continue
                 if "keys" in st:
                     action = ["keys", json.dumps([r for name in st["keys"] for r in key_records(name)])]
@@ -752,19 +771,15 @@ class Runner:
                     action = ["event", str(CTRL_EVENTS[st["event"]])]
                 else:
                     action = ["close"]
-                done = subprocess.run([sys.executable, os.path.abspath(__file__), "console-action", str(proc.pid),
-                                       *action], capture_output=True, text=True, timeout=30,
-                                      creationflags=subprocess.DETACHED_PROCESS)
-                if "ok" not in done.stdout.split():
-                    return f"step {k + 1} ({action[0]}): {done.stdout.strip()} {done.stderr.strip()}"
+                done = console_action_run(proc.pid, action)
+                if "ok" not in done.split():
+                    return f"step {k + 1} ({action[0]}): {done}; {wrote()}"
             try:
                 code = proc.wait(timeout=max(0.1, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
-                return f"still running after {rc['seconds']} s; it wrote {text(out_path)!r}"
+                return f"still running after {rc['seconds']} s; {wrote()}"
         finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait()
+            end_console_case(proc)
         problems = []
         if code != rc["exit"]:
             problems.append(f"exit {code:#x}, expected {rc['exit']:#x}")
@@ -772,7 +787,237 @@ class Runner:
             problems.append("out.txt " + differs(text(out_path), rc["out"]))
         if "file" in rc and text(os.path.join(work, rc["args"][1])) != rc["file"]:
             problems.append(f"{rc['args'][1]} " + differs(text(os.path.join(work, rc["args"][1])), rc["file"]))
+        if problems and pty:
+            problems.append(f"its console {proc.screen()!r}")
         return "; ".join(problems)
+
+
+def console_command(rc: dict, exe: str, pty: bool = False) -> str | list[str]:
+    """The command a RUNNER_CASE `rc` runs `exe` (console.exe) with: named by
+    its whole path, so that the program finds itself again when it starts
+    itself as a child (`process.args()[0]`: as cmd passes a bare name on,
+    `console.exe` alone, std.process would look for it on PATH only, D225,
+    and not find it); `cmd /c` with its output to out.txt (on a pseudo
+    console its input and error the console's own, `CON`, whatever this
+    process's are), or `exe` alone for a case that is (its status its own)."""
+    if rc.get("alone"):
+        return [exe, *rc["args"]]
+    line = f'"{exe}" ' + " ".join(rc["args"]) + (" < CON > out.txt 2> CON" if pty else " > out.txt")
+    if rc.get("before"):
+        line = rc["before"] + " && " + line
+    # cmd drops the first and the last quote of the line (`cmd /?`)
+    return f'cmd /c "{line}"'
+
+
+def console_action_run(pid: int, action: list[str]) -> str:
+    """`console-action` run on the console of the process `pid`: what it said."""
+    try:
+        done = subprocess.run([sys.executable, os.path.abspath(__file__), "console-action", str(pid), *action],
+                              capture_output=True, text=True, timeout=30, creationflags=subprocess.DETACHED_PROCESS)
+    except subprocess.TimeoutExpired:
+        return f"console-action {action[0]} took more than 30 s"
+    return f"{done.stdout.strip()} {done.stderr.strip()}".strip()
+
+
+def console_screen(pid: int) -> str:
+    """The text on the console of the process `pid` (a runtime error the
+    program wrote to it, say), "" when it has ended."""
+    said = console_action_run(pid, ["screen"])
+    return said[3:][-2000:] if said.startswith("ok ") else ""
+
+
+def end_console_case(proc) -> None:
+    """Every process a console case started ended, so that none holds a
+    console, a file or a worker into the next case: the process's tree
+    (`taskkill /T`: cmd's console.exe and its children too), then any
+    console.exe left, as one whose parent ended is in no tree."""
+    if proc.poll() is None:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=60)
+        proc.kill()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+    subprocess.run(["taskkill", "/F", "/IM", "console.exe"], capture_output=True, timeout=60)
+    if isinstance(proc, Pty):
+        proc.release()
+
+
+# The virtual-terminal input a terminal sends for RUNNER_CASES' key names
+# (a pseudo console makes it the keys again: `Pty.type`).
+VT_KEYS = {"Up": "\x1b[A", "Down": "\x1b[B", "Right": "\x1b[C", "Left": "\x1b[D", "Home": "\x1b[H", "End": "\x1b[F",
+           "Delete": "\x1b[3~", "Escape": "\x1b", "Enter": "\r", "Tab": "\t", "Backspace": "\x7f",
+           "F1": "\x1bOP", "F2": "\x1bOQ", "F3": "\x1bOR", "F4": "\x1bOS", "F5": "\x1b[15~", "F6": "\x1b[17~",
+           "F7": "\x1b[18~", "F8": "\x1b[19~", "F9": "\x1b[20~", "F10": "\x1b[21~", "F11": "\x1b[23~",
+           "F12": "\x1b[24~"}
+
+
+def vt_input(names: list[str]) -> bytes:
+    """The keys `names` as a terminal types them, in UTF-8: Ctrl-c is ETX
+    (which a pseudo console makes a Ctrl-C, CTRL_C_EVENT and all), Alt-x
+    ESC x."""
+    out = []
+    for name in names:
+        if name in VT_KEYS:
+            out.append(VT_KEYS[name])
+        elif name.startswith("Ctrl-") and len(name) == 6:
+            out.append(chr(ord(name[5].lower()) & 0x1F))
+        elif name.startswith("Alt-") and len(name) == 5:
+            out.append("\x1b" + name[4])
+        elif len(name) == 1:
+            out.append(name)
+        else:
+            raise ValueError(f"no key named {name!r}")
+    return "".join(out).encode("utf-8")
+
+
+class Pty:
+    """A program on a pseudo console of its own (ConPTY: CreatePseudoConsole
+    and PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE), Windows only: what it draws
+    read by a thread of this process (a pseudo console stops when its
+    output isn't read), what is typed written to its input as a terminal
+    writes it, the console closed as a terminal's window closes
+    (ClosePseudoConsole, which is CTRL_CLOSE_EVENT to its processes)."""
+
+    def __init__(self, command, cwd: str, cols: int = 120, rows: int = 30):
+        import ctypes
+        from ctypes import wintypes
+        self.ctypes = ctypes
+        k = self.k = ctypes_kernel32()
+        H = wintypes.HANDLE
+        COORD = COORD_type()
+        k.CreatePipe.argtypes = [ctypes.POINTER(H), ctypes.POINTER(H), wintypes.LPVOID, wintypes.DWORD]
+        k.CreatePseudoConsole.argtypes = [COORD, H, H, wintypes.DWORD, ctypes.POINTER(H)]
+        k.CreatePseudoConsole.restype = ctypes.c_long
+        k.ClosePseudoConsole.argtypes = [H]
+        k.InitializeProcThreadAttributeList.argtypes = [wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                                        ctypes.POINTER(ctypes.c_size_t)]
+        k.UpdateProcThreadAttribute.argtypes = [wintypes.LPVOID, wintypes.DWORD, ctypes.c_size_t, wintypes.LPVOID,
+                                                ctypes.c_size_t, wintypes.LPVOID, wintypes.LPVOID]
+        k.CreateProcessW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.LPVOID, wintypes.LPVOID,
+                                     wintypes.BOOL, wintypes.DWORD, wintypes.LPVOID, wintypes.LPCWSTR,
+                                     wintypes.LPVOID, wintypes.LPVOID]
+        k.WaitForSingleObject.argtypes = [H, wintypes.DWORD]
+        k.GetExitCodeProcess.argtypes = [H, ctypes.POINTER(wintypes.DWORD)]
+        k.TerminateProcess.argtypes = [H, wintypes.UINT]
+        k.CloseHandle.argtypes = [H]
+        k.ReadFile.argtypes = [H, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+        k.WriteFile.argtypes = [H, wintypes.LPCVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+
+        def check(ok, what):
+            if not ok:
+                raise OSError(f"{what} failed: {ctypes.get_last_error()}")
+
+        in_r, self.in_w, self.out_r, out_w = H(), H(), H(), H()
+        check(k.CreatePipe(ctypes.byref(in_r), ctypes.byref(self.in_w), None, 0), "CreatePipe")
+        check(k.CreatePipe(ctypes.byref(self.out_r), ctypes.byref(out_w), None, 0), "CreatePipe")
+        self.hpc = H()
+        hr = k.CreatePseudoConsole(COORD(cols, rows), in_r, out_w, 0, ctypes.byref(self.hpc))
+        k.CloseHandle(in_r)
+        k.CloseHandle(out_w)
+        if hr != 0:
+            raise OSError(f"CreatePseudoConsole failed: {hr & 0xFFFFFFFF:#x}")
+        self.output = bytearray()
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+        size = ctypes.c_size_t()
+        k.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
+        self.attrs = ctypes.create_string_buffer(size.value)
+        check(k.InitializeProcThreadAttributeList(self.attrs, 1, 0, ctypes.byref(size)), "InitializeProcThreadAttributeList")
+        # the attribute's value is the pseudo console's handle itself
+        check(k.UpdateProcThreadAttribute(self.attrs, 0, 0x00020016, self.hpc.value, ctypes.sizeof(H), None, None),
+              "UpdateProcThreadAttribute")
+        si = startupinfoex_type()()
+        si.cb = ctypes.sizeof(si)
+        si.lpAttributeList = ctypes.cast(self.attrs, ctypes.c_void_p)
+        pi = process_information_type()()
+        line = command if isinstance(command, str) else subprocess.list2cmdline(command)
+        buf = ctypes.create_unicode_buffer(line)
+        # EXTENDED_STARTUPINFO_PRESENT; no handle inherited
+        check(k.CreateProcessW(None, buf, None, None, False, 0x00080000, None, cwd, ctypes.byref(si),
+                               ctypes.byref(pi)), f"CreateProcessW({line})")
+        k.CloseHandle(pi.hThread)
+        self.handle, self.pid = pi.hProcess, pi.dwProcessId
+        self.closed = False
+
+    def _read(self):
+        from ctypes import wintypes
+        buf = self.ctypes.create_string_buffer(4096)
+        got = wintypes.DWORD()
+        while self.k.ReadFile(self.out_r, buf, 4096, self.ctypes.byref(got), None) and got.value:
+            self.output += buf.raw[:got.value]
+
+    def screen(self) -> str:
+        """What it drew, its escape sequences left out."""
+        import re
+        text = bytes(self.output).decode("utf-8", "backslashreplace")
+        return re.sub(r"\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|.)", "", text)[-2000:]
+
+    def type(self, data: bytes) -> None:
+        from ctypes import wintypes
+        done = wintypes.DWORD()
+        if not self.k.WriteFile(self.in_w, data, len(data), self.ctypes.byref(done), None) or done.value != len(data):
+            raise OSError(f"typing into the pseudo console failed: {self.ctypes.get_last_error()}")
+
+    def close_console(self) -> None:
+        """The console closed, as a terminal's window is: ClosePseudoConsole,
+        on a thread of its own (it may wait for the console's processes)."""
+        if not self.closed:
+            self.closed = True
+            threading.Thread(target=self.k.ClosePseudoConsole, args=(self.hpc,), daemon=True).start()
+
+    def poll(self):
+        if self.k.WaitForSingleObject(self.handle, 0) != 0:
+            return None
+        from ctypes import wintypes
+        code = wintypes.DWORD()
+        self.k.GetExitCodeProcess(self.handle, self.ctypes.byref(code))
+        return code.value
+
+    def wait(self, timeout: float):
+        if self.k.WaitForSingleObject(self.handle, int(timeout * 1000)) != 0:
+            raise subprocess.TimeoutExpired("console.exe", timeout)
+        return self.poll()
+
+    def kill(self) -> None:
+        self.k.TerminateProcess(self.handle, 1)
+
+    def release(self) -> None:
+        self.close_console()
+        self.k.CloseHandle(self.in_w)
+        self.k.CloseHandle(self.handle)
+
+
+def COORD_type():
+    import ctypes
+
+    class COORD(ctypes.Structure):
+        _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+    return COORD
+
+
+def startupinfoex_type():
+    """STARTUPINFOEXW: 112 bytes on x86-64, its attribute list at 104."""
+    import ctypes
+    u16, u32, ptr = ctypes.c_uint16, ctypes.c_uint32, ctypes.c_void_p
+
+    class STARTUPINFOEXW(ctypes.Structure):
+        _fields_ = [("cb", u32), ("lpReserved", ptr), ("lpDesktop", ptr), ("lpTitle", ptr),
+                    ("dwX", u32), ("dwY", u32), ("dwXSize", u32), ("dwYSize", u32), ("dwXCountChars", u32),
+                    ("dwYCountChars", u32), ("dwFillAttribute", u32), ("dwFlags", u32), ("wShowWindow", u16),
+                    ("cbReserved2", u16), ("lpReserved2", ptr), ("hStdInput", ptr), ("hStdOutput", ptr),
+                    ("hStdError", ptr), ("lpAttributeList", ptr)]
+    return STARTUPINFOEXW
+
+
+def process_information_type():
+    """PROCESS_INFORMATION: 24 bytes on x86-64."""
+    import ctypes
+
+    class PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [("hProcess", ctypes.c_void_p), ("hThread", ctypes.c_void_p), ("dwProcessId", ctypes.c_uint32),
+                    ("dwThreadId", ctypes.c_uint32)]
+    return PROCESS_INFORMATION
 
 
 # --- a console's input events and control events (Windows) ---------------------
@@ -840,7 +1085,29 @@ def console_action(pid: int, action: str, arg: str) -> int:
     elif action == "close":
         k.GetConsoleWindow.restype = wintypes.HWND
         user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-        ok = bool(user32.PostMessageW(k.GetConsoleWindow(), 0x0010, 0, 0))
+        window = k.GetConsoleWindow()
+        if not window:
+            # (a NULL window's message would go to this thread's own queue)
+            print("the console has no window")
+            return 1
+        ok = bool(user32.PostMessageW(window, 0x0010, 0, 0))
+    elif action == "screen":
+        k.CreateFileW.restype = wintypes.HANDLE
+        k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                  wintypes.DWORD, wintypes.HANDLE]
+        conout = k.CreateFileW("CONOUT$", 0xC0000000, 3, None, 3, 0, None)
+        info = (ctypes.c_uint16 * 11)()   # CONSOLE_SCREEN_BUFFER_INFO: its size, then the cursor
+        if not k.GetConsoleScreenBufferInfo(wintypes.HANDLE(conout), info):
+            print(f"screen not read: {ctypes.get_last_error()}")
+            return 1
+        cols, rows = info[0], info[3] + 1
+        cells = ctypes.create_unicode_buffer(cols * rows)
+        read = wintypes.DWORD()
+        k.ReadConsoleOutputCharacterW(wintypes.HANDLE(conout), cells, cols * rows, 0, ctypes.byref(read))
+        lines = [cells[r * cols:(r + 1) * cols].rstrip() for r in range(rows)]
+        print("ok " + "\n".join(lines).strip())
+        k.FreeConsole()
+        return 0
     elif action == "keys":
         records = json.loads(arg)
         k.CreateFileW.restype = wintypes.HANDLE
@@ -1001,7 +1268,7 @@ def main() -> int:
     r.add_argument("--list", action="store_true", help="name the cases without running them")
     a = sub.add_parser("console-action", help="(the runner's own, on Windows) act on a case's console")
     a.add_argument("pid", type=int)
-    a.add_argument("action", choices=["keys", "event", "close"])
+    a.add_argument("action", choices=["keys", "event", "close", "screen"])
     a.add_argument("arg", nargs="?", default="")
     args = ap.parse_args()
     # what a program printed, in any script, on a console or pipe of any
