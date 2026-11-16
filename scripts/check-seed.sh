@@ -10,7 +10,10 @@
 # imports starts using something the seed doesn't know (a primitive, a
 # runtime variable, an attribute), in a `Stage:` commit before that use.
 # This machine's seed is checked here; the other targets' seeds by CI on
-# their own machine (the bootstrap-arm64 job for bootstrap/seed-aarch64.s).
+# their own machine (the bootstrap-arm64 job for bootstrap/seed-aarch64.s,
+# bootstrap-windows for bootstrap/seed-windows.s, MYLA-709). Another
+# machine's seed can be checked here under its emulator, as scripts/host.sh
+# says (MYLA_OS=windows MYLA_RUN=wine64 for the Windows seed under Wine).
 # Whether each seed is also the current compiler is reported, not required.
 #
 # selfhost/embedded_std.my, the standard library the tools carry (MYLA-243),
@@ -48,17 +51,17 @@ update_hint() {
 }
 
 stage3=""
-if [ $# -gt 0 ] && [ -f "$1/stage3.s" ] && [ -x "$1/stage3" ]; then
+if [ $# -gt 0 ] && [ -f "$1/stage3.s" ] && [ -x "$1/stage3$EXE" ]; then
     stage3="$1/stage3.s"
-    compiler="$1/stage3"
+    compiler="$1/stage3$EXE"
 else
     out="build/seed-check"
     mkdir -p "$out"
     if ! {
-        asm_to_bin "$SEED" "$out/stage0" &&
-        run_tool "$out/stage0" "$ENTRY" "$STDLIB_ROOT" > "$out/stage1.s" && asm_to_bin "$out/stage1.s" "$out/stage1" &&
-        run_tool "$out/stage1" "$ENTRY" "$STDLIB_ROOT" > "$out/stage2.s" && asm_to_bin "$out/stage2.s" "$out/stage2" &&
-        run_tool "$out/stage2" "$ENTRY" "$STDLIB_ROOT" > "$out/stage3.s"
+        asm_to_bin "$SEED" "$out/stage0$EXE" &&
+        run_tool "$out/stage0$EXE" "$ENTRY" "$STDLIB_ROOT" > "$out/stage1.s" && asm_to_bin "$out/stage1.s" "$out/stage1$EXE" &&
+        run_tool "$out/stage1$EXE" "$ENTRY" "$STDLIB_ROOT" > "$out/stage2.s" && asm_to_bin "$out/stage2.s" "$out/stage2$EXE" &&
+        run_tool "$out/stage2$EXE" "$ENTRY" "$STDLIB_ROOT" > "$out/stage3.s"
     }; then
         echo "check-seed: the bootstrap from $SEED failed" >&2
         update_hint
@@ -70,7 +73,7 @@ else
         exit 2
     fi
     stage3="$out/stage3.s"
-    compiler="$out/stage2"
+    compiler="$out/stage2$EXE"
 fi
 echo "check-seed: $SEED bootstraps these sources (the fixed point)"
 
@@ -95,7 +98,9 @@ for entry in $SEEDS; do
         exit 2
     fi
     from="$(sed -n 's/^# fixed point, from \(.*\), without the embedded standard library$/\1/p' "$seed" 2>/dev/null | head -1 || true)"
-    if [ -f "$seed" ] && awk 'f || !/^#/ { f = 1; print }' "$seed" | cmp -s - "$want"; then
+    if [ ! -f "$seed" ]; then
+        echo "check-seed: $seed is missing (scripts/update-seed.sh $target writes it)"
+    elif awk 'f || !/^#/ { f = 1; print }' "$seed" | cmp -s - "$want"; then
         echo "check-seed: $seed is the current compiler"
     else
         echo "check-seed: $seed is an older compiler${from:+ (from $from)}; kept until it can't bootstrap the sources (D207)"

@@ -25,6 +25,8 @@
 #   scripts/update-seed.sh            # rewrite bootstrap/seed*.s
 #   scripts/update-seed.sh --out DIR  # write the seeds to DIR, bootstrap/ untouched
 #                                     # (CI's artifacts of each master commit)
+#   scripts/update-seed.sh x86_64-windows   # only the seeds of the targets named
+#                                     # (a new target's, the others kept, D207)
 #
 # A seed that can no longer compile the sources is updated in steps: an older
 # compiler builds a newer one (git history), or, as for the first seed, the
@@ -34,19 +36,36 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST=""
-if [ $# -gt 0 ]; then
-    if [ "$1" = "--out" ] && [ $# -eq 2 ]; then
-        DEST="$(mkdir -p "$2" && cd "$2" && pwd)"
-    else
-        echo "usage: scripts/update-seed.sh [--out DIR]" >&2
+ONLY=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out)
+            if [ $# -lt 2 ]; then
+                echo "usage: scripts/update-seed.sh [--out DIR] [TARGET...]" >&2
+                exit 2
+            fi
+            DEST="$(mkdir -p "$2" && cd "$2" && pwd)"
+            shift 2 ;;
+        -*)
+            echo "usage: scripts/update-seed.sh [--out DIR] [TARGET...]" >&2
+            exit 2 ;;
+        *)
+            ONLY="$ONLY $1"
+            shift ;;
+    esac
+done
+cd "$REPO_ROOT"
+
+. scripts/host.sh
+for target in $ONLY; do
+    if [ -z "$(seed_of "$target")" ]; then
+        echo "FAIL: no seed for '$target' (the seeds: $SEEDS)" >&2
         exit 2
     fi
-fi
-cd "$REPO_ROOT"
+done
 
 OUT_DIR="build/seed-update"
 scripts/bootstrap.sh "$OUT_DIR"
-. scripts/host.sh
 
 # every module of the standard library checked whole (D179, MYLA-416,
 # MYLA-552): a program reads a body of std's but std.rt's only once it calls
@@ -54,7 +73,7 @@ scripts/bootstrap.sh "$OUT_DIR"
 # calls, so the seed and the embedded library would carry it; a module's
 # own check reads every body
 for module in $(find lib/std -name '*.my' | LC_ALL=C sort); do
-    if ! run_tool "$OUT_DIR/myla" check "$module" --stdlib lib > /dev/null; then
+    if ! run_tool "$OUT_DIR/myla$EXE" check "$module" --stdlib lib > /dev/null; then
         echo "FAIL: $module doesn't check as a whole (\`build/myla check $module --stdlib lib\`)" >&2
         exit 1
     fi
@@ -72,11 +91,14 @@ for entry in $SEEDS; do
     target="${entry%%:*}"
     seed="${entry#*:}"
     name="$seed"
+    if [ -n "$ONLY" ] && [[ " $ONLY " != *" $target "* ]]; then
+        continue
+    fi
     if [ -n "$DEST" ]; then
         seed="$DEST/$(basename "$seed")"
     fi
     body="$OUT_DIR/seed-$target.s"
-    seed_compile "$OUT_DIR/stage3" "$target" "$body"
+    seed_compile "$OUT_DIR/stage3$EXE" "$target" "$body"
     {
         echo "# $name: stage 0 of the Myla bootstrap on $target (MYLA-218, D101, D127)."
         echo "# The self-hosted compiler (selfhost/gen_main.my) compiled by itself at its"
