@@ -1102,6 +1102,9 @@ pub fun cpus_allowed() -> int64 {
 pub fun park(addr: int64, seen: int64) {
 }
 
+pub fun yield_cpu() {
+}
+
 pub fun unpark_one(addr: int64) {
 }
 

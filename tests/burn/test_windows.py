@@ -22,6 +22,10 @@ The console (MYLA-707): `Console` runs std.term and std.signal with a
 pseudo-terminal as Wine's console and a Unix SIGINT as Ctrl-C;
 `RUNNER_CASES` are what only Windows' own console shows (MYLA-708).
 
+The bootstrap on Windows (MYLA-709): `HostScript` checks that
+scripts/host.sh finds Windows and its seed, `BootstrapLink` that it builds a
+stage by `myla build --target x86_64-windows`'s command lines.
+
 Skipped where clang, llvm-dlltool, lld-link or Wine is missing (CI installs
 them, and MYLA_REQUIRE_TARGETS makes a missing one fail there).
 """
@@ -813,12 +817,17 @@ import std.http as http
 import std.bytes as bytes
 from std.net import TcpListener, TcpStream
 from std.http import Request, Response
-from std.process import command, args, ExitStatus
+from std.process import command, args, exit, ExitStatus
+from std.io import eprintln
 
 // MYLA-706: many sockets at once on the I/O completion port, beside
 // children: `clients` connections echoed through loopback, each its own
 // pair of tasks, while `kids` children echo their input and an HTTP server
-// in this program answers its own client.
+// in this program answers its own client. What fails says so on stderr,
+// and the program then ends with 1, or with 2 once 200 s have gone
+// (naming the tasks that hadn't ended), rather than waiting for ever for a
+// server whose client gave up (MYLA-753: CI's runner saw only "still
+// running").
 
 // One connection served: what it sends echoed until its end.
 async fun echo(s: TcpStream) -> int {
@@ -867,7 +876,7 @@ async fun serve(l: TcpListener, n: int) -> int {
 async fun client(port: int, k: int, rounds: int, size: int) -> int {
     var s = match await net.connect_async(net.addr(net.loopback(), port)) {
         Ok(s) => s
-        Err(e) => { return 0 }
+        Err(e) => { return failed(f"client {k}: connect: {e}") }
     }
     var msg: [uint8] = []
     for i in 0..size {
@@ -876,24 +885,24 @@ async fun client(port: int, k: int, rounds: int, size: int) -> int {
     for r in 0..rounds {
         match await s.write_async(msg) {
             Ok(_) => {}
-            Err(e) => { return 0 }
+            Err(e) => { return failed(f"client {k}: write {r}: {e}") }
         }
         var got: [uint8] = []
         while got.len() < size {
             match await s.read_async(size - got.len()) {
                 Ok(b) => {
                     if b.len() == 0 {
-                        return 0
+                        return failed(f"client {k}: the end after {got.len()} of {size} bytes")
                     }
                     for x in b {
                         got.push(x)
                     }
                 }
-                Err(e) => { return 0 }
+                Err(e) => { return failed(f"client {k}: read {r}: {e}") }
             }
         }
         if got != msg {
-            return 0
+            return failed(f"client {k}: round {r} came back changed")
         }
     }
     let c = s.close()
@@ -904,8 +913,8 @@ async fun client(port: int, k: int, rounds: int, size: int) -> int {
 async fun kid(k: int) -> int {
     let want = f"child {k}\n"
     return match await command("./helper.exe").arg("cat").stdin(want).output_async() {
-        Ok(o) => if bytes.to_str(o.stdout) == want && o.status == ExitStatus.Exited(0) { 1 } else { 0 }
-        Err(e) => 0
+        Ok(o) => if bytes.to_str(o.stdout) == want && o.status == ExitStatus.Exited(0) { 1 } else { failed(f"child {k}: {bytes.to_str(o.stdout)}") }
+        Err(e) => failed(f"child {k}: {e}")
     }
 }
 
@@ -922,13 +931,69 @@ async fun ask(port: int, n: int) -> int {
             Ok(r) => {
                 if r.status == 200 && r.text() == f"hello GET /p{i}" {
                     right += 1
+                } else {
+                    let no = failed(f"ask {i}: {r.status} {r.text()}")
                 }
             }
-            Err(e) => {}
+            Err(e) => {
+                let no = failed(f"ask {i}: {e}")
+            }
         }
     }
     c.close()
     return right
+}
+
+// `what` on stderr: 0, a task's failure.
+fun failed(what: str) -> int {
+    eprintln(what)
+    return 0
+}
+
+// Which of the program's tasks have ended, for a run that takes too long.
+actor Progress {
+    ended: [bool],
+}
+
+impl Progress {
+    fun end(var self, k: int) {
+        self.ended[k] = true
+    }
+
+    fun pending(self) -> str {
+        var sb = StringBuilder()
+        var k = 0
+        for e in self.ended {
+            if !e {
+                sb.append(f" {k}")
+            }
+            k += 1
+        }
+        return sb.build()
+    }
+}
+
+// `x`, once task `k` is marked ended.
+async fun ended_as(p: Progress, k: int, x: int) -> int {
+    await p.end(k)
+    return x
+}
+
+// `serve`, at most 200 s.
+async fun serve_within(l: TcpListener, n: int) -> int {
+    return match await task.timeout(200000, async () => await serve(l, n)) {
+        Some(x) => x
+        None => failed("the echo server: still serving after 200 s") - 3
+    }
+}
+
+// `http.serve_n`, at most 200 s: how many requests it answered, or -1.
+async fun http_within(l: TcpListener, n: int) -> int {
+    return match await task.timeout(200000, async () => await http.serve_n(l, n, handle)) {
+        Some(Ok(k)) => k
+        Some(Err(e)) => failed(f"the HTTP server: {e}") - 1
+        None => failed("the HTTP server: still serving after 200 s") - 1
+    }
 }
 
 fun number(s: str) -> int {
@@ -960,8 +1025,14 @@ async fun main() {
         Ok(x) => x.port
         Err(e) => { panic("addr") }
     }
-    async let served = serve(l, clients)
-    async let answered = http.serve_n(hl, 20, handle)
+    async let served = serve_within(l, clients)
+    async let answered = http_within(hl, 20)
+    // tasks 0 to clients - 1 the clients, then the children, then `ask`
+    var ended: [bool] = []
+    for k in 0..clients + kids + 1 {
+        ended.push(false)
+    }
+    let progress = Progress { ended: ended }
     var fs: [async () -> int] = []
     for k in 0..clients {
         // small messages, and every tenth one past what a socket buffers
@@ -969,21 +1040,32 @@ async fun main() {
         if k % 10 == 0 {
             size = 300000
         }
-        fs.push(async () => await client(port, k, 3, size))
+        fs.push(async () => await ended_as(progress, k, await client(port, k, 3, size)))
     }
     for k in 0..kids {
-        fs.push(async () => await kid(k))
+        fs.push(async () => await ended_as(progress, clients + k, await kid(k)))
     }
-    fs.push(async () => await ask(hport, 20))
+    fs.push(async () => await ended_as(progress, clients + kids, await ask(hport, 20)))
+    let all = async () => await task.all(fs)
+    var results: [int] = []
+    match await task.timeout(200000, all) {
+        Some(xs) => { results = xs }
+        None => {
+            eprintln(f"still running after 200 s, tasks:{await progress.pending()}")
+            exit(2)
+        }
+    }
     var ok = 0
-    for x in await task.all(fs) {
+    for x in results {
         ok += x
     }
-    let echoed = await served
-    let http_served = match await answered {
-        Ok(n) => n
-        Err(e) => -1
+    if ok != clients + kids + 20 {
+        // (a server whose client gave up would wait for it for ever)
+        eprintln(f"{ok} of {clients + kids + 20} right")
+        exit(1)
     }
+    let echoed = await served
+    let http_served = await answered
     let c1 = l.close()
     let c2 = hl.close()
     print(f"{ok - 20} of {clients + kids} right, http {http_served}, echoed {echoed > 0}")
@@ -1325,6 +1407,128 @@ class FramesOnWindows(unittest.TestCase):
         self.assertEqual((built.stderr, built.returncode), ("", 0))
         ran = self.run_exe(threads="2")
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (FRAMES_OUT, b"", 0))
+
+
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+_HOST_SH = os.path.join(_REPO, "scripts", "host.sh")
+
+
+def host_sh(script: str, env: dict | None = None, cwd: str | None = None) -> subprocess.CompletedProcess:
+    """`script` run by bash after sourcing scripts/host.sh, with `env` added
+    to this process's environment."""
+    return subprocess.run(["bash", "-c", f'. "{_HOST_SH}"\n{script}'], capture_output=True, text=True,
+                          env={**os.environ, **(env or {})}, cwd=cwd or _REPO, timeout=300)
+
+
+class HostScript(unittest.TestCase):
+    """MYLA-709: scripts/host.sh finds Windows by Git Bash's `uname -s`
+    (MSYS2's `MINGW64_NT-…`, `MSYS_NT-…`; `MYLA_OS` in its place here), takes
+    the Windows seed there and names its programs `.exe`; Linux is as it was."""
+
+    def facts(self, **env: str) -> str:
+        done = host_sh('echo "$HOST_OS $HOST_TARGET $HOST_SEED [$EXE]"', {"AS": "true", "LD": "true",
+                                                                        "DLLTOOL": "true", **env})
+        return (done.stdout + done.stderr).strip()
+
+    def test_each_machine_its_seed(self):
+        self.assertEqual(self.facts(MYLA_OS="Linux", MYLA_ARCH="x86_64"), "linux x86_64-linux bootstrap/seed.s []")
+        self.assertEqual(self.facts(MYLA_OS="Linux", MYLA_ARCH="aarch64"),
+                         "linux aarch64-linux bootstrap/seed-aarch64.s []")
+        for name in ("MINGW64_NT-10.0-20348", "MSYS_NT-10.0-20348", "windows"):
+            self.assertEqual(self.facts(MYLA_OS=name, MYLA_ARCH="x86_64"),
+                             "windows x86_64-windows bootstrap/seed-windows.s [.exe]", name)
+        self.assertIn("the Windows seed is x86_64's", self.facts(MYLA_OS="windows", MYLA_ARCH="aarch64"))
+        self.assertIn("macOS is MYLA-164", self.facts(MYLA_OS="Darwin"))
+
+    def test_every_seed_is_committed(self):
+        done = host_sh('for e in $SEEDS; do echo "${e#*:}"; done', {"AS": "true", "LD": "true"})
+        seeds = done.stdout.split()
+        self.assertIn("bootstrap/seed-windows.s", seeds)
+        for seed in seeds:
+            self.assertTrue(os.path.isfile(os.path.join(_REPO, seed)), seed)
+
+
+_STUB = """#!/bin/sh
+# {name} as the test runs it: its command line logged, the files it reads kept
+printf '%s\\n' "{name} $*" >> "$STUB_LOG"
+for a in "$@"; do
+    case "$a" in *.s | *.def) cp "$a" "$STUB_KEEP/" ;; esac
+done
+exec "{real}" "$@"
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class BootstrapLink(unittest.TestCase):
+    """MYLA-709: the bootstrap on Windows assembles and links each stage as
+    `myla build --target x86_64-windows` does (scripts/host.sh's
+    `windows_asm_to_bin`, selfhost/driver.my's `cmd_build`): the same
+    command lines of clang, llvm-dlltool and lld-link, the same import lists,
+    read from the assembly's `# import` lines, and a program that runs."""
+
+    setUpClass = HelloWorld.setUpClass
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        stubs = os.path.join(self.tmp, "stubs")
+        os.mkdir(stubs)
+        for name in TOOLS:
+            path = os.path.join(stubs, name)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(_STUB.format(name=name, real=shutil.which(name)))
+            os.chmod(path, 0o755)
+        self.path = stubs + os.pathsep + os.environ.get("PATH", "")
+
+    def logged(self, where: str, argv: list[str], env: dict | None = None) -> tuple[list[str], dict]:
+        """The tools' command lines when `argv` runs in `where` (made), and
+        the import lists they read, by name."""
+        keep = os.path.join(where, "keep")
+        os.makedirs(keep)
+        log = os.path.join(where, "log")
+        done = subprocess.run(argv, capture_output=True, text=True, cwd=where, timeout=300,
+                              env={**os.environ, **(env or {}), "PATH": self.path, "STUB_LOG": log, "STUB_KEEP": keep})
+        self.assertEqual((done.stderr, done.returncode), ("", 0))
+        with open(log, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        defs = {}
+        for name in sorted(os.listdir(keep)):
+            if name.endswith(".def"):
+                with open(os.path.join(keep, name), encoding="utf-8") as fh:
+                    defs[name] = fh.read()
+        return lines, defs
+
+    def test_the_same_steps_as_myla_build(self):
+        src = os.path.join(self.tmp, "main.my")
+        with open(src, "w", encoding="utf-8") as fh:
+            # three DLLs: kernel32, bcrypt (std.random) and the synch API set (tasks)
+            fh.write('import std.random as random\n'
+                     'async fun twice(n: int) -> int {\n    return 2 * n\n}\n'
+                     'async fun main() {\n'
+                     '    var r = random.from_os()\n'
+                     '    let n = r.int_in(0, 10)\n'
+                     '    async let x = twice(21)\n'
+                     '    print(f"{await x} {n >= 0 && n < 10}")\n'
+                     '}\n')
+        built = os.path.join(self.tmp, "built")
+        os.mkdir(built)
+        by_myla, defs_myla = self.logged(built, [selfhost_tool("main"), "build", src, "--target", "x86_64-windows",
+                                                 "--stdlib", STDLIB_ROOT, "-o", "prog.exe"])
+        self.assertEqual([line.split()[0] for line in by_myla], ["clang", "llvm-dlltool", "llvm-dlltool",
+                                                                  "llvm-dlltool", "lld-link"])
+        # the assembly myla build assembled, built again by the bootstrap's steps
+        booted = os.path.join(self.tmp, "booted")
+        os.mkdir(booted)
+        shutil.copy(os.path.join(built, "keep", "prog.exe.s"), booted)
+        by_host, defs_host = self.logged(booted, ["bash", "-c", f'. "{_HOST_SH}"; asm_to_bin prog.exe.s prog.exe'],
+                                         {"MYLA_OS": "windows", "MYLA_ARCH": "x86_64"})
+        self.assertEqual(by_host, by_myla)
+        self.assertEqual(defs_host, defs_myla)
+        self.assertEqual(list(defs_host), ["prog.exe.api-ms-win-core-synch-l1-2-0.def", "prog.exe.bcrypt.def",
+                                           "prog.exe.kernel32.def"])
+        ran = subprocess.run([*wine(), os.path.join(booted, "prog.exe")], capture_output=True, timeout=120)
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"42 true\n", b"", 0))
 
 
 # MYLA-707: the console as std.term's terminal and std.signal's signals.
@@ -1967,6 +2171,78 @@ class ControlHandler(unittest.TestCase):
                                   "--only", "ctrl_counted"], capture_output=True, text=True, timeout=600,
                                  env=dict(os.environ, MYLA_EMULATOR=" ".join(wine())))
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("PASS  ctrl_counted #1\n\n1/1 passed.\n", "", 0))
+
+
+# MYLA-753, a case of std.platform's Windows module that only Windows runs:
+# more packets queued on the port than one `GetQueuedCompletionStatusEx`
+# takes (ENTRIES, 64), as under load, where every arm posts one and every
+# operation's end another. 200 handles ready (signalled events, watched
+# as a child's end is) armed, a wake-up among them: one wait with no time
+# limit gives every one of them, each once, and the wake-up. With one
+# batch a wait (BASE `983fcc3`) it gave 64, and the rest waited for later
+# waits behind whatever was queued after them: under load a connection's
+# request waited past the HTTP server's 5 s and was dropped.
+POLLER_DRAINS = '''
+#test()[(200, 200, 0)]
+fun poller_drains() -> (int64, int64, int64) {
+    let p = poller_new()
+    var events: [int64] = []
+    var k: int64 = 0
+    while k < 200 {
+        // manual reset, signalled
+        let ev = __syscall5(__rt_get("__imp_CreateEventW"), 0, 1, 1, 0, 0)
+        events.push(ev)
+        let ws = ws_new(ev, K_PROCESS, false)
+        let armed = ws_watch(ev, 1, k + 1)
+        if k == 100 {
+            poller_wake(p)
+        }
+        k += 1
+    }
+    let got = poller_wait(p, 0)
+    var seen: [bool] = []
+    while seen.len() <= 200 {
+        seen.push(false)
+    }
+    var distinct: int64 = 0
+    var i: int64 = 0
+    while i < got {
+        let tok = __load64(__load64(p + 16) + 8 * i)
+        if tok >= 1 && tok <= 200 && !seen[tok as int] {
+            seen[tok as int] = true
+            distinct += 1
+        }
+        i += 1
+    }
+    // nothing left: the next wait ends with no event and no wake-up due
+    let again = poller_wait(p, 0)
+    for ev in events {
+        let c = __syscall(__rt_get("__imp_CloseHandle"), ev, 0, 0)
+    }
+    return (got, distinct, again + __load64(net() + NET_WAKE))
+}
+'''
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class PollerBacklog(unittest.TestCase):
+    """MYLA-753: a wait takes every packet queued on the port, not one batch,
+    so a handle ready now isn't left behind a backlog (`POLLER_DRAINS`,
+    appended to a copy of the library's module)."""
+
+    setUpClass = HelloWorld.setUpClass
+
+    def test_a_wait_takes_the_whole_backlog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(os.path.join(STDLIB_ROOT, "std"), os.path.join(tmp, "std"))
+            module = os.path.join(tmp, "std", "platform_windows.my")
+            with open(module, "a", encoding="utf-8") as fh:
+                fh.write(POLLER_DRAINS)
+            ran = subprocess.run([selfhost_tool("main"), "test", module, "--target", "x86_64-windows", "--stdlib", tmp,
+                                  "--only", "poller_drains"], capture_output=True, text=True, timeout=600,
+                                 env=dict(os.environ, MYLA_EMULATOR=" ".join(wine())))
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("PASS  poller_drains #1\n\n1/1 passed.\n", "", 0))
 
 
 # MYLA-707's cases for MYLA-708's Windows runner, what Wine's console can't

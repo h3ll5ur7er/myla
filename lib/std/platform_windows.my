@@ -736,7 +736,9 @@ pub fun close(fd: int64) -> int64 {
 // (our end of a child's input pipe whose write goes on: once it ends,
 // `ws_close_later`). A process's wait of the pool's is given back first,
 // once its callback has returned (UnregisterWaitEx), as a wait on a closed
-// handle is undefined.
+// handle is undefined; `ws` is held meanwhile (MYLA-753: closed, it could be
+// freed by the waiting worker taking the packet its callback posted then,
+// and then be dropped and freed here a second time).
 fun ws_closed(h: int64) -> bool {
     var wait: int64 = 0
     net_lock()
@@ -760,9 +762,11 @@ fun ws_closed(h: int64) -> bool {
         net_unlock()
         return true
     }
+    __store64(ws + WS_REFS, __load64(ws + WS_REFS) + 1)
     net_unlock()
     let u = __syscall(__rt_get("__imp_UnregisterWaitEx"), wait, UNTIL_DONE, 0)
     net_lock()
+    __store64(ws + WS_REFS, __load64(ws + WS_REFS) - 1)
     if __load_acq64(ws + WS_POST + 32) == 0 {
         // (it never posted: no packet is due for it)
         __store64(ws + WS_REFS, __load64(ws + WS_REFS) - 1)
@@ -3525,8 +3529,9 @@ fun ws_close_later(ws: int64, close_fn: int64) -> bool {
 }
 
 // The handles closed later whose operation has ended and whose wait has
-// closed them: their waits given back and their states freed once no
-// packet is due for them (the lock held).
+// taken them to close (`__win_wait_posted` has read its context, and reads
+// nothing of the state after it says so): their waits given back and
+// their states freed once no packet is due for them (the lock held).
 fun ws_later() {
     let n = net()
     var prev: int64 = 0
@@ -4760,7 +4765,8 @@ pub fun sleep_ns(n: int64) {
 // until it ended (`poller_watch`, MYLA-705), the room in a child's input
 // pipe (`poller_watch_socket` with 2, MYLA-726). The wait is
 // `GetQueuedCompletionStatusEx` on the process's port (`net_port`) with the
-// nearest timer's time limit; `poller_wake` posts a packet of no
+// nearest timer's time limit, which takes every packet queued then, not
+// one batch (`poller_drain`, MYLA-753); `poller_wake` posts a packet of no
 // operation, at most one at a time (the net state's `NET_WAKE`), as Linux's
 // eventfd counts its wake-ups into one.
 //
@@ -4796,8 +4802,10 @@ pub fun sleep_ns(n: int64) {
 // What a watch watches: a pipe, or a handle waited for (`handle_kind`).
 const WATCH_PIPE: int64 = 1
 const WATCH_WAITABLE: int64 = 2
-// the most packets one wait takes
+// the most packets one call of a wait takes, and the most calls a wait
+// makes while each fills them (`poller_drain`)
 const ENTRIES: int64 = 64
+const DRAIN: int64 = 64
 
 // How the poller watches the handle `h` (`GetFileType`): a pipe as one,
 // one of no file's type (a process) as a handle waited for, anything else
@@ -4858,7 +4866,7 @@ pub fun poller_wait(p: int64, timeout_ms: int64) -> int64 {
             n = __load64(got) & LOW32
         }
         __store64(p + 40, __load64(p + 40) + 1)
-        let (looked, woken) = poller_take(p, entries, n, peeking)
+        let (looked, woken) = poller_drain(p, got, n, peeking)
         events = poller_look(p, looked)
         if events > 0 || woken || limit == 0 {
             break
@@ -4869,6 +4877,40 @@ pub fun poller_wait(p: int64, timeout_ms: int64) -> int64 {
     }
     __free(got)
     return events
+}
+
+// The packets of a wait taken: the `n` at the poller `p`'s entries, and
+// while a batch fills them, the ones queued behind it too, without waiting
+// (`GetQueuedCompletionStatusEx` with no time, into `got`), at most DRAIN
+// batches. The port is a queue in the order the packets came, every arm
+// and every operation's end adds one, and under load more than ENTRIES
+// wait: a wait that took one batch left the rest to later waits, a batch
+// each, and a handle armed while ready waited behind them all (MYLA-753:
+// seconds, past the HTTP server's 5 s for a request). A handle is looked
+// at once a wait whatever number of its packets came (`poller_take`'s
+// mark). The handles to look at, and whether a wake-up came.
+fun poller_drain(p: int64, got: int64, n: int64, peeking: bool) -> ([int64], bool) {
+    let entries = __load64(p + 8)
+    let (first, woke) = poller_take(p, entries, n, peeking)
+    var looked = first
+    var woken = woke
+    var taken = n
+    var batches: int64 = 1
+    while taken == ENTRIES && batches < DRAIN {
+        __store64(got, 0)
+        let r = win_call(__rt_get("__imp_GetQueuedCompletionStatusEx"), [__load64(p), entries, ENTRIES, got, 0, 0])
+        taken = 0
+        if ok(r) {
+            taken = __load64(got) & LOW32
+        }
+        let (more, also) = poller_take(p, entries, taken, false)
+        for ws in more {
+            looked.push(ws)
+        }
+        woken = woken || also
+        batches += 1
+    }
+    return (looked, woken)
 }
 
 // The `n` packets at `entries` taken (the lock held for them): each the
@@ -5176,15 +5218,18 @@ pub fun poller_watch_socket(p: int64, h: int64, events: int64, token: int64, aga
 // so that the waiting worker looks at it now: 0, or UNSUPPORTED for a
 // handle the poller can't watch (not one of a watched handle's kinds).
 // One that has no watched handle yet (a process, a pipe not ours) gets
-// one here.
+// one here. It is armed as the table has it under the lock: closed
+// meanwhile by another worker (D93: a socket's copies reach the same
+// one), it may have been freed (MYLA-753), and a handle closed is ready
+// now, as one that isn't open is (its operation then fails).
 fun ws_watch(h: int64, want: int64, token: int64) -> int64 {
     if h == 0 || want == 0 {
         return -UNSUPPORTED
     }
     net_lock()
-    var ws = ws_find(h)
+    let known = ws_find(h)
     net_unlock()
-    if ws == 0 {
+    if known == 0 {
         let kind = handle_kind(h)
         if kind == 0 {
             return -UNSUPPORTED
@@ -5193,12 +5238,16 @@ fun ws_watch(h: int64, want: int64, token: int64) -> int64 {
         if kind == WATCH_PIPE {
             k = K_PIPE
         }
-        ws = ws_new(h, k, false)
-        if ws == 0 {
+        if ws_new(h, k, false) == 0 {
             return -UNSUPPORTED
         }
     }
     net_lock()
+    let ws = ws_find(h)
+    if ws == 0 {
+        net_unlock()
+        return -UNSUPPORTED
+    }
     if ws_peeked(ws) {
         __store64(net() + NET_PEEKS, __load64(net() + NET_PEEKS) - 1)
     }
@@ -5266,6 +5315,14 @@ pub fun cpus_allowed() -> int64 {
     }
     __free(masks)
     return n
+}
+
+// The CPU given up by a thread spinning for a lock (`SwitchToThread`), so
+// a holder preempted by spinners runs again: Windows' time slices are long,
+// and with more workers than CPUs a spin lock's waiters spun through them
+// (MYLA-754).
+pub fun yield_cpu() {
+    let y = __syscall(__rt_get("__imp_SwitchToThread"), 0, 0, 0)
 }
 
 // The worker parked while the 32-bit word at `addr` still holds `seen`

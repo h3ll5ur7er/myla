@@ -18,6 +18,7 @@ How to change Myla safely: the test suites, the bootstrap and the working conven
 ```
 bootstrap/seed.s        the seed: the self-hosted compiler's own assembly, stage 0 of the bootstrap (x86-64)
 bootstrap/seed-aarch64.s  the same for aarch64 machines (D127)
+bootstrap/seed-windows.s  the same for x86-64 Windows, under Git Bash with LLVM (D214, MYLA-709)
 selfhost/               the self-hosted compiler, interpreter and CLI (build/myla)
 lib/                    the stdlib root: std/ holds the standard library, debug/ the gdb pretty-printer
 examples/               one runnable example per feature, plus args/ stdio/ readfile/ subprocess/ modules/

@@ -102,9 +102,9 @@ The reference is the wiki, starting at [Language](docs/Language.md); the reasons
 
 ## Getting started
 
-You need Linux on x86-64 or aarch64 (a Raspberry Pi 4 or 5 with a 64-bit OS works) and GNU binutils (`as`, `ld`); for another target (`--target aarch64-linux`, `x86_64-linux` or `wasm32-wasi`) also clang and lld (and qemu-user or Node to run what they build). gdb is optional, for debugging; Python 3.12 or later only runs the tests.
+You need Linux on x86-64 or aarch64 (a Raspberry Pi 4 or 5 with a 64-bit OS works) and GNU binutils (`as`, `ld`), or x86-64 Windows with Git Bash and LLVM (clang, llvm-dlltool, lld-link); for another target (`--target aarch64-linux`, `x86_64-linux` or `wasm32-wasi`) also clang and lld (and qemu-user or Node to run what they build). gdb is optional, for debugging; Python 3.12 or later only runs the tests.
 
-`scripts/bootstrap.sh` (or `just bootstrap`) builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly; only `as` and `ld` needed), checks the fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server:
+`scripts/bootstrap.sh` (or `just bootstrap`) builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly; only `as` and `ld` needed; on Windows, under Git Bash, `bootstrap/seed-windows.s` with LLVM's tools, and the programs are `.exe`), checks the fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server:
 
 ```bash
 scripts/bootstrap.sh
@@ -133,7 +133,7 @@ The VS Code extension in [`vscode-extension/myla`](vscode-extension/myla/README.
 | Part | Where | Role |
 | --- | --- | --- |
 | Self-hosted compiler | `selfhost/` | Written in Myla: lexer, parser, module loader, checker, a mid-level IR and its verifier, a native backend with the concurrency runtime, a tree-walking interpreter and the `#test` runner, the REPL and the project tool; `build/myla` |
-| Seed | `bootstrap/seed.s` | The compiler's own assembly, from which `scripts/bootstrap.sh` builds it with `as` and `ld` |
+| Seeds | `bootstrap/` | The compiler's own assembly for each machine (`seed.s`, `seed-aarch64.s`, `seed-windows.s`), from which `scripts/bootstrap.sh` builds it with `as` and `ld` (LLVM's tools on Windows) |
 | Tools in Myla | `tools/` | The language server (`tools/lsp/`) and the grammar generator (`tools/grammar/`) |
 | Standard library | `lib/` | Written in Myla (`lib/std/`), with the gdb pretty-printers (`lib/debug/`) |
 | Editor support | `vscode-extension/`, `editor/`, `grammar/` | The VS Code extension, the tree-sitter grammar, the grammar description |

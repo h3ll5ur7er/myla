@@ -3280,10 +3280,21 @@ fun wq_of(w: int64) -> int64 {
 }
 
 // Take the spin lock in the word at `p` (a queue's or an actor's record):
-// an exchange, so nothing after it is seen before it (MYLA-267).
+// an exchange, so nothing after it is seen before it (MYLA-267). After 64
+// spins the CPU is given up (`os.yield_cpu`), so a holder that was
+// preempted runs again: with more workers than CPUs, waiters spun through
+// their time slices behind it (MYLA-754: 16 workers on 4 CPUs under Wine
+// took 4 times as long, and 20 times the CPU).
 fun take_lock(p: int64) {
+    var spins: int64 = 0
     while __xchg64(p, 1) != 0 {
-        __pause()
+        spins += 1
+        if spins < 64 {
+            __pause()
+        } else {
+            os.yield_cpu()
+            spins = 0
+        }
     }
 }
 

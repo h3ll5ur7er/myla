@@ -10,7 +10,8 @@
 # jobs upload the commit's seeds and each machine's myla and myla-lsp (D207),
 # and the windows job, which runs on windows-latest what windows-build builds
 # for x86_64-windows on Linux (MYLA-708, D213), myla.exe and myla-lsp.exe.
-# See docs/Development/Testing.md.
+# bootstrap-windows bootstraps the toolchain on Windows itself, under Git
+# Bash with LLVM (MYLA-709, D214). See docs/Development/Testing.md.
 name: CI
 
 on:
@@ -239,6 +240,61 @@ jobs:
       # reorder (MYLA-297)
       - name: The runtime's litmus programs, 1,000 runs each on 4 and 16 workers
         run: python3 scripts/stress-native.py --runs 1000 --workers 4,16 --only t23_results_seen_by_their_awaiter --only t24_cancelled_sleepers --only t25_timers_fire --only t26_tasks_yield --only t27_children_read_as_they_write
+
+  bootstrap-windows:
+    # the bootstrap on Windows itself (MYLA-709, D214), as bootstrap-arm64
+    # is on aarch64: Git Bash runs scripts/bootstrap.sh from
+    # bootstrap/seed-windows.s with the image's LLVM (clang, llvm-dlltool,
+    # lld-link, D211; GNU as and ld aren't there), to the fixed point and
+    # build/myla.exe and build/myla-lsp.exe; then check-seed.sh, and every
+    # example built by build/myla.exe against what its interpreter gives.
+    # The tools the windows job publishes stay those built on Linux (D233)
+    name: Bootstrap on Windows (Git Bash, LLVM)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      # .gitattributes checks text out with LF whatever core.autocrlf says;
+      # a CR would change what the compiler reads and writes
+      - name: The checkout's line endings are LF
+        run: |
+          if grep -l $'\r' selfhost/*.my lib/std/*.my scripts/*.sh bootstrap/seed-windows.s; then
+            echo "::error::CRLF line endings in the checkout (core.autocrlf against .gitattributes)"
+            exit 1
+          fi
+      # the image's LLVM, ahead of any other clang on PATH (C:\mingw64,
+      # Strawberry Perl)
+      - name: LLVM's clang, llvm-dlltool and lld-link on PATH
+        run: |
+          llvm="/c/Program Files/LLVM/bin"
+          if [ -d "$llvm" ]; then
+            cygpath -w "$llvm" >> "$GITHUB_PATH"
+            export PATH="$llvm:$PATH"
+          fi
+          uname -s
+          for tool in clang llvm-dlltool lld-link; do
+            command -v "$tool"
+            version="$("$tool" --version 2>&1 || true)"
+            echo "${version%%$'\n'*}"
+          done
+      - name: scripts/bootstrap.sh (bootstrap/seed-windows.s, stages 0–3, the fixed point)
+        run: scripts/bootstrap.sh build
+      - name: The Windows seed bootstraps the sources and the embedded library is current (D207)
+        run: scripts/check-seed.sh build
+      - name: Every example built by build/myla.exe gives what its interpreter gives
+        run: |
+          fail=0
+          for f in examples/*.my; do
+            name=$(basename "$f" .my)
+            build/myla.exe build "$f" -o "build/ex_$name.exe" || { echo "build failed: $f"; fail=1; continue; }
+            want=$(build/myla.exe run "$f" < /dev/null 2>&1; echo "exit $?")
+            got=$("build/ex_$name.exe" < /dev/null 2>&1; echo "exit $?")
+            [ "$want" = "$got" ] || { echo "differs: $f"; diff <(echo "$want") <(echo "$got") | head -20 || true; fail=1; }
+          done
+          exit $fail
 
   windows-build:
     # what the windows job runs, built here for x86_64-windows (D214):
