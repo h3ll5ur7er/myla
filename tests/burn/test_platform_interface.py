@@ -161,11 +161,13 @@ def bindings_program() -> str:
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TargetCopies(unittest.TestCase):
     """The modules besides std.platform a target has a copy of its own of
-    (`for_target`, MYLA-704): Windows' std.path and std.path_style, which
-    the loader takes for the target's, offer what the others' do."""
+    (`for_target`, MYLA-704): Windows' std.path, std.path_style and
+    std.system_error (MYLA-716), which the loader takes for the target's,
+    offer what the others' do."""
 
     def test_each_copy_has_the_same_functions_and_constants(self):
-        for name, copy in (("path.my", "path_windows.my"), ("path_style.my", "path_style_windows.my")):
+        for name, copy in (("path.my", "path_windows.my"), ("path_style.my", "path_style_windows.my"),
+                           ("system_error.my", "system_error_windows.my")):
             with self.subTest(module=name):
                 want_funs, want_consts = interface(name)
                 got_funs, got_consts = interface(copy)
@@ -174,6 +176,7 @@ class TargetCopies(unittest.TestCase):
                                  {c: t for c, (t, _) in want_consts.items()})
         self.assertGreater(len(interface("path.my")[0]), 10)
         self.assertEqual(interface("path_style_windows.my")[1]["WINDOWS"], ("bool", "true"))
+        self.assertEqual(interface("system_error.my")[0], {"error_text": (("int64",), "str")})
 
 
 class Types(unittest.TestCase):

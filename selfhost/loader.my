@@ -369,7 +369,8 @@ pub fun load_options(stdlib_root: str) -> LoadOptions {
 // theirs. A module may have a copy for a target too, named after the
 // platform module's: x86-64 Windows takes `std/path_windows.my` for
 // `std/path.my` and `std/path_style_windows.my` for `std/path_style.my`
-// (MYLA-704, Windows' paths, D215).
+// (MYLA-704, Windows' paths, D215), and `std/system_error_windows.my` for
+// `std/system_error.my` (MYLA-716, the words for Windows' error codes).
 pub fun for_target(opts: LoadOptions, t: Target) -> LoadOptions {
     let file = t.platform_file
     if file == "" { return opts }
@@ -396,7 +397,8 @@ pub fun for_target(opts: LoadOptions, t: Target) -> LoadOptions {
     // its platform module is (`path_windows.my` beside `platform_windows.my`,
     // MYLA-704): taken where there is one
     let own = file[8:]
-    return own_copy(own_copy(o, opts, "path", "path" + own), opts, "path_style", "path_style" + own)
+    let paths = own_copy(own_copy(o, opts, "path", "path" + own), opts, "path_style", "path_style" + own)
+    return own_copy(paths, opts, "system_error", "system_error" + own)
 }
 
 // `opts` for the program `entry` run, tested or checked on the machine the

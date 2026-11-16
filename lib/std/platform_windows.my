@@ -38,9 +38,9 @@ pub const TARGET: str = "x86_64-windows"
 // never Windows' error code, which `cause` maps here, so nothing above this
 // module knows Windows' numbers. The codes are std.ioerror's, the same in
 // every platform module (tests/burn/test_platform_interface.py holds them
-// to it): 1 to 21 the causes of `IoError`, 32 to 35 those std.rt and
-// std.net act on themselves, and from OTHER on OTHER plus the system's own
-// code (`IoError.Other(code)`).
+// to it): 1 to 21 the causes of `IoError`, 32 to 37 those std.rt, std.net
+// and std.http act on themselves, and from OTHER on OTHER plus Windows' own
+// code (`IoError.Other(code)`, MYLA-716).
 pub const NOT_FOUND: int64 = 1
 pub const PERMISSION_DENIED: int64 = 2
 pub const ALREADY_EXISTS: int64 = 3
@@ -66,6 +66,8 @@ pub const WOULD_BLOCK: int64 = 32
 pub const IN_PROGRESS: int64 = 33
 pub const BAD_HANDLE: int64 = 34
 pub const NOT_A_TERMINAL: int64 = 35
+pub const TOO_MANY_OPEN: int64 = 36
+pub const TOO_MANY_OPEN_SYSTEM: int64 = 37
 pub const OTHER: int64 = 256
 
 // What a file is (`path_stat`, `fd_stat`, `path_kind`) or a directory's entry
@@ -129,12 +131,10 @@ fun failed() -> int64 {
 // The cause code of Windows' error code `e` (winerror.h): the file and path
 // not found NOT_FOUND, access denied and a sharing violation
 // PERMISSION_DENIED, a pipe being closed, broken or not connected
-// BROKEN_PIPE. One without a cause is OTHER plus Linux's errno of the same
-// meaning where Linux has one (`linux_errno`), so that an `Other` reads the
-// same on every target (std.rt's and std.io's texts name Linux's numbers:
-// a full disk is "no space left on device"), as wasm32 does with WASI's
-// (MYLA-426); else OTHER plus 4096 plus Windows' own code, past every
-// Linux errno, so it is never taken for one.
+// BROKEN_PIPE, too many open files TOO_MANY_OPEN. One without a cause is
+// OTHER plus Windows' own code (MYLA-716, D219): `Other(112)` a full disk,
+// whose words std.system_error's copy for Windows gives a failed write
+// ("there is not enough space on the disk").
 #test(2)[1]
 #test(3)[1]
 #test(5)[2]
@@ -151,10 +151,11 @@ fun failed() -> int64 {
 #test(995)[8]
 #test(1460)[18]
 #test(13)[21]
-#test(112)[284]
-#test(8)[268]
-#test(17)[274]
-#test(1392)[5744]
+#test(4)[36]
+#test(112)[368]
+#test(8)[264]
+#test(17)[273]
+#test(1392)[1648]
 fun cause(e: int64) -> int64 {
     if e == 2 || e == 3 || e == 15 || e == 161 { return NOT_FOUND }        // FILE_, PATH_NOT_FOUND, INVALID_DRIVE, BAD_PATHNAME
     if e == 5 || e == 32 || e == 33 || e == 1314 { return PERMISSION_DENIED } // ACCESS_DENIED, SHARING_, LOCK_VIOLATION, PRIVILEGE_NOT_HELD
@@ -169,29 +170,8 @@ fun cause(e: int64) -> int64 {
     if e == 13 || e == 1113 { return INVALID_DATA }                          // INVALID_DATA, NO_UNICODE_TRANSLATION
     if e == 997 { return IN_PROGRESS }                                       // IO_PENDING
     if e == 6 { return BAD_HANDLE }                                          // INVALID_HANDLE
-    return OTHER + linux_errno(e)
-}
-
-// Linux's errno of the same meaning as Windows' code `e` that has no cause,
-// else 4096 plus `e`.
-#test(112)[28]
-#test(39)[28]
-#test(4)[24]
-#test(14)[12]
-#test(223)[27]
-#test(1117)[5]
-#test(1392)[5488]
-fun linux_errno(e: int64) -> int64 {
-    if e == 4 { return 24 }                          // TOO_MANY_OPEN_FILES: EMFILE
-    if e == 8 || e == 14 { return 12 }               // NOT_ENOUGH_MEMORY, OUTOFMEMORY: ENOMEM
-    if e == 17 { return 18 }                         // NOT_SAME_DEVICE: EXDEV
-    if e == 19 { return 30 }                         // WRITE_PROTECT: EROFS
-    if e == 23 || e == 1117 { return 5 }             // CRC, IO_DEVICE: EIO
-    if e == 39 || e == 112 { return 28 }             // HANDLE_DISK_FULL, DISK_FULL: ENOSPC
-    if e == 206 { return 36 }                        // FILENAME_EXCED_RANGE: ENAMETOOLONG
-    if e == 223 { return 27 }                        // FILE_TOO_LARGE: EFBIG
-    if e == 1921 { return 40 }                       // CANT_RESOLVE_FILENAME: ELOOP
-    return 4096 + e
+    if e == 4 { return TOO_MANY_OPEN }                                       // TOO_MANY_OPEN_FILES
+    return OTHER + e
 }
 
 // --- text: UTF-16 at the system, UTF-8 in Myla (D215) ------------------------------
@@ -1142,8 +1122,9 @@ fun is_dir_attr(a: int64) -> bool {
 
 // What a call on the path `w` that failed with the error `e` gives: minus
 // its cause, but what Linux reports where Windows reports a path not found
-// or a bad name: a name longer than 255 units ENAMETOOLONG's `Other` (no
-// file system of either takes one, D220), and a path through a file
+// or a bad name: a name longer than 255 units `Other` of Windows' own code
+// for it, FILENAME_EXCED_RANGE (no file system of either takes one; Linux's
+// ENAMETOOLONG, MYLA-716), and a path through a file
 // NOT_A_DIRECTORY (ENOTDIR), found by asking each directory the path names
 // before its last component for its attributes (and the last one too when
 // the path ends in a separator).
@@ -1160,7 +1141,7 @@ fun path_failed(w: int64, e: int64) -> int64 {
             run = 0
         }
         if run > 255 {
-            return -(OTHER + 36)
+            return -(OTHER + 206)
         }
         k += 1
     }
@@ -1504,8 +1485,8 @@ pub fun path_stat(path: str, follow: bool, out: int64) -> int64 {
 // `BCryptGenRandom` with no algorithm's handle and the system's preferred
 // generator, at most RANDOM_CHUNK bytes a call (its count is a ULONG). It
 // gives an NTSTATUS, not a last error: a failure is INVALID_INPUT for
-// STATUS_INVALID_PARAMETER, else Linux's EIO (`Other(5)`, "input/output
-// error").
+// STATUS_INVALID_PARAMETER, else Windows' IO_DEVICE (`Other(1117)`, an I/O
+// device's error, MYLA-716).
 pub fun random_fill(buf: int64, n: int64) -> int64 {
     var done: int64 = 0
     while done < n {
@@ -1518,7 +1499,7 @@ pub fun random_fill(buf: int64, n: int64) -> int64 {
             return -INVALID_INPUT
         }
         if status != 0 {
-            return -(OTHER + 5)
+            return -(OTHER + 1117)
         }
         done += want
     }
@@ -2424,7 +2405,7 @@ fun pipe_pair(to_child: bool, out: int64) -> int64 {
         e = inheritable(theirs)
     }
     if e == 0 && ws_new(ours, kind, with_tasks()) == 0 {
-        e = -(OTHER + 24)
+        e = -TOO_MANY_OPEN
     }
     if e < 0 {
         let c = close(ours)
@@ -2708,7 +2689,7 @@ fun create_child(paths: [str], argv: [str], s: Streams, env: int64, dir: int64, 
         if denied {
             failure = PERMISSION_DENIED
         } else if not_a_program {
-            failure = OTHER + 8              // ENOEXEC's "exec format error"
+            failure = OTHER + 193            // BAD_EXE_FORMAT
         }
     }
     if list != 0 {
@@ -3199,8 +3180,8 @@ fun wsa_bad(r: int64) -> bool {
 
 // The cause of the Winsock error `e` (winsock2.h's WSAE… codes), as
 // [[Language/Standard-library/Net#porting-sockets-to-another-system]] says;
-// one without a cause OTHER plus Linux's errno of the same meaning; one
-// that isn't Winsock's as `cause` maps kernel32's.
+// one without a cause OTHER plus its own code, as `cause` maps kernel32's
+// (MYLA-716).
 #test(10035)[32]
 #test(10036)[33]
 #test(10061)[12]
@@ -3217,8 +3198,9 @@ fun wsa_bad(r: int64) -> bool {
 #test(10038)[34]
 #test(10004)[7]
 #test(10058)[10]
-#test(10055)[361]
-#test(10040)[346]
+#test(10024)[36]
+#test(10055)[10311]
+#test(10040)[10296]
 #test(995)[8]
 fun wsa_cause(e: int64) -> int64 {
     if e == 10035 { return WOULD_BLOCK }                                     // WSAEWOULDBLOCK
@@ -3238,28 +3220,21 @@ fun wsa_cause(e: int64) -> int64 {
     if e == 10004 { return INTERRUPTED }
     if e == 10013 { return PERMISSION_DENIED }                               // WSAEACCES
     if e == 10058 { return BROKEN_PIPE }                                     // WSAESHUTDOWN: Linux's EPIPE
-    if e == 10037 { return OTHER + 114 }                                     // WSAEALREADY: EALREADY
-    if e == 10040 { return OTHER + 90 }                                      // WSAEMSGSIZE: EMSGSIZE
-    if e == 10050 { return OTHER + 100 }                                     // WSAENETDOWN: ENETDOWN
-    if e == 10055 { return OTHER + 105 }                                     // WSAENOBUFS: ENOBUFS
-    if e == 10056 { return OTHER + 106 }                                     // WSAEISCONN: EISCONN
-    if e == 10064 { return OTHER + 112 }                                     // WSAEHOSTDOWN: EHOSTDOWN
-    if e == 10024 { return OTHER + 24 }                                      // WSAEMFILE: EMFILE
-    if e == 10014 { return OTHER + 14 }                                      // WSAEFAULT: EFAULT
+    if e == 10024 { return TOO_MANY_OPEN }                                   // WSAEMFILE
     return cause(e)
 }
 
 // The cause of the NTSTATUS an overlapped operation ended with (its
 // OVERLAPPED's `Internal`): 0 for success, and for a read of no bytes that
-// found a datagram (STATUS_BUFFER_OVERFLOW) or the end; Linux's EIO's
-// `Other` for one not mapped.
+// found a datagram (STATUS_BUFFER_OVERFLOW) or the end; Windows' IO_DEVICE's
+// `Other` for one not mapped (MYLA-716).
 #test(0)[0]
 #test(2147483653i64)[0]
 #test(3221226038i64)[12]
 #test(3221225997i64)[13]
 #test(3221225803i64)[10]
 #test(3221225760i64)[8]
-#test(3221225473i64)[261]
+#test(3221225473i64)[1373]
 fun status_cause(s: int64) -> int64 {
     if s == 0 || s == 2147483653i64 || s == 3221225489i64 { return 0 }       // SUCCESS, BUFFER_OVERFLOW, END_OF_FILE
     if s == 3221226038i64 { return CONNECTION_REFUSED }                      // CONNECTION_REFUSED
@@ -3273,7 +3248,7 @@ fun status_cause(s: int64) -> int64 {
     if s == 3221225480i64 { return BAD_HANDLE }                              // INVALID_HANDLE
     if s == 3221225506i64 { return PERMISSION_DENIED }                       // ACCESS_DENIED
     if s == 3221225485i64 { return INVALID_INPUT }                           // INVALID_PARAMETER
-    return OTHER + 5
+    return OTHER + 1117
 }
 
 // --- the watched handles' table
@@ -3661,7 +3636,7 @@ pub fun sock_open(family: int64, kind: int64) -> int64 {
     __free(v)
     if !sock_watched(s, kind) {
         let c = __syscall(__rt_get("__imp_closesocket"), s, 0, 0)
-        return -(OTHER + 24)
+        return -TOO_MANY_OPEN
     }
     return s
 }
@@ -3820,7 +3795,7 @@ pub fun sock_accept(h: int64) -> int64 {
     }
     if !sock_watched(a, 1) {
         let c = __syscall(__rt_get("__imp_closesocket"), a, 0, 0)
-        return -(OTHER + 24)
+        return -TOO_MANY_OPEN
     }
     return a
 }

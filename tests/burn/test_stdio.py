@@ -245,11 +245,15 @@ class BrokenPipe(unittest.TestCase):
     def test_a_write_to_a_full_disk_ends_with_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             for name, argv, exe in _argvs(tmp, WRITES_TO_A_FULL_DISK):
+                # the target's words for its code (MYLA-716): Windows' for
+                # ERROR_DISK_FULL, which Wine gives a write to /dev/full
+                said = "no space left on device"
+                if TEST_TARGET == "x86_64-windows" and name == "native":
+                    said = "there is not enough space on the disk"
                 with self.subTest(run=name, stream="stdout"):
                     with open("/dev/full", "w") as full:
                         p = subprocess.run(argv, executable=exe, stdout=full, stderr=subprocess.PIPE, text=True, timeout=60)
-                    self.assertEqual((p.stderr, p.returncode),
-                                     ("runtime error: write failed: no space left on device\n", 1))
+                    self.assertEqual((p.stderr, p.returncode), (f"runtime error: write failed: {said}\n", 1))
                 with self.subTest(run=name, stream="println"):
                     src = WRITES_TO_A_FULL_DISK.replace('    print("one")\n', "")
                     path = write_program(tmp, src, f"{name}2.my")
@@ -262,8 +266,7 @@ class BrokenPipe(unittest.TestCase):
                         cmd, exe2 = [selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None
                     with open("/dev/full", "w") as full:
                         p = subprocess.run(cmd, executable=exe2, stdout=full, stderr=subprocess.PIPE, text=True, timeout=60)
-                    self.assertEqual((p.stderr, p.returncode),
-                                     ("runtime error: write failed: no space left on device\n", 1))
+                    self.assertEqual((p.stderr, p.returncode), (f"runtime error: write failed: {said}\n", 1))
                 with self.subTest(run=name, stream="stderr"):
                     with open("/dev/full", "w") as full:
                         p = subprocess.run(argv, executable=exe, stdout=subprocess.PIPE, stderr=full, text=True, timeout=60)

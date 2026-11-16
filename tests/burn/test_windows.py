@@ -1245,6 +1245,55 @@ class Sockets(unittest.TestCase):
                              f"{threads} workers")
 
 
+# MYLA-716: Windows' own codes. A failed write's words are Windows' for its
+# code (std.system_error's copy for Windows), `Other` holds Windows' own
+# number (a text file run as a program, ERROR_BAD_EXE_FORMAT), and a
+# directory a child can't enter is `WorkingDir` of its cause.
+ERRORS = r"""from std.io import errno_text
+from std.process import command, SpawnError
+from std.fs import write_to_file
+
+fun main() {
+    print(errno_text(256 + 112))
+    print(errno_text(256 + 39))
+    print(errno_text(256 + 1392))
+    print(errno_text(34))
+    write_to_file("text.exe", "not a program")
+    match command(".\\text.exe").output() {
+        Ok(_) => print("ran")
+        Err(SpawnError.Other(n)) => print(f"not a program: Other({n})")
+        Err(e) => print(f"not a program: {e}")
+    }
+    match command(".\\text.exe").cwd("C:\\no\\such\\dir").output() {
+        Ok(_) => print("ran")
+        Err(SpawnError.WorkingDir(why)) => print(f"working directory: {why}")
+        Err(e) => print(f"working directory: {e}")
+    }
+}
+"""
+ERRORS_OUT = ("there is not enough space on the disk\nthe disk is full\nWindows error 1392\nbad file descriptor\n"
+              "not a program: Other(193)\nworking directory: not found (NotFound)\n")
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class Errors(unittest.TestCase):
+    """MYLA-716: an error Windows gives with no cause is `Other` of Windows'
+    own code, and a failed write says what Windows' message for the code
+    says; the causes std acts on keep std's numbers (`bad file
+    descriptor`)."""
+
+    setUpClass = Children.setUpClass
+    setUp = Children.setUp
+    build = Children.build
+
+    def test_windows_own_codes_and_words(self):
+        self.build("prog", ERRORS)
+        ran = subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe")], capture_output=True, cwd=self.tmp,
+                             timeout=120)
+        self.assertEqual((ran.stdout.decode(), ran.stderr.decode(), ran.returncode), (ERRORS_OUT, "", 0))
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
 class Workers(unittest.TestCase):

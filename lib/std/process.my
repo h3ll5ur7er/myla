@@ -60,9 +60,9 @@ pub struct Output {
 // `InvalidInput`: what no process can take, such as an environment variable
 // name with `=` in it (D160) or a NUL byte in the program's name, an
 // argument or the directory; `WorkingDir`: the directory `cwd` gave can't
-// be entered, with the number of why (Linux's errno on every target, D189,
-// D209: 2 not there, 20 not a directory, 13 denied); `Other` holds the
-// platform's own code for anything else.
+// be entered, with why (D189, MYLA-716: `NotFound`, `NotADirectory`,
+// `PermissionDenied`, …, on every target); `Other` holds the platform's own
+// code for anything else.
 #derive(Eq)
 pub enum SpawnError {
     NotFound,
@@ -70,7 +70,7 @@ pub enum SpawnError {
     Unsupported,
     Cancelled,
     InvalidInput,
-    WorkingDir(int32),
+    WorkingDir(IoError),
     Other(int32),
 }
 
@@ -78,8 +78,8 @@ impl SpawnError {
     // The reason in words.
     #test(SpawnError.NotFound)["program not found"]
     #test(SpawnError.Other(12))["could not start the program: errno 12"]
-    #test(SpawnError.WorkingDir(2))["working directory not found"]
-    #test(SpawnError.WorkingDir(5))["could not enter the working directory: errno 5"]
+    #test(SpawnError.WorkingDir(IoError.NotFound))["working directory not found"]
+    #test(SpawnError.WorkingDir(IoError.Other(5)))["could not enter the working directory: error 5 (Other(5))"]
     fun message(self) -> str {
         return match self {
             NotFound => "program not found"
@@ -87,7 +87,7 @@ impl SpawnError {
             Unsupported => "no processes on this target"
             Cancelled => "cancelled"
             InvalidInput => "invalid input"
-            WorkingDir(code) => dir_message(code)
+            WorkingDir(why) => dir_message(why)
             Other(code) => f"could not start the program: errno {code}"
         }
     }
@@ -99,20 +99,17 @@ impl Format for SpawnError {
     }
 }
 
-// What a `WorkingDir` says, by its number.
-#test(20)["working directory is not a directory"]
-#test(13)["working directory: permission denied"]
-fun dir_message(code: int32) -> str {
-    if code == 2 {
-        return "working directory not found"
+// What a `WorkingDir` says, by why.
+#test(IoError.NotADirectory)["working directory is not a directory"]
+#test(IoError.PermissionDenied)["working directory: permission denied"]
+#test(IoError.Interrupted)["could not enter the working directory: interrupted (Interrupted)"]
+fun dir_message(why: IoError) -> str {
+    return match why {
+        NotFound => "working directory not found"
+        NotADirectory => "working directory is not a directory"
+        PermissionDenied => "working directory: permission denied"
+        _ => f"could not enter the working directory: {why}"
     }
-    if code == 20 {
-        return "working directory is not a directory"
-    }
-    if code == 13 {
-        return "working directory: permission denied"
-    }
-    return f"could not enter the working directory: errno {code}"
 }
 
 // What std.platform adds to the cause of a directory the child couldn't
@@ -128,13 +125,13 @@ const DIR_FAILED: int32 = 65536
 #test(268)[SpawnError.Other(12)]
 #test(32)[SpawnError.Other(11)]
 #test(11)[SpawnError.InvalidInput]
-#test(65537)[SpawnError.WorkingDir(2)]
-#test(65540)[SpawnError.WorkingDir(20)]
-#test(65538)[SpawnError.WorkingDir(13)]
-#test(65797)[SpawnError.WorkingDir(5)]
+#test(65537)[SpawnError.WorkingDir(IoError.NotFound)]
+#test(65540)[SpawnError.WorkingDir(IoError.NotADirectory)]
+#test(65538)[SpawnError.WorkingDir(IoError.PermissionDenied)]
+#test(65797)[SpawnError.WorkingDir(IoError.Other(5))]
 fun spawn_error_from_cause(code: int32) -> SpawnError {
     if code >= DIR_FAILED {
-        return SpawnError.WorkingDir(code_number(code - DIR_FAILED))
+        return SpawnError.WorkingDir(from_cause(code - DIR_FAILED))
     }
     if code == NOT_FOUND { return SpawnError.NotFound }
     if code == PERMISSION_DENIED { return SpawnError.PermissionDenied }
@@ -358,7 +355,7 @@ impl Command {
     }
 
     // The command run in the directory `dir` (one that isn't there, or
-    // can't be entered, is `WorkingDir` with its errno).
+    // can't be entered, is `WorkingDir` with its cause).
     fun cwd(self, dir: str) -> Command {
         var c = self
         c.dir = dir
@@ -1732,8 +1729,8 @@ fun spawn_errors() {
     assert(match tool(["cat"]).pipe(command("/no/such/program")).output() { Err(SpawnError.NotFound) => true, _ => false }, "a pipeline's second not there")
     // a directory that can't be entered, and a NUL byte no process can
     // take, aren't "program not found" (MYLA-419)
-    assert(failed_with(tool([]).cwd("/no/such/dir").output()) == Some(SpawnError.WorkingDir(2)), "a directory not there")
-    assert(failed_with(tool([]).cwd(__test_tool()).spawn()) == Some(SpawnError.WorkingDir(20)), "not a directory")
+    assert(failed_with(tool([]).cwd("/no/such/dir").output()) == Some(SpawnError.WorkingDir(IoError.NotFound)), "a directory not there")
+    assert(failed_with(tool([]).cwd(__test_tool()).spawn()) == Some(SpawnError.WorkingDir(IoError.NotADirectory)), "not a directory")
     assert(failed_with(run("a\0b", [])) == Some(SpawnError.InvalidInput), "a NUL in the name")
     assert(failed_with(tool(["out", "a\0b"]).output()) == Some(SpawnError.InvalidInput), "a NUL in an argument")
     assert(failed_with(tool([]).cwd("/t\0mp").output()) == Some(SpawnError.InvalidInput), "a NUL in the directory")

@@ -1,0 +1,27 @@
+// std.system_error: the words for a system's own error code (MYLA-716),
+// which std.rt and std.io give a failed write (`write failed: no space left
+// on device`): Linux's errnos here, and WASI's, which wasm32's platform
+// module gives as Linux's (MYLA-426). A target whose codes differ has a copy
+// of its own beside its platform module (`system_error_windows.my` beside
+// `platform_windows.my`, Windows' codes), which the loader takes for this
+// one (`for_target`), as it takes std.path_style's. A module this small, as
+// std.rt is in every program and std.io in most.
+//
+// The code is what an `IoError.Other` holds past the causes (D219): never
+// one of the causes std gives a number of its own (`code_number`).
+
+// What the system's own code `n` means, as `strerror` says it, for the
+// errors a write meets (a full disk, a device's error, a file too large, a
+// quota); else the number as the system names it, `errno` and `n`.
+#test(28i64)["no space left on device"]
+#test(5i64)["input/output error"]
+#test(27i64)["file too large"]
+#test(122i64)["disk quota exceeded"]
+#test(71i64)["errno 71"]
+pub fun error_text(n: int64) -> str {
+    if n == 28 { return "no space left on device" }         // ENOSPC
+    if n == 5 { return "input/output error" }               // EIO
+    if n == 27 { return "file too large" }                  // EFBIG
+    if n == 122 { return "disk quota exceeded" }            // EDQUOT
+    return f"errno {n}"
+}
