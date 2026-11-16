@@ -463,13 +463,18 @@ impl CodeGen {
         // context in %rcx), on a thread of the pool's, which has no state
         // block of the runtime's: so it is these lines and nothing of
         // Myla's. Its context is `[function][port][key][overlapped]
-        // [posted]`: it sets `posted` to 1, then calls the function (the
-        // address of `PostQueuedCompletionStatus`) with the port, no
-        // bytes, the key and the overlapped, which queues the packet that
-        // tells std.platform's poller the object was signalled.
-        for line in ["__win_wait_posted:", "\tsubq $40, %rsp", "\tmovq $1, 32(%rcx)", "\tmovq 16(%rcx), %r8",
-            "\tmovq 24(%rcx), %r9", "\txorl %edx, %edx", "\tmovq (%rcx), %rax", "\tmovq 8(%rcx), %rcx",
-            "\tcall *%rax", "\taddq $40, %rsp", "\tret", ""] {
+        // [posted]`: it reads the context, sets `posted` to 1, then calls
+        // the function (the address of `PostQueuedCompletionStatus`) with
+        // the port, no bytes, the key and the overlapped, which queues the
+        // packet that tells std.platform's poller the object was signalled
+        // (or `closesocket` or `CloseHandle` with the handle, for a close
+        // that waited for its send). Nothing of the context is read once
+        // `posted` is set: the watched handle that holds it may be freed
+        // from then on (MYLA-753: `ws_later` could free it as soon as `posted`
+        // was set, while this read the rest of it).
+        for line in ["__win_wait_posted:", "\tsubq $40, %rsp", "\tmovq %rcx, %r10", "\tmovq 16(%r10), %r8",
+            "\tmovq 24(%r10), %r9", "\txorl %edx, %edx", "\tmovq (%r10), %rax", "\tmovq 8(%r10), %rcx",
+            "\tmovq $1, 32(%r10)", "\tcall *%rax", "\taddq $40, %rsp", "\tret", ""] {
             self.raw(line)
         }
     }

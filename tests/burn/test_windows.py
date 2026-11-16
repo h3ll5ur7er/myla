@@ -2095,6 +2095,78 @@ class ControlHandler(unittest.TestCase):
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("PASS  ctrl_counted #1\n\n1/1 passed.\n", "", 0))
 
 
+# MYLA-753, a case of std.platform's Windows module that only Windows runs:
+# more packets queued on the port than one `GetQueuedCompletionStatusEx`
+# takes (ENTRIES, 64), as under load, where every arm posts one and every
+# operation's end another. 200 handles ready (signalled events, watched
+# as a child's end is) armed, a wake-up among them: one wait with no time
+# limit gives every one of them, each once, and the wake-up. With one
+# batch a wait (BASE `983fcc3`) it gave 64, and the rest waited for later
+# waits behind whatever was queued after them: under load a connection's
+# request waited past the HTTP server's 5 s and was dropped.
+POLLER_DRAINS = '''
+#test()[(200, 200, 0)]
+fun poller_drains() -> (int64, int64, int64) {
+    let p = poller_new()
+    var events: [int64] = []
+    var k: int64 = 0
+    while k < 200 {
+        // manual reset, signalled
+        let ev = __syscall5(__rt_get("__imp_CreateEventW"), 0, 1, 1, 0, 0)
+        events.push(ev)
+        let ws = ws_new(ev, K_PROCESS, false)
+        let armed = ws_watch(ev, 1, k + 1)
+        if k == 100 {
+            poller_wake(p)
+        }
+        k += 1
+    }
+    let got = poller_wait(p, 0)
+    var seen: [bool] = []
+    while seen.len() <= 200 {
+        seen.push(false)
+    }
+    var distinct: int64 = 0
+    var i: int64 = 0
+    while i < got {
+        let tok = __load64(__load64(p + 16) + 8 * i)
+        if tok >= 1 && tok <= 200 && !seen[tok as int] {
+            seen[tok as int] = true
+            distinct += 1
+        }
+        i += 1
+    }
+    // nothing left: the next wait ends with no event and no wake-up due
+    let again = poller_wait(p, 0)
+    for ev in events {
+        let c = __syscall(__rt_get("__imp_CloseHandle"), ev, 0, 0)
+    }
+    return (got, distinct, again + __load64(net() + NET_WAKE))
+}
+'''
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class PollerBacklog(unittest.TestCase):
+    """MYLA-753: a wait takes every packet queued on the port, not one batch,
+    so a handle ready now isn't left behind a backlog (`POLLER_DRAINS`,
+    appended to a copy of the library's module)."""
+
+    setUpClass = HelloWorld.setUpClass
+
+    def test_a_wait_takes_the_whole_backlog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(os.path.join(STDLIB_ROOT, "std"), os.path.join(tmp, "std"))
+            module = os.path.join(tmp, "std", "platform_windows.my")
+            with open(module, "a", encoding="utf-8") as fh:
+                fh.write(POLLER_DRAINS)
+            ran = subprocess.run([selfhost_tool("main"), "test", module, "--target", "x86_64-windows", "--stdlib", tmp,
+                                  "--only", "poller_drains"], capture_output=True, text=True, timeout=600,
+                                 env=dict(os.environ, MYLA_EMULATOR=" ".join(wine())))
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("PASS  poller_drains #1\n\n1/1 passed.\n", "", 0))
+
+
 # MYLA-707's cases for MYLA-708's Windows runner, what Wine's console can't
 # show: each runs CONSOLE built as `console.exe` with its arguments in a
 # console of its own, its input that console and its output a file, as
