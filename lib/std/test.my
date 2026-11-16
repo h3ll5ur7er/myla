@@ -732,13 +732,18 @@ fun tool_copy(limit: int64, how: str) {
     }
 }
 
-// `n` zero bytes to the descriptor `fd`, 64 KiB at a time.
+// `n` zero bytes to the descriptor `fd`, 64 KiB at a time (no slice: the
+// harness of `std.slice` itself must build).
 fun tool_zeros(fd: int32, n: int64) {
     var piece: [uint8] = []
     for k in 0..65536 { piece.push(0u8) }
     var left = n
     while left > 0 {
-        if left < 65536i64 { piece = piece[0:left as int32] }
+        if left < 65536i64 {
+            var last: [uint8] = []
+            for k in 0..left as int32 { last.push(0u8) }
+            piece = last
+        }
         tool_put(fd, piece)
         left = left - piece.len() as int64
     }
