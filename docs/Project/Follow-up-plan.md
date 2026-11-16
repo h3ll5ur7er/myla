@@ -109,7 +109,8 @@ The owner's plan for the Windows target ([[MYLA-165]]), decisions D209 to D216. 
 | 2 | [[MYLA-702]] hello world as a static `.exe`, Wine in CI (D210 to D212, D215) | `selfhost/ir_x86.my`, `runtime_x86.my`, a `platform_windows.my`, the harness |
 | 3 | [[MYLA-703]] memory, threads, thread-local state, stack overflow; [[MYLA-704]] files and paths; [[MYLA-705]] processes | `platform_windows.my`, std.rt's runtime, std.path |
 | 4 | [[MYLA-706]] IOCP and Winsock; [[MYLA-707]] the terminal and signals; [[MYLA-708]] the Windows runner | `platform_windows.my`, std.rt's reactor, CI |
-| later | [[MYLA-709]] bootstrapping on Windows (D214) | the scripts, a third seed |
+| 5 | [[MYLA-709]] bootstrapping on Windows (D214, D238 to D241); the hang of wave 4's socket case ([[MYLA-753]], [[MYLA-754]], [[MYLA-756]], D242, D243) | the scripts, a third seed, CI; the poller, std.rt's lock, std.http's keeper |
+| 6 | The host's own modules, scratch directories and console lines ([[MYLA-723]], [[MYLA-729]], [[MYLA-734]]); signals and the poller's glances ([[MYLA-744]], [[MYLA-755]]); the platform interface's leftovers ([[MYLA-716]]); debug information on Windows ([[MYLA-757]]); portable process cases and the language server's builtin calls ([[MYLA-727]], [[MYLA-710]]) | the loader and the driver; `platform_windows.my`, the runtime, std.rt; the platform modules, std.io, std.process, std.http; `selfhost/dwarf.my`, the target record; std.process's cases, the language server |
 
 Each wave is one pull request. Wave 1 changes `lib/std/platform_wasm.my`'s interface with the others; a web application developed alongside may touch the same file, so the waves merge master often.
 
