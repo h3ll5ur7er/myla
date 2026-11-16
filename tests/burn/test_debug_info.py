@@ -4,15 +4,19 @@ types (MYLA-66), from the self-hosted CLI and compiler. readelf (binutils) is
 always there when native builds work; the gdb tests run only where gdb is
 installed. (The Python backend's debug information was tested too until it was
 retired, MYLA-219; the self-hosted compiler's abbreviation table is still
-compared with the one the Python backend wrote, recorded.)"""
+compared with the one the Python backend wrote, recorded.) On Windows
+(MYLA-757) the same DWARF is in the `.exe`'s COFF sections: LLVM's tools,
+gdb and lldb read it from the file, gdb under Wine from the running
+program."""
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 
 from tests.burn._golden import golden
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, wine, wine_env
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 
@@ -556,6 +560,206 @@ class TestSelfHostedGdbVariables(GdbVariables, unittest.TestCase):
         subprocess.run(["as", "--64", "-o", binary + ".o", binary + ".s"], check=True)
         subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
         return binary
+
+
+WINDOWS_TOOLS = ("clang", "llvm-dlltool", "lld-link")
+HAVE_WINDOWS_TOOLS = all(shutil.which(t) for t in WINDOWS_TOOLS)
+WINDOWS_SKIP = "building for x86_64-windows needs clang, llvm-dlltool and lld-link"
+
+WIN_PROGRAM = (
+    "struct Point {\n"                        # line 1
+    "    x: int,\n"
+    "    y: int,\n"
+    "}\n"
+    "\n"
+    "fun add(a: int, b: int) -> int {\n"      # line 6
+    "    let c = a + b\n"                     # line 7
+    "    return c\n"                          # line 8
+    "}\n"
+    "\n"
+    "fun main() {\n"                          # line 11
+    "    let p = Point { x: 2, y: 3 }\n"      # line 12
+    "    let name = \"two\"\n"                # line 13
+    "    let xs = [p, Point { x: 4, y: 5 }]\n"
+    "    print(add(p.x, p.y))\n"              # line 15
+    "    print(name)\n"
+    "    print(xs.len())\n"
+    "}\n"
+)
+
+
+def _llvm(tool: str, *args: str) -> str:
+    return subprocess.run([tool, *args], capture_output=True, text=True, check=True).stdout
+
+
+def line_rows(exe: str) -> list[tuple[int, str, int]]:
+    """The rows of the line table of `exe` as llvm-dwarfdump decodes them:
+    (address, file name, line)."""
+    files: dict[int, str] = {}
+    rows = []
+    current = 0
+    for line in _llvm("llvm-dwarfdump", "--debug-line", exe).splitlines():
+        words = line.split()
+        if line.startswith("file_names["):
+            current = int(line.split("[")[1].split("]")[0])
+        elif words[:1] == ["name:"]:
+            files[current] = words[1].strip('"')
+        elif len(words) >= 4 and words[0].startswith("0x") and words[1].isdigit():
+            rows.append((int(words[0], 16), files.get(int(words[3]), "?"), int(words[1])))
+    return rows
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS_TOOLS, WINDOWS_SKIP)
+class TestWindowsDebugInfo(unittest.TestCase):
+    """`myla build -g --target x86_64-windows` (MYLA-757): the DWARF of Linux's
+    `-g` in the COFF sections of the `.exe`, which lld-link keeps
+    (`/debug:dwarf`); read by LLVM's tools, gdb and lldb from the file, and by
+    gdb from the running program under Wine (winedbg's gdb proxy)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = os.path.realpath(tmp.name)
+        with open(os.path.join(self.dir, "main.my"), "w", encoding="utf-8") as fh:
+            fh.write(WIN_PROGRAM)
+
+    def build(self, *flags: str, out: str = "prog.exe") -> str:
+        built = subprocess.run([selfhost_tool("main"), "build", "main.my", "--target", "x86_64-windows", "-o", out,
+                                "--stdlib", STDLIB_ROOT, *flags], capture_output=True, text=True, cwd=self.dir,
+                               timeout=300)
+        self.assertEqual((built.stderr, built.returncode), ("", 0))
+        return os.path.join(self.dir, out)
+
+    def subprogram(self, exe: str, name: str) -> str:
+        """llvm-dwarfdump's description of the function `name`, its children
+        included."""
+        return _llvm("llvm-dwarfdump", "--debug-info", f"--name={name}", "--show-children", exe)
+
+    @unittest.skipUnless(shutil.which("llvm-dwarfdump") and shutil.which("llvm-symbolizer"), "needs LLVM's DWARF tools")
+    def test_a_functions_address_maps_to_its_line(self):
+        exe = self.build("-g")
+        low_pc = int(self.subprogram(exe, "myla_add").split("DW_AT_low_pc\t(")[1].split(")")[0], 16)
+        rows = line_rows(exe)
+        # the line table's row at the function's address is its `fun` line
+        self.assertIn((low_pc, "main.my", 6), rows)
+        self.assertLessEqual({6, 7, 8, 11, 12, 13, 15, 16, 17}, {line for _, f, line in rows if f == "main.my"})
+        # LLVM's symbolizer says so too, with the function's name
+        said = _llvm("llvm-symbolizer", f"--obj={exe}", hex(low_pc)).split()
+        self.assertEqual((said[0], said[1].replace("\\", "/")), ("myla_add", self.dir + "/main.my:6:1"))
+
+    @unittest.skipUnless(shutil.which("llvm-dwarfdump"), "needs llvm-dwarfdump")
+    def test_functions_variables_and_their_types(self):
+        exe = self.build("-g")
+        add = " ".join(self.subprogram(exe, "myla_add").split())
+        for name in ("a", "b"):
+            self.assertIn(f'DW_TAG_formal_parameter DW_AT_name ("{name}") DW_AT_type (0x', add)
+        self.assertIn('DW_TAG_variable DW_AT_name ("c") DW_AT_type (0x', add)
+        self.assertIn('"int32"', add)
+        main = " ".join(self.subprogram(exe, "myla_main").split())
+        for name, ty in (("p", "Point"), ("name", "&str"), ("xs", "Point[]")):
+            self.assertRegex(main, re.escape(f'DW_TAG_variable DW_AT_name ("{name}") DW_AT_type (0x') + "[0-9a-f]+ "
+                             + re.escape(f'"{ty}")'))
+        # the offsets into other sections are their own (`.secrel32`): the
+        # whole unit reads back without an error
+        verified = subprocess.run(["llvm-dwarfdump", "--verify", exe], capture_output=True, text=True)
+        self.assertEqual((verified.returncode, "No errors." in verified.stdout), (0, True), verified.stdout[-2000:])
+
+    @unittest.skipUnless(shutil.which("llvm-objdump"), "needs llvm-objdump")
+    def test_the_sections_only_with_g(self):
+        def sections(exe: str) -> list[str]:
+            return [words[1] for words in (line.split() for line in _llvm("llvm-objdump", "-h", exe).splitlines())
+                    if len(words) > 2 and words[0].isdigit()]
+        debug = sections(self.build("-g"))
+        for name in (".debug_abbrev", ".debug_info", ".debug_line", ".debug_gdb_scripts"):
+            self.assertIn(name, debug)
+        plain = sections(self.build(out="plain.exe"))
+        self.assertEqual([s for s in plain if s.startswith(".debug")], [])
+        # the code's sections are the same ones: what the program doesn't
+        # call is left out under -g too (`/opt:ref`)
+        self.assertEqual([s for s in debug if not s.startswith(".debug")], plain)
+        # DWARF in the image, no PDB: nothing beside the programs (MYLA-35)
+        self.assertEqual(sorted(os.listdir(self.dir)), ["main.my", "plain.exe", "prog.exe"])
+
+    @unittest.skipUnless(shutil.which("llvm-objcopy"), "needs llvm-objcopy")
+    def test_the_pretty_printers_are_embedded(self):
+        raw = os.path.join(self.dir, "scripts.bin")
+        subprocess.run(["llvm-objcopy", f"--dump-section=.debug_gdb_scripts={raw}", self.build("-g"),
+                        os.path.join(self.dir, "scratch.exe")], check=True)
+        with open(raw, "rb") as fh:
+            got = fh.read()
+        with open(GDB_SCRIPT, "rb") as fh:
+            want = b"\x04myla-printers\n" + fh.read() + b"\x00"
+        # (a PE section's bytes are padded to the file's alignment)
+        self.assertEqual(got[:len(want)], want)
+        self.assertEqual(got[len(want):].strip(b"\0"), b"")
+
+    @unittest.skipUnless(shutil.which("gdb"), "gdb is not installed")
+    def test_gdb_reads_the_exe(self):
+        session = gdb(self.build("-g"), "info line myla_add", "break main.my:7", "info scope myla_add",
+                      "info auto-load python-scripts", printers=True)
+        self.assertRegex(session, r'Line 6 of "main.my" starts at address 0x[0-9a-f]+ <myla_add>')
+        self.assertRegex(session, r"Breakpoint 1 at 0x[0-9a-f]+: file main.my, line 7\.")
+        self.assertIn("Symbol a is a variable at frame base reg $rbp offset 0+-", session)
+        # gdb finds the printers in the PE file's section as in an ELF file's
+        self.assertRegex(session, r"Yes\s+myla-printers")
+
+    @unittest.skipUnless(shutil.which("lldb"), "lldb is not installed")
+    def test_lldb_reads_the_exe(self):
+        session = subprocess.run(["lldb", "-b", "-o", "image lookup -n myla_add -v", "-o", "breakpoint set -f main.my -l 7",
+                                  self.build("-g")], capture_output=True, text=True, timeout=120).stdout
+        self.assertIn("`myla_add at main.my:6:1", session)
+        self.assertIn('name = "a", type = "int32"', session)
+        self.assertRegex(session, r"Breakpoint 1: where = prog\.exe`myla_add \+ \d+ at main\.my:7:5")
+
+    @unittest.skipUnless(wine(), "Wine is not installed")
+    def test_it_runs_as_without_g(self):
+        wine_env()
+        for exe in (self.build(out="plain.exe"), self.build("-g")):
+            ran = subprocess.run([*wine(), exe], capture_output=True, cwd=self.dir, timeout=120)
+            self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"5\ntwo\n2\n", b"", 0))
+
+    @unittest.skipUnless(wine() and shutil.which("gdb"), "needs Wine and gdb")
+    def test_gdb_on_the_running_program_under_wine(self):
+        # winedbg --gdb starts the program under its gdb proxy, then `gdb`
+        # from PATH with a file of commands that attaches to it: here a gdb
+        # that runs those, then this test's, in batch mode
+        wine_env()
+        exe = self.build("-g")
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        commands = ["break main.my:7", "continue", "info args", "bt", "up", "info locals", "down", "finish", "kill"]
+        with open(os.path.join(bindir, "gdb"), "w", encoding="utf-8") as fh:
+            fh.write(f"#!/bin/sh\nexec {shutil.which('gdb')} -q -batch -nx -iex 'add-auto-load-safe-path {exe}' \"$@\" "
+                     + " ".join(f"-ex '{c}'" for c in commands) + "\n")
+        os.chmod(os.path.join(bindir, "gdb"), 0o755)
+        env = dict(os.environ, PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
+        session = subprocess.run([*wine(), "winedbg", "--gdb", "Z:" + exe.replace("/", "\\")], env=env, cwd=self.dir,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, timeout=180).stdout
+        self.assertIn("Breakpoint 1, myla_add (a=2, b=3) at main.my:7\n7\t    let c = a + b\n", session)
+        self.assertIn("a = 2\nb = 3\n", session)
+        self.assertRegex(session, r"#1  0x[0-9a-f]+ in myla_main \(\) at main\.my:15")
+        # the printers the .exe carries show the heap values
+        self.assertIn('xs = [Point {x: 2, y: 3}, Point {x: 4, y: 5}]\nname = "two"\np = Point {x: 2, y: 3}\n', session)
+        self.assertIn("Value returned is $1 = 5\n", session)
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestWithoutG(unittest.TestCase):
+    """Without `-g` no target's assembly has debug information: the build
+    without it stays as it was (MYLA-757 made `-g` work on Windows)."""
+
+    def test_no_target_has_debug_directives_without_g(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = os.path.join(d, "main.my")
+            with open(source, "w", encoding="utf-8") as fh:
+                fh.write(WIN_PROGRAM)
+            for target in ("x86_64-linux", "aarch64-linux", "wasm32-wasi", "x86_64-windows"):
+                asm = subprocess.run([selfhost_tool("gen_main"), source, STDLIB_ROOT, "--target", target],
+                                     capture_output=True, text=True, check=True).stdout
+                for word in ("\t.loc ", "\t.file ", ".debug_", ".secrel32", ".Ltext0"):
+                    self.assertNotIn(word, asm, f"{target}: {word.strip()}")
 
 
 if __name__ == "__main__":

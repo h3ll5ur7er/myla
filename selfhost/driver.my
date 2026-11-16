@@ -559,11 +559,14 @@ fun removed(path: str) -> bool {
 // and lld for another Linux target (MYLA-163) and for wasm32-wasi (a module
 // for a WASI host such as tools/wasm/run.mjs, MYLA-158; MYLA-276); clang and
 // lld-link for Windows, linking the import libraries `libs`
-// (`import_files`, D211, MYLA-702, MYLA-722).
-pub fun build_commands(target: Target, host: Target, asm: str, obj: str, out: str, libs: [str]) -> ([str], [str]) {
+// (`import_files`, D211, MYLA-702, MYLA-722). With `debug` (`-g`) the
+// link keeps the debug information (the toolchain's `debug_link`, MYLA-757).
+pub fun build_commands(target: Target, host: Target, asm: str, obj: str, out: str, libs: [str], debug: bool = false) -> ([str], [str]) {
     let tools = toolchain(target, host)
     let files = ["asm": asm, "obj": obj, "out": out]
-    return (with_files(tools.assemble, files), with_libs(with_files(tools.link, files), libs))
+    var link = with_libs(with_files(tools.link, files), libs)
+    if debug { for w in tools.debug_link { link.push(w) } }
+    return (with_files(tools.assemble, files), link)
 }
 
 // The list of functions and the import library of the system DLL `dll`
@@ -617,6 +620,12 @@ fun each_target_has_its_tools() {
     assert(build_commands(win, x86, "a.exe.s", "a.exe.o", "a.exe", libs) == win_tools && build_commands(win, a64, "a.exe.s", "a.exe.o", "a.exe", libs) == win_tools, "windows")
     assert(import_command(win, x86, "a.exe", "kernel32.dll") == ["llvm-dlltool", "-m", "i386:x86-64", "-d", "a.exe.kernel32.def", "-l", "a.exe.kernel32.lib"], "windows' import library")
     assert(import_command(win, x86, "a.exe", "bcrypt.dll") == ["llvm-dlltool", "-m", "i386:x86-64", "-d", "a.exe.bcrypt.def", "-l", "a.exe.bcrypt.lib"], "bcrypt's")
+    // -g: lld-link keeps the DWARF and still leaves out what isn't called
+    // (MYLA-757); the other linkers keep it anyway
+    var win_debug = win_tools.1
+    for w in ["/debug:dwarf", "/opt:ref"] { win_debug.push(w) }
+    assert(build_commands(win, x86, "a.exe.s", "a.exe.o", "a.exe", libs, true) == (win_tools.0, win_debug), "windows -g")
+    for t in [x86, a64, wasm] { assert(build_commands(t, x86, "a.s", "a.o", "a", [], true) == build_commands(t, x86, "a.s", "a.o", "a", []), t.name + " -g links as without") }
 }
 
 // Run one step of a build: false when it worked; a missing tool named, with
@@ -685,7 +694,7 @@ pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, checke
             libs.push(lib_path)
         }
     }
-    let link = build_commands(target, here, asm_path, obj_path, output, libs).1
+    let link = build_commands(target, here, asm_path, obj_path, output, libs, debug).1
     if build_step(link, "myla: linker failed", target, needs) {
         return 1
     }
