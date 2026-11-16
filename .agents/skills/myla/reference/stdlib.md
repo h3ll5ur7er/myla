@@ -324,7 +324,7 @@ Import: `import std.fs as fs`. `IoError`, `from_errno` and `io_error_name` are r
   - Each method returns a new `OpenOptions`: `.read(on: bool)`, `.write(on: bool)`, `.append(on: bool)`, `.truncate(on: bool)`, `.create(on: bool)`, `.create_new(on: bool)`, `.mode(perms: int32)`
   - Finally `.open(path: str) -> Result<File, IoError>`. Options that choose nothing give `InvalidInput`.
 - Temporary files:
-  - `pub fun temp_root() -> str` (`$TMPDIR` or `/tmp`)
+  - `pub fun temp_root() -> str` (`$TMPDIR` or `/tmp`; on Windows `%TMPDIR%`, `%TEMP%`, `%TMP%` or `.`)
   - `pub fun make_temp_dir() -> Result<str, IoError>`, `pub fun make_temp_dir_in(dir: str, prefix: str) -> Result<str, IoError>`
   - `pub fun make_temp_file() -> Result<(str, File), IoError>`, `pub fun make_temp_file_in(dir: str, prefix: str) -> Result<(str, File), IoError>`
 - Gotchas:

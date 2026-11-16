@@ -86,6 +86,22 @@ def pe_facts(path: str) -> dict:
     return {"machine": machine, "pe32plus": magic == 0x20B, "subsystem": subsystem, "dlls": dlls}
 
 
+def coff_imports(path: str) -> dict[str, list[str]]:
+    """The functions the PE file `path` imports, by DLL (lowercase), as
+    `llvm-readobj --coff-imports` lists them (MYLA-722)."""
+    listed = subprocess.run(["llvm-readobj", "--coff-imports", path], capture_output=True, text=True, check=True).stdout
+    out: dict[str, list[str]] = {}
+    dll = ""
+    for line in listed.splitlines():
+        words = line.split()
+        if words[:1] == ["Name:"]:
+            dll = words[1].lower()
+            out[dll] = []
+        elif words[:1] == ["Symbol:"]:
+            out[dll].append(words[1])
+    return out
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
 class HelloWorld(unittest.TestCase):
@@ -121,6 +137,10 @@ class HelloWorld(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(self.tmp)), ["a.exe", "main.my"])
         facts = pe_facts(os.path.join(self.tmp, "a.exe"))
         self.assertEqual(facts, {"machine": 0x8664, "pe32plus": True, "subsystem": 3, "dlls": ["kernel32.dll"]})
+        # (MYLA-722: WaitOnAddress is imported where the program parks, not
+        # looked up at every start)
+        self.assertEqual(list(coff_imports(os.path.join(self.tmp, "a.exe"))), ["kernel32.dll"])
+        self.assertNotIn("GetProcAddress", coff_imports(os.path.join(self.tmp, "a.exe"))["kernel32.dll"])
         ran = self.run_exe(exe="a.exe")
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"hello, world\n", b"", 0))
 
@@ -201,17 +221,68 @@ class HelloWorld(unittest.TestCase):
         self.assertEqual((ran.stdout.decode(), ran.stderr, ran.returncode), ("<one>\n<tw\u00f6>\n", b"", 0))
 
     def test_what_isnt_there_yet_says_so(self):
-        # D210: random bytes are `Unsupported` until MYLA-722, and with them
-        # a temporary directory's name
-        src = ('import std.fs as fs\n'
+        # D210: sockets are `Unsupported` until MYLA-706
+        src = ('import std.net as net\n'
                'fun main() {\n'
-               '    match fs.make_temp_dir() {\n'
-               '        Ok(d) => { print("made") },\n'
+               '    match net.udp_bind(net.parse_addr("127.0.0.1:0").expect("addr")) {\n'
+               '        Ok(s) => { print("bound") },\n'
                '        Err(e) => { print(f"{e}") },\n'
                '    }\n'
                '}\n')
         ran = self.build_and_run(src)
         self.assertEqual((ran.stdout, ran.returncode), (b"unsupported (Unsupported)\n", 0))
+
+    def test_an_import_library_per_dll(self):
+        # MYLA-722: random bytes from bcrypt (D212), the workers' parking
+        # from the API set of WaitOnAddress, each DLL's import library made
+        # of the functions the program calls of it (the code generator's
+        # `windows_dll`), none left beside the program; one that calls only
+        # kernel32's functions imports only kernel32 (the hello world above)
+        src = ('import std.uuid as uuid\n'
+               'import std.random as random\n'
+               'async fun twice(n: int) -> int {\n    return 2 * n\n}\n'
+               'async fun main() {\n'
+               '    let a = f"{uuid.v4()}"\n'
+               '    let b = f"{uuid.v4()}"\n'
+               '    print(a.len() == 36 && a[14] == \'4\' && a != b)\n'
+               '    var r = random.from_os()\n'
+               '    var seen: [int: bool] = [:]\n'
+               '    for i in 0..100 { seen[r.int_in(0, 1000000)] = true }\n'
+               '    print(seen.len() > 90)\n'
+               '    async let x = twice(21)\n'
+               '    print(await x)\n'
+               '}\n')
+        built = self.build(src)
+        self.assertEqual((built.stderr, built.returncode), ("", 0))
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["main.my", "prog.exe"])
+        exe = os.path.join(self.tmp, "prog.exe")
+        self.assertEqual(pe_facts(exe)["dlls"], ["kernel32.dll", "bcrypt.dll", "api-ms-win-core-synch-l1-2-0.dll"])
+        imports = coff_imports(exe)
+        self.assertEqual(imports["bcrypt.dll"], ["BCryptGenRandom"])
+        self.assertEqual(sorted(imports["api-ms-win-core-synch-l1-2-0.dll"]), ["WaitOnAddress", "WakeByAddressSingle"])
+        self.assertNotIn("GetProcAddress", imports["kernel32.dll"])
+        ran = self.run_exe()
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"true\ntrue\n42\n", b"", 0))
+
+    def test_temporary_files_and_directories(self):
+        # MYLA-722: their random names, under %TEMP% (D227)
+        src = ('import std.fs as fs\n'
+               'from std.process import env\n'
+               'fun main() {\n'
+               '    let root = env("TEMP").unwrap_or("")\n'
+               '    let d = fs.make_temp_dir().expect("dir")\n'
+               '    let e = fs.make_temp_dir().expect("dir")\n'
+               '    print(root != "" && d.starts_with(root + "\\\\myla-") && d.len() == root.len() + 22 && d != e)\n'
+               '    print(fs.is_dir(d))\n'
+               '    let (p, file) = fs.make_temp_file().expect("file")\n    var f = file\n'
+               '    let c = f.close()\n'
+               '    print(fs.is_file(p) && p.starts_with(root + "\\\\myla-"))\n'
+               '    for x in [d, e] { fs.remove_dir(x).expect("rmdir") }\n'
+               '    fs.remove_file(p).expect("rm")\n'
+               '    print(fs.exists(d) || fs.exists(p))\n'
+               '}\n')
+        ran = self.build_and_run(src)
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"true\ntrue\ntrue\nfalse\n", b"", 0))
 
     def test_files_and_directories(self):
         # MYLA-704: names in UTF-8 made UTF-16, an append at the end, a

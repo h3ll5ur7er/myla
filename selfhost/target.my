@@ -10,7 +10,8 @@
 // other Linux target (MYLA-163); clang and `wasm-ld` for wasm32 on WASI
 // (D125, MYLA-158); clang for COFF, `llvm-dlltool` and `lld-link` for Windows
 // (D211), whose programs are static console executables that call only
-// kernel32 (D212, MYLA-702).
+// system DLLs, kernel32 and those selfhost/codegen.my's `windows_dlls`
+// names (D212, MYLA-702, MYLA-722).
 
 from std.platform import TARGET
 
@@ -39,8 +40,9 @@ pub enum ObjectFormat {
 // line whose words name the files with `{asm}`, `{obj}` and `{out}` (the
 // assembly, the object, the program) and, for an import library, `{def}`
 // and `{lib}` (its list of functions and the library made of it; Windows,
-// D211, D212). `imports` is [] where there are none. `needs` names them
-// all, for the error when one isn't on PATH.
+// D211, D212); the word `{libs}` of `link` is the import libraries, one a
+// DLL the program calls (MYLA-722). `imports` is [] where there are none.
+// `needs` names them all, for the error when one isn't on PATH.
 pub struct Toolchain { assemble: [str], imports: [str], link: [str], needs: str }
 
 // A target: its name (`x86_64-linux`, the `--target` word), operating
@@ -105,7 +107,7 @@ pub fun targets() -> [Target] {
         // (MYLA-705); debug information later (D216)
         Target { name: "x86_64-windows", os: Os.Windows, arch: Arch.X86_64, format: ObjectFormat.Coff, exe_suffix: ".exe", platform_file: "platform_windows.my",
                  cross: Toolchain { assemble: ["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", "{obj}", "{asm}"], imports: ["llvm-dlltool", "-m", "i386:x86-64", "-d", "{def}", "-l", "{lib}"],
-                                    link: ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:{out}", "{obj}", "{lib}"], needs: "clang, llvm-dlltool and lld-link" },
+                                    link: ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:{out}", "{obj}", "{libs}"], needs: "clang, llvm-dlltool and lld-link" },
                  native: None, emulator: ["wine"], spawns: true, debug_info: false, supported: true },
     ]
 }
@@ -161,6 +163,21 @@ pub fun with_files(words: [str], files: [str: str]) -> [str] {
         var word = w
         for (k, v) in files.items() { word = word.replace("{" + k + "}", v) }
         out.push(word)
+    }
+    return out
+}
+
+// `words` with the word `{libs}` made the words `libs` (none for []).
+#test(["lld-link", "a.o", "{libs}"], ["k.lib", "b.lib"])[["lld-link", "a.o", "k.lib", "b.lib"]]
+#test(["ld", "{libs}", "a.o"], [])[["ld", "a.o"]]
+pub fun with_libs(words: [str], libs: [str]) -> [str] {
+    var out: [str] = []
+    for w in words {
+        if w == "{libs}" {
+            for l in libs { out.push(l) }
+        } else {
+            out.push(w)
+        }
     }
     return out
 }

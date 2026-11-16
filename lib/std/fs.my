@@ -822,18 +822,28 @@ fun hex_of(b: [uint8]) -> str {
     return sb.build()
 }
 
-// `name` in the directory `dir` (on Windows one ending in `\` too).
-#test("/tmp", "a")["/tmp/a"]
-#test("/", "a")["/a"]
-#test("", "a")["a"]
+// `name` in the directory `dir`.
 fun joined(dir: str, name: str) -> str {
+    return joined_on(dir, name, style.WINDOWS)
+}
+
+// `name` in the directory `dir`, on Windows when `win` (a directory ending
+// in `\` too, joined with `\`, MYLA-722).
+#test("/tmp", "a", false)["/tmp/a"]
+#test("/", "a", false)["/a"]
+#test("", "a", false)["a"]
+#test("C:\\Temp", "a", true)["C:\\Temp\\a"]
+#test("C:\\", "a", true)["C:\\a"]
+#test("C:/t/", "a", true)["C:/t/a"]
+#test("a\\", "b", false)["a\\/b"]
+fun joined_on(dir: str, name: str, win: bool) -> str {
     if dir == "" {
         return name
     }
-    if dir[dir.len() - 1] == '/' || (style.WINDOWS && dir[dir.len() - 1] == '\\') {
+    if dir[dir.len() - 1] == '/' || (win && dir[dir.len() - 1] == '\\') {
         return dir + name
     }
-    return dir + "/" + name
+    return dir + (if win { "\\" } else { "/" }) + name
 }
 
 // --- Test functions (D162) ----------------------------------------------------------
@@ -956,8 +966,9 @@ fun open_options() -> Result<(), IoError> {
     rw.close()?
     assert(read_to_string(path)? == "abcdXY", "written at the cursor")
     let m = metadata(path)?
-    // wasm32 has no permissions: the mode it reads is made up from the kind
-    assert(m.permissions == 0o600 || m.permissions == 0o644, "the mode of a new file")
+    // wasm32 has no permissions: the mode it reads is made up from the kind;
+    // Windows' is its read-only attribute's (D218)
+    assert(m.permissions == 0o600 || m.permissions == 0o644 || (style.WINDOWS && m.permissions == 0o666), "the mode of a new file")
     assert(error_of(options().write(true).create_new(true).open(path)) == "AlreadyExists", "create_new of a file that's there")
     var t = options().write(true).truncate(true).open(path)?
     t.close()?
@@ -1046,7 +1057,7 @@ fun temporary_names() -> Result<(), IoError> {
     // a name that's taken is tried again with the next suffix
     make_dir(a + "/x-0")?
     let made = make_unique(a, "x-", (k: int32) => Ok(f"{k}"), (p: str) => mkdir_fd(p))?
-    assert(made.0 == a + "/x-1", "the second name")
+    assert(made.0 == joined(a, "x-1"), "the second name")
     let failed = make_unique(a, "x-", (k: int32) => Ok("0"), (p: str) => mkdir_fd(p))
     assert(error_of(failed) == "AlreadyExists", "gives up on a name always taken")
     assert(error_of(make_temp_dir_in(a + "/none", "y")) == "NotFound", "in a missing directory")

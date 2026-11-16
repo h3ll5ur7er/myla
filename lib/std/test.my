@@ -88,7 +88,8 @@ fun temp_dirs_and_files() {
     let f = temp_file()
     expect(fs.is_file(f), "a file")
     expect(match fs.read_to_string(f) { Ok(s) => s == "", Err(_) => false }, "an empty one")
-    expect(starts_with(f, __test_dir() + "/"), "in the case's root")
+    let sep = if style.WINDOWS { "\\" } else { "/" }
+    expect(starts_with(f, __test_dir() + sep), "in the case's root")
 }
 
 // The path of the project's program, built by `myla test` before the files
@@ -132,6 +133,7 @@ pub fun program() -> str {
 // in the harness itself, in order, and the first runtime error ends the run.
 
 import std.fs as fs
+import std.path_style as style
 from std.process import args, exit, command, ExitStatus, Output, env
 from std.io import write, eprint
 from std.time import now_ns

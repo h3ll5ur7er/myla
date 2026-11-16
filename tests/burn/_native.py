@@ -14,7 +14,6 @@ from __future__ import annotations
 import io
 import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
@@ -95,11 +94,18 @@ def wine_env(persist: str = "60") -> None:
     subprocess.run([*wine(), *boot], timeout=300, **quiet)
 
 
-def windows_imports(asm: str) -> list[str]:
-    """The kernel32 functions the Windows assembly `asm` calls through their
-    import slots (`__imp_<name>`), sorted: the list its import library is
-    made from (D211, D212)."""
-    return sorted(set(re.findall(r"__imp_([A-Za-z0-9_]+)", asm)))
+def windows_imports(asm: str) -> list[tuple[str, list[str]]]:
+    """The system DLLs the Windows assembly `asm` calls into, each with the
+    functions it calls of it through their import slots: the lists its import
+    libraries are made from (D211, D212), as the code generator names them at
+    the assembly's end (`# import <dll> <function> ...`, its `windows_dlls`,
+    MYLA-722)."""
+    out = []
+    for line in asm.splitlines():
+        if line.startswith("# import "):
+            words = line.split()
+            out.append((words[2], words[3:]))
+    return out
 
 
 def target_flags() -> list[str]:
@@ -133,18 +139,22 @@ def assemble(asm_path: str, out: str) -> None:
         subprocess.run(["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", out, obj], check=True,
                        capture_output=True, text=True)
     elif TEST_TARGET == "x86_64-windows":
-        # as `myla build` does (D211): kernel32's import library made from
-        # the functions the program calls
+        # as `myla build` does (D211): an import library of each DLL the
+        # program calls, made from the functions it calls of it (MYLA-722)
         with open(asm_path, encoding="utf-8") as fh:
-            names = windows_imports(fh.read())
-        with open(out + ".def", "w", encoding="utf-8") as fh:
-            fh.write("LIBRARY kernel32.dll\nEXPORTS\n" + "".join(n + "\n" for n in names))
+            dlls = windows_imports(fh.read())
         subprocess.run(["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", obj, asm_path], check=True,
                        capture_output=True, text=True)
-        subprocess.run(["llvm-dlltool", "-m", "i386:x86-64", "-d", out + ".def", "-l", out + ".lib"], check=True,
-                       capture_output=True, text=True)
+        libs = []
+        for dll, names in dlls:
+            stem = f"{out}.{dll.removesuffix('.dll')}"
+            with open(stem + ".def", "w", encoding="utf-8") as fh:
+                fh.write(f"LIBRARY {dll}\nEXPORTS\n" + "".join(n + "\n" for n in names))
+            subprocess.run(["llvm-dlltool", "-m", "i386:x86-64", "-d", stem + ".def", "-l", stem + ".lib"], check=True,
+                           capture_output=True, text=True)
+            libs.append(stem + ".lib")
         subprocess.run(["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib",
-                        "/stack:125829120", "/out:" + out, obj, out + ".lib"], check=True, capture_output=True, text=True)
+                        "/stack:125829120", "/out:" + out, obj, *libs], check=True, capture_output=True, text=True)
     else:
         subprocess.run(["as", "--64", "-o", obj, asm_path], check=True, capture_output=True, text=True)
         subprocess.run(["ld", "-o", out, obj], check=True, capture_output=True, text=True)
