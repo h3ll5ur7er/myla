@@ -22,7 +22,7 @@ So the busy phase of a program with tasks grows with the workers past the CPUs, 
 - **`take_lock`** ([[lib/std/rt.my]]): after 64 spins of `__pause()`, `os.yield_cpu()`, then 64 more. A lock taken at once costs what it did (one exchange).
 - **`yield_cpu`**, a function of each platform module (no primitive: what the seed knows, so nothing is staged): `sched_yield` on Linux ([[lib/std/platform.my]], [[lib/std/platform_aarch64.my]]), `SwitchToThread` on Windows ([[lib/std/platform_windows.my]], as its `net_lock` does), nothing on wasm32, which has one worker ([[lib/std/platform_wasm.my]]: `yield_cpu` added beside `park`, nothing else there changed).
 
-## Proposals
+## Proposals (accepted 2026-11-16: D243)
 
 1. **Yield, don't park** (built): the locks are held for a few loads and stores, never across a call that waits, so a waiter that gives its CPU up gets it again soon; parking on the lock's word would need a waiters' count and a wake on every release that saw one (a store more on each `give_lock`). Alternatives: park after a longer spin (a futex mutex); Windows only (`os.TARGET` folds), which leaves Linux's convoy, smaller there (its slices are short) but measured: 32 workers on 4 CPUs used 0.42 s of CPU, now 0.22 s.
 
