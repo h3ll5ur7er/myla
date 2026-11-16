@@ -2545,12 +2545,30 @@ impl CodeGen {
             out.push("\t.skip 16")
             // what VirtualQuery answers `unmap_memory`, and how many bytes
             // a read or a write moved: the platform's own words, as those
-            // run while the heap grows or report that it can't (one
-            // worker until MYLA-703)
-            out.push("__win_memory_info:")
-            out.push("\t.skip 48")
-            out.push("__win_io:")
-            out.push("\t.skip 8")
+            // run while the heap grows or report that it can't; with tasks
+            // each thread's own, in its block (`tls_offset`, MYLA-703)
+            if !self.frames {
+                out.push("__win_memory_info:")
+                out.push("\t.skip 48")
+                out.push("__win_io:")
+                out.push("\t.skip 8")
+            }
+            // WaitOnAddress and WakeByAddressSingle, which kernel32 doesn't
+            // export: their addresses, found at the start (std.platform's
+            // `windows_start`, MYLA-703; 0 where the system has none)
+            out.push("__win_synch:")
+            out.push("\t.skip 16")
+            // how many worker threads `__start_workers` made, and how many
+            // of them started (`__win_worker`), which the exit waits for
+            // (std.platform's `workers_started`, MYLA-703)
+            out.push("__win_threads:")
+            out.push("\t.skip 16")
+            // with tasks, the offset in the TEB (`%gs`) of the TLS slot
+            // holding each thread's block (`win_tls_block`)
+            if self.frames {
+                out.push("__win_tls_off:")
+                out.push("\t.skip 8")
+            }
         }
         out.push("")
         if self.line_files.len() > 0 { for l in self.dbg_sections() { out.push(l) } }
@@ -2667,15 +2685,25 @@ impl CodeGen {
 
     // The operand of the runtime variable `sym`, which is a thread's own in a
     // program with tasks: in the block `%fs` holds (`tls_offset`), else at
-    // its symbol. On Windows, whose one worker's block is the first of
-    // `__tls_blocks` until its threads (MYLA-703), there.
+    // its symbol. On Windows a thread's block is reached through a register
+    // (`tv_at`).
     #test(codegen_on("[int]"), "__heap_end")["__heap_end(%rip)"]
     fun tv(self, sym: str) -> str {
         // (a process-wide one, like `__exec_workers`, next to %rip with tasks
         // too: MYLA-162)
         if !self.frames || tls_offset(sym) == 0 { return sym + "(%rip)" }
-        if self.windows { return format("__tls_blocks+{}(%rip)", tls_offset(sym)) }
         return format("%fs:{}", tls_offset(sym))
+    }
+
+    // The lines that reach the runtime variable `sym`, then its operand: on
+    // Windows a thread's own, in a program with tasks, is in the block its
+    // TEB's TLS slot holds (`win_tls_block`, whose lines load its address
+    // into `reg` first: MYLA-703); anywhere else `tv`'s operand alone.
+    fun tv_at(self, sym: str, reg: str) -> ([str], str) {
+        if self.windows && self.frames && tls_offset(sym) != 0 {
+            return (win_tls_block(reg), format("{}(%{})", tls_offset(sym), reg))
+        }
+        return ([], self.tv(sym))
     }
 
     // -- the executor (D90, D92, MYLA-140: workers and their queues) --------
@@ -4461,11 +4489,14 @@ const SCHED_ADD: int64 = 1442695040888963407
 
 // A thread's block of runtime state in a program with tasks (D92), which
 // `%fs` points at: its own address first (for `tls_addr`), then each
-// variable's word, then the free lists (4616 bytes).
+// variable's word, then the free lists (4616 bytes), then on Windows the
+// platform's words a kernel32 call fills in (`VirtualQuery`'s answer, a
+// read's or a write's count: std.platform's, each thread's own, MYLA-703).
 #test("__exec_sp")[32]
 #test("__remote_free")[96]
 #test("__exec_task")[104]
 #test("__run_stderr_val")[48]
+#test("__win_io")[4792]
 pub fun tls_offset(sym: str) -> int32 {
     if sym == "__heap_ptr" { return 8 }
     if sym == "__heap_end" { return 16 }
@@ -4482,10 +4513,22 @@ pub fun tls_offset(sym: str) -> int32 {
     if sym == "__exec_task" { return 104 }
     if sym == "__drop_defer" { return 112 }
     if sym == "__free_buckets" { return 128 }
+    if sym == "__win_memory_info" { return 4744 }
+    if sym == "__win_io" { return 4792 }
     return 0
 }
 
 pub const TLS_SIZE: int32 = 4800
+
+// On Windows (MYLA-703) a thread's block is the value of its TLS slot, a
+// word of its TEB (`%gs`, the slots from 0x1480 on; the slot's offset is
+// `__win_tls_off`, which `_start` sets from `TlsAlloc`'s index), not
+// `%fs`'s, which Wine's own C library holds: the lines that load the
+// block's address into `reg`.
+#test("rax")[["\tmovq __win_tls_off(%rip), %rax", "\tmovq %gs:(%rax), %rax"]]
+pub fun win_tls_block(reg: str) -> [str] {
+    return [format("\tmovq __win_tls_off(%rip), %{}", reg), format("\tmovq %gs:(%{}), %{}", reg, reg)]
+}
 
 // The most workers a program runs (D92); each has a 4 GiB arena of the heap
 // region, so a cell's address tells whose heap it is.

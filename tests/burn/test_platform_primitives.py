@@ -624,8 +624,7 @@ class Pipes(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-@unittest.skipUnless(TEST_TARGET in ("wasm32-wasi", "x86_64-windows"),
-                     "the suites of a target without processes (wasm32; Windows until MYLA-705)")
+@unittest.skipUnless(TEST_TARGET == "wasm32-wasi", "the suites of a target without processes (wasm32)")
 class PipesOnWasm(unittest.TestCase):
     def test_no_processes_is_enosys(self):
         with tempfile.TemporaryDirectory() as tmp:

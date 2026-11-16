@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, same_int, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
+from .codegen import CodeGen, CgBinding, int_signed, same_int, takes_operand, is_cmp, fold_load, fold_load_for_reader, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, narrow_operand, int_width_cg, tls_offset, TLS_SIZE, win_tls_block
 from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, Intrinsic, is_rc_dec, is_rc_atomic, is_cas, is_atomic_at, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call, Pos
 from .ir_util import reachable_blocks, wrapped
 from .ssa import promote, add_ssa_stats
@@ -183,6 +183,10 @@ impl CodeGen {
         // registers, no arguments on the stack) sets up none, but under -g,
         // whose debugger finds frames by %rbp
         self.frameless = frame == 0 && self.saved_regs.len() == 0 && self.arg_words == 0 && !self.debug && !f.frame
+        // on Windows a frame of a page or more is probed first (MYLA-717)
+        if self.windows && frame >= 4096 {
+            for l in stack_probes(frame + 8) { self.emit(l) }
+        }
         let prologue_at = self.text.len()
         if !self.frameless {
             self.emit("pushq %rbp")
@@ -539,8 +543,9 @@ impl CodeGen {
                 // the loads and stores reading it name the variable
                 if self.temp_mem[d] != "" { return }
                 if self.frames && tls_offset(sym) != 0 && self.windows {
-                    // (Windows' one worker, MYLA-702: `tv`)
-                    self.emit(format("leaq __tls_blocks+{}(%rip), %rax", tls_offset(sym)))
+                    // (the thread's block through its TEB, MYLA-703)
+                    for l in win_tls_block("rax") { self.raw(l) }
+                    self.emit(format("leaq {}(%rax), %rax", tls_offset(sym)))
                 } else if self.frames && tls_offset(sym) != 0 {
                     self.emit("movq %fs:0, %rax")
                     self.emit(format("leaq {}(%rax), %rax", tls_offset(sym)))
@@ -989,7 +994,9 @@ impl CodeGen {
             Inst.Global(d, sym, w) => {
                 // (a kernel32 function's import slot on Windows, MYLA-702)
                 self.note_import(sym)
-                if w == 4 { self.emit(format("movslq {}, %rax", self.tv(sym))) } else { self.emit(format("movq {}, %rax", self.tv(sym))) }
+                let (lines, at) = self.tv_at(sym, "rax")
+                for l in lines { self.raw(l) }
+                if w == 4 { self.emit(format("movslq {}, %rax", at)) } else { self.emit(format("movq {}, %rax", at)) }
                 self.store_temp(d, temp_base)
             },
             Inst.Exit(v) => {
@@ -1975,8 +1982,9 @@ impl CodeGen {
 
     // The memory operand of the runtime variable `sym`, `off` bytes in: in
     // the worker's block with tasks (a worker's own), else next to %rip.
+    // (Never a worker's own on Windows, whose block a register reaches:
+    // `remat_texts` gives its address a temporary of its own there.)
     fun rt_var_at(self, sym: str, off: int32) -> str {
-        if self.frames && tls_offset(sym) != 0 && self.windows { return format("__tls_blocks+{}(%rip)", tls_offset(sym) + off) }
         if self.frames && tls_offset(sym) != 0 { return format("%fs:{}", tls_offset(sym) + off) }
         if off == 0 { return format("{}(%rip)", sym) }
         return format("{}+{}(%rip)", sym, off)
@@ -2053,11 +2061,14 @@ impl CodeGen {
                 match inst {
                     Inst.Addr(d, s) => { if defs[d] == 1 { frame[d] = slot_off[s] } },
                     // a runtime variable's address only loads and stores read:
-                    // the variable itself their operand, nothing computed
+                    // the variable itself their operand, nothing computed (but
+                    // a worker's own on Windows, which no one operand reaches:
+                    // `win_tls_block`)
                     Inst.Intr(d, op, args) => {
                         match op {
                             Intrinsic.RtAddr(sym) => {
-                                if d >= 0 && defs[d] == 1 && self.temp_uses[d] > 0 && at_uses[d] == self.temp_uses[d] { mem[d] = sym }
+                                let per_thread = self.windows && self.frames && tls_offset(sym) != 0
+                                if d >= 0 && defs[d] == 1 && self.temp_uses[d] > 0 && at_uses[d] == self.temp_uses[d] && !per_thread { mem[d] = sym }
                             },
                             _ => {},
                         }
@@ -3983,4 +3994,26 @@ fun names_reg(src: str, reg: str) -> bool {
         k += 1
     }
     return true
+}
+
+// The probes that make the `bytes` a prologue takes below the stack pointer
+// (the push of %rbp and the frame) safe to touch on Windows (MYLA-717):
+// Windows commits a thread's stack a page at a time as the page below the
+// committed part, its guard page, is touched, and a touch further down,
+// past it, is an access violation. So a page at a time is touched from the
+// top down to the lowest byte, as MSVC's `__chkstk` does, before the stack
+// pointer moves (no register is needed, and the prologue's own lines stay
+// as they are); a frame below a page needs none, as the call's push touched
+// the page above it.
+#test(4104)[["orq $0, -4096(%rsp)", "orq $0, -4104(%rsp)"]]
+#test(8192)[["orq $0, -4096(%rsp)", "orq $0, -8192(%rsp)"]]
+fun stack_probes(bytes: int32) -> [str] {
+    var out: [str] = []
+    var at = 4096
+    while at < bytes {
+        out.push(format("orq $0, -{}(%rsp)", at))
+        at += 4096
+    }
+    out.push(format("orq $0, -{}(%rsp)", bytes))
+    return out
 }

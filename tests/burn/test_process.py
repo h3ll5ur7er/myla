@@ -10,9 +10,11 @@ same captured output, exit code, and signal.
 import os
 import unittest
 
+from . import test_windows
 from ._native import (
     CAN_BUILD_NATIVE,
     SKIP_REASON,
+    TEST_TARGET,
     build_and_run_full,
     check_file,
     interpret_full,
@@ -237,3 +239,15 @@ class TestSubprocessParity(unittest.TestCase):
                     "}\n"
                 )
                 self.assertEqual((out, err, code), ("15\n14\n", "", 0))
+
+
+@unittest.skipUnless(TEST_TARGET == "x86_64-windows", "the suites for Windows (scripts/test-target.py x86_64-windows)")
+class WindowsChildren(test_windows.Children):
+    """These suites for Windows (MYLA-705): the tests above run Linux's tools
+    (`/bin/echo`, `/bin/sh`, `cat`), which a Windows program can't start
+    (they aren't on its PATH, and Wine runs one without the standard handles
+    or the exit code it was given), so there each is excused and this runs
+    their ground with a Windows program of its own as the child:
+    test_windows.Children's output, error, exit code, command builder, PATH,
+    directory, environment, input, waiting in a task, killing, and a test
+    harness's cases as children."""

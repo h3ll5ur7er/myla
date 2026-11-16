@@ -1,0 +1,7 @@
+// std.path_style: how the target spells a path (MYLA-704, D215): Windows',
+// the loader's copy of `std/path_style.my` for x86-64 Windows (`for_target`,
+// as `platform_windows.my` is `std/platform.my`'s there).
+
+// Whether `\` separates a path's components as `/` does, and a path may
+// start with a drive or a UNC share before its root (Windows'): yes.
+pub const WINDOWS: bool = true

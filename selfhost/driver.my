@@ -16,7 +16,7 @@ from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
 from .loader import load_program_opts, LoadOptions, for_target, file_of, Loaded, type_errors, warning_reports, in_stdlib, normalize, is_std_module, std_tree_root
 from .stdroot import EMBEDDED_ROOT
-from .target import Target, parse_target, host, toolchain, with_files, missing_tool, unsupported
+from .target import Target, Os, parse_target, host, toolchain, with_files, missing_tool, unsupported
 from .diag import render, Report
 from .checker import build_checker_lazy, Checker, CheckErr
 from .codegen import new_codegen
@@ -253,8 +253,11 @@ pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, targ
         let gone = remove_dir_all(dir)
         return r
     }
+    // the harness's children run under its emulator too (qemu-user doesn't
+    // start a child under itself), but not under Wine, which runs a Windows
+    // program's children itself (MYLA-705)
     var emu = ""
-    if argv.len() > 1 { emu = join_words(emulator(target)) }
+    if argv.len() > 1 && target.os != Os.Windows { emu = join_words(emulator(target)) }
     let ran = command(argv[0]).args(rest).env("MYLA_TEST_PROGRAM", sel.program).env("MYLA_TEST_EMULATOR", emu).stdin("").output()
     let gone = remove_dir_all(dir)
     let o = match ran {
