@@ -5317,6 +5317,14 @@ pub fun cpus_allowed() -> int64 {
     return n
 }
 
+// The CPU given up by a thread spinning for a lock (`SwitchToThread`), so
+// a holder preempted by spinners runs again: Windows' time slices are long,
+// and with more workers than CPUs a spin lock's waiters spun through them
+// (MYLA-754).
+pub fun yield_cpu() {
+    let y = __syscall(__rt_get("__imp_SwitchToThread"), 0, 0, 0)
+}
+
 // The worker parked while the 32-bit word at `addr` still holds `seen`
 // (it may also wake for no reason). The value it is compared with is the
 // thread's own word of the runtime's (`__win_io`, free between reads and

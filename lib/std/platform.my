@@ -107,6 +107,7 @@ const SYS_RMDIR: int64 = 84
 const SYS_UNLINK: int64 = 87
 const SYS_FUTEX: int64 = 202
 const SYS_NANOSLEEP: int64 = 35
+const SYS_SCHED_YIELD: int64 = 24
 const SYS_CLOCK_GETTIME: int64 = 228
 const SYS_EPOLL_WAIT: int64 = 232
 const SYS_EPOLL_CTL: int64 = 233
@@ -2057,6 +2058,12 @@ pub fun cpus_allowed() -> int64 {
         i += 1
     }
     return n
+}
+
+// The CPU given up by a thread spinning for a lock (`sched_yield`), so a
+// holder preempted by spinners runs again (MYLA-754).
+pub fun yield_cpu() {
+    sys(SYS_SCHED_YIELD, 0, 0, 0)
 }
 
 // The worker parked while the 32-bit word at `addr` still holds `seen`

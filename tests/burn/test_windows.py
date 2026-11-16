@@ -817,12 +817,17 @@ import std.http as http
 import std.bytes as bytes
 from std.net import TcpListener, TcpStream
 from std.http import Request, Response
-from std.process import command, args, ExitStatus
+from std.process import command, args, exit, ExitStatus
+from std.io import eprintln
 
 // MYLA-706: many sockets at once on the I/O completion port, beside
 // children: `clients` connections echoed through loopback, each its own
 // pair of tasks, while `kids` children echo their input and an HTTP server
-// in this program answers its own client.
+// in this program answers its own client. What fails says so on stderr,
+// and the program then ends with 1, or with 2 once 200 s have gone
+// (naming the tasks that hadn't ended), rather than waiting for ever for a
+// server whose client gave up (MYLA-753: CI's runner saw only "still
+// running").
 
 // One connection served: what it sends echoed until its end.
 async fun echo(s: TcpStream) -> int {
@@ -871,7 +876,7 @@ async fun serve(l: TcpListener, n: int) -> int {
 async fun client(port: int, k: int, rounds: int, size: int) -> int {
     var s = match await net.connect_async(net.addr(net.loopback(), port)) {
         Ok(s) => s
-        Err(e) => { return 0 }
+        Err(e) => { return failed(f"client {k}: connect: {e}") }
     }
     var msg: [uint8] = []
     for i in 0..size {
@@ -880,24 +885,24 @@ async fun client(port: int, k: int, rounds: int, size: int) -> int {
     for r in 0..rounds {
         match await s.write_async(msg) {
             Ok(_) => {}
-            Err(e) => { return 0 }
+            Err(e) => { return failed(f"client {k}: write {r}: {e}") }
         }
         var got: [uint8] = []
         while got.len() < size {
             match await s.read_async(size - got.len()) {
                 Ok(b) => {
                     if b.len() == 0 {
-                        return 0
+                        return failed(f"client {k}: the end after {got.len()} of {size} bytes")
                     }
                     for x in b {
                         got.push(x)
                     }
                 }
-                Err(e) => { return 0 }
+                Err(e) => { return failed(f"client {k}: read {r}: {e}") }
             }
         }
         if got != msg {
-            return 0
+            return failed(f"client {k}: round {r} came back changed")
         }
     }
     let c = s.close()
@@ -908,8 +913,8 @@ async fun client(port: int, k: int, rounds: int, size: int) -> int {
 async fun kid(k: int) -> int {
     let want = f"child {k}\n"
     return match await command("./helper.exe").arg("cat").stdin(want).output_async() {
-        Ok(o) => if bytes.to_str(o.stdout) == want && o.status == ExitStatus.Exited(0) { 1 } else { 0 }
-        Err(e) => 0
+        Ok(o) => if bytes.to_str(o.stdout) == want && o.status == ExitStatus.Exited(0) { 1 } else { failed(f"child {k}: {bytes.to_str(o.stdout)}") }
+        Err(e) => failed(f"child {k}: {e}")
     }
 }
 
@@ -926,13 +931,69 @@ async fun ask(port: int, n: int) -> int {
             Ok(r) => {
                 if r.status == 200 && r.text() == f"hello GET /p{i}" {
                     right += 1
+                } else {
+                    let no = failed(f"ask {i}: {r.status} {r.text()}")
                 }
             }
-            Err(e) => {}
+            Err(e) => {
+                let no = failed(f"ask {i}: {e}")
+            }
         }
     }
     c.close()
     return right
+}
+
+// `what` on stderr: 0, a task's failure.
+fun failed(what: str) -> int {
+    eprintln(what)
+    return 0
+}
+
+// Which of the program's tasks have ended, for a run that takes too long.
+actor Progress {
+    ended: [bool],
+}
+
+impl Progress {
+    fun end(var self, k: int) {
+        self.ended[k] = true
+    }
+
+    fun pending(self) -> str {
+        var sb = StringBuilder()
+        var k = 0
+        for e in self.ended {
+            if !e {
+                sb.append(f" {k}")
+            }
+            k += 1
+        }
+        return sb.build()
+    }
+}
+
+// `x`, once task `k` is marked ended.
+async fun ended_as(p: Progress, k: int, x: int) -> int {
+    await p.end(k)
+    return x
+}
+
+// `serve`, at most 200 s.
+async fun serve_within(l: TcpListener, n: int) -> int {
+    return match await task.timeout(200000, async () => await serve(l, n)) {
+        Some(x) => x
+        None => failed("the echo server: still serving after 200 s") - 3
+    }
+}
+
+// `http.serve_n`, at most 200 s: how many requests it answered, or -1.
+async fun http_within(l: TcpListener, n: int) -> int {
+    return match await task.timeout(200000, async () => await http.serve_n(l, n, handle)) {
+        Some(Ok(k)) => k
+        Some(Err(e)) => failed(f"the HTTP server: {e}") - 1
+        None => failed("the HTTP server: still serving after 200 s") - 1
+    }
 }
 
 fun number(s: str) -> int {
@@ -964,8 +1025,14 @@ async fun main() {
         Ok(x) => x.port
         Err(e) => { panic("addr") }
     }
-    async let served = serve(l, clients)
-    async let answered = http.serve_n(hl, 20, handle)
+    async let served = serve_within(l, clients)
+    async let answered = http_within(hl, 20)
+    // tasks 0 to clients - 1 the clients, then the children, then `ask`
+    var ended: [bool] = []
+    for k in 0..clients + kids + 1 {
+        ended.push(false)
+    }
+    let progress = Progress { ended: ended }
     var fs: [async () -> int] = []
     for k in 0..clients {
         // small messages, and every tenth one past what a socket buffers
@@ -973,21 +1040,32 @@ async fun main() {
         if k % 10 == 0 {
             size = 300000
         }
-        fs.push(async () => await client(port, k, 3, size))
+        fs.push(async () => await ended_as(progress, k, await client(port, k, 3, size)))
     }
     for k in 0..kids {
-        fs.push(async () => await kid(k))
+        fs.push(async () => await ended_as(progress, clients + k, await kid(k)))
     }
-    fs.push(async () => await ask(hport, 20))
+    fs.push(async () => await ended_as(progress, clients + kids, await ask(hport, 20)))
+    let all = async () => await task.all(fs)
+    var results: [int] = []
+    match await task.timeout(200000, all) {
+        Some(xs) => { results = xs }
+        None => {
+            eprintln(f"still running after 200 s, tasks:{await progress.pending()}")
+            exit(2)
+        }
+    }
     var ok = 0
-    for x in await task.all(fs) {
+    for x in results {
         ok += x
     }
-    let echoed = await served
-    let http_served = match await answered {
-        Ok(n) => n
-        Err(e) => -1
+    if ok != clients + kids + 20 {
+        // (a server whose client gave up would wait for it for ever)
+        eprintln(f"{ok} of {clients + kids + 20} right")
+        exit(1)
     }
+    let echoed = await served
+    let http_served = await answered
     let c1 = l.close()
     let c2 = hl.close()
     print(f"{ok - 20} of {clients + kids} right, http {http_served}, echoed {echoed > 0}")

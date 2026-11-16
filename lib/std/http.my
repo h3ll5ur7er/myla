@@ -3247,7 +3247,11 @@ async fun worker(l: TcpListener, o: ServerOptions, handler: async (Request) -> R
 // ran out while they were parked closed: without an answer those waiting
 // for a request (`idle_ms` without one beginning, or their time up), with
 // 408 those whose request began and didn't come within `read_ms`
-// (MYLA-549); until the task is cancelled or every worker stopped.
+// (MYLA-549); until the task is cancelled or every worker stopped. One
+// whose input has come (or its end) is parked again instead, with no time
+// limit, and served as one that became ready: its wake-up was due, only
+// late (MYLA-756: the program's workers held, the keeper ran before the
+// poller, and a request sent in time was reset unread).
 async fun keeper(lot: Lot, tally: Tally, poll: int) -> Result<int, HttpError> {
     while true {
         await task.sleep(poll)
@@ -3257,7 +3261,14 @@ async fun keeper(lot: Lot, tally: Tally, poll: int) -> Result<int, HttpError> {
         let now = time.now_ms()
         var h = __sock_expired(lot.id, now)
         while h > 0 {
-            await dropped(lot, h, Some(HttpError.TimedOut))
+            if __sock_poll(h, 1, 0) > 0 {
+                let count = lot.park(h, -1, __sock_tag(h))
+                if count < 0 {
+                    closed(h)
+                }
+            } else {
+                await dropped(lot, h, Some(HttpError.TimedOut))
+            }
             h = __sock_expired(lot.id, now)
         }
     }

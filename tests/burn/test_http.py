@@ -750,6 +750,7 @@ class KeepAlive(unittest.TestCase):
 
 TIME_SERVER = PRELUDE + r"""from std.io import println
 import std.task as task
+import std.time as time
 
 fun handle(r: Request) -> Response {
     if r.path() == "/big" {
@@ -769,6 +770,12 @@ fun handle(r: Request) -> Response {
 async fun answer(r: Request) -> Response {
     if r.path() == "/sleep" {
         await task.sleep(700)
+    }
+    if r.path() == "/busy" {
+        // its worker held 700 ms, no other task run on it meanwhile
+        let end = time.now_ms() + 700
+        while time.now_ms() < end {
+        }
     }
     return handle(r)
 }
@@ -871,8 +878,9 @@ class TimeLimits(unittest.TestCase):
             "built": run_argv(binary, binary, args),
         }
 
-    def serve(self, argv, exe, check):
-        proc = subprocess.Popen(argv, executable=exe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    def serve(self, argv, exe, check, env=None):
+        proc = subprocess.Popen(argv, executable=exe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                env=dict(os.environ, **env) if env else None)
         self.server_pid = proc.pid
         try:
             port = int(proc.stdout.readline())
@@ -929,6 +937,28 @@ class TimeLimits(unittest.TestCase):
             for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "300", "300", "300"]).items():
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
+
+    def test_a_request_that_came_while_the_server_was_busy(self):
+        # MYLA-756: a parked connection whose request came before its idle
+        # time ran out, while the program's one worker was held, is served
+        # once the worker is free, not dropped unread by the keeper (which
+        # ran before the poller had said the connection was readable)
+        def check(port):
+            with socket.create_connection(("127.0.0.1", port), timeout=10) as quiet:
+                time.sleep(0.1)
+                with socket.create_connection(("127.0.0.1", port), timeout=10) as busy:
+                    busy.sendall(b"GET /busy HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    time.sleep(0.1)
+                    quiet.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    first, _ = end_of(busy, 10)
+                second, _ = end_of(quiet, 10)
+            self.assertTrue(first.startswith(b"HTTP/1.1 200 OK\r\n"), first)
+            self.assertTrue(second.startswith(b"HTTP/1.1 200 OK\r\n") and second.endswith(b"\r\n\r\nok"), second)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (argv, exe) in self.forms(tmp, ["4000", "1", "-", "400", "5000", "5000"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, check, {"MYLA_THREADS": "1"})
 
     def test_slow_requests(self):
         def check(port):
@@ -1279,6 +1309,7 @@ class NoReplay(unittest.TestCase):
 # --- a Myla client and server in one program ---------------------------------------
 
 ONE_PROGRAM = PRELUDE + r"""import std.task as task
+from std.process import exit
 import std.compress as compress
 import std.bytes as bytes
 
@@ -1333,9 +1364,16 @@ async fun main() {
     async let a = client(port, "a")
     async let b = client(port, "b")
     async let c = client(port, "c")
-    print(await a)
-    print(await b)
-    print(await c)
+    let got = [await a, await b, await c]
+    for line in got {
+        print(line)
+    }
+    for line in got {
+        if line.contains(" error ") {
+            // (the server would wait for the request that failed for ever)
+            exit(1)
+        }
+    }
     match await served {
         Ok(n) => print(f"served {n}")
         Err(e) => print(f"server: {e}")

@@ -10,3 +10,8 @@ Found by [[MYLA-753]]. std.rt's poller is waited in by an idle worker, and a bus
 
 - [ ] A busy worker glances once a time has passed since the last poll of any worker (a millisecond, read from the clock every so many turns, or the timers' clock), as Go's `sysmon` and tokio's event interval bound a ready descriptor's wait whatever the run queues hold
 - [ ] A test that holds every worker busy and measures how long a ready socket waits
+
+## Not done in [[MYLA-753]]'s round (2026-11-16)
+
+Not small: in the traced run each of the 16 workers ran about six frames in those 3.4 s, so a glance every so many turns, however few, wouldn't have come; bounding the wait by time needs the clock read at every turn (a `clock_gettime` system call in this runtime on Linux, which has no vDSO path), a cost on every task switch, or a time another thread keeps (a runtime variable, so a seed staged, D207). With [[MYLA-754]] and [[MYLA-756]] fixed the loaded runs above hung none, so this waits.
+
