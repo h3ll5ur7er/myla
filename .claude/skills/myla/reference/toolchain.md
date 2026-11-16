@@ -247,6 +247,7 @@ A literal format spec in `format`/an f-string is checked at compile time (`type 
 | `scripts/test.sh [fast\|all]` | burn tests via `python3 -m unittest`; `fast` drops `test_selfhost_*` and ~25 slow modules |
 | `scripts/test-target.py T [MODULE…] [-j N]` | burn suites for `aarch64-linux` (qemu), `wasm32-wasi` (Node) or `x86_64-windows` (Wine: `/usr/lib/wine/wine64` found, `MYLA_EMULATOR` set, a prefix in `build/wineprefix`), exceptions in `tests/burn/_targets.py` |
 | `scripts/stress-native.py [--runs N] [--workers 1,4,16] [--only t…]` | concurrency stress programs natively |
+| `scripts/windows-runner.py build OUT` / `run OUT [--wine] [--runs N] [--only t…]` | Windows programs built on Linux with what each must print (`OUT/cases.json`), run on Windows (CI's `windows` job) or under Wine (MYLA-708) |
 | `scripts/build.sh f.my [out]` | `build/stage3 f.my lib` piped to `as`/`ld` (stage3 directly) |
 | `scripts/build-page.sh [OUT=build/page]` | the wasm playground: `play.wasm` + `tools/wasm/{page.html,myla.mjs,wasi.mjs,mem_fs.mjs}` |
 | `scripts/gen_treesitter.sh` | `editor/tree-sitter-myla` from `grammar/myla.ebnf` |
@@ -269,6 +270,7 @@ The compiler itself: `build/stage3 <file.my> <stdlib-dir> [--target T] [-g] [--c
 | `wasm-page` | the playground page in Chromium (Playwright) |
 | `bootstrap` | `scripts/bootstrap.sh build`, `scripts/check-seed.sh build`, stage3 builds `examples/hello.my`; on a push to master uploads the seeds and the x86-64 `myla`/`myla-lsp` as artifacts (90 days) |
 | `bootstrap-arm64` | `just bootstrap` on arm64 (the aarch64 seed), check-seed, every example built vs interpreted, stress runs; on a push to master uploads the aarch64 `myla`/`myla-lsp` |
+| `windows-build`, `windows` | on Linux, `scripts/windows-runner.py build` (examples, stress programs, test_windows' programs, myla.exe, myla-lsp.exe for `x86_64-windows`); on `windows-latest`, `run` of them, and `myla.exe build` with the image's LLVM; on a push to master uploads `myla.exe`/`myla-lsp.exe` (MYLA-708) |
 | `vscode-extension` | typecheck, lint, tests (debugger against gdb), `.vsix` |
 | `website` | the website (`website/`, D208): `npm test`, `npm run build:pages` (play.wasm, content from the wiki, `lib/std` via `tools/doc` and `learn/`), `npm run check-course` (every exercise in play.wasm), `npm run e2e` (Playwright) |
 | `pages` | master only: the site plus the tools and the `.vsix` under `downloads/`, deployed to GitHub Pages |

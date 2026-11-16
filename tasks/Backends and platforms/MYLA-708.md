@@ -2,16 +2,54 @@
 id: MYLA-708
 title: "Windows step 9: a job on a Windows runner"
 type: feature
-status: todo
+status: review
 priority: medium
 labels: [platforms, windows]
 ---
 A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 2026-11-14 ([[Project/Follow-up-plan#windows-2026-11-14]]). D213: Wine isn't Windows; a `windows-latest` job runs what Wine can't prove, as `bootstrap-arm64` does for aarch64.
 
-- [ ] CI builds the programs on Linux for `x86_64-windows` and runs the examples, the stress programs and the console and process cases on the Windows runner
-- [ ] The x86-64 Windows `myla.exe` and `myla-lsp.exe` uploaded as artifacts on master (D207)
+- [x] CI builds the programs on Linux for `x86_64-windows` and runs the examples, the stress programs and the console and process cases on the Windows runner — built and run under Wine here; the run on `windows-latest` is the pull request's (see below)
+- [x] The x86-64 Windows `myla.exe` and `myla-lsp.exe` uploaded as artifacts on master (D207)
 
 ## What MYLA-702 couldn't check under Wine
 
 - A read of the standard input with a time limit (`Reader.ready(ms)`, std.platform's `poll_read`) asks a pipe how much it holds (`PeekNamedPipe`) until the limit. Under Wine the pipe a Linux parent hands over isn't a named pipe, so the call fails and the read is taken for ready (it then blocks): the limit is to be checked on the runner.
-- A frame larger than a page ([[MYLA-717]]): Wine maps the whole stack. `tests/burn/test_windows.py`'s `FramesOnWindows` (a recursion through a 64 KiB frame on the main thread and a worker) is skipped under Wine and runs where `sys.platform` is `win32`.
+- A frame larger than a page ([[MYLA-717]]): Wine maps the whole stack. `tests/burn/test_windows.py`'s `FramesOnWindows` (a recursion through a 64 KiB frame on the main thread and a worker) was skipped under Wine and meant to run where `sys.platform` is `win32`, where `CAN_BUILD_NATIVE` (x86-64 Linux) skipped it too: it ran nowhere. Its program is now `FRAMES`, run under Wine by `FramesOnWindows` and on Windows by the runner's `frames/64-kib`.
+
+## What changed
+
+- [[scripts/windows-runner.py]]: `build OUT` (Linux) builds for `x86_64-windows` 101 programs and writes `OUT/cases.json`, 144 cases, each a list of commands with what each must print on stdout and stderr and exit with; `run OUT` runs them on Windows, or with `--wine` under Wine, needing Python's standard library and `OUT` only (each case in a directory of its own under `OUT/work`, kept when it fails). The cases:
+  - `console/…` (13): test_windows' `HelloWorld` and `Workers` programs: hello, UTF-8 and `\n` as is with stderr (D215), an exit code, a runtime error with its position, the command line as Windows' C runtime splits it and the environment in UTF-8, the heap, lines of the standard input, files and directories, Windows' paths (the working directory and its drive as Windows names it: `@CWD@`, `@ANCHOR@`), tasks with a sleep and the clock, a stack overflow on the main thread and on a worker, `MYLA_THREADS=2` and `1` (the busy entry runs on for 3 s). `MORE_CONSOLE_CASES` is where [[MYLA-707]]'s go: `(name, source, steps)`, or with a fourth element, the reason Wine can't show it; a step may ask for `new_console` (`CREATE_NEW_CONSOLE`).
+  - `stdin/ready`: `Reader.ready(300)` on the script's own pipe, open and empty (false after 250 to 5,000 ms), then a line sent (true at once), the line read, the pipe closed (true at once), the end; a dialog, the script sending only after the program said what it saw. Windows only: under Wine `PeekNamedPipe` fails on a Linux parent's pipe. `stdin/ready-from-a-child`: the same with a Windows program as the parent, its pipe `CreatePipe`'s, which Wine shows too.
+  - `frames/64-kib` ([[MYLA-717]]): `FRAMES` on 2 workers (repeated), 1 and 16.
+  - `process/std-process`, `process/many-children`: test_windows' `CHILDREN` with `HELPER` and the batch file, `MYLA_B=kept` and the case's directory first on `PATH` (Wine: `WINEPATH`), against `CHILDREN_OUT`; `MANY_CHILDREN` (400 children) on 4 and 16 workers.
+  - `examples/…` and `interpreter/…` (42 each): each of `examples/*.my`, `examples/stdio` and `examples/modules` natively and through `myla.exe run`, against what `myla run` prints here (stdout, stderr and status, as bootstrap-arm64 compares).
+  - `stress/…` (39): the concurrency stress programs but t27 (whose children are Linux's `echo`; `process/many-children` is its ground) on 1, 4 and 16 workers, against `EXPECTED` and `EXPECTED_STDERR`, repeated.
+  - `tools/…`: `myla.exe run`, `check` (a type error, its message and status 1) and `test` (interpreted) against Linux's `myla`; `myla-lsp.exe` answering `initialize` and `shutdown`; `tools/myla-build`: `myla.exe build hello.my -o hello.exe` and without `-o` (`a.exe`), each run, and `myla.exe test t.my --native` (a harness whose cases are its children, `TMPDIR` the case's directory), needing clang, lld-link and llvm-dlltool on PATH or in `%ProgramFiles%\LLVM\bin`. The tools found are named with their versions; a missing one skips the case with its name (an annotation on the run's page).
+  - `--runs N` repeats the repeated steps (the stress programs, the frame); a summary goes to the job's page (`GITHUB_STEP_SUMMARY`).
+- [[.github/workflows/ci.yml]]: `windows-build` (ubuntu-24.04: clang, lld, llvm; the burn tests' `myla` from the `build/test-tools` cache, with the other jobs' key, or built from the seed; `windows-runner.py build`; the artifact `windows-bundle`, 3 days) and `windows` (windows-latest, after it: `windows-runner.py run windows-bundle --runs 3`; on failure the failed cases' directories as `windows-failed-cases`; on a push to master `myla.exe` and `myla-lsp.exe` as `myla-x86_64-windows-<sha>`, 90 days, after the run passed). The other jobs' steps are as they were.
+- [[tests/burn/test_windows.py]]: `FRAMES`/`FRAMES_OUT` at the module's level (the runner imports them, with `HELPER`, `CHILDREN`, `CHILDREN_OUT`, `MANY_CHILDREN`, `DEEP`, `BUSY_ENTRY`), and `FramesOnWindows` runs under Wine.
+- [[Development/Testing]] (the script, the two jobs), [[Architecture/Native-backend]], [[Language/Targets]], the `myla` skill's toolchain reference.
+
+## What only the Windows runner shows
+
+None of this has run on Windows yet: the pull request's run of the `windows` job is the first.
+
+- `frames/64-kib`: a frame past the guard page faults on Windows without [[MYLA-717]]'s probes, on the main thread (`/stack`) and on `CreateThread`'s stacks; Wine commits the whole stack.
+- `stdin/ready`: `PeekNamedPipe` on the pipe Python gives a child (Windows' anonymous pipes are named pipes); under Wine only the Windows parent's (`stdin/ready-from-a-child`) shows it.
+- `tools/myla-build`: `myla.exe` running clang, llvm-dlltool and lld-link on Windows (D211) and `myla.exe test --native`; under Wine the tools are Linux programs a Windows program can't wait for, so the case is skipped there. `windows-latest` is Windows Server 2025 (image 20261111.331.1) with LLVM 20.1.8 in `C:\Program Files\LLVM\bin` (its README); LLVM's Windows installer installs the toolchain tools, which include `llvm-dlltool` (`LLVM_TOOLCHAIN_TOOLS`, AddLLVM.cmake) and lld's `lld-link`, so the case should run there: the script names each tool's path and version first.
+- Windows' own `CreateProcessW`, `cmd`, PATH and PATHEXT, `TerminateProcess` and 400 children at once; the console's and the C runtime's splitting of a command line Python wrote (`list2cmdline`); a stack overflow's exception on a real guard page; `WaitOnAddress` and the workers on the runner's processors; a drive letter for the working directory.
+
+## Proposals
+
+1. **The Windows tools are published by the `windows` job, after its run passed** (built): `myla-x86_64-windows-<sha>`, a zip of `myla.exe` and `myla-lsp.exe` (an artifact's own; no tarball, as no executable bit is to be kept). Alternatives: from `windows-build`, as soon as they are built (as `bootstrap` publishes what it built and checked on its machine, but nothing would have run them), or a tarball as the Linux tools are. Proposed row: *"CI publishes each master commit's `myla.exe` and `myla-lsp.exe` as the artifact `myla-x86_64-windows-<sha>` (90 days) from the `windows` job, once they ran there: built on Linux by `windows-build` with the programs it runs (D207, D213, D214, [[MYLA-708]])."*
+2. **A missing LLVM tool on the runner skips `tools/myla-build` with an annotation** (built), as the task asked, rather than failing the job as `MYLA_REQUIRE_TARGETS` fails the Linux ones. Alternative: fail, since the image ships them (a later image without one would then turn the job red instead of yellow).
+3. **The stress programs 3 times on each worker count on Windows** (built, `--runs 3`), against bootstrap-arm64's 20: Windows' memory order is x86-64's, which the burn job's own runs cover; what is Windows' here is the threads, the parking and the poller. Alternative: 20, at about seven times the stress cases' share of the job.
+
+## Evidence
+
+- **Under Wine 9.0** (the script with Wine as the runner's stand-in, 2026-11-16, `ea0c30a` with this script, 4 cores at a load of about 12): `windows-runner.py build build/windows-bundle`: 101 of 101 programs built, 144 cases, in 17 s (16 MB). `run build/windows-bundle --wine`: 142 passed, 0 failed, 2 skipped (`stdin/ready`, `tools/myla-build`, each with its reason) in 39 s; with `--runs 3`, as CI runs it, the same in 60 s, of which `process/many-children`'s 800 children are about 20 s.
+- **The cases fail when they should**: with `stdin/ready` let run under Wine it fails as MYLA-702 found (`said 'empty true waited false', expected 'empty false waited true'`), while `stdin/ready-from-a-child`, a Windows parent's pipe, passes; with expectations changed in a copy of `cases.json` (stdout, an exit code, the 1-worker run expected to end, a reply the language server doesn't give) each case fails with what differs, and the run's status is 1.
+- **The job's time on Windows**: about 3 to 5 minutes for `windows` (the runner's start, the checkout, the 16 MB artifact, then the cases: 60 s here under Wine, more where each process start and a new program's scan by Defender cost more), after `windows-build`'s 2 to 4 (apt, the cached tools or a build from the seed, 17 s of builds); both run beside the other jobs, which take longer (burn, targets).
+- **The workflow**: parsed by PyYAML (10 jobs, `windows` needs `windows-build`), and checked against the workflow syntax's keys by a script of this session's (each job's and step's keys, `needs` naming jobs, one of `uses`/`run` a step, each action at one version, the expressions' contexts); actionlint couldn't be installed here. The other jobs' steps are unchanged (`git diff` of `ci.yml` removes only the header comment's last line, rewritten); `pages` downloads `myla-*-linux-<sha>`, which the Windows artifact doesn't match ([[MYLA-739]]).
+- **Suites**: `tests.burn.test_windows` 23 tests OK (`FramesOnWindows` now runs under Wine; `WindowsTools` skipped without `MYLA_REQUIRE_TARGETS`). `scripts/test-target.py x86_64-windows`: 37 of 38, `test_selfhost_codegen`'s `test_children_run_in_parallel` failing under a load of 7 (cpu 0.99 s, wall 0.81 s), passing alone; nothing it builds changed. `scripts/test.sh fast`: 977 tests OK (7 skipped). The bootstrap's fixed point (28,807,148 bytes) and `scripts/check-seed.sh` (both seeds bootstrap the sources): `selfhost/`, `lib/`, `tools/` and `bootstrap/` are BASE's, so Linux's, aarch64's and wasm32's assembly is BASE's.

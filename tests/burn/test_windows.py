@@ -8,7 +8,8 @@ as on Linux. What isn't there yet says so (D210): random bytes are
 `Unsupported`. MYLA-703: tasks run on `MYLA_THREADS` workers,
 threads of their own, and a stack overflow is reported as on Linux
 (`Workers`); MYLA-717: a frame of a page or more is probed (`StackProbes`,
-and `FramesOnWindows` on Windows itself, MYLA-708's runner).
+and `FramesOnWindows`, which Windows itself runs on MYLA-708's runner,
+`scripts/windows-runner.py`).
 
 Files, directories and paths (MYLA-704): std.fs over kernel32 in UTF-16,
 Windows' errors as Linux's causes where a program sees them, and std.path
@@ -26,7 +27,6 @@ import os
 import shutil
 import struct
 import subprocess
-import sys
 import tempfile
 import unittest
 
@@ -620,6 +620,15 @@ def big_frame_program(main: str) -> str:
     return "".join(out) + main
 
 
+# MYLA-717's recursion through the 64 KiB frame on the main thread, 100 deep,
+# and in two tasks, 60 deep each, with MYLA_THREADS=2, and what it prints
+# (`FramesOnWindows` under Wine, scripts/windows-runner.py on Windows, MYLA-708)
+FRAMES = big_frame_program("async fun work() -> int64 {\n    return down(60, 0)\n}\n\n"
+                           "async fun main() {\n    async let a = work()\n    async let b = work()\n"
+                           "    print(down(100, 0))\n    print(await a + await b)\n}\n")
+FRAMES_OUT = b"3836\n4632\n"
+
+
 def reserved_bytes(pid: int) -> int:
     """How much of the address space of the process `pid` is reserved with
     nothing behind it (Linux's `---p` mappings: under Wine, the reserved
@@ -854,25 +863,24 @@ class StackProbes(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-@unittest.skipUnless(sys.platform == "win32", "Wine commits a thread's whole stack, so a frame past its guard page "
-                     "works there anyway: MYLA-708's Windows runner runs this")
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
 class FramesOnWindows(unittest.TestCase):
-    """MYLA-717 on Windows itself: a recursion through a function with a
-    64 KiB frame, on the main thread and on a worker, whose stacks Windows
-    commits as they grow."""
+    """MYLA-717: a recursion through a function with a 64 KiB frame, on the
+    main thread and on a worker. Wine commits a thread's whole stack, so a
+    frame past its guard page works here anyway: this shows the program
+    right, and Windows itself, which commits a stack as it grows, runs it on
+    MYLA-708's runner (`scripts/windows-runner.py`'s `frames/64-kib`)."""
+
+    setUpClass = HelloWorld.setUpClass
+    setUp = HelloWorld.setUp
+    build = HelloWorld.build
+    run_exe = Workers.run_exe
 
     def test_a_recursion_through_a_64_kib_frame(self):
-        main = ("async fun work() -> int64 {\n    return down(60, 0)\n}\n\n"
-                "async fun main() {\n    async let a = work()\n    async let b = work()\n"
-                "    print(down(100, 0))\n    print(await a + await b)\n}\n")
-        with tempfile.TemporaryDirectory() as tmp:
-            with open(os.path.join(tmp, "main.my"), "w", encoding="utf-8") as fh:
-                fh.write(big_frame_program(main))
-            subprocess.run([selfhost_tool("main"), "build", "main.my", "--target", "x86_64-windows", "--stdlib",
-                            STDLIB_ROOT, "-o", "prog.exe"], cwd=tmp, check=True, timeout=300)
-            ran = subprocess.run([os.path.join(tmp, "prog.exe")], capture_output=True, timeout=120,
-                                 env=dict(os.environ, MYLA_THREADS="2"))
-        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"3836\n4632\n", b"", 0))
+        built = self.build(FRAMES)
+        self.assertEqual((built.stderr, built.returncode), ("", 0))
+        ran = self.run_exe(threads="2")
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (FRAMES_OUT, b"", 0))
 
 
 if __name__ == "__main__":

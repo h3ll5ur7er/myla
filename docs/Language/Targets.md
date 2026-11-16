@@ -7,7 +7,7 @@ What a Myla program can count on wherever it runs, and what depends on the targe
 | Linux on x86-64 | `x86_64-linux` | The machine: a static executable, no libc |
 | Linux on aarch64 | `aarch64-linux` | The machine (a Raspberry Pi 4 or 5 with a 64-bit OS, an ARM server): a static executable, no libc |
 | WebAssembly on WASI preview 1 | `wasm32-wasi` | Node: `node tools/wasm/run.mjs`, or a web page through `tools/wasm/myla.mjs` (D125). Node is the host the suites test (D158); another WASI preview 1 host such as wasmtime should run the programs too, but nothing checks it |
-| Windows on x86-64 | `x86_64-windows` | Windows: a static console `.exe` that imports only `kernel32.dll` (D212), cross-built on Linux (D214). The suites run it under Wine (D213); a Windows runner is [[MYLA-708]]. Its first step ([[MYLA-702]]) has the standard streams, the heap, the clocks, the arguments and the environment; the rest comes in steps and is `Unsupported` until then ([[MYLA-165]], D210, the last column below) |
+| Windows on x86-64 | `x86_64-windows` | Windows: a static console `.exe` that imports only `kernel32.dll` (D212), cross-built on Linux (D214). The suites run it under Wine (D213), and CI's `windows` job on Windows itself what Wine can't show ([[MYLA-708]]); on a push to master it publishes that commit's `myla.exe` and `myla-lsp.exe` (D207). Its first step ([[MYLA-702]]) has the standard streams, the heap, the clocks, the arguments and the environment; the rest comes in steps and is `Unsupported` until then ([[MYLA-165]], D210, the last column below) |
 
 [TOC]
 
