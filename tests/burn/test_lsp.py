@@ -713,9 +713,8 @@ class TestResolutionCorpus(unittest.TestCase):
         uses = [line.split()[1] for line in out.splitlines() if line.startswith("use ")]
         self.assertEqual(uses, ["2:4-5", "3:10-11"])
 
-    def test_the_corpus_resolves(self) -> None:
-        files = _corpus()
-        self.assertGreater(len(files), 50)
+    def _resolve(self, *files: str) -> dict[str, list[str]]:
+        """`lsp --resolve`'s lines for each of `files`."""
         out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", STDLIB_ROOT, "--resolve",
                               *files], capture_output=True, text=True, check=True).stdout
         sections = {}
@@ -724,48 +723,91 @@ class TestResolutionCorpus(unittest.TestCase):
                 current = sections.setdefault(line[5:], [])
             else:
                 current.append(line)
+        return sections
+
+    def _resolves(self, path: str, lines: list[str]) -> int:
+        """Checks `lsp --resolve`'s `lines` for `path`: each name the file
+        declares resolves where it is used bare, a local only after its
+        declaration, no position twice. A member (a field, a method) is used
+        bare only where it is one, never in a call: a field in a struct's
+        literal or pattern, a method nowhere (there is no implicit `self`),
+        so `format(…)` beside a field or method `format` is the builtin
+        (MYLA-710). How many uses it checked."""
+        self.assertNotIn("unparsed", lines)
+        declared, members, defs, uses = set(), set(), set(), set()
+        for line in lines:
+            parts = line.split()
+            l, rest = parts[1].split(":")
+            pos = (int(l), int(rest.split("-")[0]))
+            if parts[0] == "def":
+                (members if parts[2] in ("field", "method") else declared).add(parts[3])
+                defs.add(pos)
+            else:
+                self.assertNotIn(pos, uses, line)
+                uses.add(pos)
+                if parts[-1] not in ("global", "module", "field", "method", "variant"):
+                    self.assertEqual(parts[4], path, line)
+                    dl, dc = parts[5].split(":")
+                    # a bound may name a type parameter declared after
+                    # it in the same list, `<I: Iterator<T>, T>` (D171)
+                    if not (parts[-1] == "typeparam" and int(dl) == pos[0]):
+                        self.assertLess((int(dl), int(dc)), pos, line)
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        source_lines = text.splitlines()
+        known = defs | uses
+        resolved = 0
+        for lexeme, line, column, member in _identifiers(path):
+            if lexeme not in declared and lexeme not in members:
+                continue
+            if lexeme in ("int", "float"):
+                continue    # the type names that are identifiers, never resolved, also a method's name (`r.float()`, `sc.int()`)
+            if member:
+                continue    # a member, or an attribute's name
+            if not source_lines[line - 1][column - 1:].startswith(lexeme):
+                continue    # the lexer's own, as the `format` an f-string expands to (MYLA-299)
+            after = source_lines[line - 1][column - 1 + len(lexeme):].lstrip()
+            if lexeme not in declared and after.startswith("("):
+                continue    # a call, which no member is: a builtin's, as `format(…)` (MYLA-710)
+            prefix = source_lines[line - 1][:column - 1]
+            pos = (line - 1, len(prefix.encode("utf-16-le")) // 2)
+            self.assertIn(pos, known, f"{lexeme} at {line}:{column} is not resolved")
+            resolved += 1
+        return resolved
+
+    def test_the_corpus_resolves(self) -> None:
+        files = _corpus()
+        self.assertGreater(len(files), 50)
+        sections = self._resolve(*files)
         self.assertEqual(sorted(sections), files)
         resolved_total = 0
         for path in files:
             with self.subTest(file=os.path.relpath(path, _REPO)):
-                lines = sections[path]
-                self.assertNotIn("unparsed", lines)
-                declared, defs, uses = set(), set(), set()
-                for line in lines:
-                    parts = line.split()
-                    l, rest = parts[1].split(":")
-                    pos = (int(l), int(rest.split("-")[0]))
-                    if parts[0] == "def":
-                        declared.add(parts[3])
-                        defs.add(pos)
-                    else:
-                        self.assertNotIn(pos, uses, line)
-                        uses.add(pos)
-                        if parts[-1] != "global" and parts[-1] != "module":
-                            self.assertEqual(parts[4], path, line)
-                            dl, dc = parts[5].split(":")
-                            # a bound may name a type parameter declared after
-                            # it in the same list, `<I: Iterator<T>, T>` (D171)
-                            if not (parts[-1] == "typeparam" and int(dl) == pos[0]):
-                                self.assertLess((int(dl), int(dc)), pos, line)
-                with open(path, encoding="utf-8") as fh:
-                    text = fh.read()
-                source_lines = text.splitlines()
-                known = defs | uses
-                for lexeme, line, column, member in _identifiers(path):
-                    if lexeme not in declared:
-                        continue
-                    if lexeme in ("int", "float"):
-                        continue    # the type names that are identifiers, never resolved, also a method's name (`r.float()`, `sc.int()`)
-                    if member:
-                        continue    # a member, or an attribute's name
-                    if not source_lines[line - 1][column - 1:].startswith(lexeme):
-                        continue    # the lexer's own, as the `format` an f-string expands to (MYLA-299)
-                    prefix = source_lines[line - 1][:column - 1]
-                    pos = (line - 1, len(prefix.encode("utf-16-le")) // 2)
-                    self.assertIn(pos, known, f"{lexeme} at {line}:{column} is not resolved")
-                    resolved_total += 1
+                resolved_total += self._resolves(path, sections[path])
         self.assertGreater(resolved_total, 30000)
+
+    def test_a_member_is_no_global(self) -> None:
+        # a field and a method are their type's, not the file's: a call of
+        # the builtin `format` beside them is no use of either (MYLA-710:
+        # `--resolve` listed them as globals, and std files and
+        # selfhost/target.my wrote f-strings instead)
+        source = ("struct T { format: int }\n\nstruct U { n: int }\n\nimpl U {\n"
+                  "    fun format(self, spec: str) -> str { return format(\"{}\", self.n) }\n}\n\n"
+                  "enum E {\n    A(int)\n}\n\n"
+                  "fun f(n: int) -> str {\n    let t = T { format: n }\n    let e = E.A(n)\n"
+                  "    let k = match e { A(v) => v }\n    return format(\"{} {}\", t.format, k)\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "members.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            lines = self._resolve(path)[path]
+            defs = sorted(line for line in lines if line.startswith("def ") and line.split()[2] not in ("param", "local"))
+            self.assertEqual(defs, ["def 0:11-17 field format", "def 0:7-8 global T", "def 12:4-5 global f",
+                                    "def 2:11-12 field n", "def 2:7-8 global U", "def 5:8-14 method format",
+                                    "def 8:5-6 global E", "def 9:4-5 variant A"])
+            self.assertIn("use 13:16-22 format -> " + path + " 0:11 field", lines)    # the literal's field
+            self.assertIn("use 15:22-23 A -> " + path + " 9:4 variant", lines)        # the pattern's variant
+            self.assertEqual(self._resolves(path, lines), 24)
 
     def test_members_agree_with_the_checker(self) -> None:
         """Where the server resolves `x.f` or `x.m(…)` in an example, it is the

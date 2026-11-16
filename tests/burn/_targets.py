@@ -186,8 +186,6 @@ SKIP_PROGRAMS: dict[str, dict[str, str]] = {
     },
     "x86_64-windows": {
         "io_through_the_ir": "it runs Linux's /bin/echo, which a Windows program can't (MYLA-705)",
-        # its children are cat, sh and head (MYLA-705)
-        "std.process": _WIN_LINUX_TOOLS,
     },
 }
 

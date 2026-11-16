@@ -146,7 +146,7 @@ pub fun host() -> Target {
 // target builds since MYLA-702; a new one starts refused here.
 pub fun unsupported(t: Target) -> str {
     if t.supported { return "" }
-    return f"building for {t.name} is not supported yet"
+    return format("building for {} is not supported yet", t.name)
 }
 
 // The tools that build for `t` on a machine whose own target is `host`.
@@ -192,7 +192,7 @@ pub fun with_libs(words: [str], libs: [str]) -> [str] {
 // building for that target here needs.
 #test("clang", "aarch64-linux", "clang and ld.lld")["myla: 'clang' was not found: building for aarch64-linux here needs clang and ld.lld"]
 pub fun missing_tool(tool: str, target: str, needs: str) -> str {
-    return f"myla: '{tool}' was not found: building for {target} here needs {needs}"
+    return format("myla: '{}' was not found: building for {} here needs {}", tool, target, needs)
 }
 
 // Every target's name reads back as it, other words as none; every one

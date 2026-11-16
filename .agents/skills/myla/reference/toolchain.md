@@ -197,7 +197,7 @@ geo = { git = "https://example.org/geo.git", tag = "v1.2" }      # or branch = "
 | `MYLA_TIME=virtual` | `myla run` only | the interpreter's monotonic clock jumps to the next deadline when no task is ready (sleeps cost nothing); wall clock unaffected |
 | `MYLA_LOG` | `std.log` | `error`, `warn` (default, also for unknown values), `info`, `debug`, `off`; any case |
 | `MYLA_EMULATOR` | `myla test --target` | the command the harness and test programs run under (`node tools/wasm/run.mjs`) |
-| `MYLA_TEST_PROGRAM`, `MYLA_TEST_DIR`, `MYLA_TEST_EMULATOR` | set by `myla test` for harnesses | `test.program()`, the scratch root, the emulator for child cases |
+| `MYLA_TEST_PROGRAM`, `MYLA_TEST_DIR`, `MYLA_TEST_EMULATOR`, `MYLA_TEST_TOOL` | set by `myla test` for harnesses | `test.program()`, the scratch root, the emulator for child cases, the harness's own path for the test tool (`__test_tool()`: the child std.process's cases start, `<harness> --test-tool <step>…`, interpreted `myla --test-tool …`, MYLA-727) |
 | `TMPDIR` | `myla test`, `std.test` | scratch root (default `/tmp`; on Windows `%TEMP%`, std.fs's `temp_root`) |
 | `MYLA_OS`, `MYLA_ARCH`, `AS`, `LD`, `DLLTOOL`, `MYLA_RUN` | `scripts/host.sh` | bootstrap another machine's seed here (system `linux`/`windows`, arch, assembler and linker, Windows' llvm-dlltool, emulator to run stages under: `MYLA_OS=windows MYLA_RUN=wine64` for Windows' under Wine) |
 | `MYLA` | `scripts/build-page.sh` | the compiler to use (default `build/myla`) |

@@ -137,6 +137,9 @@ pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Opti
     sb.append(format("{} __myla_test_main() {{\n", fun_kw))
     sb.append("    let __cases = __myla_cases()\n")
     sb.append("    let __argv = __myla_args()\n")
+    // `--test-tool <step>…`: the child a case starts, which every target
+    // with processes has (`std.test`'s `tool_mode`, MYLA-727)
+    sb.append("    __myla_t.tool_mode(__argv)\n")
     sb.append("    let __k = __myla_t.case_index(__argv)\n")
     // the head of the records the run reads (D191), with the runtime too
     sb.append("    let __head = __myla_t.reporting(__argv)\n")
