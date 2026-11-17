@@ -1,17 +1,16 @@
-// An agentic AI harness: Claude works on a directory with three tools,
-// through the Messages API's tool-use loop.
+// An agentic AI harness: a model works on a directory with three tools, in
+// a loop: it asks for a tool, the harness runs it and sends the result
+// back, until the model answers without one.
 //
 //   myla run examples/agent.my "Summarise the notes into summary.md" notes/
 //
-// sends the task to Claude (ANTHROPIC_API_KEY), runs each tool it asks for
-// inside the directory, sends the results back, and repeats until it is
-// done. ANTHROPIC_BASE_URL=http://localhost:8080 talks to a model served
-// locally that speaks the Messages API instead (AGENT_MODEL names it; no
-// key needed). std.http speaks plain HTTP only, so an https URL goes
-// through curl until std has TLS (roadmap #40). Without a task it runs offline:
-// a scripted stand-in for the API on a local port (`mock_reply`) plays one
-// conversation, so the whole loop runs and is checked by the example tests.
-import std.bytes as bytes
+// It talks to a model served on your network with the OpenAI-style chat
+// completions API (vLLM, llama.cpp's server, Ollama, ...), configured by the
+// constants below. vLLM calls tools only when started with
+// `--enable-auto-tool-choice --tool-call-parser <the model's parser>`.
+// Without a task it runs offline: a scripted stand-in for the server on a
+// local port (`mock_reply`) plays one conversation, so the whole loop runs
+// and is checked by the example tests.
 import std.fs as fs
 import std.http as http
 import std.json as json
@@ -20,16 +19,18 @@ import std.process as process
 from std.http import Request
 from std.json import Json
 
-const MODEL: str = "claude-opus-5-5"
-const ANTHROPIC: str = "https://api.anthropic.com"
-const API_VERSION: str = "2026-10-21"
-// on a refusal, Anthropic's API answers with a fallback model in the same
-// call; a local server wouldn't know the field, so it gets neither
-const FALLBACK_BETA: str = "server-side-fallback-2026-07-01"
+// Where the model is. std.http speaks plain HTTP; the host's name goes
+// through /etc/hosts and DNS (without search domains), so an IP always works.
+const SERVER: str = "http://jarvis:9293"
+const MODEL: str = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+// the server's --api-key, if it has one
+const API_KEY: str = ""
+// what one reply may take of the model's 32,768-token context
+const MAX_TOKENS: int = 4096
 const MAX_TURNS: int = 20
 const SYSTEM: str = "You work in a directory through the tools. Paths are relative to it. When the task is done, say in one sentence what you did."
 
-// A tool call from Claude: its input is JSON text.
+// A tool call: its arguments are JSON text, as the model wrote them.
 #derive(Eq)
 struct Call {
     id: str,
@@ -37,20 +38,20 @@ struct Call {
     input: str,
 }
 
-// One reply: why it stopped, its text, its tool calls, and its content as
-// JSON text, sent back unchanged in the next request.
+// One reply: its text, its tool calls, why it ended, and the message that
+// goes back into the conversation.
 #derive(Eq)
 struct Turn {
-    stop: str,
     text: str,
     calls: [Call],
-    content: str,
+    finish: str,
+    message: str,
 }
 
 // --- the tools ---------------------------------------------------------------
 
 // A tool whose parameters are all required strings.
-#test("read_file", "Read a file.", ["path"])["{\"name\":\"read_file\",\"description\":\"Read a file.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}"]
+#test("read_file", "Read a file.", ["path"])["{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Read a file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}"]
 fun tool(name: str, description: str, params: [str]) -> str {
     let props = params.map((p: str) => (p, json.obj([("type", json.text("string"))])))
     let schema = json.obj([
@@ -58,10 +59,11 @@ fun tool(name: str, description: str, params: [str]) -> str {
         ("properties", json.obj(props)),
         ("required", json.arr(params.map((p: str) => json.text(p)))),
     ])
-    return json.to_string(json.obj([("name", json.text(name)), ("description", json.text(description)), ("input_schema", schema)]))
+    let function = json.obj([("name", json.text(name)), ("description", json.text(description)), ("parameters", schema)])
+    return json.to_string(json.obj([("type", json.text("function")), ("function", function)]))
 }
 
-#test()[["{\"name\":\"list_files\",\"description\":\"List the names in a directory of the workspace; directories end with /.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}", "{\"name\":\"read_file\",\"description\":\"Read a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}", "{\"name\":\"write_file\",\"description\":\"Create or replace a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}"]]
+#test()[["{\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"description\":\"List the names in a directory of the workspace; directories end with /.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}", "{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Read a text file of the workspace.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}", "{\"type\":\"function\",\"function\":{\"name\":\"write_file\",\"description\":\"Create or replace a text file of the workspace.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}}"]]
 fun tools() -> [str] {
     return [
         tool("list_files", "List the names in a directory of the workspace; directories end with /.", ["path"]),
@@ -89,21 +91,21 @@ fun inside(root: str, path: str) -> Result<str, str> {
 // A string argument of a call.
 #test("{\"path\": \"a.txt\"}", "path")[Ok("a.txt")]
 #test("{}", "path")[Err("missing 'path'")]
-#test("nope", "path")[Err("the input isn't JSON")]
+#test("nope", "path")[Err("the arguments aren't JSON")]
 fun arg(input: str, name: str) -> Result<str, str> {
     let j = match json.parse(input) {
         Ok(j) => j
         Err(e) => {
-            return Err("the input isn't JSON")
+            return Err("the arguments aren't JSON")
         }
     }
     return json.field(j, name).and_then((v: Json) => v.as_str()).ok_or(f"missing '{name}'")
 }
 
 // What a tool call gives back, and whether it failed.
-#test("/no/such/dir", Call { id: "t1", name: "read_file", input: "{\"path\": \"a.txt\"}" })[("not found (NotFound)", true)]
-#test("/w", Call { id: "t2", name: "write_file", input: "{\"path\": \"../x\", \"content\": \"\"}" })[("'../x' is outside the workspace", true)]
-#test("/w", Call { id: "t3", name: "delete_everything", input: "{}" })[("there is no tool 'delete_everything'", true)]
+#test("/no/such/dir", Call { id: "c1", name: "read_file", input: "{\"path\": \"a.txt\"}" })[("not found (NotFound)", true)]
+#test("/w", Call { id: "c2", name: "write_file", input: "{\"path\": \"../x\", \"content\": \"\"}" })[("'../x' is outside the workspace", true)]
+#test("/w", Call { id: "c3", name: "delete_everything", input: "{}" })[("there is no tool 'delete_everything'", true)]
 fun run_tool(root: str, call: Call) -> (str, bool) {
     let result = match call.name {
         "list_files" => list_files(root, call.input)
@@ -139,53 +141,39 @@ fun write_file(root: str, input: str) -> Result<str, str> {
     return Ok(f"wrote {content.len()} bytes")
 }
 
-// --- the Messages API ---------------------------------------------------------
+// --- the chat completions API --------------------------------------------------
 
-#test("Hi")["{\"role\":\"user\",\"content\":\"Hi\"}"]
-fun user_message(text: str) -> str {
-    return json.to_string(json.obj([("role", json.text("user")), ("content", json.text(text))]))
+#test("user", "Hi")["{\"role\":\"user\",\"content\":\"Hi\"}"]
+fun message(role: str, text: str) -> str {
+    return json.to_string(json.obj([("role", json.text(role)), ("content", json.text(text))]))
 }
 
-#test("[{\"type\":\"text\",\"text\":\"Hello\"}]")["{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}"]
-fun assistant_message(content: str) -> str {
-    return json.to_string(json.obj([("role", json.text("assistant")), ("content", json.parse(content).unwrap_or(Json.Null))]))
-}
-
-// The results of a turn's calls, all in one user message.
-#test([Call { id: "t1", name: "read_file", input: "{}" }], [("missing 'path'", true)])["{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"missing 'path'\",\"is_error\":true}]}"]
-fun results_message(calls: [Call], results: [(str, bool)]) -> str {
-    var blocks: [Json] = []
-    for (call, result) in calls.zip(results) {
-        blocks.push(json.obj([
-            ("type", json.text("tool_result")),
-            ("tool_use_id", json.text(call.id)),
-            ("content", json.text(result.0)),
-            ("is_error", Json.Bool(result.1)),
-        ]))
-    }
-    return json.to_string(json.obj([("role", json.text("user")), ("content", json.arr(blocks))]))
+// A tool's result, as the message that answers its call.
+#test("c1", ("missing 'path'", true))["{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"error: missing 'path'\"}"]
+#test("c2", ("hello", false))["{\"role\":\"tool\",\"tool_call_id\":\"c2\",\"content\":\"hello\"}"]
+fun tool_message(id: str, result: (str, bool)) -> str {
+    let content = if result.1 { "error: " + result.0 } else { result.0 }
+    return json.to_string(json.obj([("role", json.text("tool")), ("tool_call_id", json.text(id)), ("content", json.text(content))]))
 }
 
 // The request: the model, the tools and the whole conversation so far.
-#test("claude-opus-5-5", true, ["{\"role\":\"user\",\"content\":\"Hi\"}"])["{\"model\":\"claude-opus-5-5\",\"max_tokens\":16000,\"system\":\"You work in a directory through the tools. Paths are relative to it. When the task is done, say in one sentence what you did.\",\"tools\":[{\"name\":\"list_files\",\"description\":\"List the names in a directory of the workspace; directories end with /.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"name\":\"read_file\",\"description\":\"Read a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"name\":\"write_file\",\"description\":\"Create or replace a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}],\"fallbacks\":\"default\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}"]
-#test("llama3", false, ["{\"role\":\"user\",\"content\":\"Hi\"}"])["{\"model\":\"llama3\",\"max_tokens\":16000,\"system\":\"You work in a directory through the tools. Paths are relative to it. When the task is done, say in one sentence what you did.\",\"tools\":[{\"name\":\"list_files\",\"description\":\"List the names in a directory of the workspace; directories end with /.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"name\":\"read_file\",\"description\":\"Read a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"name\":\"write_file\",\"description\":\"Create or replace a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}],\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}"]
-fun request_body(model: str, fallbacks: bool, messages: [str]) -> str {
-    var fields = [
+#test("m", ["{\"role\":\"user\",\"content\":\"Hi\"}"])["{\"model\":\"m\",\"max_tokens\":4096,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"description\":\"List the names in a directory of the workspace; directories end with /.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Read a text file of the workspace.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"write_file\",\"description\":\"Create or replace a text file of the workspace.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}}],\"tool_choice\":\"auto\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}"]
+fun request_body(model: str, messages: [str]) -> str {
+    return json.to_string(json.obj([
         ("model", json.text(model)),
-        ("max_tokens", Json.Int(16000)),
-        ("system", json.text(SYSTEM)),
+        ("max_tokens", Json.Int(MAX_TOKENS as int64)),
         ("tools", json.arr(tools().map((t: str) => json.parse(t).unwrap_or(Json.Null)))),
-    ]
-    if fallbacks {
-        fields.push(("fallbacks", json.text("default")))
-    }
-    fields.push(("messages", json.arr(messages.map((m: str) => json.parse(m).unwrap_or(Json.Null)))))
-    return json.to_string(json.obj(fields))
+        ("tool_choice", json.text("auto")),
+        ("messages", json.arr(messages.map((m: str) => json.parse(m).unwrap_or(Json.Null)))),
+    ]))
 }
 
-// A reply read: its stop reason, text and tool calls, or the API's error.
-#test("{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"text\",\"text\":\"Looking.\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"list_files\",\"input\":{\"path\":\".\"}}]}")[Ok(Turn { stop: "tool_use", text: "Looking.", calls: [Call { id: "t1", name: "list_files", input: "{\"path\":\".\"}" }], content: "[{\"type\":\"text\",\"text\":\"Looking.\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"list_files\",\"input\":{\"path\":\".\"}}]" })]
-#test("{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}")[Err("authentication_error: invalid x-api-key")]
+// A reply read: its text, tool calls and finish reason, or the server's
+// error (OpenAI's `{"error": {...}}` or vLLM's `{"object": "error", ...}`).
+#test("{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"role\":\"assistant\",\"content\":\"Looking.\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\": \\\".\\\"}\"}}]}}]}")[Ok(Turn { text: "Looking.", calls: [Call { id: "c1", name: "list_files", input: "{\"path\": \".\"}" }], finish: "tool_calls", message: "{\"role\":\"assistant\",\"content\":\"Looking.\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\": \\\".\\\"}\"}}]}" })]
+#test("{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"Done.\"}}]}")[Ok(Turn { text: "Done.", calls: [], finish: "stop", message: "{\"role\":\"assistant\",\"content\":\"Done.\"}" })]
+#test("{\"object\":\"error\",\"message\":\"\\\"auto\\\" tool choice requires --enable-auto-tool-choice\",\"code\":400}")[Err("the server says: \"auto\" tool choice requires --enable-auto-tool-choice")]
+#test("{\"error\":{\"message\":\"model not found\"}}")[Err("the server says: model not found")]
 #test("<html>")[Err("not a JSON reply: 1:1: Expecting value")]
 fun read_turn(text: str) -> Result<Turn, str> {
     let j = match json.parse(text) {
@@ -194,85 +182,73 @@ fun read_turn(text: str) -> Result<Turn, str> {
             return Err(f"not a JSON reply: {e}")
         }
     }
-    let s = (path: str) => json.at(j, path).and_then((v: Json) => v.as_str()).unwrap_or("")
-    if s("type") == "error" {
-        return Err(f"{s("error.type")}: {s("error.message")}")
+    let s = (v: Json, path: str) => json.at(v, path).and_then((x: Json) => x.as_str()).unwrap_or("")
+    let problem = if s(j, "object") == "error" { s(j, "message") } else { s(j, "error.message") }
+    if problem != "" {
+        return Err(f"the server says: {problem}")
     }
-    let blocks = json.at(j, "content").and_then((v: Json) => v.as_list()).unwrap_or([])
-    var text_out: [str] = []
+    let Some(msg) = json.at(j, "choices[0].message") else {
+        return Err("a reply without a message")
+    }
+    let raw = json.field(msg, "tool_calls").and_then((v: Json) => v.as_list()).unwrap_or([])
     var calls: [Call] = []
-    for b in blocks {
-        let field = (name: str) => json.field(b, name).and_then((v: Json) => v.as_str()).unwrap_or("")
-        match field("type") {
-            "text" => text_out.push(field("text"))
-            "tool_use" => calls.push(Call { id: field("id"), name: field("name"), input: json.to_string(json.field(b, "input").unwrap_or(json.obj([]))) })
-            _ => {}
-        }
+    for c in raw {
+        // the arguments are a JSON string, though some servers send an object
+        let args = json.at(c, "function.arguments").unwrap_or(json.obj([]))
+        let input = args.as_str().unwrap_or(json.to_string(args))
+        calls.push(Call { id: s(c, "id"), name: s(c, "function.name"), input: input })
     }
-    return Ok(Turn { stop: s("stop_reason"), text: text_out.join("\n"), calls: calls, content: json.to_string(Json.Array(blocks)) })
+    let text = s(msg, "content")
+    var back = [("role", json.text("assistant")), ("content", json.text(text))]
+    if raw.len() > 0 {
+        back.push(("tool_calls", Json.Array(raw)))
+    }
+    return Ok(Turn { text: text, calls: calls, finish: s(j, "choices[0].finish_reason"), message: json.to_string(json.obj(back)) })
 }
 
-// One request, to a plain-HTTP host with std.http, otherwise through curl
-// (TLS); the key goes in a header file, never in the command line.
-async fun post(base: str, key: str, body: str) -> Result<str, str> {
-    let url = f"{base}/v1/messages"
-    if base.starts_with("http://") {
-        let req = (http.request("POST", url)
-            .with_header("content-type", "application/json")
-            .with_header("x-api-key", key)
-            .with_header("anthropic-version", API_VERSION)
-            .with_body(body))
-        return match await http.send_async(req) {
-            Ok(resp) => Ok(resp.text())
-            Err(e) => Err(f"{e}")
-        }
+// What a reply says, without the reasoning a model like Qwen3 writes
+// first between <think> tags (when the server doesn't take it out).
+#test("<think>Hmm.</think>\n\nDone.")["Done."]
+#test("Done.")["Done."]
+fun visible(text: str) -> str {
+    let parts = text.split("</think>")
+    return parts[^1].trim()
+}
+
+// One request to the server.
+async fun post(server: str, body: str) -> Result<str, str> {
+    var req = http.request("POST", f"{server}/v1/chat/completions").with_header("content-type", "application/json").with_body(body)
+    if API_KEY != "" {
+        req = req.with_header("authorization", f"Bearer {API_KEY}")
     }
-    let (path, f) = fs.make_temp_file().map_err((e: fs.IoError) => f"{e}")?
-    var file = f
-    let closed = file.close()
-    let beta = if base == ANTHROPIC { f"anthropic-beta: {FALLBACK_BETA}\n" } else { "" }
-    let headers = f"content-type: application/json\nx-api-key: {key}\nanthropic-version: {API_VERSION}\n{beta}"
-    fs.write_to_file(path, headers).map_err((e: fs.IoError) => f"{e}")?
-    let out = await process.command("curl").args(["-sS", "-X", "POST", url, "-H", f"@{path}", "--data-binary", "@-"]).stdin(body).output_async()
-    let removed = fs.remove_file(path)
-    return match out {
-        Ok(o) => if o.status == process.ExitStatus.Exited(0) { Ok(bytes.to_str(o.stdout)) } else { Err(bytes.to_str(o.stderr).trim()) }
-        Err(e) => Err(f"curl: {e}")
+    return match await http.send_async(req) {
+        Ok(resp) => if resp.is_success() || json.parse(resp.text()).is_ok() { Ok(resp.text()) } else { Err(f"HTTP {resp.status} {resp.reason}") }
+        Err(e) => Err(f"{server}: {e}")
     }
 }
 
-// The loop: ask, run the tools Claude asks for, answer, until it's done.
-async fun run_agent(base: str, key: str, model: str, root: str, task: str) -> Result<str, str> {
-    var messages = [user_message(task)]
+// The loop: ask, run the tools the model asks for, answer, until it
+// answers without a tool call.
+async fun run_agent(server: str, model: str, root: str, task: str) -> Result<str, str> {
+    var messages = [message("system", SYSTEM), message("user", task)]
     for n in 0..MAX_TURNS {
-        let reply = await post(base, key, request_body(model, base == ANTHROPIC, messages))
+        let reply = await post(server, request_body(model, messages))
         let turn = read_turn(reply?)?
-        messages.push(assistant_message(turn.content))
-        if turn.text != "" {
-            print(f"claude: {turn.text}")
+        messages.push(turn.message)
+        let said = visible(turn.text)
+        if said != "" {
+            print(f"model: {said}")
         }
-        match turn.stop {
-            "tool_use" => {
-                var results: [(str, bool)] = []
-                for call in turn.calls {
-                    let r = run_tool(root, call)
-                    print(f"  {call.name} {call.input} -> {summary(r)}")
-                    results.push(r)
-                }
-                messages.push(results_message(turn.calls, results))
+        if turn.calls.len() == 0 {
+            if turn.finish == "length" {
+                return Err(f"the reply was cut off at {MAX_TOKENS} tokens")
             }
-            "end_turn" => {
-                return Ok(turn.text)
-            }
-            "refusal" => {
-                return Err("Claude declined the task")
-            }
-            "max_tokens" => {
-                return Err("the reply was cut off at max_tokens")
-            }
-            _ => {
-                return Err(f"stopped: {turn.stop}")
-            }
+            return Ok(said)
+        }
+        for call in turn.calls {
+            let r = run_tool(root, call)
+            print(f"  {call.name} {call.input} -> {summary(r)}")
+            messages.push(tool_message(call.id, r))
         }
     }
     return Err(f"no answer after {MAX_TURNS} turns")
@@ -291,34 +267,52 @@ fun summary(r: (str, bool)) -> str {
     return if lines > 1 { f"{lines} lines" } else { out }
 }
 
-// --- offline: a stand-in for the API ------------------------------------------
+// --- offline: a stand-in for the server ---------------------------------------
 
-// The reply the mock API gives: it plays one conversation, by how many
-// messages the request has, and builds the summary from the results it got.
-#test("{\"messages\":[{\"role\":\"user\",\"content\":\"Go\"}]}")["{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"text\",\"text\":\"Let me look at the notes.\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"list_files\",\"input\":{\"path\":\".\"}}]}"]
-#test("{}")["{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"unexpected request\"}}"]
+// The reply the stand-in gives: it plays one conversation, by how many
+// answers the model has given so far, and builds the summary from the tool
+// results it got.
+#test("{\"messages\":[{\"role\":\"user\",\"content\":\"Go\"}]}")["{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"role\":\"assistant\",\"content\":\"<think>A summary of notes: first see what there is.</think>\\n\\nLet me look at the notes.\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}}]}}]}"]
+#test("{\"messages\":[{\"role\":\"assistant\",\"content\":\"\"},{\"role\":\"assistant\",\"content\":\"\"},{\"role\":\"assistant\",\"content\":\"\"},{\"role\":\"assistant\",\"content\":\"\"}]}")["{\"object\":\"error\",\"message\":\"unexpected request\",\"code\":400}"]
 fun mock_reply(request: str) -> str {
     let j = json.parse(request).unwrap_or(Json.Null)
     let messages = json.at(j, "messages").and_then((v: Json) => v.as_list()).unwrap_or([])
-    let say = (text: str) => json.obj([("type", json.text("text")), ("text", json.text(text))])
-    let call = (id: str, name: str, input: [(str, Json)]) => json.obj([("type", json.text("tool_use")), ("id", json.text(id)), ("name", json.text(name)), ("input", json.obj(input))])
-    let reply = (stop: str, content: [Json]) => json.to_string(json.obj([("stop_reason", json.text(stop)), ("content", json.arr(content))]))
-    let result = (i: int) => json.at(j, f"messages[{messages.len() - 1}].content[{i}].content").and_then((v: Json) => v.as_str()).unwrap_or("")
-    return match messages.len() {
-        1 => reply("tool_use", [say("Let me look at the notes."), call("t1", "list_files", [("path", json.text("."))])])
-        3 => {
-            let names = result(0).lines().filter((n: str) => n.ends_with(".txt"))
-            let calls = names.enumerate().map((p: (int, str)) => call(f"t{p.0 + 2}", "read_file", [("path", json.text(p.1))]))
-            reply("tool_use", calls)
+    let role = (m: Json) => json.field(m, "role").and_then((v: Json) => v.as_str()).unwrap_or("")
+    let answered = messages.count((m: Json) => role(m) == "assistant")
+    // the contents of the tool messages since the model's last answer
+    var results: [str] = []
+    for m in messages {
+        if role(m) == "assistant" {
+            results = []
+        } else if role(m) == "tool" {
+            results.push(json.field(m, "content").and_then((v: Json) => v.as_str()).unwrap_or(""))
         }
-        5 => {
-            let parts = json.at(j, "messages[4].content").and_then((v: Json) => v.as_list()).unwrap_or([])
-            let firsts = parts.map((b: Json) => "- " + json.field(b, "content").and_then((v: Json) => v.as_str()).unwrap_or("").lines()[0])
-            let content = "# Summary\n\n" + firsts.join("\n") + "\n"
-            reply("tool_use", [say("Writing the summary."), call("t9", "write_file", [("path", json.text("summary.md")), ("content", json.text(content))])])
+    }
+    let call = (id: str, name: str, args: [(str, Json)]) => json.obj([
+        ("id", json.text(id)),
+        ("type", json.text("function")),
+        ("function", json.obj([("name", json.text(name)), ("arguments", json.text(json.to_string(json.obj(args))))])),
+    ])
+    let reply = (text: str, calls: [Json]) => {
+        var msg = [("role", json.text("assistant")), ("content", json.text(text))]
+        if calls.len() > 0 {
+            msg.push(("tool_calls", json.arr(calls)))
         }
-        7 => reply("end_turn", [say(f"Done: summary.md has the first line of each note ({result(0)}).")])
-        _ => json.to_string(json.obj([("type", json.text("error")), ("error", json.obj([("type", json.text("invalid_request_error")), ("message", json.text("unexpected request"))]))]))
+        let finish = if calls.len() > 0 { "tool_calls" } else { "stop" }
+        return json.to_string(json.obj([("choices", json.arr([json.obj([("finish_reason", json.text(finish)), ("message", json.obj(msg))])]))]))
+    }
+    return match answered {
+        0 => reply("<think>A summary of notes: first see what there is.</think>\n\nLet me look at the notes.", [call("c1", "list_files", [("path", json.text("."))])])
+        1 => {
+            let names = results[0].lines().filter((n: str) => n.ends_with(".txt"))
+            reply("", names.enumerate().map((p: (int, str)) => call(f"c{p.0 + 2}", "read_file", [("path", json.text(p.1))])))
+        }
+        2 => {
+            let content = "# Summary\n\n" + results.map((r: str) => "- " + r.lines()[0]).join("\n") + "\n"
+            reply("Writing the summary.", [call("c9", "write_file", [("path", json.text("summary.md")), ("content", json.text(content))])])
+        }
+        3 => reply(f"Done: summary.md has the first line of each note ({results[0]}).", [])
+        _ => "{\"object\":\"error\",\"message\":\"unexpected request\",\"code\":400}"
     }
 }
 
@@ -331,7 +325,7 @@ async fun demo() -> Result<str, str> {
     var l = net.listen(net.addr(net.loopback(), 0)).map_err((e: fs.IoError) => f"{e}")?
     let port = l.local_addr().map_err((e: fs.IoError) => f"{e}")?.port
     async let server = http.serve_n(l, 4, (r: Request) => http.response(200, mock_reply(r.text())).with_header("content-type", "application/json"))
-    let answer = await run_agent(f"http://127.0.0.1:{port}", "demo", MODEL, root, "Summarise the notes into summary.md.")
+    let answer = await run_agent(f"http://127.0.0.1:{port}", MODEL, root, "Summarise the notes into summary.md.")
     let served = await server
     let closed = l.close()
     let written = fs.read_to_string(f"{root}/summary.md").unwrap_or("(nothing)")
@@ -351,22 +345,8 @@ async fun main() {
         }
         return
     }
-    let base = process.env("ANTHROPIC_BASE_URL").unwrap_or(ANTHROPIC)
-    let model = process.env("AGENT_MODEL").unwrap_or(MODEL)
-    // a local server usually takes any key
-    let key = match process.env("ANTHROPIC_API_KEY") {
-        Some(k) => k
-        None => {
-            if base == ANTHROPIC {
-                print("set ANTHROPIC_API_KEY first")
-                process.exit(2)
-                return
-            }
-            "local"
-        }
-    }
     let root = if argv.len() > 2 { argv[2] } else { "." }
-    match await run_agent(base, key, model, root, argv[1]) {
+    match await run_agent(SERVER, MODEL, root, argv[1]) {
         Ok(a) => print("done")
         Err(e) => {
             print(f"failed: {e}")
