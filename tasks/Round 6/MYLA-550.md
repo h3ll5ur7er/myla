@@ -2,7 +2,7 @@
 id: MYLA-550
 title: "R8 The library's D184 second pass: YAML's hex scalars, a buffered seek, bigint's bit length, zip's output limit"
 type: bug
-status: review
+status: done
 priority: high
 labels: [std, yaml, io, bigint, archive, round-6]
 ---
@@ -55,3 +55,5 @@ Each item's test failed before the change and passes after:
 - The review's extreme-argument generator (`repro-r5/std/gen.py`, groups `seq` and `cont`, 6,184 calls on `myla run`, a plain and a `--checked` build): no raw index error, overflow or signal is left in `std.bigint`, `std.io`, `std.unionfind` or the dense graph searches; what still differs there is a count of 2^30 and more, which the interpreter times out on and native code runs (`bigint.shl`) or is out of memory for (`bfs_dense(1073741823, 0)`), as `list.filled` of the same size.
 - `scripts/test.sh fast`, then `test_std_modules`, `test_lsp`, `test_doc_blocks`, `test_overflow` (217 tests OK), then `scripts/test.sh` once: 1,549 tests, 3 failures. `test_embedded_std` and `test_installed`'s language-server case expect `selfhost/embedded_std.my`, which is behind `lib/` until the integrator's seed commit; `test_children_run_in_parallel` passes alone (load: the machine is shared by six lanes). `scripts/bootstrap.sh` on the result: byte-identical fixed point (24,059,779 bytes).
 - A new bug seen beside `read_exact`: a read of `n` bytes from a descriptor allocates `n` first, [[MYLA-572]] (the runtime lane's `rt.my`).
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

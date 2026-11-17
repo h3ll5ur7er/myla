@@ -2,7 +2,7 @@
 id: MYLA-394
 title: "D95's reentrancy warning misses a builtin mutator inside an expression"
 type: bug
-status: review
+status: done
 priority: low
 labels: [checker, concurrency, warnings]
 ---
@@ -55,3 +55,5 @@ Evidence:
 - Tests first, in `selfhost/checker.my` (`warnings_of`, five new cases): the `while` head and the `if` head with the `await` and the mutator (`[]` at `6e699ca`, one warning now), the same in a `let` (one warning), the re-check in a head and in a `let` (two warnings before, `[]` now), the change before the `await` in one value (one warning before, `[]` now). The ten D95 cases of rounds 4 and 5 pass unchanged, and `test_selfhost_checker`'s `FIELD_MUTATOR_WARNINGS`.
 - Reproducers: `bug2_d95_await_in_head.my`, 1 warning at the base (`as_statements`), 3 now (`in_while` at 10:53, `in_if` at 14:74, `as_statements`). `h2.my`: 2 at the base, both false (`head_rechecks` at 8:50, `let_rechecks` at 14:56); now 3, all true (`await_in_head`, `await_in_let`, `await_in_while`). `h1.my`: its 18 warnings W1 to W18 as before; `head_checks_and_changes`, a false positive at the base, is quiet, and `await_in_head` warns.
 - [[Language/Concurrency]] says that a statement is followed in the order it runs. Suites: [[MYLA-544]]'s evidence (one run for the lane).
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

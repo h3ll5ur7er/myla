@@ -2,7 +2,7 @@
 id: MYLA-705
 title: "Windows step 6: child processes"
 type: feature
-status: review
+status: todo
 priority: medium
 labels: [platforms, windows]
 ---
@@ -61,3 +61,4 @@ A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 20
   - `scripts/test-target.py x86_64-windows` (`-j 2`): 37 of 38 at `a67d61e`. test_platform_interface's behaviour probe, which runs on Windows since MYLA-704, still took Windows for a target without processes; `adf3d6f` fixes it; the whole run again at `adf3d6f`: 38 of 38.
   - The bootstrap reaches its fixed point (28,807,148 bytes); `scripts/check-seed.sh` passes (the seeds bootstrap the merged sources, the embedded library is current); `scripts/test.sh fast`: 977 tests, OK (8 skipped).
 
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.

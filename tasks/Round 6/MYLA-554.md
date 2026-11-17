@@ -2,7 +2,7 @@
 id: MYLA-554
 title: "R12 Documentation and the board after round 5"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [docs, board, round-6]
 ---
@@ -73,3 +73,5 @@ Base `2ceef83`; `build/myla` built there. The scratch programs are in this packa
 - **Links**: a scratch checker of `[[…]]` targets (task ids, page paths and titles, files) over the 49 Markdown files this package changed and over all of `docs/`: 5 broken before (`[[src/myla/…]]` in MYLA-19, 47, 50, 151, 187), 0 after; `docs/` 0 of 120 pages.
 - **Skill**: `cmp .agents/skills/myla/SKILL.md .claude/skills/myla/SKILL.md`: identical.
 - **Suites** (on this package's tip): `nice scripts/test.sh fast`: 895 tests, `OK (skipped=3)`, 636 s. `tests.burn.test_doc_blocks` (every `myla` block of the wiki, the `for` program of Statements among them, interpreted and natively) and `tests.burn.test_embedded_std`: 6 tests, OK. The repository has no link or skill test (`tests/burn/`, `scripts/`); the scratch link checker above stands in for one.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

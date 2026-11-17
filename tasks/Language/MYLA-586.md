@@ -2,7 +2,7 @@
 id: MYLA-586
 title: Floats are Hash; hashing a NaN is a runtime error
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, stdlib, checker]
 ---
@@ -25,3 +25,5 @@ The owner's decision D198 (2026-11-13), superseding D163's "floats aren't `Hash`
 - Tests: `tests/burn/test_float_keys.py` 2/2 (float, tuple, list, `Option`, `float32` and derived-struct keys, `-0.0`/`0.0` one key, alike interpreted, natively and as wasm32; a NaN key is `runtime error: cannot hash NaN` at `std/hash.my:167:32` in both). std.hash's cases 68/68 interpreted and `--native`; checker 1018/1018, interp 447/447, lower 150/150.
 - Docs: [[Language/Collections-and-strings]], [[Language/Standard-library/Hash]], [[Language/Methods-and-traits]], [[Development/Testing]], the skill.
 - What D163's refusal had pinned: the error-corpus files `type_derive_hash_float_field`, `type_map_key_float_tuple` and `type_tuple_hash_float` are valid programs now (each run interpreted and natively alike, the tuple's `hash` the same number in both) and are gone; `type_derive_generic_key_not_hash` keeps its point with an `Eq`-only struct instead of a float; the checker oracle's `unit_test_76` (a float key) is `SUPERSEDED` as "ok". `scripts/test.sh fast` showed those and nothing else; after: the error corpus, `test_std_modules`, `test_compiler_parity`, `test_selfhost_checker`, `test_implicit_imports`, `test_lazy_std` pass.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

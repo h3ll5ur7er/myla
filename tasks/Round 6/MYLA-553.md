@@ -2,7 +2,7 @@
 id: MYLA-553
 title: "R11 Small library gaps: `std.args`' spec checks, `iter()` on BitSet, Lru and Grid, the comments on import cost"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [std, args, containers, round-6]
 ---
@@ -42,3 +42,5 @@ A bad spec's panic pointed into `std/args.my` (`  --> <myla>/std/args.my:142:18`
 - **A parity program**, `iter_ldexp_and_padding_in_bulk` in `tests/burn/test_compiler_parity.py` (`PROGRAMS` and `PINNED`, with [[MYLA-580]] and [[MYLA-546]]): the three iterators, `ldexp`'s extremes and the long paddings, the same interpreted, natively, `--checked`, on aarch64 (qemu) and wasm32 (Node).
 - **The modules' cases**, `build/myla test lib/std/<m>.my --stdlib lib`, interpreted, `--native` (built checked), `--native --target aarch64-linux` and `--native --target wasm32-wasi`, all passing: args 58, bitset 77, cache 9, grid 29, list 24, encoding 95, math 55, fmt 38, num 191, str 169, digest 61; fs 50, net 98, archive 118, compress 155 (interpreted and native: their comments changed).
 - **Suites** (on the lane's tip, a shared machine at a load of 5 to 7): `scripts/test.sh fast`: `Ran 874 tests … FAILED (failures=1, skipped=3)`, the failure `test_embedded_std` (expected until the seed commit). `scripts/test.sh` (all, once): `Ran 1614 tests in 1960 s … FAILED (failures=2, skipped=342)`: `test_embedded_std` again and `test_selfhost_codegen.test_children_run_in_parallel` (cpu 1.13 s against wall 0.82 s; alone at a load of 5.75 it fails the same way, and nothing here touches the runtime or code generation). `tests.burn.test_generated_extremes` passes in it, the `ldexp` cases and the million characters of padding drawn again. `scripts/bootstrap.sh` after the checker's change: `byte-identical fixpoint reached (24225498 bytes)`; `selfhost/embedded_std.my` left as committed.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

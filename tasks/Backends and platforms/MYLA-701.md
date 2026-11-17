@@ -2,7 +2,7 @@
 id: MYLA-701
 title: "Windows step 2: the platform interface in Myla's terms"
 type: feature
-status: review
+status: done
 priority: high
 labels: [platforms, windows]
 ---
@@ -41,3 +41,5 @@ The same output as before, on every runner (2026-11-14, this branch):
 - What changed on purpose is what the primitives give, which programs don't see: `test_platform_primitives`, `test_term`'s and `test_net`'s primitive tests pin the cause codes (`-1 1` where `-1 2` was, kinds 1, 2, 3 where 32768, 16384, 40960 were, `__fstat`'s four words and `__path_stat`'s six).
 - `scripts/bootstrap.sh` from the committed seed: byte-identical fixpoint (27,995,236 bytes); no primitive changed its name or type, so no seed was staged.
 - `scripts/test.sh` (all): 1,708 tests, OK (366 skipped). `scripts/check-seed.sh`: the seed bootstraps these sources, the embedded library is current.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

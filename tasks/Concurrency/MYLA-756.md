@@ -2,7 +2,7 @@
 id: MYLA-756
 title: "std.http's server drops a parked connection at its idle time without looking whether its request came"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [http, concurrency]
 ---
@@ -23,3 +23,5 @@ Traced under Wine ([[MYLA-753]]): the client wrote its request at 4448675 ms, th
 - **Test first**: `test_http.TimeLimits.test_a_request_that_came_while_the_server_was_busy` (Python's sockets: a quiet connection parked with `idle_ms` 400, a request that holds the program's one worker 700 ms, the quiet one's request sent meanwhile) failed three runs of three before the change, natively (`b''`: the connection closed unread; the interpreter served it), and passed three of three after (2026-11-16).
 - **The suites**: `test_http`, `test_net` and `test_reactor_scaling` natively (39 tests, OK), with `--target aarch64-linux` and `x86_64-windows`; lib/std/http.my's cases 241/241.
 - **The program's failure path**, under Wine: `SOCKETS 20 3` without its helper: `child 2: program not found` (and 0, 1), `40 of 43 right`, exit 1, in a second; with its helper `250 of 250 right, http 20, echoed true` on 1 and 16 workers, nothing on stderr.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

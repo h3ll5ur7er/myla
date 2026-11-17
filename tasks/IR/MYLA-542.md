@@ -2,7 +2,7 @@
 id: MYLA-542
 title: "`self.f(self.g(k))` in a `var self` method copies the receiver for `f`"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [ir, optimisation]
 ---
@@ -55,3 +55,5 @@ impl S {
 - The compiler compiling the compiler of 6e699ca (the same input for both, cachegrind): the compiler of 6e699ca **10,122.8 M** instructions, this branch's **9,137.0 M** (−9.7 %); 9,173.3 M with the first change alone. Its output is smaller (23,962,277 → 23,917,530 bytes).
 - The benchmarks' code is unchanged, function by function ([[MYLA-543]]'s evidence); four examples got shorter (`std.num.f64_literal_bits` 248 → 244 instructions, `str.split` 18 → 5, `str.splitn` 245 → 238).
 - The review's generators `gen_h4.py` (1,905, 1,905 and 1,596 lines) and `gen_loc.py` (9 programs) and `gen_rd.py` (89 forms): the interpreter's output natively after both changes; `test_compiler_parity` (with H4's `keys_that_change_their_container`): OK.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

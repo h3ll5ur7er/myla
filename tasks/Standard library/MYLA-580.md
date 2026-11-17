@@ -2,7 +2,7 @@
 id: MYLA-580
 title: "math.ldexp takes |k| / 1023 steps: ldexp(1.5, 2147483647) runs 18 seconds interpreted"
 type: bug
-status: review
+status: done
 priority: low
 labels: [std, math, performance]
 ---
@@ -29,3 +29,5 @@ fun main() {
 - **After.** The same program, the same output byte for byte (`inf 0 -0` / `1e-323 8.98846567431158e307 inf` / `5e-324 1e-323 0` / `inf nan inf 0`), in 0.023 s. New cases of `ldexp`: the least subnormal to 2^1023, the greatest double to the least subnormal (the edges the clamp must not touch), and `(5e-324, 2147483647)` and `(1.797e308, -2^31)`, which ran 2.1 million steps each: `build/myla test lib/std/math.my --stdlib lib` 55/55, also `--native` (checked), `--target aarch64-linux` (qemu) and `--target wasm32-wasi` (Node).
 - **The burn test.** The `ldexp` entry of `SLOW` is gone from `tests/burn/test_generated_extremes.py`. The 24 `num` cases it held and the 30 `seq` cases of a million characters of padding ([[MYLA-546]]'s box, the next entry, also removed) run on all three runners in 10.3 s and 5.0 s, every answer the same, none near the 20 s limit (a scratch driver over `_gen_extreme` and `_differential`). `tests.burn.test_generated_extremes`: see [[MYLA-553]]'s evidence for the suites.
 - A parity program, `iter_ldexp_and_padding_in_bulk` in `tests/burn/test_compiler_parity.py` (with [[MYLA-553]] and [[MYLA-546]]), prints `inf -0 8.98846567431158e307 5e-324` interpreted, natively and `--checked`.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

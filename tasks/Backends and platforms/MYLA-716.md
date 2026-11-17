@@ -2,7 +2,7 @@
 id: MYLA-716
 title: "The platform interface in Myla's terms: what MYLA-701 left"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [platforms, windows, runtime, stdlib]
 ---
@@ -52,3 +52,5 @@ labels: [platforms, windows, runtime, stdlib]
 - **Assembly**: this branch changes every native program's runtime, so the three programs' assembly differs from BASE's on all three Linux-like targets, in exactly the error functions: std.rt's `errno_text` (its texts moved into `std$system_error$error_text`, new), std.platform's `cause` (two more errnos) and the string literals' labels after them (`examples/maps.my` on x86-64: 105,955 → 106,487 bytes; `selfhost/gen_main.my` 29,261,365 → 29,283,268, aarch64 44,732,747 → 44,757,659, wasm32 42,906,170 → 42,933,895; BASE's sources and this branch's, each built by this branch's `gen_tool`, whose code generation is BASE's).
 - **The bootstrap** reaches its byte-identical fixed point (29,282,111 bytes); no primitive, runtime variable or attribute was added, so **no `Stage:` commit**; `scripts/check-seed.sh`: the committed seed bootstraps these sources. The workflow parses (`yaml.safe_load`, 11 jobs).
 - **`scripts/test.sh`** (all, at `a8c073d`, 2026-11-16): 1,771 tests, OK (390 skipped), in 1,575 s.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

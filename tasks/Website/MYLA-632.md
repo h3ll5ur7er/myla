@@ -2,7 +2,7 @@
 id: MYLA-632
 title: "The API reference generated from lib/std by the real parser"
 type: feature
-status: review
+status: done
 priority: high
 labels: [website, docs, tooling]
 ---
@@ -16,3 +16,5 @@ labels: [website, docs, tooling]
 - `tools/doc/doc.my`: 15/15 cases interpreted and `--native` (comment lines, module headers, doc comments above attributes, multi-line `#test` cases, a small module end to end with a private type and its impl left out).
 - All 62 public modules in 0.5 s natively: 1424 declarations, 2576 members, 1 MB of JSON. 112 top-level declarations have no comment of their own (their module's header documents them); `zip_read`'s eight multi-line `#test` cases are found.
 - `tests/burn/test_website.py`'s `Reference`: every module documented, `Vec3`'s fields, `str.split` with its doc and examples. The language server's resolution corpus passes with `tools/doc` in it.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

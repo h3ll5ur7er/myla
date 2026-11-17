@@ -2,7 +2,7 @@
 id: MYLA-754
 title: "std.rt's spin locks never give their CPU up: more workers than CPUs convoy behind a preempted holder"
 type: bug
-status: review
+status: done
 priority: high
 labels: [concurrency, performance, windows]
 ---
@@ -15,7 +15,7 @@ So the busy phase of a program with tasks grows with the workers past the CPUs, 
 
 - [x] `take_lock` gives its CPU up after a bounded spin (as std.platform's `net_lock` does on Windows: 64 pauses, then the platform's `yield_cpu`)
 - [x] On every target, measured on Linux too (the change is for them as well: a lock holder can be preempted there by spinners just the same)
-- [ ] `SOCKETS` on 16 workers measured on CI's runner before and after (the next run of the `windows` job)
+- [x] ~~`SOCKETS` on 16 workers measured on CI's runner before and after~~ moved to [[MYLA-798]]
 
 ## What changed
 
@@ -32,3 +32,5 @@ So the busy phase of a program with tasks grows with the workers past the CPUs, 
 - **Under load** (8 or 12 runs at once beside 4 or 8 CPU burners, 16 workers, BASE `983fcc3`'s program and this branch's in turn, a hang a run past 60 s): 7 of 60 hung before, 0 of 60 after; 24 of 60 before, 0 of 60 after (with [[MYLA-756]]'s fix in too).
 - **Linux natively**, the same program: 4 workers 0.10 s and 0.09 to 0.11 s, 16 workers 0.12 to 0.15 s and 0.09 to 0.12 s, 32 workers 0.18 to 0.21 s (0.42 to 0.46 s of CPU) and 0.15 to 0.20 s (0.22 to 0.24 s of CPU), before and after.
 - **Assembly**: for `selfhost/gen_main.my`, `examples/maps.my` and `examples/concurrency.my`, on `x86_64-linux`, `aarch64-linux`, `wasm32-wasi` and `x86_64-windows`, the library of `911d95b` and this one (both compiled from the same path) differ in `yield_cpu`, `take_lock` and the std.rt functions it is inlined into (`actor_enter`, `actor_leave`, `cancel_after`, `exec_find`, `exec_poll`, `exec_push`, `exec_steal`, `exec_yield_push`, `handle_take`, `poll_events`, `task_cancel`, `task_end`, `timer_add`, `timers_fire`, `wait_fds`, `woken_later`), and otherwise only in numbers: the positions of std.rt's lines (it grew) and the names of two of the loader's lambdas, numbered by where they are; `examples/maps.my` (no tasks) in one position record only.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

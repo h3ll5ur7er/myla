@@ -2,7 +2,7 @@
 id: MYLA-744
 title: "Windows: std.signal's pipe looked at every millisecond while someone listens"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [platforms, windows, concurrency]
 ---
@@ -29,3 +29,5 @@ Suggested decision row: "**Windows' console control handler tells the poller of 
 - **Measured** (2026-11-16, 0adad44, Wine 9.0, this 4-CPU machine): a program whose only task awaits `signal.interrupted()`, 5 s waiting, built with BASE's library against this branch's: BASE's process 0.22, 0.23, 0.25 s of CPU and Wine's server 0.32, 0.29, 0.32 s on 1, 4 and 16 workers; this branch's 0.00 s and 0.01 s on each. Both took the Ctrl-C then (`got interrupt`).
 - **The cases**: `test_windows.Console` 11 OK (the storm of 10 Ctrl-Cs, `interrupted`, `readline`, `close`, ctrl while raw and listening, on 1, 4 and 16 workers where the case runs them); `test_windows` and `test_windows_runner` 50 OK (1 skipped); `lib/std/platform_windows.my`'s 159 cases interpreted. The runner's `terminal/*` cases are Windows' own (skipped under Wine, as before): not run here; CI's `windows` job runs them.
 - The suites of the lane's run are in [[MYLA-755]]'s evidence (one run for both).
+
+Signed off by [[Project/Review-2026-11-17]] (done).

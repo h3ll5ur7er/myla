@@ -2,7 +2,7 @@
 id: MYLA-709
 title: "Windows step 10: bootstrapping on Windows"
 type: feature
-status: review
+status: done
 priority: low
 labels: [platforms, windows]
 ---
@@ -38,3 +38,5 @@ A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 20
 - **Linux unchanged**: `scripts/bootstrap.sh` after the change, fixed point 29,237,053 bytes as at BASE, the same files in the build directory, and `stage3.s`, `gen_tool.s`, `embed.s`, `myla.s`, `myla-lsp.s` byte-identical to BASE's bootstrap; the aarch64 bootstrap emulated (`MYLA_ARCH=aarch64 AS=aarch64-linux-gnu-as LD=aarch64-linux-gnu-ld MYLA_RUN=qemu-aarch64`) reaches its fixed point (44,717,970 bytes). `scripts/check-seed.sh build` on Linux: the seed bootstraps the sources, exit 0. Nothing in `selfhost/`, `lib/` or `tools/` changed, so every target's assembly is BASE's (the compilers are byte-identical).
 - **Suites**: `scripts/test.sh fast` 1,002 tests OK (7 skipped); `tests.burn.test_windows` 42 tests OK (1 skipped: `WindowsTools` without `MYLA_REQUIRE_TARGETS`); `tests.burn.test_windows_runner` 6 OK; `scripts/windows-runner.py build` 108 programs, 160 cases; `run --wine --runs 3`: 148 passed, 0 failed, 12 skipped (what only Windows shows). The workflow parses with PyYAML (11 jobs, every step one of `uses`/`run`, every `needs` a job), and each of `bootstrap-windows`' scripts passes `bash -n`, as do the four scripts (shellcheck isn't installed here).
 - **What only the Windows runner can show**: Git Bash's `uname -s`; its argument conversion for clang, llvm-dlltool and lld-link (turned off) and for the stages (relative paths only); that `.gitattributes` gives LF under the image's `core.autocrlf=true` (the job's first check); `mktemp -d` under `/tmp` and `cp -R lib` in `seed_compile`; `cmp`, `wc`, `sha256sum` and `awk` from Git's MSYS2; `$GITHUB_PATH` with `C:\Program Files\LLVM\bin`; the stages' memory and time on Windows itself; and `myla.exe build` running the image's LLVM for the examples.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

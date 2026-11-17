@@ -2,7 +2,7 @@
 id: MYLA-727
 title: "std.process's own cases need POSIX tools: excused on Windows"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [platforms, windows, stdlib, testing]
 ---
@@ -42,3 +42,4 @@ Suggested decision rows:
 - **The other targets unchanged**: BASE's `stage3` (`478d656`'s `selfhost/gen_main.my` built here) and this branch's give byte-identical assembly for `selfhost/gen_main.my`, `examples/maps.my` and `examples/concurrency.my` on x86_64-linux, aarch64-linux, wasm32-wasi and x86_64-windows (this branch's library for both).
 - Filed [[MYLA-780]]: std.process's cases on Windows itself, by MYLA-708's runner.
 
+Signed off by [[Project/Review-2026-11-17]] (done).

@@ -2,7 +2,7 @@
 id: MYLA-633
 title: "The website's embedded editor and playground"
 type: feature
-status: review
+status: done
 priority: high
 labels: [website, editor, wasm]
 ---
@@ -20,3 +20,5 @@ A reusable `<myla-editor>` (D208): CodeMirror 6 with a Myla language mode (keywo
 - The Myla mode's tests (`myla-language.spec.ts`): keywords, types, functions, builtins, constants, numbers with suffixes and bases, chars, attributes, ranges, f-strings with nested strings, block comments over lines.
 - In Chromium (e2e): the hero's program prints `Life, the universe and everything: 42` in about 200 ms with the module loaded; a docs example matches its expected output; a playground link with the code in its fragment runs.
 - The playground: the repository's examples to pick, standard input, sharing by link, the draft kept in the browser.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

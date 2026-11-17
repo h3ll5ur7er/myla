@@ -2,7 +2,7 @@
 id: MYLA-548
 title: "R6 The runtime: a line limit, the poller's creation, `Signals`, a failure beside a blocked read, raw mode and signals"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [runtime, net, term, round-6]
 ---
@@ -83,3 +83,5 @@ Work package R6 of [[Project/Review-2026-11-12]]. Files: `lib/std/rt.my`, `lib/s
 - **Embedded library behind `lib/`**: with the routine named in every program with tasks, `scripts/test.sh fast` had 21 failures (`no function 'std$rt$tasks_waiting' to compile` in every tasked build without `--stdlib`: `test_benchmarks`, `test_packed_lists`, `test_register_args`, `test_installed`, `test_project_commands`); called where used, only `test_embedded_std` fails, as expected until the seed commit.
 - Follow-up suites: `scripts/test.sh` (1,656 tests, 342 skipped): `test_embedded_std` (expected) and `test_children_run_in_parallel` under load (OK alone); `scripts/test-target.py aarch64-linux` and `wasm32-wasi` for `test_term`, `test_net`, `test_stdio`, `test_process`: 4 of 4 each; `build/myla test lib/std/<m>.my --stdlib lib` for net (98), task (38), signal (11), io (35), term (102), process (48) interpreted and `--native`, net, task, signal and term on aarch64, task, signal and term on wasm32: all passed. The bootstrap reaches its fixed point after each commit that touches `selfhost/` or `lib/`, without a staged seed.
 - Suites at the end: `scripts/test.sh fast` (886 tests) and `scripts/test.sh` (1,626 tests, 342 skipped): the one failure `test_embedded_std`, as expected until the integrator's seed; `scripts/test-target.py aarch64-linux` and `wasm32-wasi` for `test_stdio`, `test_net` and `test_term`; the platform modules' own cases on their targets (23, 23, 19), which first found `__on_raw_signal` named wrongly when std.platform is the entry (fixed, `platform_fn`).
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

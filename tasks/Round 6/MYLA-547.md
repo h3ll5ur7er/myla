@@ -2,7 +2,7 @@
 id: MYLA-547
 title: "R5 The test harness: verdicts that still differ between runners"
 type: bug
-status: review
+status: todo
 priority: medium
 labels: [testing, harness, round-6]
 ---
@@ -54,3 +54,5 @@ Tests: `tests/burn/test_test_native.py` `_FRAMED` (the boxes in one file: the mu
 Suites (at `cf963fa`, the bootstrap at its byte-identical fixed point): `scripts/test.sh fast` 877 tests, 2 failures, both the expected ones before the seed commit (`test_embedded_std`, and `test_project_commands`' `test_natively`, which passes with `MYLA_STDLIB=$PWD/lib`); `test_test_native` and `test_test_functions` 34 OK (the qemu and Node classes run); `test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_overflow` 680 OK; `test_std_modules` and `test_lsp` 169 OK; `scripts/test.sh` 1616 tests, 4 failures: the two above and two timing tests under a load of 5 on 4 cores (`test_round_trips_beside_many_waiting_frames` passes alone; `test_children_run_in_parallel`, the known one, fails alone too at that load and touches no test harness).
 
 Found on the way: [[MYLA-588]] (x86-64 passes `exit`'s status to `exit_program` zero-extended; invisible today, the record masks it).
+
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.

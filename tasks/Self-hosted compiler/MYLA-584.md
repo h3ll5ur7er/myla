@@ -2,7 +2,7 @@
 id: MYLA-584
 title: "A program's own std/ directory gets the standard library's privileges in the checker"
 type: bug
-status: review
+status: todo
 priority: medium
 labels: [checker, loader, round-6]
 ---
@@ -38,3 +38,4 @@ fun main() {
 - **Test first**: `test_raw_memory.test_a_programs_own_std_directory_is_the_programs`: a program with its own `std/raw.my` (`__addr_of`, `__load64`) and `std/helper.my` (`__write`), and the same under `other/`. At `aef0b21` the `std` case failed (`myla check` exit 0, no error); after, both directories give `type error: '__addr_of' reads or writes raw memory: only the standard library may call it` at `raw.my:2:13`, and `warning[primitive]: '__write' is a primitive of the standard library, not meant to be called from a program` at `helper.my:2:13`. `tests.burn.test_raw_memory`: 4 of 4 pass (the library's own files still may call them).
 - No new warning anywhere: `myla check --stdlib lib` of the 37 examples and a std.http server prints `ok`; the bootstrap builds the toolchain (std.rt's raw memory) with a byte-identical fixed point; `scripts/test.sh fast` passes (898 tests).
 
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.

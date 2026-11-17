@@ -2,7 +2,7 @@
 id: MYLA-634
 title: "The website's learn area: gamified exercises checked by #test"
 type: feature
-status: review
+status: done
 priority: high
 labels: [website, learn, tutorial]
 ---
@@ -20,3 +20,5 @@ Inspired by rustlings and boot.dev (MYLA-159, D208): chapters of small exercises
 - Gamification (`core/gamification.ts`, 12 specs): XP (hints at 15 % each down to half, nothing with the solution shown first), 13 levels from Mostly Harmless to Pirate King, daily streaks, 17 achievements, unlocks (a chapter at 60 % of the one before, a boss after its chapter; sudo mode), confetti and toasts; progress in `localStorage`, exported and imported as a file. A locked exercise solved early counts only once it opens.
 - Follow-up after the owner's review: [[MYLA-636]] (hidden cases, hints, chapter 9, 20 levels, 28 achievements).
 - In Chromium (e2e): an exercise solved earns `+10 XP` and "Don't Panic", and stays solved after a reload; a wrong answer shows the program's output.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

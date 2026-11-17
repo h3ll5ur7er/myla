@@ -2,7 +2,7 @@
 id: MYLA-413
 title: "An imported std module's bodies parsed and checked once called"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [loader, checker, performance, check-time]
 ---
@@ -29,3 +29,5 @@ Round 6, wave 2 (base `07445ab`), commit "MYLA-413: a program's own std/ directo
 - Check time (callgrind, `MYLA_THREADS=1`, `myla check`, the carried library): a hello world 20,642,824 → 20,668,611 instructions (+0.12 %), `import std.http` (`http.reason`) 146,627,013 → 146,741,100 (+0.08 %).
 - `scripts/bootstrap.sh`: byte-identical fixed point, `selfhost/embedded_std.my` unchanged.
 - Found on the way: the checker still takes a function named `std$…` for the library's, so such a module may call raw-memory primitives ([[MYLA-584]], the checker's lane).
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

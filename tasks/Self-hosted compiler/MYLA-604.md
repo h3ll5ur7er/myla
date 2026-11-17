@@ -2,7 +2,7 @@
 id: MYLA-604
 title: "Interpreter: every turn of the scheduler polls every task that waits for a descriptor"
 type: bug
-status: review
+status: done
 priority: low
 labels: [interpreter, performance, concurrency]
 ---
@@ -68,3 +68,5 @@ Measuring it found [[MYLA-620]]: the program ends with `exit(0)` while the reade
 - **Failing first.** `test_selfhost_interp…test_a_turn_costs_nothing_per_waiting_task` (the program above with 0 and with 400 waiters, the standard input an empty pipe kept open; 400 must take less than twice 0's time plus 100 ms) against the base (aef0b21's `interp.my`): fails; passes now.
 - **The program above**, `myla run`, the time it prints, before → after (2026-11-13, at a load under 1): 0 waiting 54 → 55 ms, 100 waiting 382 → 65 ms, 400 waiting 1,426 → 85 ms (1,000 waiting: 131 ms after). What 400 waiters still cost is their start (`task.all` runs the 400 readers to their waits during the 20,000 turns), not the turns. Natively 22 to 25 ms whatever the number.
 - The suites: [[MYLA-605]]'s evidence (the three tasks measured together).
+
+Signed off by [[Project/Review-2026-11-17]] (done).

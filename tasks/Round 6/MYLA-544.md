@@ -2,7 +2,7 @@
 id: MYLA-544
 title: "R2 The checker: `x.format(spec)` on a builtin, a negated char literal, literals beside typed operands"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [checker, round-6]
 ---
@@ -44,3 +44,5 @@ Work package R2 of [[Project/Review-2026-11-12]]. Files: `selfhost/checker.my`. 
 - Generated probes (scratch): 16 literal programs (`-1 == u`, `300 + u8`, `-2.5 * f32`, `1.5 + n` still an error, `1 == g()` still typed by the left's `int32` hint, `c + 1` and `'a' + 1` still chars, `'0' + d` a `uint8`, `V { v: 2 } + 5` and `+ W { … }` still errors, ranges, arms, `-'a'` in `int8`/`int32`, `-'\0'`, a struct of literals against `V<uint8>`, `1 + s` with a string): each as the language says.
 - **Suites** (for the lane's four tasks): the bootstrap's fixed point after every commit; the checker's cases (866 at round 5's end → 989, all pass), `lower.my`'s 140 and `interp.my`'s 442; `scripts/test.sh fast` 872 OK (3 skipped) before the last commit and again after it; the full `scripts/test.sh`: 1,558 tests, 341 skipped, one failure, `test_selfhost_interp`'s `range_beyond_int32` (`3000000000..3000000002` reported at its end, not its start: a literal waited for another literal), fixed by the last commit, after which `test_selfhost_interp`, `test_error_corpus`, `test_selfhost_checker` and `test_compiler_parity` pass (625 + 7 OK). `test_embedded_std` passes too: the lane changes nothing in `lib/`.
 - **Check time**: see [[MYLA-538]]'s evidence: the lane's four tasks cost a hello world +0.13 % and a std.http server +0.24 % of `myla check`'s instructions (callgrind), nearly all of it this task's typing of left literals; a first version cost 0.48 % and 0.89 %, before the literal checks were made allocation-free (`literal_waits` a pattern match, `left_literal` called for literals only).
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

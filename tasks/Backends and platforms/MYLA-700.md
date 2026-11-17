@@ -2,7 +2,7 @@
 id: MYLA-700
 title: "Windows step 1: a target record, and each target's tools named by it"
 type: feature
-status: review
+status: done
 priority: high
 labels: [platforms, windows]
 ---
@@ -35,3 +35,5 @@ The owner took the four recommendations; the record itself is D217.
 - **The fixed point:** `scripts/bootstrap.sh` reached it (27,880,618 bytes); `scripts/check-seed.sh build`: the committed seed bootstraps these sources, so no seed is staged (D207).
 - **Same output:** BASE's `stage3` and the new one write byte-identical assembly for `selfhost/gen_main.my` (the whole compiler) and `examples/maps.my` with `--target` `x86_64-linux`, `aarch64-linux` and `wasm32-wasi` (six pairs, sha256 of the compiler's x86-64 output `6a1cc3cd1408…`); BASE's `myla build` and the new one write byte-identical files for `examples/maps.my` on all three targets.
 - **Suites:** `scripts/test-target.py aarch64-linux`: 37 of 37 suites passed; `MYLA_EMULATOR="node tools/wasm/run.mjs" scripts/test-target.py wasm32-wasi`: 37 of 37; `scripts/test.sh fast`: 938 tests OK (3 skipped); `scripts/test.sh` (full): 1,703 tests, one failure, `test_lsp`'s `test_the_corpus_resolves` on `target.my`'s `format(...)` calls beside its field `format` (the language server's quirk, filed as [[MYLA-710]]): with f-strings there, `tests.burn.test_lsp.TestResolutionCorpus` passes, the bootstrap reaches its fixed point again and the six outputs are still the same.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

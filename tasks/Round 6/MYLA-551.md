@@ -2,7 +2,7 @@
 id: MYLA-551
 title: "R9 `--checked` arithmetic: the traps out of line"
 type: improvement
-status: review
+status: todo
 priority: medium
 labels: [codegen, x86-64, aarch64, overflow, performance, round-6]
 ---
@@ -51,3 +51,4 @@ Measured by hand on this machine (the review's `hot1` loop, written as the compi
 - **Bootstrap**: byte-identical fixed point (24,189,090 bytes).
 - **Suites**: `scripts/test.sh fast` (874 tests) OK; `test_generated_widths`, `test_generated_extremes`, `test_formats_checked`, `test_debug_info`, `test_test_native`, `test_compiler_parity`, `test_selfhost_codegen`, `test_aarch64`, `test_selfhost_cases`, `test_error_corpus` (770 tests) OK but `test_children_run_in_parallel`, the known timing test, at load 8 on 4 cores (cpu 1.15 s against wall 0.80 s); `scripts/test-target.py aarch64-linux` with `test_overflow`, `test_ir_contract`, `test_generated_widths`, `test_formats_checked`, `test_generated_extremes`, `test_error_corpus` and `wasm32-wasi` with `test_overflow`, `test_generated_widths`, `test_formats_checked` pass. The full `scripts/test.sh` (1,613 tests, 1,870 s): only `test_children_run_in_parallel` fails, which needs idle cores (alone afterwards at load 5 on 4 cores: cpu 1.12 s against wall 1.00 s); a plain build's code being byte for byte the base's, the change can't reach it.
 
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.

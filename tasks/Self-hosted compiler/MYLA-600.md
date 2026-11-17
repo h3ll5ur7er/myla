@@ -2,7 +2,7 @@
 id: MYLA-600
 title: "The interpreter's StringBuilder holds each byte in a word: a 20 MB string takes 280 MB to build"
 type: bug
-status: review
+status: done
 priority: low
 labels: [interpreter, memory, performance]
 ---
@@ -40,3 +40,5 @@ The interpreter's builder is the host's own: `Value.VSB(StringBuilder)` ([[selfh
 - **The program above** (`myla run`, peak resident memory, wall time), before → after: 279.6 MB → 62.8 MB, 0.38 s → 0.055 s; an empty program takes 10.9 MB, so the builder and the string take 52 MB, as natively (55.0 MB, 0.04 s, with no interpreter around them).
 - **`num.to_hex(255u64, 100000000)`** (a tenth of the review's 2^30, which needs 3 GB natively too): 1.60 s and 1,051 MB → 0.29 s and 215 MB interpreted (natively 0.17 s and 207 MB). `test_generated_extremes.py` keeps leaving out the 2^30 case (`NEVER`): natively it is `out of memory` under the gigabyte a run may take.
 - The suites, and that they are as fast as before: [[MYLA-605]]'s evidence (the three tasks measured together).
+
+Signed off by [[Project/Review-2026-11-17]] (done).

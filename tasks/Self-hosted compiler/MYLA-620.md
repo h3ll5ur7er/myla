@@ -2,7 +2,7 @@
 id: MYLA-620
 title: "Interpreter: the entry's `exit` waits for a child that sleeps or waits for input, and reports one on a notifier as stuck"
 type: bug
-status: review
+status: done
 priority: low
 labels: [interpreter, concurrency]
 ---
@@ -49,3 +49,5 @@ With its standard input a pipe that stays open, natively each mode prints `exit`
 
 - **Failing first.** `test_selfhost_interp…test_exit_ends_the_tasks_that_wait` against the base (aef0b21's `interp.my`): `sleep` and `input` killed after the test's 30 s, `notifier` `('exit\n', 'runtime error: every task waits for another one\n', 1)`; now each `('exit\n', '', 3)` in 0.01 to 0.02 s, as natively.
 - The suites are [[MYLA-604]]'s (same commit).
+
+Signed off by [[Project/Review-2026-11-17]] (done).

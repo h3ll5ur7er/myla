@@ -2,7 +2,7 @@
 id: MYLA-755
 title: "A busy worker glances at the poller every 64 frames, not by time: under load no worker polls for seconds"
 type: bug
-status: review
+status: todo
 priority: medium
 labels: [concurrency, performance]
 ---
@@ -39,3 +39,5 @@ Suggested decision row: "**A busy worker glances at the poller once a millisecon
 - **The cost** (2026-11-16, 7af6e7f's library against BASE's, the same compiler, this 4-CPU machine, load average about 1; `yields.my`: 8 tasks each awaiting `task.yield()` 200,000 times, plain and beside a task in `accept_async`, the median of 9 runs interleaved): 1 worker plain 58 ms both; with the descriptor watched BASE 61 ms, this branch 62 ms (the clock at every turn: 276 ms); 4 workers plain 318 against 312 ms, watched 375 against 370 ms (the queues' contention dominates; best of 9: 320 against 255 ms). A second run under the other lanes' load (load average 7.5, median of 11): watched 64 against 64 ms on 1 worker, 96 against 82 on 4; the clock at every turn 289 and 314. A program without descriptors watched pays what it did (one load a turn).
 - **Suites** (2026-11-16, this branch): `scripts/test-target.py x86_64-windows test_reactor_scaling test_net test_http test_process` 4 of 4; the same on `aarch64-linux` 4 of 4; `wasm32-wasi test_reactor_scaling test_net` 2 of 2 (`BusyWorkers` skipped there: WASI has no sockets); `python3 -m unittest tests.burn.test_reactor_scaling` natively 7 OK, `tests.burn.test_net` 21 OK (the held read's warning failed natively and under Wine with an immediate first glance, which ran the connecting task first: fixed by counting the first turn as a glance); `lib/std/rt.my`'s 41 cases interpreted (`glance_every`'s 6 among them); `test_windows` and `test_windows_runner` 50 OK (1 skipped); `scripts/windows-runner.py build` 108 programs, 160 cases, and `run --wine --runs 3` 148 passed, 0 failed, 12 skipped (the console cases, as before); `scripts/test.sh fast` 1,005 tests OK (7 skipped); `scripts/check-seed.sh`: each seed bootstraps the sources, none changed; the workflow parses (PyYAML); the bootstrap's fixed point holds (29,277,478 bytes).
 - **The other targets' assembly**: BASE's `stage3` and this branch's, both given this branch's library, give byte-identical assembly for `selfhost/gen_main.my`, `examples/maps.my` and `examples/concurrency.my` on `x86_64-linux`, `aarch64-linux` and `wasm32-wasi`; on `x86_64-windows` they differ in `__win_on_ctrl`'s eight lines and the import list's `PostQueuedCompletionStatus` ([[MYLA-744]]). The library's change gives every native program's `exec_run` its new lines and `glance_every`, on every target, by design.
+
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.

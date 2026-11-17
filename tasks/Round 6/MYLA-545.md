@@ -2,7 +2,7 @@
 id: MYLA-545
 title: "R3 Lexer, parser, loader: a swallowed declaration, D186's messages, the look-ahead budget, a root written with `..`"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [lexer, parser, loader, round-6]
 ---
@@ -52,3 +52,5 @@ The last two rows are a library being edited (every file of `lib/std` with a new
 1. **No budget for the type-argument scan, a bound of depth instead** (the task's "a message that names the budget, or no budget"). Recommended as built: the depth bound is exact (deeper doesn't parse) and keeps the parse linear. The alternative, a message naming the budget, can't be given where the scan gives up, as a long run of comparisons is valid there.
 2. **A chain's limit is a parse error at 8,192 per expression.** Alternatives: a checker, interpreter and lowering that walk a chain without recursion (other lanes' files, a larger change), or a larger limit (the checker overflowed at about 13,000 on an 8 MB stack). 8,192 leaves room on every runner measured; generated code with longer expressions splits them with `let`s.
 3. **D186's note comes from the loader, which lexes the file again on an error**, not from the parser, which would need the forms it read carried to the checker's errors (the AST or the checker's files). Recommended as built: zero cost when there is no error, and one place for parse, module and type errors.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

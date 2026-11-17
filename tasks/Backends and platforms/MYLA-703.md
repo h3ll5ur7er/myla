@@ -2,7 +2,7 @@
 id: MYLA-703
 title: "Windows step 4: memory, threads, thread-local state and stack overflow"
 type: feature
-status: review
+status: done
 priority: high
 labels: [platforms, windows]
 ---
@@ -53,3 +53,5 @@ A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 20
 - **The bootstrap** reaches its byte-identical fixed point (28,318,512 bytes); `scripts/check-seed.sh`: the committed seed bootstraps these sources and the embedded library is current. No primitive, runtime variable the seed reads or attribute was added (the new words are Windows' data, which only a Windows build names): **no `Stage:` commit**.
 - **Suites** (`1713ab1`): `scripts/test.sh fast` 968 tests, OK (5 skipped); `scripts/test.sh` 1,733 tests, OK (375 skipped); `selfhost/codegen.my` 372/372, `selfhost/ir_x86.my` 73/73, `lib/std/platform_windows.my` 41/41 interpreted and under Wine.
 - **The target suites under Wine**: `scripts/test-target.py x86_64-windows -j 3`: 38 of 38 suites passed (2026-11-15, `1713ab1`). Excuses changed: `test_selfhost_codegen`'s `test_children_run_in_parallel` ("one worker until Windows' threads") is gone and passes; no other suite changed (the rest are files, processes, sockets and the console's, [[MYLA-704]] to [[MYLA-707]]). The first run found the Wine exit message above (`test_generated_widths` 4 failures, `test_generated_extremes` 5), fixed by the exit's wait; both pass since.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

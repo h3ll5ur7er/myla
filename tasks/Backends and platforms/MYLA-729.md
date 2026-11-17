@@ -2,7 +2,7 @@
 id: MYLA-729
 title: "myla.exe's scratch directories on Windows: TEMP, not /tmp"
 type: bug
-status: review
+status: done
 priority: low
 labels: [platforms, windows, testing]
 ---
@@ -22,3 +22,5 @@ The driver's `scratch_dir()` ([[selfhost/driver.my]]) is `myla-test-<ns>` under 
 - **Test first.** With BASE's code: `HostModules.test_test_interpreted` gave `FAIL  under_temp #1: expected True, got False`; BASE's `myla.exe test t.my --native` under Wine said `(kept at /tmp/myla-test-1614928263700/harness.exe.my)`. After: both pass (`kept at C:\users\root\Temp\myla-test-1560281671000\harness.exe.my`, removed by the test).
 - `scripts/windows-runner.py run --wine --runs 3`: `tools/myla-host-modules` ok; `tools/myla-build` skipped under Wine (needs the LLVM tools).
 - The shared checks are in [[MYLA-734]]'s evidence.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

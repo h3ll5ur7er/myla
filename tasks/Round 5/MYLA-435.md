@@ -2,7 +2,7 @@
 id: MYLA-435
 title: "A failing expect points at its caller"
 type: improvement
-status: review
+status: todo
 priority: low
 labels: [std, diagnostics]
 ---
@@ -75,3 +75,5 @@ Follow-up: [[MYLA-628]], the other library panics that are the caller's mistake 
 - **Suites** (a shared machine, load 3 to 5): `scripts/test.sh fast`: `Ran 904 tests in 647 s, OK (skipped=3)` (with `selfhost/embedded_std.my` as the bootstrap regenerated it, left out of the commits). `scripts/test.sh` once: `Ran 1661 tests in 1587 s, FAILED (failures=2)`: `test_selfhost_codegen.test_children_run_in_parallel` (cpu 0.95 s against wall 0.76 s; alone it passes) and `test_std_cache.test_an_error_in_a_body_read_late_is_at_its_place`, whose program failed inside `Option.expect` to have an error in a library body read late; it now fails inside `xs.chunks(0)` (std.list) and passes.
 - **Bootstrap**: `byte-identical fixpoint reached` after each step. The cost of the hidden word, the same compiler sources built against std.option and std.args without and with the attribute: 26406078 against 26408927 bytes of stage assembly (+0.011 %, a `leaq` at each call of `expect` and of the std.args methods). The x86-64 seed grew from 12920382 to 12955779 bytes with the compiler's new code.
 - **Staging.** The bootstrap can't build the library's `#track_caller` with the seed of `aef0b21` (`unknown attribute '#track_caller'`), so the compiler is its own commit, then a `Stage:` commit with the seeds, then the library's use (D156's exception).
+
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.

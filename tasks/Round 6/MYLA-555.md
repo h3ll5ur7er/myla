@@ -2,7 +2,7 @@
 id: MYLA-555
 title: "R13 The review's generators as burn tests"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [testing, burn, differential, round-6]
 ---
@@ -46,3 +46,4 @@ The other items:
 - `TimeLimits`: the cause is the order of the test, not the server: it read the two non-reading clients right after the quick GET, and under load the second holder's handler starts late, so its `write_ms` hadn't passed and the test's read was progress that let the whole response through (8,388,652 bytes = headers and 8 MiB). It now waits until the server holds only its listener (its sockets in `/proc/<pid>/fd`, at most 10 s) and then reads; it passed alone (24 s, both servers).
 - New bug: [[MYLA-580]] (`math.ldexp` takes |k| / 1023 steps). No other generated case failed beyond those of the known tasks.
 
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

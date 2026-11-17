@@ -2,7 +2,7 @@
 id: MYLA-414
 title: "P1 The interpreter: generic code, receivers, errno"
 type: bug
-status: review
+status: done
 priority: high
 labels: [interpreter, generics, overflow, round-5]
 ---
@@ -97,3 +97,4 @@ In [[selfhost/interp.my]]; the bundle's patch, taken with two changes.
 - **Memory** (peak RSS, `myla run`): generic `fib(27)` 167 MB → 11 MB (the `int` version 11 MB), 2.16 s → 1.69 s; `gfib31.my` 11 MB (1,067 MB in the review).
 - **Suites**: see [[MYLA-546]]'s, run on both tasks together.
 
+Signed off by [[Project/Review-2026-11-17]] (done).

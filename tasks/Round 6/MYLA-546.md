@@ -2,7 +2,7 @@
 id: MYLA-546
 title: "R4 The interpreter: small differences from native code, and the cost that crept in"
 type: bug
-status: review
+status: done
 priority: low
 labels: [interpreter, round-6]
 ---
@@ -52,3 +52,5 @@ Work package R4 of [[Project/Review-2026-11-12]]. Files: `selfhost/interp.my`. S
 - **Native code**: callgrind of the same `read_line` program built natively, 68.4 M instructions before, 78.1 M with `find_from` (its `matched` call and the `Option` a line), 72.4 M with the one-byte loop (+6 percent: the `Option` a line). A method call interpreted (20,000 iterations of a `var self` and a `self` method): 494.07 M → 494.21 M.
 - **Suites**: `build/myla test selfhost/interp.my` 449/449; `lib/std/{io,str,fmt,list}.my --stdlib lib` interpreted, `--native`, `--target aarch64-linux` and `--target wasm32-wasi`: 35, 166, 36, 24 cases each, all pass. The rest with [[MYLA-564]]'s and [[MYLA-565]]'s, at the lane's tip (in their tasks and the report). `scripts/bootstrap.sh`: byte-identical fixed point (24,169,371 bytes).
 - **Left open**: the busy side of the same wait, every turn of the scheduler polling every task that waits for a descriptor, is [[MYLA-604]].
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

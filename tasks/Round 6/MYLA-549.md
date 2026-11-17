@@ -2,7 +2,7 @@
 id: MYLA-549
 title: "R7 std.http: a request that has begun holds a worker; the client's redirect and write checks"
 type: bug
-status: review
+status: todo
 priority: high
 labels: [std, http, security, round-6]
 ---
@@ -58,3 +58,5 @@ Cost:
 - A request that comes a byte at a time (the slow path, a scratch `t_drip_paced.py`: 2 heads of 16 KB, a byte a send every 0.5 ms): about a sixth more server CPU than before on one worker thread (1.39 s before, 1.57 s after, the client's address kept with the request begun rather than asked for again), the same on four (6.2 and 6.4 s, mostly the idle workers' spinning). Each wait parks with an `epoll_ctl` where the base's `task.timeout` read waited on its own watch.
 
 Suites: `scripts/test.sh fast` (867 tests, the one failure `test_embedded_std`, as expected until the seed commit); `scripts/test.sh` (1,549 tests, 341 skipped; failures `test_embedded_std` and `test_children_run_in_parallel`, the known timing test, which passes alone); `tests.burn.test_http` natively (12 tests, `HttpOnWasm` skipped), with `MYLA_TEST_TARGET=aarch64-linux` (12, the same skip) and `scripts/test-target.py wasm32-wasi tests.burn.test_http` (`HttpOnWasm`); `build/myla test lib/std/http.my --stdlib lib`: 225/225 interpreted, `--native`, `--target aarch64-linux` and `--target wasm32-wasi` (Node). After the last commit (the client's framing looked at only when it is there) again: `tests.burn.test_http` natively (12, OK), `MylaClient` and `MylaServer` on aarch64, the 225 cases `--native`, on aarch64 and on wasm32.
+
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.

@@ -2,7 +2,7 @@
 id: MYLA-728
 title: "std.test's case directories on Windows: TEMP, not /tmp"
 type: bug
-status: review
+status: done
 priority: low
 labels: [platforms, windows, testing]
 ---
@@ -21,3 +21,5 @@ Left as they are: the toolchain's own scratch directories (`myla test`'s harness
 
 - **Test first**: `test_windows`'s `Children.test_a_harness_runs_its_cases_as_children` with the new cases `case_dir` (`\c6`), `under_temp` (`MYLA_TEST_DIR` under `%TEMP%\myla-test-`, not on `Z:`) and `a_temp_dir` (a case's `temp_dir()` made and written in): on BASE `expected '\\c6', got '/c6'`, `under_temp` `expected True, got False`, `a_temp_dir` failed (no random bytes there yet, [[MYLA-722]]); 5/9 passed. After: 8/9 passed, as expected (`f #4` fails by design).
 - `lib/std/test.my` 87/87 interpreted, `--native` and under Wine; `test_test_native` and `test_test_functions` (Linux's roots unchanged) in the suites below.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

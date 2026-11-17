@@ -2,7 +2,7 @@
 id: MYLA-610
 title: "Code comments give no unpinned timing (D197's sweep)"
 type: chore
-status: review
+status: done
 priority: low
 labels: [std, comments, check-time, round-6]
 ---
@@ -43,3 +43,5 @@ Candidates: the task's grep, `grep -rnE "(//|#).*[0-9][0-9.,]* ?(ms|µs|us|ns|s|
 - **Pinned with a date and hash: none**; every bare figure's reason stands without it.
 - Not edited, not time: instruction counts and their percentages (`fs.my`, `net.my`, `archive.my`, `compress.my`, `http.my`, `list.my`, `selfhost/checker.my:4480`'s 1.4 %, `selfhost/parser.my:628`'s 0.25 percent, `ir_x86.my`'s 1.6 %), memory (`interp.my`'s 600 MB), cycles (`codegen.my`, `runtime_x86.my`).
 - Checks: `build/myla check` (with `--stdlib lib` for `lib/std`) on every changed `.my` file, `build/myla test` on the changed `lib/std` modules, all passing; `scripts/bootstrap.sh` reaches its fixed point, and the compiler and the CLI that `build/stage3` builds from `selfhost/` with and without the comment edits are byte-identical; `scripts/test.sh fast`.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

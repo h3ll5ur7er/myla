@@ -2,7 +2,7 @@
 id: MYLA-417
 title: "P3b The checker: generic operators, literals, D178's call error, diagnostics"
 type: bug
-status: review
+status: done
 priority: high
 labels: [checker, diagnostics, round-5]
 ---
@@ -94,3 +94,5 @@ Reopened ([[Project/Review-2026-11-12]]): two regressions, both narrow. The rest
 - **D95's head**: [[MYLA-394]]'s evidence (`Reentrancy.ordered` replaces `head`).
 
 Evidence: `repro-r5/checker/bug1_d178_actor_getter.my` was `type error: 'value' is a method of 'Cell<(int32) -> int32>' and its field 'value' holds a function here: bind the field first: let g = c.value` at `6e699ca` and prints 6 now, interpreted and natively. Tests first: two `errors_of` cases in `selfhost/checker.my` (a getter called on a local actor and on one in a struct's field: `[]`, the first failing before with the D178 message), and the parity program `actor_getter_of_a_field_s_name` (pinned `6`, `11`; a type error before). The four D178 cases of round 5 still pass. Suites: [[MYLA-544]]'s evidence (one run for the lane).
+
+Signed off by [[Project/Review-2026-11-17]] (done).

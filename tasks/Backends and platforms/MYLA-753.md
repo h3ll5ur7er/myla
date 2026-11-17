@@ -2,7 +2,7 @@
 id: MYLA-753
 title: "Windows: a wait of the poller takes one batch of the port's packets, so a ready handle waits behind the backlog"
 type: bug
-status: review
+status: done
 priority: high
 labels: [platforms, windows, concurrency]
 ---
@@ -47,3 +47,4 @@ The cause: an I/O completion port is a queue in arrival order, every arm posts a
 - **The other targets unchanged**: BASE's `stage3` and this branch's give byte-identical assembly for `selfhost/gen_main.my`, `examples/maps.my` and `examples/concurrency.my` for `x86_64-linux`, `aarch64-linux` and `wasm32-wasi` (with this branch's library for both: the library's change is Windows' module only); for `x86_64-windows`, `examples/maps.my` differs in `__win_wait_posted`'s lines alone. The bootstrap's fixed point holds.
 - **On CI's runner** (run 43852840522, PR #79 at this commit): `net/sockets-and-children` still hung on 16 workers, 300 s, nothing printed. So the drain wasn't enough there; [[MYLA-754]] and [[MYLA-756]] are fixed after it, and the case now says what failed instead of waiting for ever.
 
+Signed off by [[Project/Review-2026-11-17]] (done).

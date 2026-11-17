@@ -2,7 +2,7 @@
 id: MYLA-708
 title: "Windows step 9: a job on a Windows runner"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [platforms, windows]
 ---
@@ -95,3 +95,5 @@ None of this has run on Windows yet: the pull request's run of the `windows` job
 - **The job's time on Windows**: about 3 to 5 minutes for `windows` (the runner's start, the checkout, the 16 MB artifact, then the cases: 60 s here under Wine, more where each process start and a new program's scan by Defender cost more), after `windows-build`'s 2 to 4 (apt, the cached tools or a build from the seed, 17 s of builds); both run beside the other jobs, which take longer (burn, targets).
 - **The workflow**: parsed by PyYAML (10 jobs, `windows` needs `windows-build`), and checked against the workflow syntax's keys by a script of this session's (each job's and step's keys, `needs` naming jobs, one of `uses`/`run` a step, each action at one version, the expressions' contexts); actionlint couldn't be installed here. The other jobs' steps are unchanged (`git diff` of `ci.yml` removes only the header comment's last line, rewritten); `pages` downloads `myla-*-linux-<sha>`, which the Windows artifact doesn't match ([[MYLA-739]]).
 - **Suites**: `tests.burn.test_windows` 23 tests OK (`FramesOnWindows` now runs under Wine; `WindowsTools` skipped without `MYLA_REQUIRE_TARGETS`). `scripts/test-target.py x86_64-windows`: 37 of 38, `test_selfhost_codegen`'s `test_children_run_in_parallel` failing under a load of 7 (cpu 0.99 s, wall 0.81 s), passing alone; nothing it builds changed. `scripts/test.sh fast`: 977 tests OK (7 skipped). The bootstrap's fixed point (28,807,148 bytes) and `scripts/check-seed.sh` (both seeds bootstrap the sources): `selfhost/`, `lib/`, `tools/` and `bootstrap/` are BASE's, so Linux's, aarch64's and wasm32's assembly is BASE's.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

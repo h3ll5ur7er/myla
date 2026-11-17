@@ -2,7 +2,7 @@
 id: MYLA-460
 title: "std.xml's stream reader is quadratic in an event's length over short reads"
 type: bug
-status: review
+status: todo
 priority: medium
 labels: [std, xml, streams, round-5]
 ---
@@ -84,3 +84,5 @@ Reopened ([[Project/Review-2026-11-12]]): the fix for the quadratic scan made th
 - Still linear (the task's reproduction, native, x86-64, 16-byte reads): 25,000 bytes 1 ms, 100,000 2 ms, 250,000 6 ms, 1,000,000 21 ms (the round-5 reader: 1, 1, 4, 20 ms).
 - `build/myla test lib/std/xml.my --stdlib lib`: 106/106 interpreted (9 s, was 6 s: the scan is a loop over each byte read, which the interpreter runs at about 2 µs a byte), `--native` (checked), `--target aarch64-linux`, `--target wasm32-wasi`. `tests.burn.test_xml` OK.
 - `scripts/test.sh` once at the end of the lane (with [[MYLA-550]]): 1,549 tests; the three failures are the embedded library (behind `lib/` until the seed commit, twice) and `test_children_run_in_parallel`, which passes alone. Bootstrap fixed point byte-identical.
+
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.

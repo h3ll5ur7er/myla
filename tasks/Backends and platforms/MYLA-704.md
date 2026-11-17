@@ -2,7 +2,7 @@
 id: MYLA-704
 title: "Windows step 5: files, directories and paths"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [platforms, windows]
 ---
@@ -47,3 +47,5 @@ Where Windows reports what Linux reports otherwise, the module gives Linux's cau
 - **Check time** (valgrind's instruction count of `myla check` with the carried library, BASE's CLI against this branch's, 2026-11-15): a program importing std.fs 49.2 M → 49.4 M, std.path 26.7 M → 26.8 M, std.test 67.7 M → 67.9 M.
 - **The bootstrap** reaches its byte-identical fixed point (28,495,159 bytes); `scripts/check-seed.sh`: the committed seed bootstraps these sources and the embedded library is current. No `Stage:` commit.
 - **Suites** (at `57b698d`): `scripts/test.sh fast`: 963 tests, OK (4 skipped). `scripts/test.sh` (all): 1,728 tests, 2 failures, both `test_selfhost_parser.test_bodies_read_later_are_the_same` on `path_style.my` and `path_style_windows.my`, which have no function bodies (the test asked every library file for some, against two parses failing alike): it now asks a file that declares a function; `tests.burn.test_selfhost_parser` then OK.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

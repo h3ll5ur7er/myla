@@ -2,7 +2,7 @@
 id: MYLA-585
 title: Floats get methods (an implicit std.float)
 type: feature
-status: review
+status: todo
 priority: high
 labels: [stdlib, language]
 ---
@@ -26,3 +26,5 @@ The owner's decision D199 (2026-11-13). Floats have no methods today (`type 'flo
 - Found on the way: `import std.float as float` made the type `float` unusable (`'float' is a module, not a type`), since `int` and `float` aren't keywords. A built-in type's name now stays the type where a type stands (`is_builtin_type_word` in the loader); `float.PI` stays the module's.
 - The compiler's cases: loader 148/148, `tools/embed` 14/14. Bootstrap: byte-identical fixed point.
 - Docs: [[Language/Standard-library/Float]] (a tested example), [[Language/Standard-library]], [[Language/Modules]], [[Language/Standard-library/Math]], [[Architecture/Module-loader]], [[Development/Conventions]], [[Development/Testing]], the skill.
+
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.

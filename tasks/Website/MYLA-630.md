@@ -2,7 +2,7 @@
 id: MYLA-630
 title: "The website's app: shell, design system, landing, downloads, quickstart, search"
 type: feature
-status: review
+status: todo
 priority: high
 labels: [website, angular]
 ---
@@ -22,3 +22,5 @@ The Angular app in `website/` (D208): Angular 22, standalone components, signals
 - The pages: landing (starfield hero with a live program printing 42, features, a taste in four runnable samples, the course's levels, the pipeline), quickstart (three steps, a runnable program, the wiki's Getting-started), download (the CI's tools by `downloads/manifest.json`, else building from source), docs, reference, learn, playground, a 404 with rotating quotes.
 - Shell: header (navigation, Ctrl+K search, level and streak once learning, theme, GitHub), footer, toasts. The theme is set before the first paint (index.html) and kept.
 - Unit tests (Vitest): 25 across gamification, search, the Myla mode, the highlighter and the samples' output trailer; `website/e2e/site.spec.ts` (Playwright): 24, every page rendering without a console error, no sideways scroll on a phone among them.
+
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
