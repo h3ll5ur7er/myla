@@ -785,7 +785,8 @@ fun time_of(s: str) -> int {
 }
 
 // args: how long it runs, then `d` for the default options or the
-// workers, keep_alive_ms, idle_ms, read_ms and write_ms (`-`: none)
+// workers, keep_alive_ms, idle_ms, read_ms and write_ms (`-`: none), and
+// maybe max_connections and max_body_bytes
 #main
 async fun main() {
     var l = match net.listen(net.addr(net.loopback(), 0)) {
@@ -804,6 +805,12 @@ async fun main() {
         o.idle_ms = time_of(a[4])
         o.read_ms = time_of(a[5])
         o.write_ms = time_of(a[6])
+        if a.len() > 7 {
+            o.max_connections = int_of(a[7])
+        }
+        if a.len() > 8 {
+            o.max_body_bytes = int_of(a[8])
+        }
     }
     let f = async () => await http.serve_with(l, o, async (r: Request) => await answer(r))
     match await task.timeout(int_of(a[1]), f) {
@@ -1174,6 +1181,128 @@ class TimeLimits(unittest.TestCase):
             for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "5000", "1500", "5000"]).items():
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
+
+    def test_one_byte_requests_filling_the_connections_give_way_to_new_ones(self):
+        # H7 of the review of 2026-11-17 (MYLA-794): max_connections filled
+        # by connections that each sent one byte (a request begun, parked
+        # for read_ms), then clients at once: the eviction took the one
+        # whose time runs out first, the newcomer's (idle_ms), and closed
+        # 99 of 100 unanswered. It takes the one that has waited longest
+        # since it last got on: an attacker's.
+        def check(port):
+            held = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(32)]
+            for s in held:
+                s.sendall(b"G")
+            time.sleep(0.3)
+            for _ in range(2):
+                cs = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(10)]
+                time.sleep(0.05)
+                for s in cs:
+                    s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                for s in cs:
+                    out, _ = end_of(s, 5)
+                    self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+                    s.close()
+            # each newcomer closed an attacker's
+            gone = 0
+            for s in held:
+                s.settimeout(0.05)
+                try:
+                    gone += s.recv(100) == b""
+                except socket.timeout:
+                    pass
+                except OSError:
+                    gone += 1
+                s.close()
+            self.assertGreaterEqual(gone, 10)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (argv, exe) in self.forms(tmp, ["8000", "4", "60000", "5000", "20000", "5000", "32"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, check)
+
+    def test_bodies_kept_parked_stay_within_the_room_for_them(self):
+        # M8 of the review of 2026-11-17 (MYLA-794): every parked
+        # connection kept its body so far, max_connections times
+        # max_body_bytes (100 bodies of 4 MB: 598 MB, where the workers
+        # held 17 MB before they were parked). The bodies kept parked share
+        # what the workers held, workers times max_body_bytes (here 2 MB):
+        # past it a body is answered 503 and its connection closed, and
+        # those kept are answered once they end.
+        def check(port):
+            body = b"b" * 600000
+            socks = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(12)]
+            for s in socks:
+                try:
+                    s.sendall(b"POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 600001\r\n\r\n" + body)
+                except OSError:   # answered 503 and closed meanwhile
+                    pass
+            time.sleep(0.5)
+            out, _ = quick_get(port, timeout=5)
+            self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+            kept = 0
+            for s in socks:
+                try:
+                    s.sendall(b"z")
+                    out, _ = end_of(s, 5)
+                except OSError:
+                    out = b""
+                if out.startswith(b"HTTP/1.1 200 OK\r\n"):
+                    self.assertTrue(out.endswith(b"\r\n\r\n" + body + b"z"), out[:200])
+                    kept += 1
+                else:
+                    self.assertTrue(out == b"" or out.startswith(b"HTTP/1.1 503 Service Unavailable\r\n"), out[:200])
+                s.close()
+            # 2 MB of room: three bodies of 600,000 bytes
+            self.assertTrue(1 <= kept <= 3, kept)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (argv, exe) in self.forms(tmp, ["10000", "2", "60000", "5000", "20000", "5000", "1024", "1000000"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, check)
+
+    def test_a_body_dribbled_costs_its_pieces_not_its_size(self):
+        # M8 (MYLA-794): each piece of a body waiting parked took it out of
+        # the server's `Pending` actor and put it back, two copies of the
+        # body so far: a byte dribbled after 15 MB cost two copies of
+        # 15 MB, an upload of 16 MB in pieces of 1,460 bytes ten times the
+        # CPU of one that came at once. It is read on where it is kept: a
+        # piece costs about the same after 4 MB as after 4 KB.
+        def cpu_seconds(pid: int) -> float:
+            with open(f"/proc/{pid}/stat") as f:
+                fields = f.read().rsplit(")", 1)[1].split()
+            return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+        def dribbled(size: int):
+            used = []
+
+            def check(port):
+                socks = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(4)]
+                for s in socks:
+                    s.sendall(f"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: {size + 200}\r\n\r\n".encode() + b"b" * size)
+                time.sleep(0.5)
+                before = cpu_seconds(self.server_pid)
+                for _ in range(200):
+                    for s in socks:
+                        s.sendall(b"x")
+                    time.sleep(0.002)
+                for s in socks:
+                    r = recv_response(s)
+                    self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"x" * 200), r[:100])
+                    s.close()
+                used.append(cpu_seconds(self.server_pid) - before)
+
+            argv, exe = run_argv(binary, binary, ["6000", "2", "60000", "5000", "5000", "5000"])
+            self.serve(argv, exe, check, {"MYLA_THREADS": "2"})
+            return used[0]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, TIME_SERVER, "times.my")
+            binary = os.path.join(tmp, "times")
+            native_build(Program(path), binary)
+            small = min(dribbled(4000) for _ in range(2))
+            big = min(dribbled(4000000) for _ in range(2))
+            self.assertLess(big, 2 * small + 0.1, f"{big:.2f} s of CPU for 800 bytes after 4 MB, {small:.2f} s after 4 KB")
 
 
 # --- what a client sends again on a new connection (MYLA-422) ---------------------
