@@ -6,7 +6,7 @@ status: todo
 priority: high
 labels: [http, json, security, round-7]
 ---
-Work package of [[Project/Review-2026-11-17]], lane "Router and JSON" (section 5). Files: `lib/std/http.my` (the router: `static_files`, `file_response`, patterns, `json_body`; the server is [[MYLA-794]]'s), `lib/std/json.my`. The reproducers are in the review's bundle (`repro-r6/`, with a README per area); each fix turns its reproducer into a test that fails before it. The owner's decisions it builds as the review recommends: 6. New tasks it files take ids 841–848.
+Work package of [[Project/Review-2026-11-17]], lane "Router and JSON" (section 5). Files: `lib/std/http.my` (the router: `static_files`, `file_response`, patterns, `json_body`; the server is [[MYLA-794]]'s), `lib/std/json.my`. The reproducers are in the review's bundle (`repro-r6/`, with a README per area); each fix turns its reproducer into a test that fails before it. The owner's decision it builds: D260. New tasks it files take ids 841–848.
 
 - [ ] **H8** (high, new, Windows target): `GET /assets/..%5ctopsecret.txt` is `200`: `file_response` splits on `/` only; `app.css.`, `app.css%20` and `nul` are served. `repro-r6/runtime-http/router_static_backslash_windows.py`. Reopens [[MYLA-613]]. Decision 6
 - [ ] **H9**: `http.json_body` exposes std.json's quadratic number parse: 64,000 digits in 11.7 s, four 300 kB bodies stop a server. `router_json_number_dos.py`, `json_number_time.my`

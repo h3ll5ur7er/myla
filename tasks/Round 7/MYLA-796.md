@@ -6,7 +6,7 @@ status: todo
 priority: high
 labels: [numerics, round-7]
 ---
-Work package of [[Project/Review-2026-11-17]], lane "Numerics" (section 5). Files: `lib/std/matrix*.my`, `vector*.my`, `quaternion*.my`, `lib/std/float.my`, `math.my`, `fmt.my` (float printing), and the checker's registration of `std.float`'s methods only where decision 4 needs it. The reproducers are in the review's bundle (`repro-r6/`, with a README per area); each fix turns its reproducer into a test that fails before it. The owner's decisions it builds as the review recommends: 4 (lazy std.float). New tasks it files take ids 849–856.
+Work package of [[Project/Review-2026-11-17]], lane "Numerics" (section 5). Files: `lib/std/matrix*.my`, `vector*.my`, `quaternion*.my`, `lib/std/float.my`, `math.my`, `fmt.my` (float printing), and the checker's registration of `std.float`'s methods only where decision 4 needs it. The reproducers are in the review's bundle (`repro-r6/`, with a README per area); each fix turns its reproducer into a test that fails before it. The owner's decision it builds: D258 (lazy std.float).float). New tasks it files take ids 849–856.
 
 - [ ] **H11** (high, new): `json.decode<Matrix>` of `{"rows":65536,"cols":65536,"data":[]}` traps where checked and gives a matrix with no data in a plain build; `matrix(65536, 65536, [])` and `identity(46341)` the same (D184). `repro-r6/library/json_matrix_shape_overflow.my`, `matrix_shape_overflow.my`. Reopens [[MYLA-587]], whose box "`#test` cases on every value-returning function" is false (matrix 10 of 120, quaternion 3 of 29)
 - [ ] **M7**: `Mat4.inverse` of an exactly singular integer matrix is `Some` with elements of -4.5e15; `Mat2`/`Mat3` of the identity times 1e-200 give `None`. `mat_inverse_singular.my`

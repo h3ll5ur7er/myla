@@ -6,7 +6,7 @@ status: todo
 priority: high
 labels: [interpreter, testing, round-7]
 ---
-Work package of [[Project/Review-2026-11-17]], lane "Interpreter and harness" (section 5). Files: `selfhost/interp.my`, `selfhost/harness.my`, `lib/std/test.my`, `lib/std/rt.my` (the test record's functions only; the HTTP lane owns `exec_run`). The reproducers are in the review's bundle (`repro-r6/`, with a README per area); each fix turns its reproducer into a test that fails before it. The owner's decisions it builds as the review recommends: 5. New tasks it files take ids 817–824.
+Work package of [[Project/Review-2026-11-17]], lane "Interpreter and harness" (section 5). Files: `selfhost/interp.my`, `selfhost/harness.my`, `lib/std/test.my`, `lib/std/rt.my` (the test record's functions only; the HTTP lane owns `exec_run`). The reproducers are in the review's bundle (`repro-r6/`, with a README per area); each fix turns its reproducer into a test that fails before it. The owner's decision it builds: D259. New tasks it files take ids 817–824.
 
 - [ ] **H6** (high, new): a generic `#track_caller` function: `lt(18446744073709551615u64, 2u64)` is `true` interpreted, `false` natively; `%caller` takes the frame's first slot, where `%env` is looked for (named frame slots). `repro-r6/interp-harness/track_caller_generic.my`. Reopens [[MYLA-435]]
 - [ ] **M2**: D191's record is three writes, so a worker's `eprint` cuts it (a test with noisy tasks passes 8/8 interpreted, 0–8/8 natively); a case that writes a `P:0;` record with the nonce from its arguments and is then killed passes. `repro-r6/interp-harness/record_race.my`, `forged_record.my`. Reopens [[MYLA-547]]

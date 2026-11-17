@@ -6,7 +6,7 @@ status: todo
 priority: high
 labels: [lowering, native, round-7]
 ---
-Work package of [[Project/Review-2026-11-17]], lane "Lowering and ANF" (section 5). Files: `selfhost/lower.my`, `selfhost/anf.my`, `selfhost/ir_a64.my`. The reproducers are in the review's bundle (`repro-r6/`, with a README per area); each fix turns its reproducer into a test that fails before it. The owner's decisions it builds as the review recommends: none. New tasks it files take ids 809–816.
+Work package of [[Project/Review-2026-11-17]], lane "Lowering and ANF" (section 5). Files: `selfhost/lower.my`, `selfhost/anf.my`, `selfhost/ir_a64.my`. The reproducers are in the review's bundle (`repro-r6/`, with a README per area); each fix turns its reproducer into a test that fails before it. No owner's decision. New tasks it files take ids 809–816.
 
 - [ ] **H4** (high, old): `m.contains(k())` where `k()` changes the map: `true true true` interpreted, `true false true` natively. `Lower.map_contains` takes the map before the key; the fix (`self.operand(cg, m, [k])`) was validated in a copy. `repro-r6/native/uaf_map_contains_*.my`. Reopens [[MYLA-543]]
 - [ ] **H5** (high, old, every runner): in async code a mutating method on a place loses its write when the call has an `await` and the receiver isn't a name or `name[literal]` (`g[i + 1].push(await f())`); `Norm.callee` hoists the receiver into a copy; 26 of 36 forms differ from their sync twin. Each mutating form against its sync twin (`repro-r6/native/async_place_writes.my`). File a task
