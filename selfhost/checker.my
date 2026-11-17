@@ -2455,6 +2455,7 @@ pub struct Checker {
     op_sets: [int32: str],          // an index assigned to by an `IndexSet`, as `op_sites` (a compound assignment's target is its value's operand too)
     impl_args: [str: ImplArgs],     // a generic trait's impls' arguments, by `trait\tkey` (D171)
     impl_bounds: [str: ImplBounds], // a generic impl's bounds on its type parameters, by `trait\tkey` (MYLA-379)
+    op_bounds: [str: ImplBounds],   // an operator impl's of `op_impls`, by its method (MYLA-612)
     for_iters: [int32: Stmt],       // a `for` over an iterator, by its id: the loop it is (D171, `check_for_iterator`)
     // functions without `self` (D172): each one's impl target, by its name
     // (`Box.zero`: `Box<T>`), which solves the impl's type parameters; the
@@ -2589,7 +2590,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         decls: decls,
         structs: [], enums: [], recursive_enums: [],
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
-        impl_decls: [], next_id: 1000000000, derived: [], pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], op_impls: [], op_sites: [:], op_sets: [:], impl_args: [:], impl_bounds: [:], for_iters: [:],
+        impl_decls: [], next_id: 1000000000, derived: [], pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], op_impls: [], op_sites: [:], op_sets: [:], impl_args: [:], impl_bounds: [:], op_bounds: [:], for_iters: [:],
         static_selfs: [:], static_calls: [:], on_type_params: false, call_types: [:],
         grow_calls: [],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
@@ -2878,10 +2879,35 @@ impl Checker {
     // they all do or the impl has none.
     #test(checker_on("[int]"), "Vec2", "Eq", Type.TStruct("Vec2", []))[Ok(None)]
     fun impl_bound_failing(self, k: str, trnm: str, t: Type) -> Result<Option<(Type, str)>, CheckErr> {
-        let ib = match self.impl_bounds.get(trnm + "\t" + k) {
-            Some(x) => x,
-            None => { return Ok(None) },
+        return match self.impl_bounds.get(trnm + "\t" + k) {
+            Some(ib) => self.bounds_failing(ib, t),
+            None => Ok(None),
         }
+    }
+
+    // `impl_bound_failing` of the operator impl `oi` that an operator, an
+    // index or a bound picked for `t` (MYLA-612): `impl<C: Name> Mul<int,
+    // str> for W<C>` gives `W<A>` no `*` unless `A` is `Name`.
+    #test(checker_on("[int]"), OpImpl { tr: "Mul", key: "V", target: Type.TStruct("V", []), r: Type.TFloat(64), r_self: false, o: Type.TStruct("V", []), method: "V.mul$float64", decl: 0 }, Type.TStruct("V", []))[Ok(None)]
+    fun op_bound_failing(self, oi: OpImpl, t: Type) -> Result<Option<(Type, str)>, CheckErr> {
+        return match self.op_bounds.get(oi.method) {
+            Some(ib) => self.bounds_failing(ib, t),
+            None => Ok(None),
+        }
+    }
+
+    // `op_bound_failing` as a message ends with it: ": 'A' isn't Name", ""
+    // when `t` meets the bounds of `oi`.
+    fun op_bound_why(self, oi: OpImpl, t: Type) -> Result<str, CheckErr> {
+        return match self.op_bound_failing(oi, t)? {
+            Some(ct) => Ok(": " + self.not_trait_why(ct.0, ct.1)),
+            None => Ok(""),
+        }
+    }
+
+    // The first argument of `t` that doesn't meet one of the impl bounds
+    // `ib`, and the bound's trait; None when they all do.
+    fun bounds_failing(self, ib: ImplBounds, t: Type) -> Result<Option<(Type, str)>, CheckErr> {
         let u = unify_param(ib.target, t, [])
         for b in ib.bounds {
             // (a parameter the target doesn't hold has nothing to meet)
@@ -2963,8 +2989,23 @@ impl Checker {
         }
         let rt = if tr == "Neg" { c } else { want[0] }
         return match find_op_impl(self.op_impls, tr, key, c, rt) {
-            Some(oi) => Ok(type_eq(subst_type(oi.o, unify_param(oi.target, c, []).subst), want[want.len() - 1])),
+            Some(oi) => Ok(type_eq(subst_type(oi.o, unify_param(oi.target, c, []).subst), want[want.len() - 1]) && is_none_tt(self.op_bound_failing(oi, c)?)),
             None => Ok(false),
+        }
+    }
+
+    // Why `c`, which has an impl of the operator trait `tr` for the bound's
+    // arguments `want`, doesn't meet the bound, as `op_bound_why` says it:
+    // the impl's own bounds (MYLA-612); "" for any other reason.
+    fun op_bound_arg_why(self, c: Type, tr: str, want: [Type]) -> Result<str, CheckErr> {
+        if !is_struct_or_enum(c) || want.len() == 0 { return Ok("") }
+        let key = match self.type_key(c) {
+            Some(k) => k,
+            None => { return Ok("") },
+        }
+        return match find_op_impl(self.op_impls, tr, key, c, if tr == "Neg" { c } else { want[0] }) {
+            Some(oi) => self.op_bound_why(oi, c),
+            None => Ok(""),
         }
     }
 
@@ -3880,6 +3921,7 @@ impl Checker {
                         tinfo.methods = [tm]
                         let last = if tn == "IndexSet" { trait_args[1] } else { trait_args[trait_args.len() - 1] }
                         self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: trait_args[0], r_self: r_self, o: last, method: key + "." + renamed, decl: decl.id })
+                        if ibounds.len() > 0 { self.op_bounds[key + "." + renamed] = ImplBounds { target: target, bounds: ibounds } }
                     } else {
                         var dup = false
                         for p in self.user_trait_impls { if p.trait_name == tn && p.key == key { dup = true } }
@@ -3889,7 +3931,10 @@ impl Checker {
                         }
                         self.user_trait_impls.push(TraitImplPair { trait_name: tn, key: key })
                         // `Neg` is one per type, its result in the table too
-                        if tn == "Neg" && conforms { self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: Type.TTuple([]), r_self: false, o: trait_args[0], method: key + ".neg", decl: decl.id }) }
+                        if tn == "Neg" && conforms {
+                            self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: Type.TTuple([]), r_self: false, o: trait_args[0], method: key + ".neg", decl: decl.id })
+                            if ibounds.len() > 0 { self.op_bounds[key + ".neg"] = ImplBounds { target: target, bounds: ibounds } }
+                        }
                         // what a bound naming the trait with arguments compares
                         // and solves (D171); an operator's are its own (D200)
                         if conforms && trait_args.len() > 0 && !is_op_trait(tn) { self.impl_args[tn + "\t" + key] = ImplArgs { target: target, args: trait_args } }
@@ -4929,6 +4974,8 @@ impl Checker {
         }
         return match find_op_impl(self.op_impls, tr, key, lt, rt) {
             Some(oi) => {
+                let why = self.op_bound_why(oi, lt)?
+                if why != "" { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}' and '{}'{}", op, type_name(lt), type_name(rt), why))) }
                 self.op_sites[e.id] = op_part(oi)
                 Ok(subst_type(oi.o, unify_param(oi.target, lt, []).subst))
             },
@@ -5004,6 +5051,8 @@ impl Checker {
         let key = match self.type_key(t) { Some(k) => k, None => "" }
         return match find_op_impl(self.op_impls, "Neg", key, t, t) {
             Some(oi) => {
+                let why = self.op_bound_why(oi, t)?
+                if why != "" { return Err(terr_at(e.line, e.col, e.sp, format("unary '-' is not defined for '{}'{}", type_name(t), why))) }
                 self.op_sites[e.id] = op_part(oi)
                 Ok(subst_type(oi.o, unify_param(oi.target, t, []).subst))
             },
@@ -5035,6 +5084,8 @@ impl Checker {
         let it = self.expect_value(ix, self.op_hint(cands, base, false, ix))?
         return match find_op_impl(self.op_impls, "Index", key, base, it) {
             Some(oi) => {
+                let why = self.op_bound_why(oi, base)?
+                if why != "" { return Err(terr_at(e.line, e.col, e.sp, format("type '{}' can't be indexed by '{}'{}", type_name(base), type_name(it), why))) }
                 self.op_sites[e.id] = op_part(oi)
                 Ok(subst_type(oi.o, unify_param(oi.target, base, []).subst))
             },
@@ -5078,6 +5129,8 @@ impl Checker {
                 let it = self.expect_value(ix, self.op_hint(cands, bt, false, ix))?
                 match find_op_impl(self.op_impls, "IndexSet", key, bt, it) {
                     Some(oi) => {
+                        let why = self.op_bound_why(oi, bt)?
+                        if why != "" { return Err(terr_at(s.line, s.col, s.sp, format("cannot assign to an index of '{}'{}", type_name(bt), why))) }
                         want = subst_type(oi.o, unify_param(oi.target, bt, []).subst)
                         self.op_sets[target.id] = op_part(oi)
                     },
@@ -11589,7 +11642,8 @@ impl Checker {
                         // an operator's, by its type arguments (D200)
                         if is_op_trait(tr) {
                             if !self.meets_op_bound(concrete, tr, subst_type_list(b.args[j], subst))? {
-                                return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, op_bound_text(tr, b.args[j], Type.TParam(b.tp)), unqualified(sig.decl.name))))
+                                let why = self.op_bound_arg_why(concrete, tr, subst_type_list(b.args[j], subst))?
+                                return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'{}", type_name(concrete), b.tp, op_bound_text(tr, b.args[j], Type.TParam(b.tp)), unqualified(sig.decl.name), why)))
                             }
                             j += 1
                             continue

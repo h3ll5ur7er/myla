@@ -342,6 +342,10 @@ ERRORS = [
      "operator '*' on a value of type parameter 'T' is not defined for 'int32'"),
     (_VEC + "impl Mul<float> for V {\n    fun mul(self, k: float) -> V { return self }\n}\n\nfun scale<T: Mul<float>>(a: T) -> T {\n    return a * 2.0\n}\n\nfun main() {\n    let s = scale(\"x\")\n}\n",
      "type 'str' does not satisfy the bound 'T: Mul<float64>' required by 'scale'"),
+    # an operator impl's bounds hold where the operator picks it, in generic
+    # code too, `*=` included (MYLA-612, H1)
+    ("struct W<C> {\n    v: C,\n}\n\ntrait Name {\n    fun name(self) -> str\n}\n\nimpl<C: Name> Mul<float> for W<C> {\n    fun mul(self, k: float) -> W<C> { return self }\n}\n\nfun g<C>(w: W<C>) -> W<C> {\n    var x = w\n    x *= 2.0\n    return x\n}\n",
+     "operator '*' is not defined for 'W<C>' and 'float64': 'C' isn't Name (it needs the bound 'C: Name')"),
 ]
 
 

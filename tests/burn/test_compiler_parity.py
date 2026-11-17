@@ -9813,6 +9813,98 @@ async fun main() {
     print(await st.report())
     print(f"{mine.len()} {tags.len()} {sb.build()}")
 }
+""",    "operator_impls_whose_bounds_hold": r"""// H1 (MYLA-612): operator impls with bounds, used where the bounds hold:
+// `*` by a type argument, `*=`, unary `-`, `x[i]`, `x[i] = v` and a
+// `T: Mul<float>` argument, on concrete types and in generic code
+trait Conv<T> {
+    fun conv(self) -> T
+}
+
+trait Name {
+    fun name(self) -> str
+}
+
+struct A {
+    n: int,
+}
+
+impl Conv<str> for A {
+    fun conv(self) -> str {
+        return f"a{self.n}"
+    }
+}
+
+impl Name for A {
+    fun name(self) -> str {
+        return f"A{self.n}"
+    }
+}
+
+struct W<C> {
+    v: C,
+    k: float,
+    s: str,
+}
+
+impl<C: Conv<str>> Index<int, str> for W<C> {
+    fun index(self, i: int) -> str {
+        return f"{self.v.conv()}[{i}]"
+    }
+}
+
+impl<C: Name> IndexSet<int, str> for W<C> {
+    fun set_index(var self, i: int, x: str) {
+        self.s = f"{self.v.name()}:{i}={x}"
+    }
+}
+
+impl<C: Name> Mul<int, str> for W<C> {
+    fun mul(self, k: int) -> str {
+        return f"{self.v.name()}*{k}"
+    }
+}
+
+impl<C: Conv<str>> Mul<float> for W<C> {
+    fun mul(self, k: float) -> W<C> {
+        return W { v: self.v, k: self.k * k, s: self.s + self.v.conv() }
+    }
+}
+
+impl<C: Name> Neg<str> for W<C> {
+    fun neg(self) -> str {
+        return "-" + self.v.name()
+    }
+}
+
+fun scale<T: Mul<float>>(x: T) -> T {
+    return x * 2.0
+}
+
+fun named<C: Name>(w: W<C>) -> str {
+    return (w * 3) + " " + (-w)
+}
+
+fun indexed<C: Conv<str> + Name>(w: W<C>) -> str {
+    var x = w
+    x[4] = "q"
+    return w[1] + " " + x.s
+}
+
+fun main() {
+    var w = W { v: A { n: 7 }, k: 1.5, s: "" }
+    print(w * 2)
+    print(-w)
+    print(w[3])
+    w[5] = "z"
+    print(w.s)
+    let d = scale(w)
+    print(d.k)
+    print(d.s)
+    w *= 4.0
+    print(w.k)
+    print(named(w))
+    print(indexed(w))
+}
 """,
 }
 
@@ -11825,6 +11917,9 @@ PINNED = {
     "arithmetic_operators_of_generic_impls": '3\n5\n42\n4\n1\n3.75\nabcd\nababab\n15000000000\n3\n3 xy\nlinked\n',
     # MYLA-415 (M15): stack overflow on aarch64 and wasm32 (release and deep copy recursed)
     "values_nested_through_closures": '7\n1\n1\n2\n5\n50001 100000 50000 100000\nreleased\n',
+    # MYLA-612 (H1): new; the bounds are checked where an operator picks its
+    # impl, and a program that meets them runs as before
+    "operator_impls_whose_bounds_hold": 'A7*2\n-A7\na7[3]\nA7:5=z\n3\nA7:5=za7\n6\nA7*3 -A7\na7[1] A7:4=q\n',
 }
 
 
