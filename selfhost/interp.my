@@ -19,7 +19,9 @@ from std.slice import range_of, str_whole, take_str
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write, eprint, errno_text
 from std.process import exit
-from std.fs import read_to_string, make_dir_all, remove_dir_all
+import std.process as process_m  // `args`: the program `myla` was started as (MYLA-727)
+from std.fs import read_to_string, make_dir_all, remove_dir_all, temp_root
+import std.path_style as style // `WINDOWS`: the separator of the machine the interpreter runs on
 from .parser import fused_compound
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -5328,9 +5330,10 @@ impl Interp {
         if c == B_TEST_DIR {
             // the case's scratch root, made on the first call (D162)
             if self.test_root == "" && self.testing {
-                var base = __getenv("TMPDIR")
-                if base == "" { base = "/tmp" }
-                let root = format("{}/myla-test-{}", base, __clock_ns())
+                // under std.fs's temporary root, joined with `\` on
+                // Windows, as std.test's case directories (MYLA-729)
+                let sep = if style.WINDOWS { "\\" } else { "/" }
+                let root = format("{}{}myla-test-{}", temp_root(), sep, __clock_ns())
                 match make_dir_all(root) {
                     Ok(()) => { self.test_root = root },
                     Err(err) => { self.fail(e, format("test.temp_dir() could not create {}", root)) },
@@ -5339,6 +5342,7 @@ impl Interp {
             return Value.VStr(self.test_root)
         }
         if c == B_TEST_PROGRAM { return Value.VStr(self.test_program) }
+        if c == B_TEST_TOOL { return Value.VStr(program_path(process_m.args()[0], __getcwd())) }
         if c == B_GETENV { return Value.VStr(__getenv(as_str(self.eval(args[0])))) }
         if c == B_SQRT { return Value.VFloat(__sqrt(as_float(self.eval(args[0])))) }
         if c == G_RAW_MEMORY {
@@ -5903,6 +5907,7 @@ const B_APPEND_CHAR: int32 = 78
 const B_APPEND_BYTE: int32 = 79
 const B_BUILD: int32 = 80
 const B_TASKS_WAITING: int32 = 81
+const B_TEST_TOOL: int32 = 82
 
 // Each builtin's name and its code (`Interp.bcodes`).
 fun builtin_codes() -> [str: int32] {
@@ -5934,6 +5939,7 @@ fun builtin_codes() -> [str: int32] {
     m["__getcwd"] = B_GETCWD
     m["__test_dir"] = B_TEST_DIR
     m["__test_program"] = B_TEST_PROGRAM
+    m["__test_tool"] = B_TEST_TOOL
     m["__getenv"] = B_GETENV
     m["__sqrt"] = B_SQRT
     m["__f64_bits"] = B_F64_BITS
@@ -6016,6 +6022,26 @@ fun primitive_group(nm: str) -> int32 {
 #test(B_PRINT)[false]
 fun is_method_code(c: int32) -> bool {
     return c == G_WRAPPING || (c >= B_LEN && c <= B_BUILD && c != B_FORMAT && c != B_STRINGBUILDER)
+}
+
+// The program the interpreter's cases run in, which is their test tool too
+// (`myla --test-tool`, std.test's `tool_mode`, MYLA-727): this process as
+// it was started, `argv0`, from the working directory `cwd` when it names
+// a directory that isn't absolute; a bare name, found on PATH, as it is.
+#test("/usr/bin/myla", "/w")["/usr/bin/myla"]
+#test("build/myla", "/w")["/w/build/myla"]
+#test("myla", "/w")["myla"]
+#test("Z:\\b\\myla.exe", "Z:\\w")["Z:\\b\\myla.exe"]
+#test("build\\myla.exe", "C:\\w")["C:\\w\\build\\myla.exe"]
+fun program_path(argv0: str, cwd: str) -> str {
+    if argv0.len() == 0 || argv0[0] == '/' || argv0[0] == '\\' || (argv0.len() > 1 && argv0[1] == ':') { return argv0 }
+    var named_dir = false
+    for i in 0..argv0.len() {
+        if argv0[i] == '/' || argv0[i] == '\\' { named_dir = true }
+    }
+    if !named_dir { return argv0 }
+    let windows = cwd.len() > 1 && cwd[1] == ':'
+    return cwd + (if windows { "\\" } else { "/" }) + argv0
 }
 
 // The table agrees with the checker's lists: a name's group is the one its

@@ -23,6 +23,8 @@ import .fmt as fmt
 // slices (D142): the code generator calls std.slice's functions
 import .slice as slice
 import .num as num
+// the words for the system's own error codes, the target's (MYLA-716)
+import .system_error as system_error
 
 // `a + b` (`__str_concat`): a new cell holding both strings' bytes.
 pub fun str_concat(a: str, b: str) -> str {
@@ -2402,34 +2404,29 @@ fun broken_pipe() {
     os.broken_pipe()
 }
 
-// What the cause `code` of a failed write means, as `strerror` says it
-// (std.io's `errno_text` says the same): a handle that isn't open, the
-// system's codes Linux and wasm32 give, else `errno` and the number
-// std.ioerror's `code_number` gives the cause.
-#test(284i64)["no space left on device"]
+// What the cause `code` of a failed write means (std.io's `errno_text`
+// says the same): a handle that isn't open; a system's own code as the
+// target's std.system_error says it (Linux's as `strerror` does, Windows'
+// as its messages do, MYLA-716); else `errno` and the number std.ioerror's
+// `code_number` gives the cause.
 #test(34i64)["bad file descriptor"]
-#test(327i64)["errno 71"]
 #test(11i64)["errno 22"]
 fun errno_text(code: int64) -> str {
     if code == os.BAD_HANDLE {
         return "bad file descriptor"
     }
-    let n = code_number(code)
     if code >= os.OTHER {
-        if n == 28 {
-            return "no space left on device"
-        }
-        if n == 5 {
-            return "input/output error"
-        }
-        if n == 27 {
-            return "file too large"
-        }
-        if n == 122 {
-            return "disk quota exceeded"
-        }
+        return system_error.error_text(code - os.OTHER)
     }
-    return format("errno {}", n)
+    return format("errno {}", code_number(code))
+}
+
+// A system's own code in the words of the target the case runs on (std.io's
+// `a_system_code_in_the_target_s_words`).
+#test
+fun a_system_code_in_the_target_s_words() {
+    assert(errno_text(os.OTHER + 28) == system_error.error_text(28), "a full disk")
+    assert(errno_text(os.OTHER + 71) == system_error.error_text(71), "a code without words")
 }
 
 // std.ioerror's `code_number`, which std.rt can't import (it is in every
@@ -2454,8 +2451,8 @@ fun code_number(code: int64) -> int64 {
     return n
 }
 
-// std.ioerror's LINUX_NUMBERS: Linux's errno of each cause code, 0 to 35.
-const CAUSE_NUMBERS: str = "000002013017020021039004125038032022111104103107098099110113101074000000000000000000000000000000011115009025"
+// std.ioerror's LINUX_NUMBERS: Linux's errno of each cause code, 0 to 37.
+const CAUSE_NUMBERS: str = "000002013017020021039004125038032022111104103107098099110113101074000000000000000000000000000000011115009025024023"
 
 pub fun print_int(v: int64) {
     print_str(int_to_str(v))
@@ -3566,17 +3563,36 @@ pub fun actor_leave(rec: int64) {
 // whose task failed (D97, `__task_fail`) comes back to its start on that
 // stack: it keeps nothing from one frame to the next.
 pub fun exec_run() {
+    // with descriptors watched: the turns since the clock was read, how
+    // many go between two reads, when it was read and when this worker
+    // glanced at the poller
     var turns: int64 = 0
+    var every: int64 = 1
+    var read_at: int64 = 0
+    var glanced: int64 = 0
     while true {
         if __rt_get("__timer_count") != 0 {
             timers_fire()
         }
-        // descriptors watched: a glance at the poller now and then, for
-        // workers too busy to poll (D124)
+        // descriptors watched: a glance at the poller once GLANCE_NS has
+        // passed since this worker's last, for workers too busy to poll
+        // (D124, MYLA-755: a glance every 64 turns came seconds apart
+        // while every worker ran slow frames)
         if __rt_get("__watch_count") != 0 {
             turns += 1
-            if (turns & 63) == 0 {
-                exec_glance()
+            if turns >= every {
+                let now = os.clock_ns()
+                every = glance_every(every, now - read_at)
+                turns = 0
+                read_at = now
+                if glanced == 0 {
+                    // (the first turn with descriptors watched counts as
+                    // a glance: the frames queued run first, as before)
+                    glanced = now
+                } else if now - glanced >= GLANCE_NS {
+                    glanced = now
+                    exec_glance()
+                }
             }
         }
         let fr = exec_find()
@@ -3605,6 +3621,41 @@ pub fun exec_run() {
             __xchg64(__rt_addr("__exec_cur"), 0)
         }
     }
+}
+
+// A busy worker glances at the poller once GLANCE_NS has passed since its
+// last glance (MYLA-755), as Go's sysmon polls the network once 10 ms have
+// passed without a poll: a ready descriptor waits about that long, or until
+// a frame suspends, whatever the run queues hold. The clock is read every
+// so many turns (`glance_every`): about every GLANCE_READ_NS, at most every
+// GLANCE_TURNS turns, so short turns pay a read of it every 64 (on Linux a
+// system call, as a glance every 64 turns was) and long ones a read each.
+const GLANCE_NS: int64 = 1000000
+const GLANCE_READ_NS: int64 = 250000
+const GLANCE_TURNS: int64 = 64
+
+// The turns between reads of the clock next, from `every` and the `since`
+// ns those `every` took: as many as take about GLANCE_READ_NS, from 1 to
+// GLANCE_TURNS, at most twice as many as before (so turns that become
+// long at once are read each from the next read on).
+#test(64i64, 1000000000i64)[1i64]
+#test(64i64, 4000000i64)[4i64]
+#test(1i64, 1000i64)[2i64]
+#test(64i64, 1000i64)[64i64]
+#test(8i64, 250000i64)[8i64]
+#test(1i64, 0i64)[2i64]
+fun glance_every(every: int64, since: int64) -> int64 {
+    var next = every * 2
+    if since > 0 && every * GLANCE_READ_NS / since < next {
+        next = every * GLANCE_READ_NS / since
+    }
+    if next < 1 {
+        return 1
+    }
+    if next > GLANCE_TURNS {
+        return GLANCE_TURNS
+    }
+    return next
 }
 
 // No frame found: this worker counts itself idle and only glances at the

@@ -20,7 +20,7 @@ fun main() {
 | `write(fd: int32, s: str) -> Result<(), IoError>` | Writes the bytes of `s` to file descriptor `fd`, all of them, or the error that stopped it (D146); a pipe nobody reads any more is `BrokenPipe` |
 | `println(s)` | `s` and a newline to stdout |
 | `eprint(s)`, `eprintln(s)` | To stderr, without / with a newline |
-| `errno_text(code: int32) -> str` | The `<cause>` of `write failed: <cause>` below, for the cause code (`__io_errno()`'s, D209) of a failed write: ENOSPC's (`256 + 28`) is `"no space left on device"`, a handle that isn't open `"bad file descriptor"`, one it doesn't name `"errno 77"` (the number std.ioerror's `code_number` gives) |
+| `errno_text(code: int32) -> str` | The `<cause>` of `write failed: <cause>` below, for the cause code (`__io_errno()`'s, D209) of a failed write: a handle that isn't open is `"bad file descriptor"`; a system's own code (from `256` on) the target's words for it, [[Language/Standard-library/Ioerror#system-codes|std.system_error]]'s ([[MYLA-716]]): on Linux and wasm32 ENOSPC's (`256 + 28`) is `"no space left on device"` and one it doesn't name `"errno 77"`, on Windows `ERROR_DISK_FULL`'s (`256 + 112`) `"there is not enough space on the disk"` and one it doesn't name `"Windows error 1392"`; a cause std numbers itself `"errno 22"` (the number std.ioerror's `code_number` gives) |
 
 Output isn't buffered: what a program wrote is out before it waits for input.
 
@@ -34,7 +34,7 @@ Reading goes through a buffered `Reader` ([[MYLA-78]]), a `Buffered` over the de
 | --- | --- |
 | `stdin() -> Reader` | A reader of the standard input |
 | `reader(fd: int32) -> Reader` | A reader of file descriptor `fd` |
-| `r.read_line() -> Result<Option<str>, IoError>` | The next line without its `"\n"` (a `"\r"` before it stays); a last line without `"\n"` counts; `None` at the end |
+| `r.read_line() -> Result<Option<str>, IoError>` | The next line without its `"\n"` (a `"\r"` before it stays: a file's CR LF; a line typed at Windows' console has none, as at a terminal, [[MYLA-734]]); a last line without `"\n"` counts; `None` at the end |
 | `r.read_exact(n: int32) -> Result<Option<str>, IoError>` | Exactly the next `n` bytes (`""` for `n <= 0`); `None` if the input ends first (those bytes stay unread, as after a failed read). Its reads ask for what is still needed, but at most 4 KiB more than it holds, so they double and a count far past the input's end isn't allocated up front ([[MYLA-550]]: `read_exact(2000000000)` of `abc` under a memory limit was `out of memory`) |
 | `r.read_to_end() -> Result<str, IoError>` | The rest of the input (`""` once it has ended) |
 | `r.ready(timeout_ms: int32) -> bool` | Whether a read won't block: bytes are buffered, or within `timeout_ms` milliseconds input arrives, the input ends or reading fails (0: don't wait; negative: wait as long as it takes) |

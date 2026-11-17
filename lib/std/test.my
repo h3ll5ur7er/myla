@@ -315,7 +315,7 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
         argv.push("--case")
         argv.push(f"{k}")
         argv.push(nonce)
-        let ran = command(exe).args(argv).env("MYLA_TEST_DIR", dir).stdin("").output()
+        let ran = command(exe).args(argv).env("MYLA_TEST_DIR", dir).env("MYLA_TEST_TOOL", program).stdin("").output()
         var started = true
         var out = Output { stdout: [], stderr: [], status: ExitStatus.Exited(0) }
         match ran {
@@ -649,6 +649,144 @@ fun on_one_line(text: str) -> str {
         i = i + 1
     }
     return sb.build()
+}
+
+// --- The test tool (MYLA-727) --------------------------------------------
+//
+// The child a case that starts processes starts, which every target with
+// processes has, Windows too, where Linux's `cat`, `sh`, `head` and `wc`
+// aren't: the program that runs the cases in a mode of its own,
+// `<program> --test-tool <step>…` (a case finds it with `__test_tool()`:
+// natively the harness, whose runner gives its children its path as
+// MYLA_TEST_TOOL; interpreted `myla` itself). Each calls `tool_mode` first.
+// Its steps run in order, then it ends with 0:
+//
+//   cat          its input to its output, a piece at a time, to the end
+//   upper        the same, ASCII's lowercase letters uppercase (`tr a-z A-Z`)
+//   a-for-nul    the same, each zero byte an `a` (`tr '\0' a`)
+//   head <n>     the first `n` bytes of its input to its output (`head -c`)
+//   count        its input read to the end, then how many bytes it was and
+//                a newline (`wc -c`)
+//   line         a line of its input to its output, without its newline
+//   out <text>, err <text>
+//                the text to its output or its error
+//   zeros <n>, err-zeros <n>
+//                `n` zero bytes to its output or its error
+//   sleep <ms>   a sleep of `ms` milliseconds
+//   exit <n>     the end, with the status `n`
+//
+// A write to a pipe nobody reads ends it quietly, as by SIGPIPE (D146).
+
+// The test tool, when `argv` is `<program> --test-tool <step>…`: its steps
+// run, and the process ends; else nothing.
+pub fun tool_mode(argv: [str]) {
+    if argv.len() < 2 || argv[1] != "--test-tool" { return }
+    var i = 2
+    while i < argv.len() {
+        let step = argv[i]
+        let arg = if i + 1 < argv.len() { argv[i + 1] } else { "" }
+        let takes = step == "head" || step == "out" || step == "err" || step == "zeros" || step == "err-zeros" || step == "sleep" || step == "exit"
+        if takes && i + 1 == argv.len() { tool_failed(f"'{step}' needs a value") }
+        if step == "cat" || step == "upper" || step == "a-for-nul" { tool_copy(-1i64, step) }
+        else if step == "head" { tool_copy(tool_number(arg), "cat") }
+        else if step == "count" {
+            var total: int64 = 0
+            while true {
+                let piece = __read_bytes(0, 65536)
+                if __io_errno() != 0 || piece.len() == 0 { break }
+                total = total + piece.len() as int64
+            }
+            tool_put(1, __str_to_bytes(f"{total}\n"))
+        }
+        else if step == "line" {
+            var sb = StringBuilder()
+            while true {
+                let b = __read_bytes(0, 1)
+                if __io_errno() != 0 || b.len() == 0 || b[0] == 10u8 { break }
+                sb.append_byte(b[0])
+            }
+            tool_put(1, __str_to_bytes(sb.build()))
+        }
+        else if step == "out" { tool_put(1, __str_to_bytes(arg)) }
+        else if step == "err" { tool_put(2, __str_to_bytes(arg)) }
+        else if step == "zeros" || step == "err-zeros" { tool_zeros(if step == "zeros" { 1 } else { 2 }, tool_number(arg)) }
+        else if step == "sleep" { __sleep_ns(tool_number(arg) * 1000000i64) }
+        else if step == "exit" { exit(tool_number(arg) as int32) }
+        else { tool_failed(f"no step '{step}'") }
+        i = i + (if takes { 2 } else { 1 })
+    }
+    exit(0)
+}
+
+// Up to `limit` bytes of the tool's input (all of it when negative) to its
+// output, a piece at a time, as `how` says (`tool_mode`'s `cat`, `upper`,
+// `a-for-nul`).
+fun tool_copy(limit: int64, how: str) {
+    var left = limit
+    while left != 0 {
+        let most = if left < 0 || left > 65536i64 { 65536 } else { left as int32 }
+        let piece = __read_bytes(0, most)
+        if __io_errno() != 0 || piece.len() == 0 { return }
+        tool_put(1, translated(piece, how))
+        if left > 0 { left = left - piece.len() as int64 }
+    }
+}
+
+// `n` zero bytes to the descriptor `fd`, 64 KiB at a time (no slice: the
+// harness of `std.slice` itself must build).
+fun tool_zeros(fd: int32, n: int64) {
+    var piece: [uint8] = []
+    for k in 0..65536 { piece.push(0u8) }
+    var left = n
+    while left > 0 {
+        if left < 65536i64 {
+            var last: [uint8] = []
+            for k in 0..left as int32 { last.push(0u8) }
+            piece = last
+        }
+        tool_put(fd, piece)
+        left = left - piece.len() as int64
+    }
+}
+
+// `b` as `tool_copy`'s `how` says.
+#test([97u8, 0u8, 122u8, 65u8], "upper")[[65u8, 0u8, 90u8, 65u8]]
+#test([97u8, 0u8, 0u8], "a-for-nul")[[97u8, 97u8, 97u8]]
+#test([97u8, 0u8], "cat")[[97u8, 0u8]]
+fun translated(b: [uint8], how: str) -> [uint8] {
+    if how == "cat" { return b }
+    var out = b
+    for i in 0..out.len() {
+        if how == "upper" && out[i] >= 97u8 && out[i] <= 122u8 { out[i] = out[i] - 32u8 }
+        if how == "a-for-nul" && out[i] == 0u8 { out[i] = 97u8 }
+    }
+    return out
+}
+
+// `b` to the descriptor `fd`; a write to a closed pipe ends the tool
+// quietly (D146), another error with 1.
+fun tool_put(fd: int32, b: [uint8]) {
+    __write_bytes(fd, b)
+    if __io_errno() != 0 { exit(1) }
+}
+
+// The number a step was given, in decimal digits.
+#test("16777216")[16777216i64]
+#test("0")[0i64]
+fun tool_number(s: str) -> int64 {
+    var n: int64 = 0
+    if s.len() == 0 { tool_failed("a step's value is no number") }
+    for i in 0..s.len() {
+        if s[i] < '0' || s[i] > '9' { tool_failed(f"'{s}' is no number") }
+        n = n * 10i64 + (s[i] - '0') as int64
+    }
+    return n
+}
+
+// The tool ends with 2 for a step it can't take, saying why.
+fun tool_failed(why: str) {
+    eprint(f"myla --test-tool: {why}\n")
+    exit(2)
 }
 
 // --- Values as the report shows them (the interpreter's forms) -----------

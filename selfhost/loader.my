@@ -28,7 +28,7 @@
 from std.fs import read_to_string, exists, is_dir, current_dir
 from std.process import env
 from .stdroot import is_embedded, embedded_text, embedded_parse, EMBEDDED_ROOT
-from .target import Target
+from .target import Target, host
 from .astcache import decode, body_part, cached_body, no_bodies, Cached, Bodies
 from .parser import parse_source_with, parse_source_lazy, parse_body, BodySite, LazyParsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
@@ -369,7 +369,8 @@ pub fun load_options(stdlib_root: str) -> LoadOptions {
 // theirs. A module may have a copy for a target too, named after the
 // platform module's: x86-64 Windows takes `std/path_windows.my` for
 // `std/path.my` and `std/path_style_windows.my` for `std/path_style.my`
-// (MYLA-704, Windows' paths, D215).
+// (MYLA-704, Windows' paths, D215), and `std/system_error_windows.my` for
+// `std/system_error.my` (MYLA-716, the words for Windows' error codes).
 pub fun for_target(opts: LoadOptions, t: Target) -> LoadOptions {
     let file = t.platform_file
     if file == "" { return opts }
@@ -396,7 +397,65 @@ pub fun for_target(opts: LoadOptions, t: Target) -> LoadOptions {
     // its platform module is (`path_windows.my` beside `platform_windows.my`,
     // MYLA-704): taken where there is one
     let own = file[8:]
-    return own_copy(own_copy(o, opts, "path", "path" + own), opts, "path_style", "path_style" + own)
+    let paths = own_copy(own_copy(o, opts, "path", "path" + own), opts, "path_style", "path_style" + own)
+    return own_copy(paths, opts, "system_error", "system_error" + own)
+}
+
+// `opts` for the program `entry` run, tested or checked on the machine the
+// tools run on (`myla run`, `myla test` interpreted, `myla check`, the REPL,
+// the language server): the host's own modules, as `for_target` gives a
+// native build its target's, so that a `myla.exe` built for Windows reads
+// Windows' std.path and std.platform (MYLA-723); as they are on x86-64
+// Linux. The modules a copy replaces (std.system_error's too, MYLA-716)
+// are themselves when one is `entry`: `myla test lib/std/path.my` runs
+// path.my's cases on every host. `opts` is rooted where the program is
+// loaded from (the driver's `own_library`).
+pub fun for_host(entry: str, opts: LoadOptions) -> LoadOptions {
+    var o = for_target(opts, host())
+    for name in ["platform", "path", "path_style", "system_error"] {
+        let key = opts.stdlib_root + "/std/" + name + ".my"
+        if o.overrides.contains(key) && same_file(entry, key) {
+            let text = match override_text(entry, opts.overrides) {
+                Some(t) => Some(t),
+                None => match read_to_string(entry) {
+                    Ok(t) => Some(t),
+                    Err(e) => None,
+                },
+            }
+            match text {
+                Some(t) => {
+                    // under both spellings: the loader reads a key spelled
+                    // as the path is before another spelling of it
+                    o.overrides[key] = t
+                    o.overrides[entry] = t
+                },
+                // (the loader reports the file it can't read)
+                None => { o.overrides.remove(key) },
+            }
+        }
+    }
+    return o
+}
+
+// Whether the paths `a` and `b` name the same file: normalized, from the
+// working directory where one is relative and the other isn't.
+#test("lib/std/path.my", "lib/./std/path.my")[true]
+#test("lib/std/path.my", "lib/std/path_windows.my")[false]
+#test("/w/lib/std/path.my", "/w/lib/std//path.my")[true]
+fun same_file(a: str, b: str) -> bool {
+    var x = normalize(a)
+    var y = normalize(b)
+    let xa = x.len() > 0 && x[0] == '/'
+    let ya = y.len() > 0 && y[0] == '/'
+    if xa != ya {
+        let here = match current_dir() {
+            Ok(d) => d,
+            Err(e) => { return false },
+        }
+        if !xa { x = normalize(here + "/" + x) }
+        if !ya { y = normalize(here + "/" + y) }
+    }
+    return x == y
 }
 
 // `o` with `std/<name>.my` read from the target's own copy `file` of it,

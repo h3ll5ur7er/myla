@@ -9,6 +9,7 @@
 // for input.
 
 from .ioerror import IoError, from_cause, code_number, BAD_HANDLE, OTHER
+import .system_error as system_error // the target's words for its codes
 import .str as str_m // `find_from`
 
 // Write `s`'s bytes to file descriptor `fd` (1 = stdout, 2 = stderr), all of
@@ -55,32 +56,29 @@ fun put(fd: int32, s: str) {
 }
 
 // What the cause code `code` (`__io_errno`'s, D209) of a failed write means
-// (std.rt's `errno_text`): a handle that isn't open, the system's codes
-// Linux and wasm32 give, else `errno` and the number `code_number` gives.
-#test(284)["no space left on device"]
+// (std.rt's `errno_text`): a handle that isn't open; a system's own code as
+// the target's std.system_error says it (`no space left on device` on Linux,
+// `there is not enough space on the disk` on Windows, MYLA-716); else
+// `errno` and the number `code_number` gives the cause.
 #test(34)["bad file descriptor"]
-#test(333)["errno 77"]
 #test(11)["errno 22"]
 pub fun errno_text(code: int32) -> str {
     if code == BAD_HANDLE {
         return "bad file descriptor"
     }
-    let n = code_number(code)
     if code >= OTHER {
-        if n == 28 {
-            return "no space left on device"
-        }
-        if n == 5 {
-            return "input/output error"
-        }
-        if n == 27 {
-            return "file too large"
-        }
-        if n == 122 {
-            return "disk quota exceeded"
-        }
+        return system_error.error_text((code - OTHER) as int64)
     }
-    return f"errno {n}"
+    return f"errno {code_number(code)}"
+}
+
+// A system's own code in the words of the target the case runs on: Linux's
+// `no space left on device`, Windows' `there is not enough space on the
+// disk` (std.system_error's own cases say which).
+#test
+fun a_system_code_in_the_target_s_words() {
+    assert(errno_text(OTHER + 28) == system_error.error_text(28), "a full disk")
+    assert(errno_text(OTHER + 77) == system_error.error_text(77), "a code without words")
 }
 
 // --- Streams (MYLA-338) ---------------------------------------------------------

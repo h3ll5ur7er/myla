@@ -28,12 +28,13 @@
 from std.process import args, exit
 from std.io import eprintln, println
 from std.rt import heap_huge_pages
+from std.test import tool_mode
 from .repl import repl
 from .loader import load_options, LoadOptions, parse_package_flag
 from .stdroot import default_stdlib_root
 from .diag import render
 from .target import Target, host, parse_target, target_names
-from .driver import cmd_build, cmd_interp, cmd_test, cmd_test_native, load_and_check
+from .driver import cmd_build, cmd_interp, cmd_test, cmd_test_native, load_for_host
 from .interp import TestOptions, all_tests
 from .project_cmd import project_build, project_run, project_test, project_check, project_clean, project_new, project_fetch, ends_with
 
@@ -171,6 +172,9 @@ fun main() {
         exit(2)
     }
     let cmd = argv[1]
+    // `myla --test-tool <step>…`: the child that the cases `myla test`
+    // interprets start (std.test's `tool_mode`, MYLA-727)
+    tool_mode(argv)
     if cmd == "--help" || cmd == "-h" || cmd == "help" {
         for l in usage_lines() { println(l) }
         exit(0)
@@ -223,7 +227,7 @@ fun main() {
         exit(cmd_build(cl.file, cl.output, cl.opts, cl.debug, cl.checked, cl.target))
     }
     if cmd == "check" {
-        match load_and_check(cl.file, cl.opts) {
+        match load_for_host(cl.file, cl.opts) {
             Ok(ch) => {
                 print("ok")
                 exit(0)

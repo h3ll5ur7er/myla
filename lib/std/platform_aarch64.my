@@ -32,9 +32,9 @@ pub const TARGET: str = "aarch64-linux"
 // Linux's errno, which `cause` maps here, so nothing above this module
 // knows Linux's numbers. The codes are std.ioerror's, the same in every
 // platform module (tests/burn/test_platform_interface.py holds them to it):
-// 1 to 21 the causes of `IoError`, 32 to 35 those std.rt and std.net act on
-// themselves, and from OTHER on OTHER plus the system's own code
-// (`IoError.Other(code)`).
+// 1 to 21 the causes of `IoError`, 32 to 37 those std.rt, std.net and
+// std.http act on themselves, and from OTHER on OTHER plus the system's own
+// code (`IoError.Other(code)`).
 pub const NOT_FOUND: int64 = 1
 pub const PERMISSION_DENIED: int64 = 2
 pub const ALREADY_EXISTS: int64 = 3
@@ -60,6 +60,8 @@ pub const WOULD_BLOCK: int64 = 32
 pub const IN_PROGRESS: int64 = 33
 pub const BAD_HANDLE: int64 = 34
 pub const NOT_A_TERMINAL: int64 = 35
+pub const TOO_MANY_OPEN: int64 = 36
+pub const TOO_MANY_OPEN_SYSTEM: int64 = 37
 pub const OTHER: int64 = 256
 
 // What a file is (`path_stat`, `fd_stat`, `path_kind`) or a directory's entry
@@ -170,8 +172,8 @@ fun sys5(nr: int64, a: int64, b: int64, c: int64, d: int64, e: int64) -> int64 {
 
 // The cause code of Linux's errno `e` (the same numbers on x86-64 and
 // aarch64): EACCES and EPERM are PERMISSION_DENIED, ENOSYS, EOPNOTSUPP,
-// EAFNOSUPPORT and EPROTONOSUPPORT UNSUPPORTED; one without a cause OTHER
-// plus it.
+// EAFNOSUPPORT and EPROTONOSUPPORT UNSUPPORTED, EMFILE TOO_MANY_OPEN and
+// ENFILE TOO_MANY_OPEN_SYSTEM (MYLA-716); one without a cause OTHER plus it.
 #test(11)[32]
 #test(4)[7]
 #test(2)[1]
@@ -187,6 +189,8 @@ fun sys5(nr: int64, a: int64, b: int64, c: int64, d: int64, e: int64) -> int64 {
 #test(115)[33]
 #test(9)[34]
 #test(25)[35]
+#test(24)[36]
+#test(23)[37]
 #test(5)[261]
 #test(40)[296]
 fun cause(e: int64) -> int64 {
@@ -215,6 +219,8 @@ fun cause(e: int64) -> int64 {
     if e == 115 { return IN_PROGRESS }
     if e == 9 { return BAD_HANDLE }
     if e == 25 { return NOT_A_TERMINAL }
+    if e == 24 { return TOO_MANY_OPEN }
+    if e == 23 { return TOO_MANY_OPEN_SYSTEM }
     return OTHER + e
 }
 

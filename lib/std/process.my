@@ -4,6 +4,7 @@
 from .io import Read, Write, Pollable, buffered
 from .ioerror import IoError, from_cause, code_number, NOT_FOUND, PERMISSION_DENIED, UNSUPPORTED, CANCELLED, INVALID_INPUT, BAD_HANDLE
 import .bytes as bytes_m
+from .platform import TARGET // the cases' statuses on Windows (MYLA-727)
 
 // The process command-line arguments, captured at startup. `args()[0]` is the
 // program name as invoked; the remainder are its arguments.
@@ -59,9 +60,9 @@ pub struct Output {
 // `InvalidInput`: what no process can take, such as an environment variable
 // name with `=` in it (D160) or a NUL byte in the program's name, an
 // argument or the directory; `WorkingDir`: the directory `cwd` gave can't
-// be entered, with the number of why (Linux's errno on every target, D189,
-// D209: 2 not there, 20 not a directory, 13 denied); `Other` holds the
-// platform's own code for anything else.
+// be entered, with why (D189, MYLA-716: `NotFound`, `NotADirectory`,
+// `PermissionDenied`, …, on every target); `Other` holds the platform's own
+// code for anything else.
 #derive(Eq)
 pub enum SpawnError {
     NotFound,
@@ -69,7 +70,7 @@ pub enum SpawnError {
     Unsupported,
     Cancelled,
     InvalidInput,
-    WorkingDir(int32),
+    WorkingDir(IoError),
     Other(int32),
 }
 
@@ -77,8 +78,8 @@ impl SpawnError {
     // The reason in words.
     #test(SpawnError.NotFound)["program not found"]
     #test(SpawnError.Other(12))["could not start the program: errno 12"]
-    #test(SpawnError.WorkingDir(2))["working directory not found"]
-    #test(SpawnError.WorkingDir(5))["could not enter the working directory: errno 5"]
+    #test(SpawnError.WorkingDir(IoError.NotFound))["working directory not found"]
+    #test(SpawnError.WorkingDir(IoError.Other(5)))["could not enter the working directory: error 5 (Other(5))"]
     fun message(self) -> str {
         return match self {
             NotFound => "program not found"
@@ -86,7 +87,7 @@ impl SpawnError {
             Unsupported => "no processes on this target"
             Cancelled => "cancelled"
             InvalidInput => "invalid input"
-            WorkingDir(code) => dir_message(code)
+            WorkingDir(why) => dir_message(why)
             Other(code) => f"could not start the program: errno {code}"
         }
     }
@@ -98,20 +99,17 @@ impl Format for SpawnError {
     }
 }
 
-// What a `WorkingDir` says, by its number.
-#test(20)["working directory is not a directory"]
-#test(13)["working directory: permission denied"]
-fun dir_message(code: int32) -> str {
-    if code == 2 {
-        return "working directory not found"
+// What a `WorkingDir` says, by why.
+#test(IoError.NotADirectory)["working directory is not a directory"]
+#test(IoError.PermissionDenied)["working directory: permission denied"]
+#test(IoError.Interrupted)["could not enter the working directory: interrupted (Interrupted)"]
+fun dir_message(why: IoError) -> str {
+    return match why {
+        NotFound => "working directory not found"
+        NotADirectory => "working directory is not a directory"
+        PermissionDenied => "working directory: permission denied"
+        _ => f"could not enter the working directory: {why}"
     }
-    if code == 20 {
-        return "working directory is not a directory"
-    }
-    if code == 13 {
-        return "working directory: permission denied"
-    }
-    return f"could not enter the working directory: errno {code}"
 }
 
 // What std.platform adds to the cause of a directory the child couldn't
@@ -127,13 +125,13 @@ const DIR_FAILED: int32 = 65536
 #test(268)[SpawnError.Other(12)]
 #test(32)[SpawnError.Other(11)]
 #test(11)[SpawnError.InvalidInput]
-#test(65537)[SpawnError.WorkingDir(2)]
-#test(65540)[SpawnError.WorkingDir(20)]
-#test(65538)[SpawnError.WorkingDir(13)]
-#test(65797)[SpawnError.WorkingDir(5)]
+#test(65537)[SpawnError.WorkingDir(IoError.NotFound)]
+#test(65540)[SpawnError.WorkingDir(IoError.NotADirectory)]
+#test(65538)[SpawnError.WorkingDir(IoError.PermissionDenied)]
+#test(65797)[SpawnError.WorkingDir(IoError.Other(5))]
 fun spawn_error_from_cause(code: int32) -> SpawnError {
     if code >= DIR_FAILED {
-        return SpawnError.WorkingDir(code_number(code - DIR_FAILED))
+        return SpawnError.WorkingDir(from_cause(code - DIR_FAILED))
     }
     if code == NOT_FOUND { return SpawnError.NotFound }
     if code == PERMISSION_DENIED { return SpawnError.PermissionDenied }
@@ -357,7 +355,7 @@ impl Command {
     }
 
     // The command run in the directory `dir` (one that isn't there, or
-    // can't be entered, is `WorkingDir` with its errno).
+    // can't be entered, is `WorkingDir` with its cause).
     fun cwd(self, dir: str) -> Command {
         var c = self
         c.dir = dir
@@ -1332,9 +1330,62 @@ fun wait_status(r: Result<ExitStatus, IoError>) -> ExitStatus {
 
 // --- Tests of the children (D162) ---------------------------------------------
 //
-// Each starts real programs (`cat`, `sh`, `head`, …). Where the target has
-// no processes (wasm32) the first spawn is `Unsupported`, which is what the
-// test checks there before it returns.
+// Each starts real programs: the test tool, which every target with
+// processes has (`tool`, MYLA-727). Where the target has no processes
+// (wasm32) the first spawn is `Unsupported`, which is what the test checks
+// there before it returns.
+
+// The test tool given `steps` (std.test's `tool_mode`, MYLA-727): the
+// program running these cases (`__test_tool()`: `myla` interpreted, the
+// harness natively) in a mode of its own, `--test-tool <step>…`, under the
+// emulator the harness runs under (MYLA_TEST_EMULATOR: qemu-user starts no
+// child under itself). It stands in for `cat`, `sh`, `head` and `wc`, which
+// a Windows program has none of.
+fun tool(steps: [str]) -> Command {
+    var words: [str] = []
+    match env("MYLA_TEST_EMULATOR") {
+        Some(e) => {
+            var word = StringBuilder()
+            for i in 0..e.len() + 1 {
+                if i == e.len() || e[i] == ' ' {
+                    let w = word.build()
+                    if w.len() > 0 {
+                        words.push(w)
+                    }
+                    word = StringBuilder()
+                } else {
+                    word.append_byte(e[i])
+                }
+            }
+        }
+        None => {}
+    }
+    words.push(__test_tool())
+    var lead: [str] = []
+    for i in 1..words.len() {
+        lead.push(words[i])
+    }
+    lead.push("--test-tool")
+    return command(words[0]).args(lead).args(steps)
+}
+
+// The status of a child `kill` ended: SIGKILL's, but on Windows the exit
+// code 1 (D224).
+fun killed() -> ExitStatus {
+    if TARGET == "x86_64-windows" {
+        return ExitStatus.Exited(1)
+    }
+    return ExitStatus.Signaled(9)
+}
+
+// The status of a child that wrote to a pipe nobody reads: SIGPIPE's, but on
+// Windows, which has no signals, the exit code a shell would show (D146).
+fun broken_piped() -> ExitStatus {
+    if TARGET == "x86_64-windows" {
+        return ExitStatus.Exited(141)
+    }
+    return ExitStatus.Signaled(13)
+}
 
 // Whether `r` failed only because the target has no processes; any other
 // failure ends the test.
@@ -1447,7 +1498,7 @@ fun line(r: Result<Option<str>, IoError>) -> str {
 // A child's input written, closed, and its output read back.
 #test
 fun child_round_trip() {
-    let started = command("cat").spawn()
+    let started = tool(["cat"]).spawn()
     if no_processes(started, "cat") {
         return
     }
@@ -1468,7 +1519,7 @@ fun child_round_trip() {
 // A stream used after it was closed is an error, not a crash.
 #test
 fun closed_streams() {
-    let started = command("cat").spawn()
+    let started = tool(["cat"]).spawn()
     if no_processes(started, "cat") {
         return
     }
@@ -1494,7 +1545,7 @@ fun closed_streams() {
 // a stream built by hand holds no handle (D181).
 #test
 fun stale_copies() {
-    let started = command("cat").spawn()
+    let started = tool(["cat"]).spawn()
     if no_processes(started, "cat") {
         return
     }
@@ -1502,7 +1553,7 @@ fun stale_copies() {
     var w = input(child.take_stdin())
     let stale = w
     assert(ok(w.close()), "close the input")
-    var other = running(command("cat").spawn())
+    var other = running(tool(["cat"]).spawn())
     var w2 = input(other.take_stdin())
     var r2 = output_of(other.take_stdout())
     var s = stale
@@ -1524,7 +1575,7 @@ fun stale_copies() {
 // result that comes at the end.
 #test
 fun child_line_by_line() {
-    let started = command("cat").spawn()
+    let started = tool(["cat"]).spawn()
     if no_processes(started, "cat") {
         return
     }
@@ -1546,7 +1597,7 @@ fun child_line_by_line() {
 // review's M12).
 #test
 async fun input_written_while_output_read() {
-    let started = command("cat").spawn()
+    let started = tool(["cat"]).spawn()
     if no_processes(started, "cat") {
         return
     }
@@ -1590,7 +1641,7 @@ async fun drink(r: ChildStdout) -> int {
 // `try_wait` while it runs and after, `kill`, and the status a kill gives.
 #test
 fun child_killed() {
-    let started = command("sleep").arg("5").spawn()
+    let started = tool(["sleep", "5000"]).spawn()
     if no_processes(started, "sleep") {
         return
     }
@@ -1598,18 +1649,18 @@ fun child_killed() {
     assert(child.id() > 0, "a process ID")
     assert(none(polled(child.try_wait())), "still running")
     assert(ok(child.kill()), "kill")
-    assert(waited(child.wait()) == ExitStatus.Signaled(9), "ended by SIGKILL")
-    assert(match polled(child.try_wait()) { Some(st) => st == ExitStatus.Signaled(9), None => false }, "try_wait gives it then")
+    assert(waited(child.wait()) == killed(), "ended by the kill")
+    assert(match polled(child.try_wait()) { Some(st) => st == killed(), None => false }, "try_wait gives it then")
     assert(ok(child.kill()), "a kill after the end does nothing")
 }
 
-// `wait` with the streams still held: the input closed (or cat would wait
-// for it), the output and error read and dropped (or sh would stop on the
-// full pipes).
+// `wait` with the streams still held: the input closed (or `cat` would
+// wait for it), the output and error read and dropped (or the tool would
+// stop on the full pipes).
 #test
 fun wait_closes_what_it_holds() {
-    let started = command("sh").args(["-c", "cat; head -c 300000 /dev/zero; head -c 300000 /dev/zero >&2; exit 3"]).spawn()
-    if no_processes(started, "sh") {
+    let started = tool(["cat", "zeros", "300000", "err-zeros", "300000", "exit", "3"]).spawn()
+    if no_processes(started, "the tool") {
         return
     }
     var child = running(started)
@@ -1620,8 +1671,8 @@ fun wait_closes_what_it_holds() {
 // `wait_with_output` keeps what it reads; a text `stdin` is the input.
 #test
 fun wait_with_output_and_text_input() {
-    let started = command("sh").args(["-c", "printf out; printf err >&2; read x; printf \"$x\""]).stdin("got\n").spawn()
-    if no_processes(started, "sh") {
+    let started = tool(["out", "out", "err", "err", "line"]).stdin("got\n").spawn()
+    if no_processes(started, "the tool") {
         return
     }
     var child = running(started)
@@ -1639,7 +1690,7 @@ fun wait_with_output_and_text_input() {
 // `stdin_from`: nothing, this process's, a pipe; `output` takes them too.
 #test
 fun input_modes() {
-    let started = command("cat").stdin_from(Stdio.Null).spawn()
+    let started = tool(["cat"]).stdin_from(Stdio.Null).spawn()
     if no_processes(started, "cat") {
         return
     }
@@ -1649,18 +1700,18 @@ fun input_modes() {
         Ok(out) => assert(out.stdout.len() == 0 && out.status == ExitStatus.Exited(0), "cat read nothing")
         Err(_) => panic("wait_with_output failed")
     }
-    var quiet = running(command("sh").args(["-c", "exit 0"]).stdin_from(Stdio.Inherit).spawn())
+    var quiet = running(tool(["exit", "0"]).stdin_from(Stdio.Inherit).spawn())
     assert(none(quiet.take_stdin()), "Inherit is no pipe")
-    assert(waited(quiet.wait()) == ExitStatus.Exited(0), "sh ended well")
-    var piped = running(command("cat").stdin("text").stdin_from(Stdio.Piped).spawn())
+    assert(waited(quiet.wait()) == ExitStatus.Exited(0), "it ended well")
+    var piped = running(tool(["cat"]).stdin("text").stdin_from(Stdio.Piped).spawn())
     var w = input(piped.take_stdin())
     assert(ok(w.close()), "Piped after a text is a pipe")
     assert(waited(piped.wait()) == ExitStatus.Exited(0), "cat ended at the closed input")
-    match command("cat").stdin_from(Stdio.Null).output() {
+    match tool(["cat"]).stdin_from(Stdio.Null).output() {
         Ok(out) => assert(out.stdout.len() == 0, "output with Null reads nothing")
         Err(_) => panic("output failed")
     }
-    match command("cat").stdin("x").stdin_from(Stdio.Piped).output() {
+    match tool(["cat"]).stdin("x").stdin_from(Stdio.Piped).output() {
         Ok(out) => assert(out.stdout.len() == 0, "output with Piped has nobody to write")
         Err(_) => panic("output failed")
     }
@@ -1674,15 +1725,15 @@ fun spawn_errors() {
         return
     }
     assert(match missing { Err(SpawnError.NotFound) => true, _ => false }, "not there")
-    assert(match command("cat").env("A=B", "x").spawn() { Err(SpawnError.InvalidInput) => true, _ => false }, "a bad name runs nothing")
-    assert(match command("cat").pipe(command("/no/such/program")).output() { Err(SpawnError.NotFound) => true, _ => false }, "a pipeline's second not there")
+    assert(match tool(["cat"]).env("A=B", "x").spawn() { Err(SpawnError.InvalidInput) => true, _ => false }, "a bad name runs nothing")
+    assert(match tool(["cat"]).pipe(command("/no/such/program")).output() { Err(SpawnError.NotFound) => true, _ => false }, "a pipeline's second not there")
     // a directory that can't be entered, and a NUL byte no process can
     // take, aren't "program not found" (MYLA-419)
-    assert(failed_with(command("true").cwd("/no/such/dir").output()) == Some(SpawnError.WorkingDir(2)), "a directory not there")
-    assert(failed_with(command("true").cwd("/dev/null").spawn()) == Some(SpawnError.WorkingDir(20)), "not a directory")
+    assert(failed_with(tool([]).cwd("/no/such/dir").output()) == Some(SpawnError.WorkingDir(IoError.NotFound)), "a directory not there")
+    assert(failed_with(tool([]).cwd(__test_tool()).spawn()) == Some(SpawnError.WorkingDir(IoError.NotADirectory)), "not a directory")
     assert(failed_with(run("a\0b", [])) == Some(SpawnError.InvalidInput), "a NUL in the name")
-    assert(failed_with(command("echo").arg("a\0b").output()) == Some(SpawnError.InvalidInput), "a NUL in an argument")
-    assert(failed_with(command("true").cwd("/t\0mp").output()) == Some(SpawnError.InvalidInput), "a NUL in the directory")
+    assert(failed_with(tool(["out", "a\0b"]).output()) == Some(SpawnError.InvalidInput), "a NUL in an argument")
+    assert(failed_with(tool([]).cwd("/t\0mp").output()) == Some(SpawnError.InvalidInput), "a NUL in the directory")
     assert(failed_with(command("a\0b").spawn()) == Some(SpawnError.InvalidInput), "spawned")
 }
 
@@ -1699,8 +1750,8 @@ fun failed_with<T>(r: Result<T, SpawnError>) -> Option<SpawnError> {
 // And both children's errors.
 #test
 fun pipeline_of_two() {
-    let counted = command("head").args(["-c", "16777216", "/dev/zero"]).pipe(command("wc").arg("-c")).output()
-    if no_processes(counted, "head | wc") {
+    let counted = tool(["zeros", "16777216"]).pipe(tool(["count"])).output()
+    if no_processes(counted, "zeros | count") {
         return
     }
     match counted {
@@ -1711,14 +1762,14 @@ fun pipeline_of_two() {
         }
         Err(e) => panic(f"pipeline: {e}")
     }
-    match command("head").args(["-c", "524288", "/dev/zero"]).pipe(command("tr").args(["\\0", "a"])).output() {
+    match tool(["zeros", "524288"]).pipe(tool(["a-for-nul"])).output() {
         Ok(out) => {
             assert(out.second.stdout.len() == 524288, f"all of it: {out.second.stdout.len()}")
             assert(out.second.stdout[0] == 'a' && out.second.stdout[524287] == 'a', "translated")
         }
         Err(e) => panic(f"pipeline: {e}")
     }
-    match command("sh").args(["-c", "echo a >&2; echo data"]).pipe(command("sh").args(["-c", "cat; echo b >&2; exit 2"])).output() {
+    match tool(["err", "a\n", "out", "data\n"]).pipe(tool(["cat", "err", "b\n", "exit", "2"])).output() {
         Ok(out) => {
             assert(bytes_m.to_str(out.second.stdout) == "data\n", "the data")
             assert(bytes_m.to_str(out.first.stderr) == "a\n" && bytes_m.to_str(out.second.stderr) == "b\n", "both errors")
@@ -1733,8 +1784,8 @@ fun pipeline_of_two() {
 // pipe between them doesn't.
 #test
 fun pipeline_second_writes_first() {
-    let r = command("head").args(["-c", "200000", "/dev/zero"]).pipe(command("sh").args(["-c", "head -c 1000000 /dev/zero; wc -c"])).output()
-    if no_processes(r, "head | sh") {
+    let r = tool(["zeros", "200000"]).pipe(tool(["zeros", "1000000", "count"])).output()
+    if no_processes(r, "zeros | zeros, count") {
         return
     }
     match r {
@@ -1750,8 +1801,8 @@ fun pipeline_second_writes_first() {
 // nobody reads doesn't stop it, and none is a pipe to take.
 #test
 fun output_modes() {
-    let started = command("head").args(["-c", "1000000", "/dev/zero"]).stdout_from(Stdio.Null).spawn()
-    if no_processes(started, "head") {
+    let started = tool(["zeros", "1000000"]).stdout_from(Stdio.Null).spawn()
+    if no_processes(started, "zeros") {
         return
     }
     var child = running(started)
@@ -1764,16 +1815,16 @@ fun output_modes() {
         tries += 1
     }
     assert(match st { Some(s) => s == ExitStatus.Exited(0), None => false }, "it ended without anyone reading")
-    var quiet = running(command("sh").args(["-c", "echo out; echo err >&2"]).stderr_from(Stdio.Null).spawn())
+    var quiet = running(tool(["out", "out\n", "err", "err\n"]).stderr_from(Stdio.Null).spawn())
     assert(none(quiet.take_stderr()), "a Null error is no pipe")
     match quiet.wait_with_output() {
         Ok(out) => assert(bytes_m.to_str(out.stdout) == "out\n" && out.stderr.len() == 0, "the output, no error")
         Err(_) => panic("wait_with_output failed")
     }
-    var shown = running(command("true").stdout_from(Stdio.Inherit).stderr_from(Stdio.Inherit).spawn())
+    var shown = running(tool([]).stdout_from(Stdio.Inherit).stderr_from(Stdio.Inherit).spawn())
     assert(none(shown.take_stdout()) && none(shown.take_stderr()), "Inherit is no pipe")
-    assert(waited(shown.wait()) == ExitStatus.Exited(0), "true ended well")
-    match command("sh").args(["-c", "echo out; echo err >&2; exit 3"]).stdout_from(Stdio.Null).output() {
+    assert(waited(shown.wait()) == ExitStatus.Exited(0), "it ended well")
+    match tool(["out", "out\n", "err", "err\n", "exit", "3"]).stdout_from(Stdio.Null).output() {
         Ok(out) => {
             assert(out.stdout.len() == 0 && bytes_m.to_str(out.stderr) == "err\n", "output with a Null output")
             assert(out.status == ExitStatus.Exited(3), "and its status")
@@ -1785,33 +1836,34 @@ fun output_modes() {
 // A child's output as another's input, straight (MYLA-378).
 #test
 fun input_from_a_child() {
-    let started = command("printf").arg("abc").spawn()
-    if no_processes(started, "printf") {
+    let started = tool(["out", "abc"]).spawn()
+    if no_processes(started, "out") {
         return
     }
     var first = running(started)
     let joined = output_of(first.take_stdout())
-    match command("tr").args(["a-z", "A-Z"]).stdin_from_stdout(joined).output() {
+    match tool(["upper"]).stdin_from_stdout(joined).output() {
         Ok(out) => assert(bytes_m.to_str(out.stdout) == "ABC", f"translated: {bytes_m.to_str(out.stdout)}")
-        Err(e) => panic(f"tr: {e}")
+        Err(e) => panic(f"upper: {e}")
     }
     var r = joined
     assert(is_closed(r.read(1)), "the output was handed over")
-    assert(match command("cat").stdin_from_stdout(joined).spawn() { Err(SpawnError.Other(9)) => true, _ => false }, "and can't be handed over again")
-    assert(waited(first.wait()) == ExitStatus.Exited(0), "printf ended well")
+    assert(match tool(["cat"]).stdin_from_stdout(joined).spawn() { Err(SpawnError.Other(9)) => true, _ => false }, "and can't be handed over again")
+    assert(waited(first.wait()) == ExitStatus.Exited(0), "the first ended well")
 }
 
-// A second child that ends early: the first gets SIGPIPE, as in a shell.
+// A second child that ends early: the first gets SIGPIPE, as in a shell
+// (on Windows its write fails, and it ends as by SIGPIPE, D146).
 #test
 fun pipeline_cut_short() {
-    let result = command("head").args(["-c", "50000000", "/dev/zero"]).pipe(command("head").args(["-c", "5"])).output()
-    if no_processes(result, "head | head") {
+    let result = tool(["zeros", "50000000"]).pipe(tool(["head", "5"])).output()
+    if no_processes(result, "zeros | head") {
         return
     }
     match result {
         Ok(out) => {
             assert(out.second.stdout.len() == 5, "five bytes")
-            assert(out.first.status == ExitStatus.Signaled(13), "the first stopped by SIGPIPE")
+            assert(out.first.status == broken_piped(), "the first stopped by SIGPIPE")
             assert(out.second.status == ExitStatus.Exited(0), "the second ended well")
         }
         Err(e) => panic(f"pipeline: {e}")
@@ -1821,8 +1873,8 @@ fun pipeline_cut_short() {
 // The waits in a task.
 #test
 async fun child_waited_in_a_task() {
-    let started = command("sh").args(["-c", "sleep 0.1; printf done; printf e >&2; exit 4"]).spawn()
-    if no_processes(started, "sh") {
+    let started = tool(["sleep", "100", "out", "done", "err", "e", "exit", "4"]).spawn()
+    if no_processes(started, "the tool") {
         return
     }
     var child = running(started)
@@ -1833,7 +1885,7 @@ async fun child_waited_in_a_task() {
         }
         Err(_) => panic("wait_with_output_async failed")
     }
-    var other = running(command("cat").spawn())
+    var other = running(tool(["cat"]).spawn())
     var w = input(other.take_stdin())
     w.write(bytes_m.from_str("x"))
     w.close()
@@ -1841,7 +1893,7 @@ async fun child_waited_in_a_task() {
     let st = await other.wait_async()
     assert(waited(st) == ExitStatus.Exited(0), "cat's status")
     // `output_async` with a stream that isn't a pipe (MYLA-378)
-    match await command("sh").args(["-c", "printf o; printf e >&2"]).stderr_from(Stdio.Null).output_async() {
+    match await tool(["out", "o", "err", "e"]).stderr_from(Stdio.Null).output_async() {
         Ok(out) => assert(bytes_m.to_str(out.stdout) == "o" && out.stderr.len() == 0, "output_async with a Null error")
         Err(e) => panic(f"output_async: {e}")
     }

@@ -108,7 +108,7 @@ Module cycles are allowed: `lower` imports `codegen` and `codegen` imports `lowe
 2. **std.rt in Myla** (`lib/std/rt.my` over `std.platform`, raw memory through `__load64`/`__store64`/`__alloc`/`__addr_of`/`__str_of`/…, `is_raw_memory_primitive`, std-only): compiled through the IR with every native program (loader `opts.runtime`). The lowering calls it in three ways: `myla_runtime_function(prim)` turns `__str_concat`, `__read`, `__stat`, … into `std$rt$<name>` (`Lower.rt_call`); `CodeGen.rt_exec()` aliases runtime entry names to std.rt functions (`__exit_program` → `std$rt$exit_program`); direct `Inst.Call("std$fmt$fmt_int")`, `std$slice$take`, `trap_text_fn`. Every name a back end calls must be in `checker.backend_std_functions()` (else `request_fn` panics "the checker never marked as called"; `test_lazy_std.py` greps the back ends for them).
 3. **IR routines generated per type** in lower.my (drops, clones, walks, deep copies, `==`, hash, map find/put, env routines, partials, `__new` frame constructors, `__compose_call`), requested through `Want`/`type_jobs`/`need_*` and emitted by `emit_routine`/`emit_drop_helpers`.
 
-`std.platform` is chosen per target by the loader (`for_target`: `platform_aarch64.my`, `platform_wasm.my`, `platform_windows.my` replace `platform.my`).
+`std.platform` is chosen per target by the loader (`for_target`: `platform_aarch64.my`, `platform_wasm.my`, `platform_windows.my` replace `platform.my`). `run`, interpreted `test`, `check`, the REPL and the language server load with the host's (`for_host`, MYLA-723): a `myla.exe` interprets with Windows' std.platform and std.path.
 
 ## Interpreter and parity
 

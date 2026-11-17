@@ -490,7 +490,7 @@ Import: `from std.ioerror import IoError` (or the same from `std.fs`).
   - Network: `ConnectionRefused`, `ConnectionReset`, `ConnectionAborted`, `NotConnected`, `AddrInUse`, `AddrNotAvailable`, `TimedOut`, `HostUnreachable`, `NetworkUnreachable`
   - `InvalidData`, `Other(int32)` (the platform's own code; `Other(9)` a handle that isn't open)
 - `e.message() -> str` (`"not found (NotFound)"`), `impl Format` (so `f"{e}"` works)
-- `pub fun from_cause(code: int32) -> IoError` (a cause code, what `__io_errno()` gives, D209), `pub fun code_number(code: int32) -> int32`, `pub fun from_errno(code: int32) -> IoError` (a Linux errno), `pub fun io_error_name(e: IoError) -> str`; the cause codes `NOT_FOUND` (1) … `INVALID_DATA` (21), `WOULD_BLOCK`, `IN_PROGRESS`, `BAD_HANDLE`, `NOT_A_TERMINAL`, `OTHER` (256: plus a system's own code)
+- `pub fun from_cause(code: int32) -> IoError` (a cause code, what `__io_errno()` gives, D209), `pub fun code_number(code: int32) -> int32`, `pub fun from_errno(code: int32) -> IoError` (a Linux errno), `pub fun io_error_name(e: IoError) -> str`; the cause codes `NOT_FOUND` (1) … `INVALID_DATA` (21), `WOULD_BLOCK`, `IN_PROGRESS`, `BAD_HANDLE`, `NOT_A_TERMINAL`, `TOO_MANY_OPEN` (EMFILE's `Other(24)`), `TOO_MANY_OPEN_SYSTEM` (ENFILE's `Other(23)`), `OTHER` (256: plus a system's own code, Windows' own on Windows: `Other(112)` a full disk). `IoError` is `Eq`. `std.system_error.error_text(n: int64) -> str`: a system code's words, per target (std/system_error_windows.my on Windows)
 - Gotcha: **`IoError` is not `Eq`**. `r == Err(IoError.NotFound)` doesn't type-check, so match it instead (`Err(IoError.NotFound) => …`).
 - Prose: `docs/Language/Standard-library/Ioerror.md`
 
@@ -642,7 +642,7 @@ Import: `import std.process as process`.
 - `pub fun args() -> [str]` (`[0]` is the program), `pub fun exit(code: int32)`, `pub fun env(name: str) -> Option<str>`
 - `pub enum ExitStatus { Exited(int32), Signaled(int32) }` is `Eq`.
 - `pub struct Output { stdout: [uint8], stderr: [uint8], status: ExitStatus }`
-- `pub enum SpawnError { NotFound, PermissionDenied, Unsupported, Cancelled, InvalidInput, WorkingDir(int32), Other(int32) }` is `Eq`, with `message()` and `Format`.
+- `pub enum SpawnError { NotFound, PermissionDenied, Unsupported, Cancelled, InvalidInput, WorkingDir(IoError), Other(int32) }` is `Eq`, with `message()` and `Format`.
 - `pub enum Stdio { Piped, Inherit, Null }` is `Eq`.
 - One-shot: `pub fun run(program: str, args: [str]) -> Result<Output, SpawnError>`, `pub async fun run_async(program: str, args: [str]) -> Result<Output, SpawnError>` (must be awaited)
 - Builder: `pub struct Command` (opaque fields), `pub fun command(program: str) -> Command`. Each `Command` method returns a new `Command`:

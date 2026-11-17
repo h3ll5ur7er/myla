@@ -117,7 +117,7 @@ SKIP: dict[str, dict[str, str]] = {
         **{f"test_net.{c}": "WASI has no sockets (NetOnWasm checks they are Unsupported)"
            for c in ["Tcp", "Udp", "Dns", "Errors", "Primitives"]},
         **{f"test_reactor_scaling.{c}": "WASI has no sockets (its Readers run)"
-           for c in ["RoundTrips", "Accepts", "Closed", "Lots"]},
+           for c in ["RoundTrips", "Accepts", "Closed", "Lots", "BusyWorkers"]},
         # MYLA-350: WASI preview 1 has no terminal modes and no signals, which
         # TermOnWasm checks are `Unsupported` (nothing a terminal, no size)
         **{f"test_term.{c}": "WASI has no terminals or signals (TermOnWasm checks they are Unsupported)"
@@ -186,8 +186,6 @@ SKIP_PROGRAMS: dict[str, dict[str, str]] = {
     },
     "x86_64-windows": {
         "io_through_the_ir": "it runs Linux's /bin/echo, which a Windows program can't (MYLA-705)",
-        # its children are cat, sh and head (MYLA-705)
-        "std.process": _WIN_LINUX_TOOLS,
     },
 }
 

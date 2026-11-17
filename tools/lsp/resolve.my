@@ -1403,9 +1403,23 @@ fun split_bounds(s: str) -> [str] {
     return out
 }
 
+// What `--resolve` calls a declaration: a member of a type (a field, a
+// method, a variant) by what it is, never `global`, as it isn't a name of
+// the file (MYLA-710: a call of the builtin `format` beside a field
+// `format` read as an unresolved use of the file's name).
+#test(DefKind.Global(SymKind.Field))["field"]
+#test(DefKind.Global(SymKind.Method))["method"]
+#test(DefKind.Global(SymKind.EnumMember))["variant"]
+#test(DefKind.Global(SymKind.Function))["global"]
+#test(DefKind.Param)["param"]
 fun kind_name(k: DefKind) -> str {
     return match k {
-        DefKind.Global(s) => "global",
+        DefKind.Global(s) => match s {
+            SymKind.Field => "field",
+            SymKind.Method => "method",
+            SymKind.EnumMember => "variant",
+            _ => "global",
+        },
         DefKind.Local(s) => "local",
         DefKind.Param => "param",
         DefKind.TypeParam => "typeparam",
@@ -1415,7 +1429,8 @@ fun kind_name(k: DefKind) -> str {
 
 // A resolution as lines (for `lsp --resolve`): `def L:C-E kind name` for the
 // declarations made in the file and `use L:C-E name -> path L:C kind` for
-// the uses, 0-based UTF-16 positions; `unparsed` when it doesn't parse.
+// the uses (`kind_name`'s kinds), 0-based UTF-16 positions; `unparsed` when
+// it doesn't parse.
 pub fun describe(r: Resolution) -> [str] {
     var out: [str] = []
     if !r.ok {
