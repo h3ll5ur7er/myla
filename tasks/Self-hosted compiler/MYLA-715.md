@@ -3,7 +3,7 @@ id: MYLA-715
 title: "The interpreter gives a constant made of an imported constant as unit or 0"
 type: bug
 status: todo
-priority: medium
+priority: high
 labels: [interpreter, bug]
 ---
 Found by [[MYLA-701]]. A `const` whose initializer names a constant of another module evaluates wrongly in the interpreter (`myla run`, `myla test`): unit (`ERR: VUnit` when printed) or 0 under a unary minus. Natively it is right. A constant made of one of its own module's constants is right in both.
@@ -20,3 +20,5 @@ const D: int32 = -BAD_HANDLE  // natively -34; interpreted 0
 
 - [ ] The interpreter evaluates a constant's initializer in the module that declares it, its imports visible (`selfhost/interp.my`)
 - [ ] A parity program with the four constants above in `tests/burn/test_compiler_parity.py`
+
+Raised to `high` by [[Project/Review-2026-11-17]] (H13): it is a silent wrong result in the runner the others are compared with. `const C: int32 = BAD_HANDLE` with `from std.ioerror import BAD_HANDLE` gives `C + 1` as 1 and `-BAD_HANDLE` as 0 interpreted, 35 and -34 natively (`repro-r6/docs/known_715_const.my`). It is in the lane of [[MYLA-792]].
