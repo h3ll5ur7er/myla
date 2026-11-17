@@ -110,8 +110,13 @@ pub enum TailCall {
 }
 
 // A scope's variables, and its deferred blocks (D135) in the order they were
-// met.
-pub struct RtFrame { names: [str], vals: [Value], defers: [Deferral] }
+// met. A function's outermost scope also holds the frame's named slots, -1
+// for none (in a block's scope always): `env`, the environment its type
+// parameters are bound in (an index into `envs`, D172), and `caller`, the
+// node of the call whose position it reports (`#track_caller`, MYLA-435).
+// Slots, not variables: two hidden variables both wanted the first place
+// (the 2026-11-17 review's H6).
+pub struct RtFrame { names: [str], vals: [Value], defers: [Deferral], env: int32, caller: int32 }
 
 // A deferred block, and how many of its scope's names were declared before
 // it: the ones it sees when it runs.
@@ -244,8 +249,13 @@ pub struct Interp {
     own_eq: [str: bool],
     own_hash: [str: bool],
     typed_keys: bool,
-    const_names: [str],
+    // each constant's initializer and value, `const_state` 0 before it is
+    // evaluated, 1 while, 2 after: evaluated when first named, so one may
+    // name a constant declared after it or in a module loaded after it
+    // (MYLA-715: such a name read as unit, `C + 1` was 1)
+    const_exprs: [Expr],
     const_vals: [Value],
+    const_state: [uint8],
     const_ix: [str: int32],
     enum_names: [str],
     enum_ix: [str: bool],
@@ -620,7 +630,7 @@ pub fun time_from_env() -> str {
 
 // Whether the awaited `op` calls a function value (a local, or any callee
 // but a name or a method), which goes on at once natively (MYLA-228).
-#test(expr_of("f(1)"), [RtFrame { names: ["f"], vals: [Value.VUnit], defers: [] }])[true]
+#test(expr_of("f(1)"), [RtFrame { names: ["f"], vals: [Value.VUnit], defers: [], env: -1, caller: -1 }])[true]
 #test(expr_of("f(1)"), [])[false]
 #test(expr_of("a.m()"), [])[false]
 #test(expr_of("fs[0]()"), [])[true]
@@ -646,7 +656,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         decls: c.decls,
         resolved: c.resolved,
         func_names: [], func_ix: [:], func_decls: [], tracks: [], caller_next: -1, caller_fi: -1, call_sites: [:], own_eq: [:], own_hash: [:], typed_keys: false,
-        const_names: [], const_vals: [], const_ix: [:],
+        const_exprs: [], const_vals: [], const_state: [], const_ix: [:],
         enum_names: [], enum_ix: [:], variant_ix: [:], nullary_ix: [:],
         scopes: [],
         ctrl: Ctrl.CNone,
@@ -819,7 +829,7 @@ impl Interp {
 
     // -- scopes -----------------------------------------------------------
 
-    fun push_scope(var self) { self.scopes.push(RtFrame { names: [], vals: [], defers: [] }) }
+    fun push_scope(var self) { self.scopes.push(RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }) }
     fun pop_scope(var self) { self.scopes = drop_last_frame(self.scopes) }
 
     fun define(var self, name: str, v: Value) {
@@ -1107,20 +1117,54 @@ impl Interp {
         return Some(join_parts(parts))
     }
 
+    // Every constant, the first declared of a name: each evaluated when
+    // first named (`const_value`), so a program pays for the constants it
+    // uses (a float's literal costs the conversion of its digits: those of
+    // the modules every program loads took 8.3 M of an empty program's
+    // 35.4 M instructions under `myla run`, 2026-11-17 on fe30af6, the
+    // 2026-11-17 review's start-up follow-up).
     fun eval_consts(var self) {
         for d in self.decls {
             match d.kind {
                 DeclKind.ConstDecl(n, ty, value, attrs, isp) => {
-                    self.push_scope()
-                    let v = self.eval(value)
-                    self.pop_scope()
-                    if !self.const_ix.contains(n) { self.const_ix[n] = self.const_names.len() }
-                    self.const_names.push(n)
-                    self.const_vals.push(v)
+                    if !self.const_ix.contains(n) {
+                        self.const_ix[n] = self.const_exprs.len()
+                        self.const_exprs.push(value)
+                        self.const_vals.push(Value.VUnit)
+                        self.const_state.push(0)
+                    }
                 },
                 _ => {},
             }
         }
+    }
+
+    // How many constants have been evaluated: none before one is named.
+    #test(interp_on("const X: float = 1.5; const Y: int = 2"))[0]
+    fun consts_evaluated(self) -> int32 {
+        var n = 0
+        for st in self.const_state {
+            if st == 2 { n += 1 }
+        }
+        return n
+    }
+
+    // The value of constant `ci`, its initializer evaluated the first time,
+    // in a frame of its own: what it names are other constants (the loader
+    // qualifies another module's names), never a variable in scope. The
+    // checker refuses a cycle; one would read unit here.
+    #test(interp_on("const B: int = A + 1; const A: int = 5"), 0)[Value.VInt(6)]
+    fun const_value(var self, ci: int32) -> Value {
+        if self.const_state[ci] != 0 { return self.const_vals[ci] }
+        self.const_state[ci] = 1
+        let saved = self.scopes
+        self.scopes = []
+        self.push_scope()
+        let v = self.eval(self.const_exprs[ci])
+        self.scopes = saved
+        self.const_vals[ci] = v
+        self.const_state[ci] = 2
+        return v
     }
 
     // Whether `fd` is a running case's standard input, which is empty, as
@@ -1738,10 +1782,10 @@ impl Interp {
     }
 
     // A task running `body` with the variables `scopes`, ready to run.
-    #test(interp_on("fun main() { print(1 + 2) }"), [RtFrame { names: [], vals: [], defers: [] }], block_of("{ }"))[0]
+    #test(interp_on("fun main() { print(1 + 2) }"), [RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }], block_of("{ }"))[0]
     fun new_task(var self, scopes: [RtFrame], body: Block) -> int32 {
         var sc = scopes
-        sc.push(RtFrame { names: [], vals: [], defers: [] })
+        sc.push(RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 })
         let f = AFrame { scopes: sc, conts: [Cont.KScope, Cont.KStmts(body.stmts, 0)], place: None, pend: Ctrl.CNone, pval: Value.VUnit, perr: None, pcode: 0 }
         self.tasks.push(Task { frames: [f], state: 0, value: Value.VUnit, failed: false, err: None, code: 0, awaited: false, waiters: [], cancelled: false, kids: [], requested: false })
         let id = self.tasks.len() - 1
@@ -3389,7 +3433,7 @@ impl Interp {
             None => {},
         }
         let ci = self.const_idx(n)
-        if ci >= 0 { return self.const_vals[ci] }
+        if ci >= 0 { return self.const_value(ci) }
         // a bare no-payload enum variant, e.g. `None` or `North`
         match self.nullary_variant_enum(n) {
             Some(en) => { return Value.VEnum(en, n, []) },
@@ -4129,11 +4173,19 @@ impl Interp {
     }
 
     // The environment the running function's frame binds (an index into
-    // `envs`), -1 for none: its first variable, `%env`.
+    // `envs`), -1 for none: its slot `env`.
     #test(interp_on("[int]"))[-1]
     fun frame_env(self) -> int32 {
-        if self.scopes.len() == 0 || self.scopes[0].names.len() == 0 || self.scopes[0].names[0] != "%env" { return -1 }
-        return as_int(self.scopes[0].vals[0]) as int32
+        if self.scopes.len() == 0 { return -1 }
+        return self.scopes[0].env
+    }
+
+    // The node of the call whose position the running function reports
+    // (`#track_caller`), -1 for none: its frame's slot `caller`.
+    #test(interp_on("[int]"))[-1]
+    fun frame_caller(self) -> int32 {
+        if self.scopes.len() == 0 { return -1 }
+        return self.scopes[0].caller
     }
 
     // The checked type of node `id`, a type parameter's the type the
@@ -4248,13 +4300,13 @@ impl Interp {
     }
 
     // Bind the type parameters `env_next` gives in the frame of function
-    // `fi` just made, as its first variable.
+    // `fi` just made, in its slot `env`.
     fun bind_types(var self, fi: int32) {
         self.bind_caller(fi)
         let k = self.env_next
         self.env_next = -1
         if k < 0 || self.env_fi != fi { return }
-        self.define("%env", Value.VInt(k as int64))
+        self.scopes[0].env = k
     }
 
     // The call `e` of function `fi` is about to enter it: when `fi`
@@ -4263,37 +4315,30 @@ impl Interp {
     // one too, which `bind_caller` binds in its frame.
     fun note_caller(var self, fi: int32, e: Expr) {
         if fi < 0 || !self.tracks[fi] { return }
-        var at = e.id
-        match self.lookup("%caller") {
-            Some(v) => { at = as_int(v) as int32 },
-            None => { self.call_sites[e.id] = e },
+        var at = self.frame_caller()
+        if at < 0 {
+            at = e.id
+            self.call_sites[e.id] = e
         }
         self.caller_next = at
         self.caller_fi = fi
     }
 
-    // The caller's position `note_caller` found, as the variable `%caller`
-    // of function `fi`'s frame just made.
+    // The caller's position `note_caller` found, in the slot `caller` of
+    // function `fi`'s frame just made.
     fun bind_caller(var self, fi: int32) {
         let at = self.caller_next
         self.caller_next = -1
         if at < 0 || self.caller_fi != fi { return }
-        self.define("%caller", Value.VInt(at as int64))
+        self.scopes[0].caller = at
     }
 
     // Where a `panic`, `assert` or `unreachable` at `e` fails: in a function
     // that reports its caller's position, at its call (MYLA-435).
     fun failure_at(self, e: Expr) -> Expr {
-        match self.lookup("%caller") {
-            Some(v) => {
-                match self.call_sites.get(as_int(v) as int32) {
-                    Some(c) => { return c },
-                    None => {},
-                }
-            },
-            None => {},
-        }
-        return e
+        let at = self.frame_caller()
+        if at < 0 { return e }
+        return self.call_sites.get(at).unwrap_or(e)
     }
 
     // The runtime method-dispatch key for a receiver: its checker-resolved type
@@ -5674,14 +5719,19 @@ impl Interp {
         for n in reads { wanted[n] = true }
         var cnames: [str] = []
         var cvals: [Value] = []
+        // and the type parameters bound in scope (D172), first, which
+        // `call_closure` puts in the lambda's frame's slot (`frame_env`)
+        let k = self.frame_env()
+        if k >= 0 {
+            cnames.push("%env")
+            cvals.push(Value.VInt(k as int64))
+        }
         var i = 0
         while i < self.scopes.len() {
             var j = 0
             while j < self.scopes[i].names.len() {
                 let n = self.scopes[i].names[j]
-                // and the type parameters bound in scope (D172), first, as
-                // in a function's frame (`frame_env`)
-                if wanted.contains(n) || (i == 0 && j == 0 && n == "%env") {
+                if wanted.contains(n) {
                     cnames.push(self.scopes[i].names[j])
                     cvals.push(self.scopes[i].vals[j])
                 }
@@ -5716,7 +5766,11 @@ impl Interp {
         self.push_scope()
         var i = 0
         while i < cnames.len() {
-            self.define(cnames[i], cvals[i])
+            if i == 0 && cnames[0] == "%env" {
+                self.scopes[0].env = as_int(cvals[0]) as int32
+            } else {
+                self.define(cnames[i], cvals[i])
+            }
             i = i + 1
         }
         var k = 0
@@ -7643,9 +7697,9 @@ fun key_at(c: Value, j: int32, k: Value) -> Value {
     }
 }
 
-#test([RtFrame { names: [], vals: [], defers: [] }])[[]]
-#test([RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [] }, RtFrame { names: ["c"], vals: [Value.VInt(72)], defers: [] }])[[RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [] }]]
-#test([RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [] }, RtFrame { names: [], vals: [], defers: [] }, RtFrame { names: [], vals: [], defers: [] }])[[RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [] }, RtFrame { names: [], vals: [], defers: [] }]]
+#test([RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }])[[]]
+#test([RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [], env: -1, caller: -1 }, RtFrame { names: ["c"], vals: [Value.VInt(72)], defers: [], env: -1, caller: -1 }])[[RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [], env: -1, caller: -1 }]]
+#test([RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [], env: -1, caller: -1 }, RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }, RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }])[[RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [], env: -1, caller: -1 }, RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }]]
 fun drop_last_frame(xs: [RtFrame]) -> [RtFrame] {
     var out: [RtFrame] = []
     var i = 0

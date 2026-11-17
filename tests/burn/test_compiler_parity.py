@@ -12,6 +12,73 @@ from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_an
                                 native_build, run_argv, run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
+    # H13 (MYLA-792, MYLA-715): a constant made of an imported constant, or of
+    # one declared after it, read unit interpreted
+    "consts_of_another_module": r"""// H13 (MYLA-715): a constant made of another module's constant, or of one
+// declared after it, is that constant's value on every runner
+from std.ioerror import BAD_HANDLE
+const A: int32 = 5
+const B: int32 = A
+const C: int32 = BAD_HANDLE
+const D: int32 = -BAD_HANDLE
+const E: int32 = F * 2 + C
+const F: int32 = G - 1
+const G: int32 = 4
+const S: str = T + "!"
+const T: str = "late"
+fun main() {
+    print(A)
+    print(B)
+    print(C + 1)
+    print(D)
+    print(E)
+    print(S)
+}
+""",
+    # H6 (MYLA-792, MYLA-435): a generic `#track_caller` function or method
+    # kept its caller's position where its type parameters' binding was
+    # looked for, so its operators on `T` were untyped interpreted
+    "track_caller_generic": r"""// H6: `#track_caller` on generic functions and a generic type's methods,
+// a lambda in one, and one calling another
+#track_caller
+fun lt<T: Ord>(a: T, b: T) -> bool {
+    return a < b
+}
+#track_caller
+fun add<T: Add>(a: T, b: T) -> T {
+    return a + b
+}
+#track_caller
+fun show<T: Format>(a: T) -> str {
+    return f"{a}"
+}
+#track_caller
+fun twice<T: Add + Format>(a: T) -> str {
+    let f = (x: T) => x + x
+    return show(f(a)) + " " + show(add(a, a))
+}
+struct Box<T> { v: T }
+impl<T: Ord + Add + Format> Box<T> {
+    #track_caller
+    fun less(self, k: T) -> bool { return self.v < k }
+    #track_caller
+    fun plus(self, k: T) -> T { return self.v + k }
+    #track_caller
+    fun text(self) -> str { return f"{self.v}" }
+}
+fun main() {
+    let big = 18446744073709551615u64
+    print(lt(big, 2u64))
+    print(show(big))
+    print(Box { v: big }.less(2u64))
+    print(Box { v: big }.text())
+    print(add(0.1f32, 0.2f32))
+    print(Box { v: 0.1f32 }.plus(0.2f32))
+    print(add(200u8, 50u8))
+    print(twice(9223372036854775807u64))
+    print(lt(-1i8, 1i8))
+}
+""",
     # MYLA-553, MYLA-580, MYLA-546: containers' iter(), ldexp, padding in bulk
     "iter_ldexp_and_padding_in_bulk": r"""// MYLA-553, MYLA-580, MYLA-546: `iter()` on a BitSet, an Lru and a Grid;
 // `ldexp` past ±2100 in three steps; long paddings and repeats in bulk
@@ -11621,6 +11688,10 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # H13: interpreted 5 5 1 0 0 0 before the change
+    "consts_of_another_module": "5\n5\n35\n-34\n40\nlate!\n",
+    # H6: interpreted `true`, `-1`, `true`, `-1` and `-2 -2` before the change
+    "track_caller_generic": "false\n18446744073709551615\nfalse\n18446744073709551615\n0.3\n0.3\n250\n18446744073709551614 18446744073709551614\ntrue\n",
     # MYLA-553, MYLA-580, MYLA-546: new; native code gives the same
     "iter_ldexp_and_padding_in_bulk": '0,63,64,199,299, 630\nb1 d1 c1 \n6\ninf -0 8.98846567431158e307 5e-324\n1000000     |  xy\n1999996 éé|éé\n1000000 -000|0005\n100 0x00|00ff\n1000003 0000|00ff\n4097 0000|0101\n999999 abca|cabc\n139998 ßß|ßab\n',
     # MYLA-545: new; failed to parse before (`expected field name or tuple index after '.'`)
