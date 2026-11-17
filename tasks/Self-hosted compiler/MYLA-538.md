@@ -2,7 +2,7 @@
 id: MYLA-538
 title: "Checker: an impl's bound that names a generic trait (`I: Iterator<int>`) isn't checked where the impl is used"
 type: bug
-status: done
+status: review
 priority: high
 labels: [checker, traits, soundness]
 ---
@@ -78,3 +78,9 @@ fun main() {
 - **Suites**: see [[MYLA-544]]'s evidence (one run for the lane).
 
 Signed off by [[Project/Review-2026-11-17]] (done).
+
+## Round 7 ([[MYLA-790]])
+
+[[Project/Review-2026-11-17]] found the hole open again through [[MYLA-612]]'s new sites (H1): an operator impl by type arguments, `Neg`, `Index` and `IndexSet` were picked without their bounds. They are checked there now, with this task's messages (`'A' isn't Conv<str> (it implements 'Conv<int32>')`); see [[MYLA-612]]'s round 7 evidence.
+
+- [x] The bounds of every operator impl hold where its operator, an index or a bound's argument picks it

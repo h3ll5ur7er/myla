@@ -1,0 +1,5 @@
+type error: '#track_caller' is given twice: it stands on a function once
+  --> examples/errors/type_track_caller_twice.my:5:1
+  |
+5 | #track_caller
+  | ^^^^^^^^^^^^^

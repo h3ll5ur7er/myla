@@ -1,0 +1,27 @@
+//~ type error: operator '*' is not defined for 'W<A>' and 'int32': 'A' isn't Name
+//~ span: w * 2
+// The bound of an operator impl by type arguments holds where `*` picks
+// it (MYLA-612): `Mul<int, str>` for `W<C>` needs `C: Name`, which `A`
+// doesn't implement at all.
+trait Name {
+    fun name(self) -> str
+}
+
+struct A {
+    n: int,
+}
+
+struct W<C> {
+    v: C,
+}
+
+impl<C: Name> Mul<int, str> for W<C> {
+    fun mul(self, k: int) -> str {
+        return self.v.name()
+    }
+}
+
+fun main() {
+    let w = W { v: A { n: 1 } }
+    print(w * 2)
+}

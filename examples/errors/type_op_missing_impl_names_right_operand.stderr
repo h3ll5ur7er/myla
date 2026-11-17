@@ -1,0 +1,5 @@
+type error: operator '/' is not defined for 'V': it needs 'impl Div<float64> for V'
+  --> examples/errors/type_op_missing_impl_names_right_operand.my:17:14
+   |
+17 |     print((v / 2.0).x)
+   |            ^^^^^^^

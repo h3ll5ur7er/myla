@@ -9813,6 +9813,154 @@ async fun main() {
     print(await st.report())
     print(f"{mine.len()} {tags.len()} {sb.build()}")
 }
+""",    "literals_left_of_operators_take_their_type": r"""// M15 and the left literals (MYLA-612, MYLA-544, MYLA-609): a literal on
+// the left of an operator takes its type from the impl or the other side
+import std.vector32 as v32
+
+struct B<T> {
+    v: T,
+}
+
+struct V {
+    x: int,
+}
+
+impl<T> Mul<B<str>, str> for B<T> {
+    fun mul(self, n: B<str>) -> str {
+        return "by " + n.v
+    }
+}
+
+impl<T> Mul<B<T>, B<T>> for B<T> {
+    fun mul(self, n: B<T>) -> B<T> {
+        return n
+    }
+}
+
+impl Mul<V, V> for int64 {
+    fun mul(self, k: V) -> V {
+        return V { x: k.x * (self as int) }
+    }
+}
+
+fun eqs(x: int64) -> str {
+    let a = Some(1) == Some(x)
+    let b = (1, 1) == (x, 1)
+    let c = [1] == [x]
+    let d = Some(5000000000) == Some(x)
+    let e = (Some(3), [1, 2]) != (Some(x), [1, 2])
+    return f"{a} {b} {c} {d} {e}"
+}
+
+fun main() {
+    let b = B { v: "b" }
+    print(B { v: 1 } * b)
+    print((B { v: 2 } * B { v: 3 }).v)
+    let w = v32.vec3(1.0, 2.0, 3.0)
+    let c = 2.0 * w
+    print(c.y)
+    let d = -0.5 * w
+    print(d.z)
+    let v = V { x: 3 }
+    print((2 * v).x)
+    print((-4 * v).x)
+    print(eqs(1))
+    print(eqs(3))
+    print(eqs(5000000000))
+}
+""",
+    "operator_impls_whose_bounds_hold": r"""// H1 (MYLA-612): operator impls with bounds, used where the bounds hold:
+// `*` by a type argument, `*=`, unary `-`, `x[i]`, `x[i] = v` and a
+// `T: Mul<float>` argument, on concrete types and in generic code
+trait Conv<T> {
+    fun conv(self) -> T
+}
+
+trait Name {
+    fun name(self) -> str
+}
+
+struct A {
+    n: int,
+}
+
+impl Conv<str> for A {
+    fun conv(self) -> str {
+        return f"a{self.n}"
+    }
+}
+
+impl Name for A {
+    fun name(self) -> str {
+        return f"A{self.n}"
+    }
+}
+
+struct W<C> {
+    v: C,
+    k: float,
+    s: str,
+}
+
+impl<C: Conv<str>> Index<int, str> for W<C> {
+    fun index(self, i: int) -> str {
+        return f"{self.v.conv()}[{i}]"
+    }
+}
+
+impl<C: Name> IndexSet<int, str> for W<C> {
+    fun set_index(var self, i: int, x: str) {
+        self.s = f"{self.v.name()}:{i}={x}"
+    }
+}
+
+impl<C: Name> Mul<int, str> for W<C> {
+    fun mul(self, k: int) -> str {
+        return f"{self.v.name()}*{k}"
+    }
+}
+
+impl<C: Conv<str>> Mul<float> for W<C> {
+    fun mul(self, k: float) -> W<C> {
+        return W { v: self.v, k: self.k * k, s: self.s + self.v.conv() }
+    }
+}
+
+impl<C: Name> Neg<str> for W<C> {
+    fun neg(self) -> str {
+        return "-" + self.v.name()
+    }
+}
+
+fun scale<T: Mul<float>>(x: T) -> T {
+    return x * 2.0
+}
+
+fun named<C: Name>(w: W<C>) -> str {
+    return (w * 3) + " " + (-w)
+}
+
+fun indexed<C: Conv<str> + Name>(w: W<C>) -> str {
+    var x = w
+    x[4] = "q"
+    return w[1] + " " + x.s
+}
+
+fun main() {
+    var w = W { v: A { n: 7 }, k: 1.5, s: "" }
+    print(w * 2)
+    print(-w)
+    print(w[3])
+    w[5] = "z"
+    print(w.s)
+    let d = scale(w)
+    print(d.k)
+    print(d.s)
+    w *= 4.0
+    print(w.k)
+    print(named(w))
+    print(indexed(w))
+}
 """,
 }
 
@@ -11825,6 +11973,13 @@ PINNED = {
     "arithmetic_operators_of_generic_impls": '3\n5\n42\n4\n1\n3.75\nabcd\nababab\n15000000000\n3\n3 xy\nlinked\n',
     # MYLA-415 (M15): stack overflow on aarch64 and wasm32 (release and deep copy recursed)
     "values_nested_through_closures": '7\n1\n1\n2\n5\n50001 100000 50000 100000\nreleased\n',
+    # MYLA-612 (H1): new; the bounds are checked where an operator picks its
+    # impl, and a program that meets them runs as before
+    # MYLA-612 (M15), MYLA-544, MYLA-609: new; a type error before (the
+    # struct literal took the right operand's type, the others stayed
+    # `float64`, `int32` and `Option<int32>`)
+    "literals_left_of_operators_take_their_type": 'by b\n3\n4\n-1.5\n6\n-12\ntrue true true false true\nfalse false false false false\nfalse false false true true\n',
+    "operator_impls_whose_bounds_hold": 'A7*2\n-A7\na7[3]\nA7:5=z\n3\nA7:5=za7\n6\nA7*3 -A7\na7[1] A7:4=q\n',
 }
 
 

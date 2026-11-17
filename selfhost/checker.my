@@ -115,11 +115,13 @@ pub fun backend_std_functions() -> [str] {
 // `task_line`: the line of an `async let` in one of them, 0 if none has one
 // or nobody asked: what makes a native build's program one with tasks
 // (`Checker.task_line`), as if every body was read (MYLA-413).
-pub struct LazyBodies { ids: [int32: bool], keys: [int64: int32], parse: (int64) -> Result<Block, [CheckErr]>, task_line: int32 }
+// `files`: the first node id of each module the loader read, in order,
+// and its file, which tell a declaration's file (D257's notes).
+pub struct LazyBodies { ids: [int32: bool], keys: [int64: int32], parse: (int64) -> Result<Block, [CheckErr]>, task_line: int32, files: [(int32, str)] }
 
 // No body left unparsed: a program loaded whole.
 pub fun no_lazy_bodies() -> LazyBodies {
-    return LazyBodies { ids: [:], keys: [:], parse: no_body, task_line: 0 }
+    return LazyBodies { ids: [:], keys: [:], parse: no_body, task_line: 0, files: [] }
 }
 
 #test(7)[Err([CheckErr { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "internal error: no body 7 to read", decl: -1, notes: [] }])]
@@ -1081,6 +1083,29 @@ pub fun op_method_name(m: str, r: Type, r_self: bool) -> str {
     return m + "$" + if r_self { "self" } else { type_token(r) }
 }
 
+// A trait's method `m` as a program wrote it: an operator method without
+// the right operand's type that names it beside the trait's others (D200),
+// `mul` of `mul$float64`.
+#test("mul$float64")["mul"]
+#test("set_index$int32")["set_index"]
+#test("next")["next"]
+fun written_method(m: str) -> str {
+    var i = 0
+    while i < m.len() {
+        if m[i] == '$' { return m[:i] }
+        i += 1
+    }
+    return m
+}
+
+// `written_method` of each of `ms`.
+#test(["mul$float64", "neg"])[["mul", "neg"]]
+fun written_methods(ms: [str]) -> [str] {
+    var out: [str] = []
+    for m in ms { out.push(written_method(m)) }
+    return out
+}
+
 // The type a right operand (or index) `x` is read with beside impls taking
 // the right operands `rs` (D200): the only one's; for a number literal, the
 // only one of its kind, so `v * 2.0` picks `Mul<float32, …>` beside a
@@ -1177,9 +1202,12 @@ pub fun op_part(oi: OpImpl) -> str {
 }
 
 // The error of a second impl of the operator trait `tn` for the type `key`
-// with the right operand (or index) `r` (D200).
-fun op_dup(ln: int32, cl: int32, sp: SrcSpan, tn: str, r: Type, key: str) -> CheckErr {
-    return terr_at(ln, cl, sp, format("duplicate impl of trait '{}<{}, …>' for type '{}' (one per type of the right operand or index)", tn, type_name(r), key))
+// with the right operand (or index) `r` (D200), whose `decl` is the impl
+// `first` it repeats, for `dup_impl` to name (D257).
+fun op_dup(ln: int32, cl: int32, sp: SrcSpan, tn: str, r: Type, key: str, first: int32) -> CheckErr {
+    var e = terr_at(ln, cl, sp, format("duplicate impl of trait '{}<{}, …>' for type '{}' (one per type of the right operand or index)", tn, type_name(r), key))
+    e.decl = first
+    return e
 }
 
 // The impl of the operator trait `tr` among `impls` for a left operand (or
@@ -2308,6 +2336,49 @@ fun literal_struct(e: Expr) -> bool {
     return false
 }
 
+// Whether `e` is a tuple or a list, or a call of `Some`, `Ok` or `Err`,
+// built of number literals only (`literal_struct`'s structs included, as
+// deep as they go): `(1, 1)`, `[1]`, `Some(1)`, which `==` types by its
+// other side, as it does a number literal (MYLA-544, MYLA-609).
+#test(expr_of("Some(1)"))[true]
+#test(expr_of("(1, [2.0])"))[true]
+#test(expr_of("(1, x)"))[false]
+#test(expr_of("[]"))[false]
+#test(expr_of("1"))[false]
+fun literal_compound(e: Expr) -> bool {
+    var parts: [Expr] = []
+    match e.kind {
+        ExprKind.TupleLit(es) => { parts = es },
+        ExprKind.ListLit(es) => { parts = es },
+        ExprKind.Call(c, args, targs) => {
+            let variant = match c.kind {
+                ExprKind.Name(n) => targs.len() == 0 && (n == "Some" || n == "Ok" || n == "Err"),
+                _ => false,
+            }
+            if !variant { return false }
+            parts = args
+        },
+        _ => { return false },
+    }
+    if parts.len() == 0 { return false }
+    for x in parts { if !(literal_compound(x) || literal_struct(x) || (adapts(x) && !is_flexible_char_lit(x))) { return false } }
+    return true
+}
+
+// Whether `e` is a call of `Some`, whose type its argument gives, unlike
+// `None`, `Ok(x)` and `Err(e)` (MYLA-379).
+#test(expr_of("Some(x)"))[true]
+#test(expr_of("Ok(x)"))[false]
+fun is_some_call(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Call(c, args, targs) => targs.len() == 0 && match c.kind {
+            ExprKind.Name(n) => n == "Some",
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 // Whether `e` is `None`, or a call of `Some`, `Ok` or `Err`: a value whose
 // type `==` takes from its other side (MYLA-379).
 #test(expr_of("None"))[true]
@@ -2450,11 +2521,13 @@ pub struct Checker {
     trait_decls: [Decl],
     trait_impls: [TraitImplPair],
     user_trait_impls: [TraitImplPair],
+    trait_impl_ids: [str: int32],   // the declaration of each of `user_trait_impls`, by `trait\tkey` (D257)
     op_impls: [OpImpl],             // the operator impls by type arguments (D200)
     op_sites: [int32: str],         // an operator or index that calls one: the method, "" to pick by the types in generic code
     op_sets: [int32: str],          // an index assigned to by an `IndexSet`, as `op_sites` (a compound assignment's target is its value's operand too)
     impl_args: [str: ImplArgs],     // a generic trait's impls' arguments, by `trait\tkey` (D171)
     impl_bounds: [str: ImplBounds], // a generic impl's bounds on its type parameters, by `trait\tkey` (MYLA-379)
+    op_bounds: [str: ImplBounds],   // an operator impl's of `op_impls`, by its method (MYLA-612)
     for_iters: [int32: Stmt],       // a `for` over an iterator, by its id: the loop it is (D171, `check_for_iterator`)
     // functions without `self` (D172): each one's impl target, by its name
     // (`Box.zero`: `Box<T>`), which solves the impl's type parameters; the
@@ -2589,7 +2662,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         decls: decls,
         structs: [], enums: [], recursive_enums: [],
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
-        impl_decls: [], next_id: 1000000000, derived: [], pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], op_impls: [], op_sites: [:], op_sets: [:], impl_args: [:], impl_bounds: [:], for_iters: [:],
+        impl_decls: [], next_id: 1000000000, derived: [], pending_keys: [], keys_ready: false, key_ctx: false, traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [], trait_impl_ids: [:], op_impls: [], op_sites: [:], op_sets: [:], impl_args: [:], impl_bounds: [:], op_bounds: [:], for_iters: [:],
         static_selfs: [:], static_calls: [:], on_type_params: false, call_types: [:],
         grow_calls: [],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
@@ -2878,10 +2951,35 @@ impl Checker {
     // they all do or the impl has none.
     #test(checker_on("[int]"), "Vec2", "Eq", Type.TStruct("Vec2", []))[Ok(None)]
     fun impl_bound_failing(self, k: str, trnm: str, t: Type) -> Result<Option<(Type, str)>, CheckErr> {
-        let ib = match self.impl_bounds.get(trnm + "\t" + k) {
-            Some(x) => x,
-            None => { return Ok(None) },
+        return match self.impl_bounds.get(trnm + "\t" + k) {
+            Some(ib) => self.bounds_failing(ib, t),
+            None => Ok(None),
         }
+    }
+
+    // `impl_bound_failing` of the operator impl `oi` that an operator, an
+    // index or a bound picked for `t` (MYLA-612): `impl<C: Name> Mul<int,
+    // str> for W<C>` gives `W<A>` no `*` unless `A` is `Name`.
+    #test(checker_on("[int]"), OpImpl { tr: "Mul", key: "V", target: Type.TStruct("V", []), r: Type.TFloat(64), r_self: false, o: Type.TStruct("V", []), method: "V.mul$float64", decl: 0 }, Type.TStruct("V", []))[Ok(None)]
+    fun op_bound_failing(self, oi: OpImpl, t: Type) -> Result<Option<(Type, str)>, CheckErr> {
+        return match self.op_bounds.get(oi.method) {
+            Some(ib) => self.bounds_failing(ib, t),
+            None => Ok(None),
+        }
+    }
+
+    // `op_bound_failing` as a message ends with it: ": 'A' isn't Name", ""
+    // when `t` meets the bounds of `oi`.
+    fun op_bound_why(self, oi: OpImpl, t: Type) -> Result<str, CheckErr> {
+        return match self.op_bound_failing(oi, t)? {
+            Some(ct) => Ok(": " + self.not_trait_why(ct.0, ct.1)),
+            None => Ok(""),
+        }
+    }
+
+    // The first argument of `t` that doesn't meet one of the impl bounds
+    // `ib`, and the bound's trait; None when they all do.
+    fun bounds_failing(self, ib: ImplBounds, t: Type) -> Result<Option<(Type, str)>, CheckErr> {
         let u = unify_param(ib.target, t, [])
         for b in ib.bounds {
             // (a parameter the target doesn't hold has nothing to meet)
@@ -2963,8 +3061,23 @@ impl Checker {
         }
         let rt = if tr == "Neg" { c } else { want[0] }
         return match find_op_impl(self.op_impls, tr, key, c, rt) {
-            Some(oi) => Ok(type_eq(subst_type(oi.o, unify_param(oi.target, c, []).subst), want[want.len() - 1])),
+            Some(oi) => Ok(type_eq(subst_type(oi.o, unify_param(oi.target, c, []).subst), want[want.len() - 1]) && is_none_tt(self.op_bound_failing(oi, c)?)),
             None => Ok(false),
+        }
+    }
+
+    // Why `c`, which has an impl of the operator trait `tr` for the bound's
+    // arguments `want`, doesn't meet the bound, as `op_bound_why` says it:
+    // the impl's own bounds (MYLA-612); "" for any other reason.
+    fun op_bound_arg_why(self, c: Type, tr: str, want: [Type]) -> Result<str, CheckErr> {
+        if !is_struct_or_enum(c) || want.len() == 0 { return Ok("") }
+        let key = match self.type_key(c) {
+            Some(k) => k,
+            None => { return Ok("") },
+        }
+        return match find_op_impl(self.op_impls, tr, key, c, if tr == "Neg" { c } else { want[0] }) {
+            Some(oi) => self.op_bound_why(oi, c),
+            None => Ok(""),
         }
     }
 
@@ -3852,12 +3965,19 @@ impl Checker {
                         }
                     }
                     // an operator's impl by its type arguments (D200): one per
-                    // right operand's type, its method named by that type
+                    // right operand's type, its method named by that type; one
+                    // whose argument didn't resolve has had its error, and is
+                    // left out rather than compared with the others
+                    if is_op_trait(tn) && conforms && target_ok && list_has_error(trait_args) {
+                        self.lose_impl(methods, trait_name)
+                        return Ok(0)
+                    }
                     if is_op_trait(tn) && conforms && target_ok {
                         match self.op_impl_kind(ln, cl, sp, tn, target, key, trait_args) {
                             Ok(k) => { op_kind = k },
                             Err(e) => {
-                                self.record(e)?
+                                // (a repeat's names the impl it repeats)
+                                if e.decl >= 0 { self.dup_impl(e)? } else { self.record(e)? }
                                 self.lose_impl(methods, trait_name)
                                 return Ok(0)
                             },
@@ -3880,16 +4000,24 @@ impl Checker {
                         tinfo.methods = [tm]
                         let last = if tn == "IndexSet" { trait_args[1] } else { trait_args[trait_args.len() - 1] }
                         self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: trait_args[0], r_self: r_self, o: last, method: key + "." + renamed, decl: decl.id })
+                        if ibounds.len() > 0 { self.op_bounds[key + "." + renamed] = ImplBounds { target: target, bounds: ibounds } }
                     } else {
-                        var dup = false
-                        for p in self.user_trait_impls { if p.trait_name == tn && p.key == key { dup = true } }
-                        if dup {
-                            self.record(terr_at(ln, cl, sp, format("duplicate impl of trait '{}' for type '{}' (at most one user impl per trait/type pair)", tn, key)))?
-                            return Ok(0)
+                        match self.trait_impl_ids.get(tn + "\t" + key) {
+                            Some(first) => {
+                                var e = terr_at(ln, cl, sp, format("duplicate impl of trait '{}' for type '{}' (at most one user impl per trait/type pair)", tn, key))
+                                e.decl = first
+                                self.dup_impl(e)?
+                                return Ok(0)
+                            },
+                            None => {},
                         }
                         self.user_trait_impls.push(TraitImplPair { trait_name: tn, key: key })
+                        self.trait_impl_ids[tn + "\t" + key] = decl.id
                         // `Neg` is one per type, its result in the table too
-                        if tn == "Neg" && conforms { self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: Type.TTuple([]), r_self: false, o: trait_args[0], method: key + ".neg", decl: decl.id }) }
+                        if tn == "Neg" && conforms {
+                            self.op_impls.push(OpImpl { tr: tn, key: key, target: target, r: Type.TTuple([]), r_self: false, o: trait_args[0], method: key + ".neg", decl: decl.id })
+                            if ibounds.len() > 0 { self.op_bounds[key + ".neg"] = ImplBounds { target: target, bounds: ibounds } }
+                        }
                         // what a bound naming the trait with arguments compares
                         // and solves (D171); an operator's are its own (D200)
                         if conforms && trait_args.len() > 0 && !is_op_trait(tn) { self.impl_args[tn + "\t" + key] = ImplArgs { target: target, args: trait_args } }
@@ -3968,7 +4096,7 @@ impl Checker {
     #test(checker_on("struct V { x: int }"), 1, 1, no_span(), "Add", Type.TStruct("V", []), "V", [Type.TStruct("V", []), Type.TStruct("V", [])])[Ok(0)]
     fun op_impl_kind(self, ln: int32, cl: int32, sp: SrcSpan, tn: str, target: Type, key: str, args: [Type]) -> Result<int32, CheckErr> {
         if is_arith_trait(tn) && type_eq(args[0], target) && type_eq(args[1], target) {
-            for oi in self.op_impls { if oi.tr == tn && oi.key == key && oi.r_self { return Err(op_dup(ln, cl, sp, tn, args[0], key)) } }
+            for oi in self.op_impls { if oi.tr == tn && oi.key == key && oi.r_self { return Err(op_dup(ln, cl, sp, tn, args[0], key, oi.decl)) } }
             return Ok(0)
         }
         let agg = is_struct_or_enum(target)
@@ -3985,12 +4113,70 @@ impl Checker {
         if contains_type_param(args[0]) && !r_self { return Err(terr_at(ln, cl, sp, format("the right operand of an operator impl can't use the impl's type parameters (found '{}'): the impl is picked where the operands' types are known", type_name(args[0])))) }
         for oi in self.op_impls {
             if oi.tr != tn || oi.key != key { continue }
-            if (r_self && oi.r_self) || (!r_self && !oi.r_self && type_eq(oi.r, args[0])) { return Err(op_dup(ln, cl, sp, tn, args[0], key)) }
+            if (r_self && oi.r_self) || (!r_self && !oi.r_self && type_eq(oi.r, args[0])) { return Err(op_dup(ln, cl, sp, tn, args[0], key, oi.decl)) }
         }
         if r_self && is_arith_trait(tn) {
-            for p in self.user_trait_impls { if p.trait_name == tn && p.key == key { return Err(op_dup(ln, cl, sp, tn, args[0], key)) } }
+            match self.trait_impl_ids.get(tn + "\t" + key) {
+                Some(first) => { return Err(op_dup(ln, cl, sp, tn, args[0], key, first)) },
+                None => {},
+            }
         }
         return Ok(2)
+    }
+
+    // The error `e0` of the impl being resolved (`cur_decl`), which repeats
+    // the impl `e0.decl` (D257: two impls of one trait with the same type
+    // arguments for one type, wherever they are): reported at the program's
+    // of the two, not at the library's, with a note naming the other.
+    fun dup_impl(var self, e0: CheckErr) -> Result<int32, CheckErr> {
+        let first = e0.decl
+        let here = self.cur_decl
+        var e = CheckErr { line: e0.line, col: e0.col, sp: e0.sp, msg: e0.msg, decl: -1, notes: e0.notes }
+        var other = first
+        var (ol, oc, osp) = self.decl_place(first)
+        if self.std_impls.contains(here) && !self.std_impls.contains(first) {
+            e.line = ol
+            e.col = oc
+            e.sp = osp
+            other = here
+            ol = e0.line
+            oc = e0.col
+            osp = e0.sp
+            self.cur_decl = first
+        }
+        e.notes.push(self.other_impl_note(other, ol, oc, osp))
+        let r = self.record(e)
+        self.cur_decl = here
+        return r
+    }
+
+    // The note that names the impl `other` at `line`, `col`, `sp` beside a
+    // repeat of it (D257): there, in the error's file; else by its module
+    // or file, as a note's place is in the error's file.
+    fun other_impl_note(self, other: int32, line: int32, col: int32, sp: SrcSpan) -> Note {
+        match self.std_impls.get(other) {
+            Some(o) => { return note_at(format("the other impl is {}'s, at {}:{}:{}", o.module, o.path, line, col), 0, 0, no_span()) },
+            None => {},
+        }
+        let f = self.decl_file(other)
+        if f == self.decl_file(self.cur_decl) { return note_at("the other impl is here", line, col, sp) }
+        return note_at(format("the other impl is at {}:{}:{}", f, line, col), 0, 0, no_span())
+    }
+
+    // The place of the declaration `id`: an impl's, a type's (a derive's);
+    // none for another.
+    fun decl_place(self, id: int32) -> (int32, int32, SrcSpan) {
+        for d in self.impl_decls { if d.id == id { return (d.line, d.col, d.sp) } }
+        for d in self.decls { if d.id == id { return (d.line, d.col, d.sp) } }
+        return (0, 0, no_span())
+    }
+
+    // The file of the declaration `id`, as the loader read it ("" for a
+    // program it didn't load).
+    fun decl_file(self, id: int32) -> str {
+        var path = ""
+        for f in self.lazy_bodies.files { if f.0 <= id { path = f.1 } }
+        return path
     }
 
     // The impl `id`'s methods made `ms` where the declarations are kept, as
@@ -4121,7 +4307,7 @@ impl Checker {
             if !contains_str(impl_names, tm.name) && !contains_str(missing, tm.name) { missing.push(tm.name) }
         }
         if missing.len() > 0 {
-            return Err(terr_at(ln, cl, sp, format("impl of trait '{}' for '{}' is missing method(s): {}", trinfo.name, key, join_strs(sorted_strs(missing), ", "))))
+            return Err(terr_at(ln, cl, sp, format("impl of trait '{}' for '{}' is missing method(s): {}", trinfo.name, key, join_strs(sorted_strs(written_methods(missing)), ", "))))
         }
         // extra: impl methods not declared by the trait
         var extra: [str] = []
@@ -4131,7 +4317,7 @@ impl Checker {
             if !in_trait && !contains_str(extra, nm) { extra.push(nm) }
         }
         if extra.len() > 0 {
-            return Err(terr_at(ln, cl, sp, format("impl of trait '{}' for '{}' declares method(s) not in the trait: {}", trinfo.name, key, join_strs(sorted_strs(extra), ", "))))
+            return Err(terr_at(ln, cl, sp, format("impl of trait '{}' for '{}' declares method(s) not in the trait: {}", trinfo.name, key, join_strs(sorted_strs(written_methods(extra)), ", "))))
         }
         var broken = false
         for tm in trinfo.methods {
@@ -4142,12 +4328,16 @@ impl Checker {
             }
             let sig = match sig_opt { Some(x) => x, None => { return Ok(false) } }
             let recv = match sig.decl.receiver { Some(r) => r, None => "" }
+            let mn = written_method(tm.name)
             if recv != tm.receiver {
                 // a function without `self` (D172) on one side
-                if recv == "" { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("'{}' in impl of trait '{}' for '{}' has no receiver but the trait declares '{}'", tm.name, trinfo.name, key, tm.receiver))) }
-                if tm.receiver == "" { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares a function without 'self'", tm.name, trinfo.name, key, recv))) }
-                return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares '{}'", tm.name, trinfo.name, key, recv, tm.receiver)))
+                if recv == "" { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("'{}' in impl of trait '{}' for '{}' has no receiver but the trait declares '{}'", mn, trinfo.name, key, tm.receiver))) }
+                if tm.receiver == "" { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares a function without 'self'", mn, trinfo.name, key, recv))) }
+                return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares '{}'", mn, trinfo.name, key, recv, tm.receiver)))
             }
+            // a trait's method is called without `await`, by an operator, a
+            // bound or a format hole: it can't suspend (D256, until MYLA-434)
+            if sig.decl.is_async { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' can't be 'async': the trait's method isn't, and it is called without 'await'", mn, trinfo.name, key))) }
             var exp_params: [Type] = []
             for p in tm.params { exp_params.push(subst_self(p, target, pmap)) }
             let exp_ret = opt_subst_self(tm.ret, target, pmap)
@@ -4162,7 +4352,7 @@ impl Checker {
                     rest.push(exp_params[k])
                     k = k + 1
                 }
-                return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' does not match the trait signature (expected '({}) -> {}')", tm.name, trinfo.name, key, type_names(rest), opt_type_name(exp_ret))))
+                return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' does not match the trait signature (expected '({}) -> {}')", mn, trinfo.name, key, type_names(rest), opt_type_name(exp_ret))))
             }
         }
         return Ok(!broken)
@@ -4690,8 +4880,22 @@ impl Checker {
             // a struct of number literals takes the type of the operand
             // beside it, as a number literal does (MYLA-544)
             let rt0 = self.expect_value(r, if is_arith_op(op) { op_hint(expected, None) } else { None })?
-            let lt0 = self.expect_value(l, if is_struct_or_enum(rt0) { Some(rt0) } else { None })?
+            // (but not where the right operand's type picks an impl of its
+            // own, whatever the left one's arguments: `B { v: 1 } * b` by
+            // `impl<T> Mul<B<str>, str> for B<T>`, M15)
+            let by_right = is_arith_op(op) && self.right_picks(op, l, rt0)
+            let lt0 = self.expect_value(l, if is_struct_or_enum(rt0) && !by_right { Some(rt0) } else { None })?
             return self.infer_overload_known(e, op, l, r, lt0, Some(rt0))
+        }
+        // a tuple, list, `Some`, `Ok` or `Err` of literals left of `==`
+        // takes the right side's type, as a literal does (MYLA-544,
+        // MYLA-609): `Some(1) == Some(x)`, `(1, 1) == (x, 1)` with `x: int64`
+        // (not beside `None`, `Ok(x)` or `Err(e)`, which take theirs from it)
+        if (op == "==" || op == "!=") && literal_compound(l) && !literal_compound(r) && !adapts(r) && (!self.other_side_first(r) || is_some_call(r)) {
+            let rt0 = self.expect_value(r, None)?
+            let lt0 = self.expect_value(l, Some(rt0))?
+            if is_struct_or_enum(lt0) { return self.infer_overload_known(e, op, l, r, lt0, Some(rt0)) }
+            return self.equality(e, l, lt0, r, rt0)
         }
         if op == "==" || op == "!=" {
             if self.other_side_first(l) && !self.other_side_first(r) {
@@ -4713,17 +4917,7 @@ impl Checker {
             if is_compound_eq(lt) { hint = Some(lt) }
             let rt = self.expect_value(r, hint)?
             if adapts(l) { lt = self.left_literal(l, lt, waits, None, r, rt)? }
-            let common = self.unify(l, lt, r, rt)?
-            if is_compound_eq(common) {
-                // a tuple or list of `Eq` elements (D163, MYLA-313)
-                self.prelude_need(common)
-                if self.type_implements(common, "Eq")? { return Ok(Type.TBool) }
-                return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}': {}", type_name(common), self.not_eq_why(common))))
-            }
-            if !(is_int(common) || is_float(common) || is_char(common) || is_bool(common) || is_str(common) || is_unit(common)) {
-                return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}'", type_name(common))))
-            }
-            return Ok(Type.TBool)
+            return self.equality(e, l, lt, r, rt)
         }
         if op == "<" || op == "<=" || op == ">" || op == ">=" {
             let waits = literal_waits(l, None) && !adapts(r)
@@ -4813,6 +5007,45 @@ impl Checker {
         return Ok(common)
     }
 
+    // `l == r` (or `!=`) with the left side of the type `lt` and the right
+    // side of `rt`, neither a struct, enum or type parameter: of one type,
+    // a tuple's or list's of `Eq` elements or a primitive's.
+    fun equality(var self, e: Expr, l: Expr, lt: Type, r: Expr, rt: Type) -> Result<Type, CheckErr> {
+        let common = self.unify(l, lt, r, rt)?
+        if is_compound_eq(common) {
+            // a tuple or list of `Eq` elements (D163, MYLA-313)
+            self.prelude_need(common)
+            if self.type_implements(common, "Eq")? { return Ok(Type.TBool) }
+            return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}': {}", type_name(common), self.not_eq_why(common))))
+        }
+        if !(is_int(common) || is_float(common) || is_char(common) || is_bool(common) || is_str(common) || is_unit(common)) {
+            return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}'", type_name(common))))
+        }
+        return Ok(Type.TBool)
+    }
+
+    // Whether `t` is indexed by an `Index` impl (D200): a struct or enum
+    // with one, or a type parameter.
+    fun indexes_by_impl(self, t: Type) -> bool {
+        if is_type_param(t) { return true }
+        if !is_struct_or_enum(t) { return false }
+        let key = match self.type_key(t) { Some(k) => k, None => "" }
+        return self.op_cands("Index", key).len() > 0
+    }
+
+    // Whether the right operand's type `rt` picks an impl of `op`'s trait
+    // for the struct literal `l` by itself, not as the left's type (D200):
+    // `impl<T> Mul<B<str>, str> for B<T>` for `B { v: 1 } * b`.
+    fun right_picks(self, op: str, l: Expr, rt: Type) -> bool {
+        let n = match l.kind {
+            ExprKind.StructLit(n0, fs) => n0,
+            _ => { return false },
+        }
+        let tr = match arith_trait(op) { Some(t) => t, None => "" }
+        for oi in self.op_impls { if oi.tr == tr && oi.key == n && !oi.r_self && type_eq(oi.r, rt) { return true } }
+        return false
+    }
+
     // `c - d` on two chars, their distance, an `int32`; `c + n` and `c - n`
     // with `n` an `int32`, `c` moved by `n`, a char (checked to be one when
     // it runs, as a cast to char is). None for any other operands, which
@@ -4864,7 +5097,18 @@ impl Checker {
                 Some(ct) => { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}': {}", op, type_name(lt), self.not_trait_why(ct.0, ct.1)))) },
                 None => {},
             }
-            return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}': it needs 'impl {} for {}'{}", op, type_name(lt), trnm, type_name(lt), if_str(trnm == "Eq", " (or '#derive(Eq)')", ""))))
+            // the impl the right operand asks for, `impl Div<float64> for V`
+            // for `v / 2.0` (D200)
+            var wanted = trnm
+            if kind == "arith" {
+                // (a right operand that doesn't type leaves the classic one)
+                let rt = match known_rt {
+                    Some(t) => t,
+                    None => match self.expect_value(r, None) { Ok(t) => t, Err(x) => lt },
+                }
+                if !type_eq(rt, lt) && !has_error(rt) { wanted = format("{}<{}>", trnm, type_name(rt)) }
+            }
+            return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}': it needs 'impl {} for {}'{}", op, type_name(lt), wanted, type_name(lt), if_str(trnm == "Eq", " (or '#derive(Eq)')", ""))))
         }
         // the left side's type for the right one's, `opt == None` (MYLA-379)
         let rt = match known_rt {
@@ -4929,6 +5173,8 @@ impl Checker {
         }
         return match find_op_impl(self.op_impls, tr, key, lt, rt) {
             Some(oi) => {
+                let why = self.op_bound_why(oi, lt)?
+                if why != "" { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}' and '{}'{}", op, type_name(lt), type_name(rt), why))) }
                 self.op_sites[e.id] = op_part(oi)
                 Ok(subst_type(oi.o, unify_param(oi.target, lt, []).subst))
             },
@@ -4967,17 +5213,30 @@ impl Checker {
     fun infer_left_scalar(var self, e: Expr, op: str, l: Expr, lt0: Type, waits: bool, rt: Type) -> Result<Type, CheckErr> {
         let tr = match arith_trait(op) { Some(t) => t, None => "" }
         var lt = lt0
-        if waits {
+        // a literal its own type has no impl for takes the only one of its
+        // kind, `2.0 * v` by `impl Mul<Vec3, Vec3> for float32`, `2 * v` by
+        // one for `int64` (MYLA-612)
+        if waits || (adapts(l) && !is_flexible_char_lit(l)) {
             var hint: Option<Type> = None
             var n = 0
+            var own = false
             for oi in self.op_impls {
                 if oi.tr == tr && !oi.r_self && type_eq(oi.r, rt) && !is_struct_or_enum(oi.target) {
-                    hint = Some(oi.target)
-                    n += 1
+                    if type_eq(oi.target, lt0) { own = true }
+                    if is_float(lt0) == is_float(oi.target) {
+                        hint = Some(oi.target)
+                        n += 1
+                    }
                 }
             }
             if n != 1 { hint = None }
-            lt = self.expect_value(l, no_float_for_int(hint, l))?
+            if waits { lt = self.expect_value(l, hint)? }
+            else if !own {
+                match hint {
+                    Some(h) => { lt = self.expect_value(l, Some(h))? },
+                    None => {},
+                }
+            }
         }
         let key = match self.type_key(lt) { Some(k) => k, None => "" }
         return match find_op_impl(self.op_impls, tr, key, lt, rt) {
@@ -5004,6 +5263,8 @@ impl Checker {
         let key = match self.type_key(t) { Some(k) => k, None => "" }
         return match find_op_impl(self.op_impls, "Neg", key, t, t) {
             Some(oi) => {
+                let why = self.op_bound_why(oi, t)?
+                if why != "" { return Err(terr_at(e.line, e.col, e.sp, format("unary '-' is not defined for '{}'{}", type_name(t), why))) }
                 self.op_sites[e.id] = op_part(oi)
                 Ok(subst_type(oi.o, unify_param(oi.target, t, []).subst))
             },
@@ -5035,6 +5296,8 @@ impl Checker {
         let it = self.expect_value(ix, self.op_hint(cands, base, false, ix))?
         return match find_op_impl(self.op_impls, "Index", key, base, it) {
             Some(oi) => {
+                let why = self.op_bound_why(oi, base)?
+                if why != "" { return Err(terr_at(e.line, e.col, e.sp, format("type '{}' can't be indexed by '{}'{}", type_name(base), type_name(it), why))) }
                 self.op_sites[e.id] = op_part(oi)
                 Ok(subst_type(oi.o, unify_param(oi.target, base, []).subst))
             },
@@ -5078,6 +5341,8 @@ impl Checker {
                 let it = self.expect_value(ix, self.op_hint(cands, bt, false, ix))?
                 match find_op_impl(self.op_impls, "IndexSet", key, bt, it) {
                     Some(oi) => {
+                        let why = self.op_bound_why(oi, bt)?
+                        if why != "" { return Err(terr_at(s.line, s.col, s.sp, format("cannot assign to an index of '{}'{}", type_name(bt), why))) }
                         want = subst_type(oi.o, unify_param(oi.target, bt, []).subst)
                         self.op_sets[target.id] = op_part(oi)
                     },
@@ -7751,6 +8016,9 @@ impl Checker {
                         if !is_int(it) { return Err(terr_at(index.line, index.col, index.sp, format("list index must be an integer, found '{}'", type_name(it)))) }
                         Ok(LValue { ty: el, mutable: base.mutable })
                     },
+                    // `g[0].a = 5` on a type with `Index` (D200): its element
+                    // is a value the impl gives, not a place
+                    _ if self.indexes_by_impl(base.ty) => Err(with_notes(terr_at(e.line, e.col, e.sp, format("an element of '{}' is not a place: its 'Index' impl gives a value, which can't be changed in place", type_name(base.ty))), [Note { label: "help", msg: "read it into a 'var', change that, and assign it back by 'IndexSet' ('x[i] = v')", line: 0, col: 0, sp: no_span() }])),
                     _ => Err(terr_at(e.line, e.col, e.sp, format("type '{}' is not a list and cannot be indexed with `[...]`", type_name(base.ty)))),
                 }
             },
@@ -8452,6 +8720,7 @@ impl Checker {
             self.add_method(MethodEntry { key: name, name: "eq", sig: sig })
             self.trait_impls.push(TraitImplPair { trait_name: "Eq", key: name })
             self.user_trait_impls.push(TraitImplPair { trait_name: "Eq", key: name })
+            self.trait_impl_ids["Eq\t" + name] = decl.id
             self.note_derived(-1, decl, "Eq", "Eq")
         }
         if hash_targets.len() > 0 { self.derive_hashes(hash_targets, eq_names)? }
@@ -8514,6 +8783,7 @@ impl Checker {
                 // the runners hash a derived key by its members
                 self.trait_impls.push(TraitImplPair { trait_name: "Hash", key: name })
                 self.user_trait_impls.push(TraitImplPair { trait_name: "Hash", key: name })
+                self.trait_impl_ids["Hash\t" + name] = decl.id
                 self.note_derived(-1, decl, "Hash", "Hash")
                 let gtps = self.type_params_of(name)
                 if gtps.len() > 0 {
@@ -9711,6 +9981,10 @@ impl Checker {
     fun check_track_caller(var self, fd: FunData, attr: Attribute, key: str) -> Result<int32, CheckErr> {
         let none = match attr.outputs { Some(x) => false, None => true }
         if attr.args.len() > 0 || !none { return Err(terr_at(attr.line, attr.col, attr.sp, "'#track_caller' takes no arguments")) }
+        match track_attr(fd.attributes) {
+            Some(first) => { if first.line != attr.line || first.col != attr.col { return Err(terr_at(attr.line, attr.col, attr.sp, "'#track_caller' is given twice: it stands on a function once")) } },
+            None => {},
+        }
         if key != "" && self.actors.contains(key) { return Err(terr_at(attr.line, attr.col, attr.sp, "'#track_caller' can't stand on an actor's method")) }
         if fd.is_async { return Err(terr_at(attr.line, attr.col, attr.sp, "'#track_caller' can't stand on an async function")) }
         return Ok(0)
@@ -11589,7 +11863,8 @@ impl Checker {
                         // an operator's, by its type arguments (D200)
                         if is_op_trait(tr) {
                             if !self.meets_op_bound(concrete, tr, subst_type_list(b.args[j], subst))? {
-                                return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, op_bound_text(tr, b.args[j], Type.TParam(b.tp)), unqualified(sig.decl.name))))
+                                let why = self.op_bound_arg_why(concrete, tr, subst_type_list(b.args[j], subst))?
+                                return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'{}", type_name(concrete), b.tp, op_bound_text(tr, b.args[j], Type.TParam(b.tp)), unqualified(sig.decl.name), why)))
                             }
                             j += 1
                             continue
@@ -12818,8 +13093,38 @@ impl Reentrancy {
         }
     }
 
+    // `b` walked in order, its `defer`s where they run (D135): when the
+    // block ends, the last first, after what follows them, an `await`
+    // included (MYLA-394's follow-up). (A `return` inside runs them as
+    // early as that, never later than its end.)
     fun block(var self, b: Block) {
-        for s in b.stmts { self.stmt(s) }
+        var deferred: [Block] = []
+        for s in b.stmts {
+            match s.kind {
+                StmtKind.DeferS(d) => { deferred.push(d) },
+                _ => { self.stmt(s) },
+            }
+        }
+        var i = deferred.len() - 1
+        while i >= 0 {
+            self.block(deferred[i])
+            i -= 1
+        }
+    }
+
+    // The indices and keys of the place `t` walked in evaluation order, the
+    // base's first: `self.items[await p.charge()] = 5` waits before the
+    // write (MYLA-394's follow-up).
+    fun place(var self, t: Expr) {
+        match t.kind {
+            ExprKind.Index(b, i) => {
+                self.place(b)
+                self.ordered(i, false)
+            },
+            ExprKind.GetField(b, f) => { self.place(b) },
+            ExprKind.TupleIndex(b, k) => { self.place(b) },
+            _ => {},
+        }
     }
 
     // `e` walked in evaluation order (MYLA-394): an `await` starts its epoch
@@ -12965,7 +13270,9 @@ impl Reentrancy {
             StmtKind.Assign(target, v) => {
                 let r = self.scan(v)
                 let before = self.epoch
+                // the value first, then the place (MYLA-4)
                 self.ordered(v, false)
+                self.place(target)
                 let root = self_field(target)
                 if root != "" {
                     self.write(root, r.names, target)
@@ -12998,7 +13305,7 @@ impl Reentrancy {
             StmtKind.ReturnS(v, t) => { self.opt(v) },
             StmtKind.ExprStmt(e) => { self.ordered(e, false) },
             StmtKind.DestructDecl(k, b, ty, init) => { self.ordered(init, false) },
-            // without an `await`, read as where it stands (D135)
+            // (`block` takes a `defer` where it runs; without an `await`, D135)
             StmtKind.DeferS(b) => { self.block(b) },
             _ => {},
         }

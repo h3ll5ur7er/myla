@@ -1,0 +1,5 @@
+type error: type 'W<A>' can't be indexed by 'int32': 'A' isn't Conv<str> (it implements 'Conv<int32>')
+  --> examples/errors/type_op_impl_bound_index.my:33:14
+   |
+33 |     let s = w[0]
+   |             ^^^^

@@ -1,0 +1,5 @@
+type error: operator '*' is not defined for 'W<A>' and 'int32': 'A' isn't Name (it needs 'impl Name for A')
+  --> examples/errors/type_op_impl_bound_mul.my:26:13
+   |
+26 |     print(w * 2)
+   |           ^^^^^

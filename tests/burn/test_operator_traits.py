@@ -323,7 +323,7 @@ ERRORS = [
     (_VEC + "impl Mul<float> for V {\n    fun mul(self, k: float) -> V { return V { x: self.x * k } }\n}\n\nfun main() {\n    let v = V { x: 1.0 }\n    let w = v * 2\n}\n",
      "operator '*' is not defined for 'V' and 'int32'"),
     (_VEC + "fun main() {\n    let v = V { x: 1.0 }\n    let w = v * 2.0\n}\n",
-     "operator '*' is not defined for 'V': it needs 'impl Mul for V'"),
+     "operator '*' is not defined for 'V': it needs 'impl Mul<float64> for V'"),
     (_VEC + "fun main() {\n    let v = V { x: 1.0 }\n    let w = -v\n}\n",
      "unary '-' is not defined for 'V': it needs 'impl Neg for V'"),
     (_VEC + "fun main() {\n    let v = V { x: 1.0 }\n    let w = v[0]\n}\n",
@@ -342,6 +342,20 @@ ERRORS = [
      "operator '*' on a value of type parameter 'T' is not defined for 'int32'"),
     (_VEC + "impl Mul<float> for V {\n    fun mul(self, k: float) -> V { return self }\n}\n\nfun scale<T: Mul<float>>(a: T) -> T {\n    return a * 2.0\n}\n\nfun main() {\n    let s = scale(\"x\")\n}\n",
      "type 'str' does not satisfy the bound 'T: Mul<float64>' required by 'scale'"),
+    # an operator impl's bounds hold where the operator picks it, in generic
+    # code too, `*=` included (MYLA-612, H1)
+    ("struct W<C> {\n    v: C,\n}\n\ntrait Name {\n    fun name(self) -> str\n}\n\nimpl<C: Name> Mul<float> for W<C> {\n    fun mul(self, k: float) -> W<C> { return self }\n}\n\nfun g<C>(w: W<C>) -> W<C> {\n    var x = w\n    x *= 2.0\n    return x\n}\n",
+     "operator '*' is not defined for 'W<C>' and 'float64': 'C' isn't Name (it needs the bound 'C: Name')"),
+    # a trait's method is called without `await`: its impl can't be async
+    # (D256), an operator's, `Eq`'s, `Format`'s or any trait's
+    (_VEC + "impl Index<int, float> for V {\n    async fun index(self, i: int) -> float { return self.x }\n}\n",
+     "method 'index' in impl of trait 'Index' for 'V' can't be 'async': the trait's method isn't"),
+    (_VEC + "impl Eq for V {\n    async fun eq(self, o: V) -> bool { return true }\n}\n",
+     "method 'eq' in impl of trait 'Eq' for 'V' can't be 'async'"),
+    (_VEC + "impl Format for V {\n    async fun format(self, spec: str) -> str { return \"v\" }\n}\n",
+     "method 'format' in impl of trait 'Format' for 'V' can't be 'async'"),
+    (_VEC + "trait Size {\n    fun size(self) -> int\n}\n\nimpl Size for V {\n    async fun size(self) -> int { return 1 }\n}\n",
+     "method 'size' in impl of trait 'Size' for 'V' can't be 'async'"),
 ]
 
 

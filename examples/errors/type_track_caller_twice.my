@@ -1,0 +1,12 @@
+//~ type error: '#track_caller' is given twice: it stands on a function once
+//~ span: #track_caller
+// `#track_caller` (MYLA-435) twice on one function was accepted.
+#track_caller
+#track_caller
+fun check(n: int) {
+    assert(n > 0)
+}
+
+fun main() {
+    check(1)
+}

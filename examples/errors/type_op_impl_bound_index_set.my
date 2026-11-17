@@ -1,0 +1,27 @@
+//~ type error: cannot assign to an index of 'W<A>': 'A' isn't Name
+//~ span: w[0] = "x"
+// `IndexSet`'s impl's bound holds where `w[i] = v` picks it (MYLA-612).
+trait Name {
+    fun name(self) -> str
+}
+
+struct A {
+    n: int,
+}
+
+struct W<C> {
+    v: C,
+    s: str,
+}
+
+impl<C: Name> IndexSet<int, str> for W<C> {
+    fun set_index(var self, i: int, x: str) {
+        self.s = self.v.name() + x
+    }
+}
+
+fun main() {
+    var w = W { v: A { n: 1 }, s: "" }
+    w[0] = "x"
+    print(w.s)
+}
