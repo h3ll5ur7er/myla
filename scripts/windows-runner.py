@@ -7,20 +7,25 @@ D213, D214).
       stress programs, tests/burn/test_windows.py's programs (its HELPER and
       process and socket cases, FramesOnWindows' 64 KiB frame, console cases of its
       own), a read of the standard input with a time limit, a program with
-      debug information (-g, MYLA-757), and myla.exe and myla-lsp.exe, into
+      debug information (-g, MYLA-757: its DWARF verified with llvm-dwarfdump
+      when it is on PATH), and myla.exe and myla-lsp.exe, into
       OUT, and writes OUT/cases.json: each case's
       commands and what each must print and exit with (the examples' from
       the interpreter here, as bootstrap-arm64 takes them).
 
-  windows-runner.py run OUT [--wine [CMD]] [--runs N] [--only TEXT] [--list]
+  windows-runner.py run OUT [--wine [CMD]] [--runs N] [--only TEXT] [--list] [--tally]
       On Windows (CI's windows-latest job): runs every case of OUT and
-      reports each; exit status 1 when one failed. With --wine, on Linux,
+      reports each; exit status 1 when one failed. With --tally a repeated
+      step runs all its --runs, each reported, and then how many were right
+      (a rate, MYLA-798), instead of stopping at the first that failed. With
+      --wine, on Linux,
       Wine stands in for Windows (CMD, default /usr/lib/wine/wine64 or
       wine64 or wine on PATH): what Wine can't show is skipped with its
       reason (a case's `windows_only`), and so is what needs tools that
       aren't there (`myla.exe build` needs clang, lld-link and llvm-dlltool
       for Windows on PATH, or in C:\\Program Files\\LLVM\\bin; reading a -g
-      program's DWARF llvm-symbolizer or llvm-dwarfdump).
+      program's DWARF llvm-symbolizer; its whole unit is verified by the
+      build, with Linux's llvm-dwarfdump, MYLA-798).
 
 The run needs Python's standard library only and nothing of the checkout
 but OUT: a case's programs are under OUT/bin and OUT/tools, the files it
@@ -45,7 +50,7 @@ FORMAT = 1
 STRESS_WORKERS = ["1", "4", "16"]
 LLVM_TOOLS = ["clang", "lld-link", "llvm-dlltool"]
 # what reads a -g program's DWARF (MYLA-757), each in a step of its own
-DEBUG_TOOLS = ["llvm-symbolizer", "llvm-dwarfdump"]
+DEBUG_TOOLS = ["llvm-symbolizer"]
 
 # --- the console cases ---------------------------------------------------------
 # Each: (name, source, steps), a step a dict of `Step`'s fields (see `step`).
@@ -310,7 +315,8 @@ def lsp_input() -> str:
 
 
 def step(argv, stdout=None, stderr="", code=0, stdin="", env=None, timeout=120, has=(), subst=False,
-         path_dir=False, expect_timeout=False, dialog=None, repeat=False, needs=(), drive=None):
+         path_dir=False, expect_timeout=False, dialog=None, repeat=False, needs=(), drive=None, commit=False,
+         commit_below=0):
     """A command of a case and what it must do. `argv[0]` is a program under
     OUT (`bin/…`, `tools/…`), in the case's directory (`./…`), or a tool on
     PATH named by itself (DEBUG_TOOLS, put in `needs`). `stdout`
@@ -323,11 +329,15 @@ def step(argv, stdout=None, stderr="", code=0, stdin="", env=None, timeout=120, 
     it must still run after `timeout` seconds (then killed); `repeat`: it
     runs --runs times; `needs`: tools it needs on PATH; `drive`: one of
     test_windows' RUNNER_CASES, which `Runner.drive_console` runs in a
-    console of its own (Windows only)."""
+    console of its own (Windows only); `commit`: on Windows, the system's
+    commit charge and the program's own sampled while it runs and reported
+    (`CommitSampler`, MYLA-798), and with `commit_below` the program's peak
+    must stay below that many bytes. A step that fails reports its
+    standard error too, checked or not."""
     return {"argv": list(argv), "stdout": stdout, "stderr": stderr, "code": code, "stdin": stdin,
             "env": dict(env or {}), "timeout": timeout, "has": list(has), "subst": subst, "path_dir": path_dir,
             "expect_timeout": expect_timeout, "dialog": dialog, "repeat": repeat, "needs": list(needs),
-            "drive": drive}
+            "drive": drive, "commit": commit or commit_below > 0, "commit_below": commit_below}
 
 
 # MYLA-707's cases of a console of the program's own (std.term, std.signal)
@@ -479,9 +489,34 @@ def build(out: str, myla: str, jobs: int) -> int:
          [step(["./prog.exe"], tw.CHILDREN_OUT, env={"MYLA_B": "kept"}, path_dir=True, timeout=300)],
          dict(helper, **{"prog.exe": "bin/children.exe",
                          "echo-args.bat": file("echo-args.bat", "@echo [%1] [%2] [%3] [%4]\r\n")}))
+    # (MYLA-798, H12: the real runner counted 393 once; each child that
+    # gives something else is on the standard error, which a failure
+    # shows, and the system's commit charge is sampled meanwhile)
     case("process/many-children",
-         [step(["./prog.exe"], "400\n", None, env={"MYLA_THREADS": w}, timeout=300) for w in ("4", "16")],
+         [step(["./prog.exe"], "400\n", "", env={"MYLA_THREADS": w}, timeout=300, repeat=True, commit=True)
+          for w in ("4", "16")],
          dict(helper, **{"prog.exe": "bin/many-children.exe"}))
+    # MYLA-798: a variable's name in any case (Windows' own `Path` is
+    # `PATH`), a batch file named with dots or spaces after `.bat` quoted
+    # for cmd (CVE-2024-43402's hole, which only Windows shows), and paths
+    # past MAX_PATH (D261), which Windows refuses without `\\?\`
+    program("bin/env-case.exe", tw.ENV_CASE)
+    program("bin/batch-names.exe", tw.BAT_NAMES)
+    program("bin/long-paths.exe", tw.LONG_PATHS)
+    case("process/env-case", [step(["bin/env-case.exe"], "MyLa_Var true\nMYLA_VAR true\nmyla_var true\nPATH true\n"
+                                   "path true\nMYLA_NONE false\n", env={"MyLa_Var": "1"})])
+    batch = file("e.bat", "@echo [%1] [%2]\r\n")
+    names = ["./e.bat", "./e.bat.", "./e.bat ", "./e.bat. .", "./E.CMD.."]
+    case("process/batch-names",
+         [step(["./prog.exe"], "".join(f'[{n}] ["&echo INJECTED"] []\n' for n in names))],
+         {"prog.exe": "bin/batch-names.exe", "e.bat": batch, "E.CMD": batch})
+    case("files/long-paths", [step(["bin/long-paths.exe"], tw.LONG_PATHS_OUT)])
+    # what a child of 16 workers commits (its rings of ready frames are
+    # reserved, MYLA-798: they were 128 MiB of it)
+    case("process/a-child-s-commit",
+         [step(["./helper.exe", "sleep", "1500"], "", env={"MYLA_THREADS": "16"}, commit=True)],
+         helper, windows_only="Windows' commit charge (GetProcessMemoryInfo); Wine's isn't Windows': "
+                              "test_windows.PlatformFollowUps looks at the rings' mapping there")
 
     # sockets and the poller on an I/O completion port (MYLA-706): a TCP
     # echo through loopback (test_net's), an HTTP server and its client in
@@ -499,7 +534,7 @@ def build(out: str, myla: str, jobs: int) -> int:
                                   for w in ("1", "4")])
     case("net/sockets-and-children",
          [step(["./prog.exe", "200", "50"], "250 of 250 right, http 20, echoed true\n", env={"MYLA_THREADS": w},
-               timeout=300) for w in STRESS_WORKERS],
+               timeout=300, repeat=True) for w in STRESS_WORKERS],
          dict(helper, **{"prog.exe": "bin/sockets.exe"}))
     case("net/a-close-waits-for-its-send",
          [step(["bin/closed-while-sending.exe"], "4000000 4000000\n" * 3, env={"MYLA_THREADS": w}) for w in ("1", "4")])
@@ -597,8 +632,9 @@ def build(out: str, myla: str, jobs: int) -> int:
     case("debug/symbolizer", [step(["llvm-symbolizer", "--obj=debug.exe", "myla_add", "myla_main"], None, None,
                                    has=["myla_add", "main.my:6:1", "myla_main", "main.my:11:1"], needs=["llvm-symbolizer"])],
          {"debug.exe": "bin/debug.exe"})
-    case("debug/dwarfdump", [step(["llvm-dwarfdump", "--verify", "debug.exe"], None, None, has=["No errors."],
-                                  needs=["llvm-dwarfdump"])], {"debug.exe": "bin/debug.exe"})
+    # (the whole unit verified here, by Linux's llvm-dwarfdump on the same
+    # file, `verify_dwarf`: Windows' image has no llvm-dwarfdump, so the
+    # case `debug/dwarfdump` never ran there, MYLA-798)
 
     def make(b: tuple[str, str, str]) -> str:
         exe, src, cwd = b
@@ -610,6 +646,8 @@ def build(out: str, myla: str, jobs: int) -> int:
     with ThreadPoolExecutor(jobs) as pool:
         failed = [f for f in pool.map(make, builds) if f]
     shutil.rmtree(scratch, ignore_errors=True)
+    if "bin/debug.exe" not in " ".join(failed):
+        failed += verify_dwarf(os.path.join(out, "bin", "debug.exe"))
     for f in failed:
         print(f"build failed: {f}")
     with open(os.path.join(out, "cases.json"), "w", encoding="utf-8") as fh:
@@ -619,14 +657,32 @@ def build(out: str, myla: str, jobs: int) -> int:
     return 1 if failed else 0
 
 
+def verify_dwarf(exe: str) -> list[str]:
+    """The DWARF of the -g program `exe` verified by this machine's
+    `llvm-dwarfdump --verify` (MYLA-757's check, MYLA-798: Windows' image
+    has none, and the file is the same here): what failed, [] for nothing,
+    and a note when there is no llvm-dwarfdump."""
+    tool = shutil.which("llvm-dwarfdump")
+    if not tool:
+        print("debug: no llvm-dwarfdump here, the -g program's DWARF not verified")
+        return []
+    r = subprocess.run([tool, "--verify", exe], capture_output=True, text=True, timeout=300)
+    if r.returncode != 0 or "No errors." not in r.stdout:
+        return [f"{os.path.basename(exe)}'s DWARF (llvm-dwarfdump --verify): {(r.stdout + r.stderr).strip()[-2000:]}"]
+    print(f"debug: {os.path.basename(exe)}'s DWARF verifies (llvm-dwarfdump --verify: No errors.)")
+    return []
+
+
 # --- running (Windows, or Linux under Wine) --------------------------------------
 
 class Runner:
-    def __init__(self, bundle: str, wine: list[str], runs: int):
+    def __init__(self, bundle: str, wine: list[str], runs: int, tally: bool = False):
         self.bundle = os.path.abspath(bundle)
         self.wine = wine
         self.runs = runs
+        self.tally = tally
         self.env = dict(os.environ)
+        self.note = ""   # what the last step measured (its commit charge), for its report
         self.tools_missing = self.find_tools()
 
     def find_tools(self) -> list[str]:
@@ -682,12 +738,33 @@ class Runner:
             shutil.copyfile(os.path.join(self.bundle, *src.split("/")), target)
         cwd = self.windows_path(work)
         subst = {"@CWD@": cwd, "@ANCHOR@": cwd[:3]}
+        failed = []
         for k, s in enumerate(c["steps"]):
-            for n in range(self.runs if s["repeat"] else 1):
+            runs = self.runs if s["repeat"] else 1
+            right = 0
+            times = []
+            for n in range(runs):
+                t0 = time.monotonic()
                 bad = self.run_step(s, work, subst)
-                if bad:
-                    run = f", run {n + 1}" if s["repeat"] and self.runs > 1 else ""
-                    return "FAIL", f"step {k + 1}{run} ({' '.join(s['argv'])}): {bad}"
+                times.append(time.monotonic() - t0)
+                what = f"step {k + 1}{f', run {n + 1}' if runs > 1 else ''} ({' '.join(s['argv'])}{env_words(s)})"
+                if self.tally and runs > 1:
+                    verdict = "FAIL" if bad else "ok"
+                    print(f"  {verdict:4} {c['name']} {what}, {times[-1]:.1f} s{self.note}"
+                          + (f": {bad}" if bad else ""), flush=True)
+                elif self.note:
+                    print(f"  {c['name']} {what}, {times[-1]:.1f} s{self.note}", flush=True)
+                if not bad:
+                    right += 1
+                elif not self.tally:
+                    return "FAIL", f"{what}: {bad}"
+                else:
+                    failed.append(what)
+            if self.tally and runs > 1:
+                print(f"  rate {c['name']} step {k + 1} ({' '.join(s['argv'])}{env_words(s)}): {right} of {runs} "
+                      f"right, {min(times):.1f} to {max(times):.1f} s", flush=True)
+        if failed:
+            return "FAIL", f"{len(failed)} runs failed: " + "; ".join(failed)
         shutil.rmtree(work, ignore_errors=True)
         return "ok", ""
 
@@ -719,6 +796,18 @@ class Runner:
         # of the rest taken from what `communicate` reads after it
         proc = subprocess.Popen(argv, cwd=work, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, bufsize=0 if s["dialog"] else -1)
+        sampler = CommitSampler(proc) if s.get("commit") and not self.wine else None
+        try:
+            bad = self.finish_step(s, proc, put)
+        finally:
+            self.note = sampler.stop() if sampler else ""
+        if sampler and s.get("commit_below") and sampler.own_peak >= s["commit_below"]:
+            bad = "; ".join(p for p in [bad, f"committed {sampler.own_peak >> 20} MiB at its peak, expected less "
+                                            f"than {s['commit_below'] >> 20} MiB"] if p)
+        return bad
+
+    def finish_step(self, s: dict, proc: subprocess.Popen, put) -> str:
+        """What step `s`, started as `proc`, did wrong, "" for nothing."""
         deadline = time.monotonic() + s["timeout"]
         got_lines = []
         if s["dialog"]:
@@ -760,6 +849,10 @@ class Runner:
                 problems.append(f"stdout {clip(out)} without {h!r}")
         if s["stderr"] is not None and stderr != s["stderr"]:
             problems.append("stderr " + differs(stderr, s["stderr"]))
+        if problems and stderr:
+            # (what the program said on its standard error, checked or not:
+            # a process case's children say there what they gave, MYLA-798)
+            problems.append(f"its standard error {clip(err, 4000)}")
         return "; ".join(problems)
 
 
@@ -1039,6 +1132,33 @@ class Pty:
         self.k.CloseHandle(self.handle)
 
 
+def performance_information_type():
+    """PERFORMANCE_INFORMATION (psapi.h): counts of pages, and SIZE_Ts."""
+    import ctypes
+    size_t, u32 = ctypes.c_uint64, ctypes.c_uint32
+
+    class PERFORMANCE_INFORMATION(ctypes.Structure):
+        _fields_ = [("cb", u32), ("CommitTotal", size_t), ("CommitLimit", size_t), ("CommitPeak", size_t),
+                    ("PhysicalTotal", size_t), ("PhysicalAvailable", size_t), ("SystemCache", size_t),
+                    ("KernelTotal", size_t), ("KernelPaged", size_t), ("KernelNonpaged", size_t),
+                    ("PageSize", size_t), ("HandleCount", u32), ("ProcessCount", u32), ("ThreadCount", u32)]
+    return PERFORMANCE_INFORMATION
+
+
+def process_memory_counters_type():
+    """PROCESS_MEMORY_COUNTERS (psapi.h): `PeakPagefileUsage`, a process's
+    peak commit charge, in bytes."""
+    import ctypes
+    size_t, u32 = ctypes.c_uint64, ctypes.c_uint32
+
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [("cb", u32), ("PageFaultCount", u32), ("PeakWorkingSetSize", size_t),
+                    ("WorkingSetSize", size_t), ("QuotaPeakPagedPoolUsage", size_t), ("QuotaPagedPoolUsage", size_t),
+                    ("QuotaPeakNonPagedPoolUsage", size_t), ("QuotaNonPagedPoolUsage", size_t),
+                    ("PagefileUsage", size_t), ("PeakPagefileUsage", size_t)]
+    return PROCESS_MEMORY_COUNTERS
+
+
 def COORD_type():
     import ctypes
 
@@ -1208,6 +1328,62 @@ def input_record_type():
     return InputRecord
 
 
+def env_words(s: dict) -> str:
+    """The step's MYLA_THREADS, for a rate's line (", 16 workers")."""
+    w = s["env"].get("MYLA_THREADS")
+    return f", {w} workers" if w else ""
+
+
+class CommitSampler:
+    """On Windows, the commit charge while `proc` runs, sampled every 20 ms
+    from a thread of its own (MYLA-798, H12: a hypothesis for the children
+    that gave nothing is the system's commit limit, which Wine on Linux
+    hasn't): the system's peak (`GetPerformanceInfo`'s CommitTotal) against
+    its limit, the most processes at once, and the program's own peak
+    (`GetProcessMemoryInfo`'s PeakPagefileUsage, `own_peak`)."""
+
+    def __init__(self, proc: subprocess.Popen):
+        import ctypes
+        self.ctypes = ctypes
+        self.k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.k32.K32GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+        self.k32.K32GetPerformanceInfo.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        self.perf = performance_information_type()()
+        self.counters = process_memory_counters_type()()
+        self.handle = int(getattr(proc, "_handle", 0) or 0)
+        self.peak = self.limit = self.processes = self.own_peak = 0
+        self.done = threading.Event()
+        self.thread = threading.Thread(target=self.sample_until_done, daemon=True)
+        self.thread.start()
+
+    def sample(self) -> None:
+        ctypes = self.ctypes
+        self.perf.cb = ctypes.sizeof(self.perf)
+        if self.k32.K32GetPerformanceInfo(ctypes.byref(self.perf), self.perf.cb):
+            page = self.perf.PageSize
+            self.peak = max(self.peak, self.perf.CommitTotal * page)
+            self.limit = self.perf.CommitLimit * page
+            self.processes = max(self.processes, self.perf.ProcessCount)
+        self.counters.cb = ctypes.sizeof(self.counters)
+        if self.handle and self.k32.K32GetProcessMemoryInfo(self.handle, ctypes.byref(self.counters),
+                                                            self.counters.cb):
+            self.own_peak = max(self.own_peak, self.counters.PeakPagefileUsage)
+
+    def sample_until_done(self) -> None:
+        while not self.done.is_set():
+            self.sample()
+            self.done.wait(0.02)
+
+    def stop(self) -> str:
+        """The sampling ended: what it found, for the step's report."""
+        self.done.set()
+        self.thread.join(5)
+        self.sample()
+        gib = 1 << 30
+        return (f"; commit: the system's peak {self.peak / gib:.1f} of {self.limit / gib:.1f} GiB, "
+                f"{self.processes} processes at most, the program's own peak {self.own_peak >> 20} MiB")
+
+
 def stop(proc: subprocess.Popen) -> tuple[bytes, bytes]:
     """`proc` killed, and what it wrote (nothing if a child of its holds its
     streams open 30 s on)."""
@@ -1256,6 +1432,9 @@ def prepare_wine(wine: list[str]) -> None:
     hold a case's pipes (as tests/burn/_native.py's `wine_env`)."""
     os.environ.setdefault("WINEDEBUG", "-all")
     os.environ.setdefault("WINEPREFIX", os.path.join(_REPO, "build", "wineprefix"))
+    # (a UTF-8 locale, which Wine converts arguments and paths from, MYLA-798)
+    if "UTF-8" not in os.environ.get("LC_ALL", os.environ.get("LANG", "")).upper().replace("UTF8", "UTF-8"):
+        os.environ["LC_ALL"] = "C.UTF-8"
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     server = shutil.which("wineserver") or os.path.join(os.path.dirname(wine[0]), "wineserver")
     if os.access(server, os.X_OK):
@@ -1264,7 +1443,7 @@ def prepare_wine(wine: list[str]) -> None:
     subprocess.run([*wine, *boot], timeout=300, **quiet)
 
 
-def run(bundle: str, wine: list[str], runs: int, only: list[str], listing: bool) -> int:
+def run(bundle: str, wine: list[str], runs: int, only: list[str], listing: bool, tally: bool = False) -> int:
     with open(os.path.join(bundle, "cases.json"), encoding="utf-8") as fh:
         data = json.load(fh)
     if data.get("format") != FORMAT:
@@ -1276,7 +1455,7 @@ def run(bundle: str, wine: list[str], runs: int, only: list[str], listing: bool)
         return 0
     if wine:
         prepare_wine(wine)
-    runner = Runner(bundle, wine, runs)
+    runner = Runner(bundle, wine, runs, tally)
     tally = {"ok": 0, "FAIL": 0, "skip": 0}
     lines = []
     start = time.monotonic()
@@ -1317,6 +1496,8 @@ def main() -> int:
     r.add_argument("--runs", type=int, default=1, help="runs of each repeated step (the stress programs, …)")
     r.add_argument("--only", action="append", default=[], help="cases whose name has this text (repeatable)")
     r.add_argument("--list", action="store_true", help="name the cases without running them")
+    r.add_argument("--tally", action="store_true",
+                   help="every run of a repeated step, each reported, then how many were right (a rate)")
     a = sub.add_parser("console-action", help="(the runner's own, on Windows) act on a case's console")
     a.add_argument("pid", type=int)
     a.add_argument("action", choices=["keys", "event", "close", "screen"])
@@ -1332,7 +1513,7 @@ def main() -> int:
     wine = wine_command(args.wine) if args.wine is not None else []
     if not wine and sys.platform != "win32" and not args.list:
         sys.exit("windows-runner: run the cases on Windows, or here with --wine")
-    return run(args.out, wine, args.runs, args.only, args.list)
+    return run(args.out, wine, args.runs, args.only, args.list, args.tally)
 
 
 if __name__ == "__main__":

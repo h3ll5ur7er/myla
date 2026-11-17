@@ -339,7 +339,7 @@ jobs:
     name: Windows (the programs built on Linux, myla.exe)
     needs: windows-build
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
@@ -348,6 +348,19 @@ jobs:
           path: windows-bundle
       - name: Every case, the stress programs' 3 times on 1, 4 and 16 workers
         run: python scripts/windows-runner.py run windows-bundle --runs 3
+      # rates, for the log (MYLA-798): process/many-children 10 times on 4
+      # and 16 workers, each run's result and the system's commit charge
+      # meanwhile, then "rate … N of 10 right" (H12: once 393 of 400 on 16
+      # workers, the real runner only); net/sockets-and-children's times on
+      # 1, 4 and 16 workers (MYLA-754's measurement). It reports and never
+      # fails the job: the step above is the verdict
+      - name: Rates (many-children, sockets-and-children), for the log
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 12
+        run: >-
+          python scripts/windows-runner.py run windows-bundle --runs 10 --tally
+          --only process/many-children --only process/a-child-s-commit --only net/sockets-and-children
       # a failed case's directory is kept, with what its programs left there
       - uses: actions/upload-artifact@v7
         if: failure()

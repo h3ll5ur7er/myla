@@ -71,6 +71,17 @@ pub fun load_for_host(entry: str, given: LoadOptions) -> Result<Checked, str> {
     return load_and_check(file, for_host(file, opts))
 }
 
+// `load_and_check` with the modules of `target` (std.platform, std.path,
+// std.path_style, std.system_error), as a build for it takes them:
+// `myla check --target` (MYLA-798). A target the compiler doesn't build for
+// yet is refused.
+pub fun load_for_target(entry: str, given: LoadOptions, target: Target) -> Result<Checked, str> {
+    let refused = unsupported(target)
+    if refused != "" { return Err("myla: " + refused) }
+    let (file, opts) = own_library(entry, given)
+    return load_and_check(file, for_target(opts, target))
+}
+
 // Type-check `file`, then generate its assembly for `target` (`debug`: with DWARF
 // debug information, MYLA-71, MYLA-66; `checked`: integer overflow traps,
 // D175), and the system's functions it calls by name, by DLL (Windows'

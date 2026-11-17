@@ -610,26 +610,42 @@ async fun ticking() -> int {
 # Children waited for in tasks on many workers (MYLA-705 with MYLA-703's
 # threads): 2 rounds of 200 children at once, each a task, its output read
 # and its end awaited through the poller while other workers watch, forget
-# and wake; it prints how many gave what they should (400).
+# and wake; it prints how many gave what they should (400), and each child
+# that didn't on the standard error, with what it gave (MYLA-798, H12: the
+# real runner counted 393 once, and the count alone couldn't say why).
 MANY_CHILDREN = """import std.task as task
 from std.process import run_async, command, ExitStatus
 import std.bytes as bytes
+from std.io import eprintln
 
 // One child, its output read and its end awaited in a task: 1 when it gave
-// what it should have.
-async fun one(k: int) -> int {
+// what it should have, else 0 and what it gave on the standard error.
+async fun one(round: int, k: int) -> int {
     var want = f"{k}\\n"
+    var what = "cat"
     var r = await command("./helper.exe").arg("cat").stdin(want).output_async()
     if k % 3 == 0 {
         want = f"[{k}]\\n"
+        what = "args"
         r = await run_async("./helper.exe", ["args", f"{k}"])
     } else if k % 3 == 1 {
         want = ""
+        what = "sleep"
         r = await command("./helper.exe").args(["sleep", f"{k % 7 * 5}"]).output_async()
     }
-    return match r {
-        Ok(o) => if bytes.to_str(o.stdout) == want && o.status == ExitStatus.Exited(0) { 1 } else { 0 }
-        Err(e) => 0
+    match r {
+        Ok(o) => {
+            if bytes.to_str(o.stdout) == want && o.status == ExitStatus.Exited(0) {
+                return 1
+            }
+            let st = match o.status { Exited(c) => f"exit {c} ({c as uint32:x})", Signaled(s) => f"signal {s}" }
+            eprintln(f"BAD round {round} child {k} ({what}): {st}, stdout {o.stdout.len()} bytes [{bytes.to_str(o.stdout)}], stderr [{bytes.to_str(o.stderr)}]")
+            return 0
+        }
+        Err(e) => {
+            eprintln(f"ERR round {round} child {k} ({what}): {e}")
+            return 0
+        }
     }
 }
 
@@ -639,7 +655,7 @@ async fun main() {
     for round in 0..2 {
         var fs: [async () -> int] = []
         for k in 0..200 {
-            fs.push(async () => await one(k))
+            fs.push(async () => await one(round, k))
         }
         for x in await task.all(fs) {
             ok += x
@@ -1142,6 +1158,75 @@ async fun main() {
 }
 """
 
+# MYLA-798: the close that waits for its send has a limit (30 s): a server
+# writes to a client that reads nothing until a write would wait half a
+# second, then closes; the client reads 35 s later. Without a limit the
+# send went on until then and the client got every byte; with it, the send
+# going on was cancelled at 30 s and the client gets less (then the end).
+CLOSE_GIVES_UP = r"""import std.task as task
+import std.net as net
+import std.bytes as bytes
+from std.io import Write
+from std.net import TcpListener
+
+async fun server(l: TcpListener) -> int {
+    var s = match await l.accept_async() {
+        Ok(s) => s
+        Err(e) => { return -1 }
+    }
+    s.set_write_timeout(500)
+    let chunk = bytes.from_str("x".repeat(65536))
+    var sent = 0
+    while sent < 64000000 {
+        match s.write(chunk) {
+            Ok(k) => { sent += k }
+            Err(e) => { break }
+        }
+    }
+    let c = s.close()
+    return sent
+}
+
+async fun client(port: int) -> int {
+    var s = match await net.connect_async(net.addr(net.loopback(), port)) {
+        Ok(s) => s
+        Err(e) => { return -1 }
+    }
+    await task.sleep(35000)
+    var total = 0
+    while true {
+        match await s.read_async(65536) {
+            Ok(b) => {
+                if b.len() == 0 {
+                    break
+                }
+                total += b.len()
+            }
+            Err(e) => { break }
+        }
+    }
+    let c = s.close()
+    return total
+}
+
+#main
+async fun main() {
+    var l = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic("listen") }
+    }
+    let port = match l.local_addr() {
+        Ok(x) => x.port
+        Err(e) => { panic("addr") }
+    }
+    async let wrote = server(l)
+    async let read = client(port)
+    let a = await wrote
+    let b = await read
+    print(f"sent {a > 0}, all read {b == a}, some read {b > 0}")
+}
+"""
+
 # MYLA-726: a child's input written by one task while another reads its
 # output, more than the pipes hold, so each waits for the other: on one
 # worker only `write_async` suspending its task lets the reader run (std.
@@ -1235,6 +1320,13 @@ class Sockets(unittest.TestCase):
             self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"4000000 4000000\n" * 3, b"", 0),
                              f"{threads} workers")
 
+    def test_a_close_waits_for_its_send_with_a_limit(self):
+        # MYLA-798: at BASE the client read every byte 35 s later
+        self.build("prog", CLOSE_GIVES_UP)
+        ran = self.run_exe(threads="2", timeout=90)
+        self.assertEqual((ran.stdout, ran.stderr, ran.returncode),
+                         (b"sent true, all read false, some read true\n", b"", 0))
+
     def test_a_childs_input_written_while_its_output_is_read(self):
         # at BASE (9738e37) one worker never ended (`timeout 30`: 124)
         self.build("helper", HELPER)
@@ -1261,7 +1353,7 @@ fun main() {
     write_to_file("text.exe", "not a program")
     match command(".\\text.exe").output() {
         Ok(_) => print("ran")
-        Err(SpawnError.Other(n)) => print(f"not a program: Other({n})")
+        Err(SpawnError.Other(n)) => print(f"not a program: Other({n}): {SpawnError.Other(n)}")
         Err(e) => print(f"not a program: {e}")
     }
     match command(".\\text.exe").cwd("C:\\no\\such\\dir").output() {
@@ -1272,7 +1364,8 @@ fun main() {
 }
 """
 ERRORS_OUT = ("there is not enough space on the disk\nthe disk is full\nWindows error 1392\nbad file descriptor\n"
-              "not a program: Other(193)\nworking directory: not found (NotFound)\n")
+              "not a program: Other(193): could not start the program: error 193\n"
+              "working directory: not found (NotFound)\n")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -1292,6 +1385,162 @@ class Errors(unittest.TestCase):
         ran = subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe")], capture_output=True, cwd=self.tmp,
                              timeout=120)
         self.assertEqual((ran.stdout.decode(), ran.stderr.decode(), ran.returncode), (ERRORS_OUT, "", 0))
+
+
+# MYLA-798 (M13): an environment variable's name in any case, as Windows
+# compares names; the system's `Path` is `env("PATH")`.
+ENV_CASE = r"""from std.process import env
+
+fun main() {
+    for name in ["MyLa_Var", "MYLA_VAR", "myla_var", "PATH", "path", "MYLA_NONE"] {
+        print(f"{name} {env(name).is_some()}")
+    }
+}
+"""
+
+# MYLA-798 (M13): a batch file named with dots or spaces after `.bat`, which
+# Windows drops, is a batch file: run by cmd with its arguments quoted for
+# cmd, not with the C runtime's quoting CreateProcess would give it
+# (CVE-2024-43402). Under Wine those names were `Other(193)`.
+BAT_NAMES = r"""from std.process import command
+import std.bytes as bytes
+
+fun main() {
+    for name in ["./e.bat", "./e.bat.", "./e.bat ", "./e.bat. .", "./E.CMD.."] {
+        match command(name).arg("&echo INJECTED").output() {
+            Ok(o) => print(f"[{name}] {bytes.to_str(o.stdout).trim()}")
+            Err(e) => print(f"[{name}] {e}")
+        }
+    }
+}
+"""
+
+# MYLA-798 (D261): paths past MAX_PATH, relative and absolute, are made
+# absolute and verbatim (`\\?\`) before they reach the system. Wine takes
+# long paths without it, so this holds that nothing else changed; Windows
+# refuses them without (scripts/windows-runner.py's `files/long-paths`).
+LONG_PATHS = r"""import std.fs as fs
+import std.path as path
+
+fun said(r: Result<(), fs.IoError>) -> str {
+    return match r {
+        Ok(()) => "ok"
+        Err(e) => fs.io_error_name(e)
+    }
+}
+
+fun main() {
+    let cwd = match fs.current_dir() {
+        Ok(d) => d
+        Err(e) => panic(f"{e}")
+    }
+    var rel = "long"
+    for i in 0..12 {
+        rel = rel + "/" + "d".repeat(30)
+    }
+    print(rel.len() > 300)
+    print(said(fs.make_dir_all(rel)))
+    let file = rel + "/f.txt"
+    print(said(fs.write_to_file(file, "deep")))
+    print(match fs.read_to_string(path.join(cwd, file)) {
+        Ok(s) => s
+        Err(e) => fs.io_error_name(e)
+    })
+    print(match fs.read_to_string(rel + "/./../" + rel[rel.len() - 30:] + "/f.txt") {
+        Ok(s) => s
+        Err(e) => fs.io_error_name(e)
+    })
+    print(match fs.list_dir(rel) {
+        Ok(ns) => ns.join(",")
+        Err(e) => fs.io_error_name(e)
+    })
+    print(said(fs.rename(file, rel + "/g.txt")))
+    let moved = rel + "/g.txt"
+    print(f"{fs.is_file(moved)} {fs.exists(file)}")
+    print(said(fs.remove_file(moved)))
+    print(said(fs.remove_dir_all("long")))
+    print(fs.exists("long"))
+}
+"""
+LONG_PATHS_OUT = "true\nok\nok\ndeep\ndeep\nf.txt\nok\ntrue false\nok\nok\nfalse\n"
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+class PlatformFollowUps(unittest.TestCase):
+    """MYLA-798: `env`'s names in any case, batch files named with a dot or
+    a space after their extension, long paths (D261), and the workers'
+    rings reserved, not committed (H12)."""
+
+    setUpClass = Children.setUpClass
+    setUp = Children.setUp
+    build = Children.build
+
+    def run_exe(self, *args: str, env: dict | None = None, threads: str = "1") -> subprocess.CompletedProcess:
+        return subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe"), *args], capture_output=True,
+                              cwd=self.tmp, timeout=120, env=dict(os.environ, MYLA_THREADS=threads, **(env or {})))
+
+    def test_an_environment_variable_in_any_case(self):
+        # at BASE only `MyLa_Var` and `PATH` were found
+        self.build("prog", ENV_CASE)
+        ran = self.run_exe(env={"MyLa_Var": "1"})
+        self.assertEqual((ran.stdout.decode(), ran.stderr.decode(), ran.returncode),
+                         ("MyLa_Var true\nMYLA_VAR true\nmyla_var true\nPATH true\npath true\nMYLA_NONE false\n",
+                          "", 0))
+
+    def test_a_batch_file_named_with_trailing_dots_or_spaces(self):
+        # at BASE every name but the first was `could not start the program: errno 193`
+        self.build("prog", BAT_NAMES)
+        for name in ("e.bat", "E.CMD"):
+            with open(os.path.join(self.tmp, name), "w") as fh:
+                fh.write("@echo [%1] [%2]\r\n")
+        ran = self.run_exe()
+        line = '["&echo INJECTED"] []'
+        self.assertEqual((ran.stdout.decode(), ran.stderr.decode(), ran.returncode),
+                         ("".join(f"[{n}] {line}\n" for n in ["./e.bat", "./e.bat.", "./e.bat ", "./e.bat. .",
+                                                              "./E.CMD.."]), "", 0))
+
+    def test_check_with_a_target(self):
+        # `myla check --target` takes the target's modules, as a build does
+        # (at BASE: "myla: unknown option '--target'")
+        with open(os.path.join(self.tmp, "w.my"), "w", encoding="utf-8") as fh:
+            fh.write("import std.platform as os\nfun main() {\n    os.windows_start()\n}\n")
+        def check(*flags: str) -> tuple[str, int]:
+            r = subprocess.run([selfhost_tool("main"), "check", "w.my", *flags, "--stdlib", STDLIB_ROOT],
+                               capture_output=True, text=True, cwd=self.tmp, timeout=120)
+            return r.stdout + r.stderr, r.returncode
+        self.assertEqual(check("--target", "x86_64-windows"), ("ok\n", 0))
+        said, code = check("--target", "x86_64-linux")
+        self.assertEqual(code, 1, said)
+        self.assertIn("windows_start", said)
+
+    def test_long_paths(self):
+        self.build("prog", LONG_PATHS)
+        ran = self.run_exe()
+        self.assertEqual((ran.stdout.decode(), ran.stderr.decode(), ran.returncode), (LONG_PATHS_OUT, "", 0))
+
+    def test_the_rings_are_reserved_not_committed(self):
+        # H12: a program of 16 workers committed their rings of ready frames,
+        # 8 MiB each, which Windows counts against the system's limit (Wine
+        # maps reserved memory with no access: `---p`); at BASE the largest
+        # such mapping was 12 MiB
+        self.build("prog", HELPER)
+        proc = subprocess.Popen([*wine(), os.path.join(self.tmp, "prog.exe"), "sleep", "3000"], cwd=self.tmp,
+                                env=dict(os.environ, MYLA_THREADS="16"))
+        try:
+            time.sleep(2)
+            biggest = 0
+            with open(f"/proc/{proc.pid}/maps", encoding="ascii") as fh:
+                for line in fh:
+                    span, perms = line.split()[:2]
+                    lo, hi = (int(x, 16) for x in span.split("-"))
+                    if perms == "---p":
+                        biggest = max(biggest, hi - lo)
+            self.assertEqual(proc.wait(timeout=60), 0)
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertGreaterEqual(biggest, 120 << 20, f"the largest reserved mapping: {biggest >> 20} MiB")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -1875,8 +2124,14 @@ fun ends() {
 }
 
 // raw mode until a Ctrl-C ends the program (D192), with a listener first
-// that takes one (`listen`)
+// that takes one (`listen`); `plain`: no raw mode, nobody listening
 async fun wait(how: str) {
+    if how == "plain" {
+        print("plain")
+        await task.sleep(30000)
+        print("not here")
+        return
+    }
     let r = raw()
     if how == "listen" {
         let s = match signal.listen() {
@@ -1922,6 +2177,42 @@ fun ctrl(how: str, token: str) {
         }
     }
     print(f"exited {code_of(child.wait())} restored {mode(0) == before}")
+    s.close()
+}
+
+// the console's output code page after a child on it that Windows' default
+// handler ended (`wait plain`, a Ctrl-Break): the one before the child,
+// which cmd's `chcp` set, not the UTF-8 the child set at its start
+// (MYLA-798: it was left so); this program listening meanwhile
+fun code_page(token: str) {
+    let s = match signal.listen() {
+        Ok(s) => s
+        Err(e) => panic(f"listen: {e}")
+    }
+    let set = process.command("cmd").args(["/c", "chcp 437"]).output()
+    let cmd = process.command(process.args()[0]).arg("wait").arg("plain").arg("c" + token).stdin_from(Stdio.Inherit)
+    var child = match cmd.stderr_from(Stdio.Inherit).spawn() {
+        Ok(c) => c
+        Err(e) => panic(f"spawn: {e}")
+    }
+    var out = match child.take_stdout() {
+        Some(o) => io.buffered(o)
+        None => panic("no output")
+    }
+    var more = true
+    while more {
+        match out.read_line() {
+            Ok(Some(l)) => print(f"child {l}")
+            _ => { more = false }
+        }
+    }
+    let st = code_of(child.wait())
+    let now = match process.command("cmd").args(["/c", "chcp"]).output() {
+        Ok(o) => bytes.to_str(o.stdout).trim()
+        Err(e) => f"{e}"
+    }
+    let words = now.split(" ")
+    print(f"exited {st} code page {words[words.len() - 1]}")
     s.close()
 }
 
@@ -2089,6 +2380,7 @@ async fun main() {
     if case == "ends" { ends() }
     if case == "wait" { await wait(args[2]) }
     if case == "ctrl" { ctrl(args[2], args[3]) }
+    if case == "code-page" { code_page(args[2]) }
     if case == "vt" { vt() }
     if case == "ansi" { ansi() }
     if case == "storm" { await storm(10) }
@@ -2612,6 +2904,10 @@ RUNNER_CASES = [
                {"event": "CTRL_BREAK_EVENT"}],
      "out": f"child listening\nchild caught interrupt\nchild raw\nexited {STATUS_CONTROL_C_EXIT - (1 << 32)} "
             "restored true\n", "exit": 0, "seconds": 30},
+    {"name": "MYLA-798: a child that Windows' default handler ended puts the console's code page back",
+     "args": ["code-page", "token"],
+     "steps": [{"wait": "child plain\n"}, {"event": "CTRL_BREAK_EVENT"}],
+     "out": f"child plain\nexited {STATUS_CONTROL_C_EXIT - (1 << 32)} code page 437\n", "exit": 0, "seconds": 30},
     {"name": "D187 on Windows' console: every end of raw mode puts the mode back",
      "args": ["ends"], "steps": [],
      "out": "return 0 restored true\nexit 3 restored true\npanic 1 restored true\nindex 1 restored true\n"

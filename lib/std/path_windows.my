@@ -162,10 +162,20 @@ pub fun is_absolute(p: str) -> bool {
 #test("a", "")["a/"]
 #test("a//", "b")["a//b"]
 #test("", "")[""]
+#test("\\\\?\\C:\\x", "a/b")["\\\\?\\C:\\x\\a\\b"] // verbatim
+#test("\\\\?\\C:\\x\\", "./a/../b")["\\\\?\\C:\\x\\b"]
+#test("\\\\?\\C:\\x", "../..")["\\\\?\\C:\\"]
+#test("\\\\?\\C:\\x", "/y\\z")["\\\\?\\C:\\y\\z"]
+#test("\\\\?\\UNC\\srv\\share", "a/b")["\\\\?\\UNC\\srv\\share\\a\\b"]
+#test("\\\\?\\C:\\x", "")["\\\\?\\C:\\x\\"]
+#test("\\\\?\\C:\\x", "D:/y")["D:/y"]
 pub fun join(a: str, b: str) -> str {
     let ak = prefix_len(a)
     let ae = anchor_end(a)
     let bk = prefix_len(b)
+    if bk == 0 && verbatim(a) {
+        return verbatim_join(a, b)
+    }
     if rooted(b) {
         // `a`'s drive at most stays
         if bk > 0 || ak == 0 {
@@ -189,6 +199,60 @@ pub fun join(a: str, b: str) -> str {
         return drive + "/" + rest
     }
     return drive + root + rest
+}
+
+// Whether `p` is verbatim (`\\?\C:\a`, `\\?\UNC\srv\share`), which Windows
+// takes as written: `/` is no separator there, nor `.` and `..` names of
+// the directory itself and the one above.
+fun verbatim(p: str) -> bool {
+    return p.len() >= 4 && p[0] == '\\' && p[1] == '\\' && p[2] == '?' && p[3] == '\\'
+}
+
+// `b` (no prefix of its own) after the verbatim path `a`, as Rust's
+// `PathBuf::push` adds to one (MYLA-798): `b`'s components split at either
+// separator and joined with `\`, its `.` left out and its `..` taking away
+// the name before (none above the anchor); a rooted `b` goes on from
+// `a`'s prefix. `/` written there would be part of a name.
+fun verbatim_join(a: str, b: str) -> str {
+    var out = a
+    if rooted(b) {
+        out = a[:prefix_len(a)] + "\\"
+    }
+    let floor = anchor_end(out)
+    if b == "" && out != "" && !is_sep(out[out.len() - 1]) {
+        return out + "\\"
+    }
+    var start = 0
+    var i = 0
+    while i <= b.len() {
+        if i == b.len() || is_sep(b[i]) {
+            let c = b[start:i]
+            if c == ".." {
+                var k = out.len()
+                while k > floor && !is_sep(out[k - 1]) {
+                    k -= 1
+                }
+                if k < out.len() {
+                    out = out[:k]
+                } else if k > floor {
+                    // (a separator at the end: the name before it)
+                    var j = k - 1
+                    while j > floor && !is_sep(out[j - 1]) {
+                        j -= 1
+                    }
+                    out = out[:j]
+                }
+            } else if c != "" && c != "." {
+                if out != "" && !is_sep(out[out.len() - 1]) {
+                    out = out + "\\"
+                }
+                out = out + c
+            }
+            start = i + 1
+        }
+        i += 1
+    }
+    return out
 }
 
 // Whether the prefixes or anchors `a` and `b` are the same, ASCII letters
@@ -464,7 +528,13 @@ fun resolved(p: str) -> [str] {
 #test("//srv/share")["//srv/share"]
 #test("")["."]
 #test("a\\..\\..")[".."]
+#test("\\\\?\\C:\\a\\..\\b/c")["\\\\?\\C:\\a\\..\\b/c"] // verbatim: as it is
 pub fun normalize(p: str) -> str {
+    if verbatim(p) {
+        // (Windows reads no `.`, `..` or `/` in it: they are names, as
+        // Python's `ntpath.normpath` keeps one, MYLA-798)
+        return p
+    }
     let body = resolved(p).join("/")
     let k = prefix_len(p)
     if rooted(p) {

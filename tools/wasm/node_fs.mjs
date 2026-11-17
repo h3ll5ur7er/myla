@@ -9,6 +9,10 @@ function typeOf(st) {
   if (st.isFile()) return 4;
   if (st.isSymbolicLink()) return 7;
   if (st.isCharacterDevice()) return 2;
+  // a block device and a socket their WASI types too, as Linux gives their
+  // kinds (D254, MYLA-798); a FIFO has none in WASI
+  if (st.isBlockDevice()) return 1;
+  if (st.isSocket()) return 6;
   return 0;
 }
 
