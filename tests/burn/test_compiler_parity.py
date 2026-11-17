@@ -9671,6 +9671,85 @@ fun main() {
     print(f"{g[0].len()} {bs[0].build()}")
 }
 """,
+    "contains_keeps_its_map_while_the_key_replaces_it": r"""// H4 (MYLA-543): `m.contains(k())` where `k()` replaces the map: the map is
+// read first and kept (D193), so the lookup walks the old map. Native code
+// walked the freed one (`true false true`, and `5` once its cells were reused)
+struct H { m: [int: str], sm: [str: int], junk: [[int64]] }
+
+impl H {
+    fun k(var self) -> int {
+        self.m = [5: f"new{5}"]
+        return 1
+    }
+    fun sk(var self) -> str {
+        self.sm = [f"k{9}": 5]
+        return f"k{2}"
+    }
+    fun key(var self, i: int) -> str {
+        self.sm = [:]
+        // the old map's memory reused
+        for j in 0..64 {
+            var xs: [int64] = []
+            for q in 0..(16 + j % 48) { xs.push(0x7fffffff00000000 + (q as int64)) }
+            self.junk.push(xs)
+        }
+        return f"k{i}"
+    }
+}
+
+fun main() {
+    var h = H { m: [0: f"old{0}", 1: f"old{1}"], sm: [f"k{1}": 1, f"k{2}": 2], junk: [] }
+    print(h.m.contains(h.k()))
+    print(h.m.contains(1))
+    print(h.sm.contains(h.sk()))
+    print(h.sm.contains(f"k{2}"))
+    var hits = 0
+    for r in 0..50 {
+        h.sm = [:]
+        for i in 0..40 { h.sm[f"k{i}"] = i }
+        if h.sm.contains(h.key(r % 40)) { hits += 1 }
+        h.junk = []
+    }
+    print(hits)
+}
+""",
+    "places_counted_from_the_end_by_a_call": r"""// MYLA-811: a place's index counted from the end by a call, `g[^at(1)]`,
+// written by a method or an assignment. Native code held the `^n` as a
+// value of its own and wrote `g[0]`
+struct S { g: [[int]], n: int }
+
+impl S {
+    fun bump(var self) -> int {
+        self.n += 1
+        return 1
+    }
+}
+
+fun at(i: int) -> int { return i }
+
+fun lens(g: [[int]]) -> str {
+    var sb = StringBuilder()
+    for x in g { sb.append(f"{x.len()},") }
+    return sb.build()
+}
+
+fun main() {
+    var g = [[1], [2], [3]]
+    g[^at(1)].push(9)
+    g[^at(2)].push(at(8))
+    g[^at(3)].insert(0, 7)
+    print(lens(g))
+    g[^at(1)][0] = 5
+    g[^at(1)][^at(1)] += 1
+    print(f"{g[2][0]} {g[2][1]}")
+    var s = S { g: [[1], [2]], n: 0 }
+    s.g[^s.bump()].push(s.bump())
+    print(f"{lens(s.g)} {s.n} {s.g[1][1]}")
+    var gg = [[[1]], [[2], [3]]]
+    gg[^at(1)][^at(2)].push(4)
+    print(f"{gg[1][0].len()} {gg[1][1].len()}")
+}
+""",
     "recursive_enums_as_map_keys": r"""// C11, D194 (MYLA-543): a recursive enum is a map key natively too, as
 // interpreted: written, read, updated, removed, iterated, copied, handed to
 // a child task, in a literal; natively `main can't be lowered to the IR`
@@ -11503,6 +11582,20 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertTrue(interp[1].startswith(f"runtime error: {text}\n"), interp[1])
                 self.assertTrue(native[1].startswith(f"runtime error: {text}\n"), native[1])
 
+    def test_a_missing_receiver_element_is_reported_after_the_arguments(self):
+        # D193's timing (MYLA-791): a method on `g[5]` takes the place's
+        # indices, runs its arguments, then finds the element, as the
+        # interpreter does; natively a `var self` method of a program or of
+        # std (`insert`, a builder's `append`) found it first. An element
+        # before the last index is found when the place is taken
+        for name, out in (("missing_receiver_element", "index 5\nvalue 7\n"),
+                          ("missing_receiver_key", "value 7\n"), ("missing_builder_element", "value 7\n"),
+                          ("missing_inner_receiver_element", "")):
+            with self.subTest(program=name):
+                interp, native = _both(RUNTIME_ERRORS[name])
+                self.assertEqual(interp[0], out)
+                self.assertEqual(native[0], out)
+
     def test_a_runtime_spec_is_reported_at_the_call(self):
         # MYLA-565: at `x.format(spec)`, on every runner, not in std.fmt
         for name, text in (("runtime_spec_of_an_int", "invalid format spec 'q'"),
@@ -11811,6 +11904,10 @@ PINNED = {
     "holes_and_keys_kept_when_a_later_one_writes_their_variable": 's10!s110\ns30-!\ns10!\nok\n',
     # MYLA-543: native code ran the value first
     "a_method_call_takes_its_receivers_place_first": 'push: 12 2\nmap element push: 12 2\nindex read first: 2 3\nindex 1\nvalue 2\nindex 3\nvalue 4\n1 4\n',
+    # MYLA-543 (H4): native code read the freed map (`true false false false 1` before)
+    "contains_keeps_its_map_while_the_key_replaces_it": 'true\nfalse\ntrue\nfalse\n50\n',
+    # MYLA-811: native code wrote `g[0]` (`4,1,1,`, then an index out of bounds)
+    "places_counted_from_the_end_by_a_call": '2,2,2,\n5 10\n1,2, 2 1\n2 1\n',
     # MYLA-543 (C11, D194): native code was `main can't be lowered to the IR`
     "recursive_enums_as_map_keys": '6\n30\ntrue\nfalse\n25\n5 false\n1515\n5 10\ntrue\n-1\n4 6 0 42\n56\n6\nbin leaf\n50 1999\n',
     # MYLA-415 (H2): native code segfaulted (a string, list or map argument kept)
@@ -11889,6 +11986,21 @@ RUNTIME_ERRORS = {
                              'fun main() {\n    print(show("ab", "^4"))\n    print(show(true, ".x"))\n}\n'),
     "runtime_spec_with_std_fmt": ('import std.fmt as fmt\n\nfun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
                                   'fun main() {\n    print(fmt.pad("a", ">2"))\n    print(show(\'c\', "<<<"))\n}\n'),
+    # D193's timing (MYLA-791): the arguments run before the missing element
+    # (natively it was reported first); an element before the last index is
+    # found with the place
+    "missing_receiver_element": ('impl [int] {\n    fun put(var self, v: int) { self.push(v) }\n}\n'
+                                 'fun at(i: int) -> int {\n    print(f"index {i}")\n    return i\n}\n'
+                                 'fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                                 'fun main() {\n    var g = [[1], [2]]\n    g[at(5)].put(val(7))\n}\n'),
+    "missing_receiver_key": ('impl [int] {\n    fun put(var self, v: int) { self.push(v) }\n}\n'
+                             'fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                             'fun main() {\n    var m = [0: [1]]\n    m[9].insert(0, val(7))\n}\n'),
+    "missing_builder_element": ('fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                                'fun main() {\n    var sbs = [StringBuilder()]\n    sbs[5].append(f"{val(7)}")\n}\n'),
+    "missing_inner_receiver_element": ('impl [int] {\n    fun put(var self, v: int) { self.push(v) }\n}\n'
+                                       'fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                                       'fun main() {\n    var gg = [[[1]]]\n    gg[5][0].put(val(7))\n}\n'),
 }
 
 

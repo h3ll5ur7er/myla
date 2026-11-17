@@ -12,7 +12,7 @@
 // take fresh ids from `next` and the types of the nodes they stand for.
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, ElseTail, ExprOrBlock, MatchArm, FieldInit, MapEntry
-from .checker import Type
+from .checker import Type, is_slice_expr
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // `value_matches`: a `match` with an `await` in an arm, as a value, stays a
@@ -140,15 +140,56 @@ fun is_simple(e: Expr) -> bool {
     }
 }
 
-// A variable or a part of one: what a `var self` method changes in place.
+// A variable or a part of one: what a `var self` method changes in place,
+// whatever its indices are (H5); a slice is a new value.
 #test(expr_of("a.b[0]"))[true]
+#test(expr_of("g[i + 1].xs[^f()]"))[true]
+#test(expr_of("g[1:2]"))[false]
+#test(expr_of("f().xs"))[false]
 fun is_place(e: Expr) -> bool {
     return match e.kind {
         ExprKind.Name(n) => true,
         ExprKind.GetField(t, f) => is_place(t),
-        ExprKind.Index(t, i) => is_place(t) && is_simple(i),
+        ExprKind.Index(t, i) => is_place(t) && !is_slice_expr(i),
         _ => false,
     }
+}
+
+// The values an index is made of, in the order they are evaluated: the
+// index itself, what a `^n` counts, or a slice's bounds and step (D142), a
+// bound left out a `Hole`. Neither a slice's `a:b` nor a `^n` is a value a
+// temporary could hold (M11).
+#test(expr_of("x"))[[expr_of("x")]]
+fun index_values(i: Expr) -> [Expr] {
+    match i.kind {
+        ExprKind.Binary(op, l, r) => {
+            if op == ":" {
+                var vs = index_values(l)
+                for v in index_values(r) { vs.push(v) }
+                return vs
+            }
+        },
+        ExprKind.Unary(op, x) => { if op == "^" { return [x] } },
+        _ => {},
+    }
+    return [i]
+}
+
+// `i` with its values (`index_values`) taken from `vs`, from `at` on; and
+// where the next one would be.
+fun with_index_values(i: Expr, vs: [Expr], at: int32) -> (Expr, int32) {
+    match i.kind {
+        ExprKind.Binary(op, l, r) => {
+            if op == ":" {
+                let (l2, n) = with_index_values(l, vs, at)
+                let (r2, m) = with_index_values(r, vs, n)
+                return (with_kind(i, ExprKind.Binary(op, l2, r2)), m)
+            }
+        },
+        ExprKind.Unary(op, x) => { if op == "^" { return (with_kind(i, ExprKind.Unary(op, vs[at])), at + 1) } },
+        _ => {},
+    }
+    return (vs[at], at + 1)
 }
 
 fun with_kind(like: Expr, kind: ExprKind) -> Expr {
@@ -245,8 +286,9 @@ impl Norm {
             },
             StmtKind.Assign(t, v) => {
                 // the value first, then the target's indices, as evaluated
-                let v2 = self.expr(v)
-                let t2 = self.place(t)
+                var v2 = self.expr(v)
+                if has_await(t) { v2 = self.hoist(v2) }
+                let t2 = self.place(t, false)
                 self.out.push(self.with_stmt(s, StmtKind.Assign(t2, v2)))
             },
             StmtKind.IfS(c, th, el) => {
@@ -333,13 +375,23 @@ impl Norm {
         }
     }
 
-    // An assignment's target, its indices evaluated after the value.
-    fun place(var self, t: Expr) -> Expr {
+    // A place (`is_place`: an assignment's target, a method's receiver), its
+    // indices evaluated left to right, each put into a temporary when
+    // something evaluated after it has an `await` (a later index, or the
+    // call's arguments: `later`). Its variable and fields stay as they are,
+    // so that what is written is the place, not a copy of it (H5).
+    fun place(var self, t: Expr, later: bool) -> Expr {
         return match t.kind {
-            ExprKind.GetField(x, f) => with_kind(t, ExprKind.GetField(self.place(x), f)),
+            ExprKind.GetField(x, f) => with_kind(t, ExprKind.GetField(self.place(x, later), f)),
             ExprKind.Index(x, i) => {
-                let x2 = self.place(x)
-                with_kind(t, ExprKind.Index(x2, self.expr(i)))
+                let x2 = self.place(x, later || has_await(i))
+                var vs: [Expr] = []
+                for v in index_values(i) {
+                    var v2 = self.expr(v)
+                    if later { v2 = self.hoist(v2) }
+                    vs.push(v2)
+                }
+                with_kind(t, ExprKind.Index(x2, with_index_values(i, vs, 0).0))
             },
             _ => t,
         }
@@ -397,8 +449,10 @@ impl Norm {
             },
             ExprKind.TupleIndex(t, i) => with_kind(e, ExprKind.TupleIndex(self.expr(t), i)),
             ExprKind.Index(t, i) => {
-                let parts = self.seq([t, i])
-                with_kind(e, ExprKind.Index(parts[0], parts[1]))
+                var parts = [t]
+                for v in index_values(i) { parts.push(v) }
+                let vs = self.seq(parts)
+                with_kind(e, ExprKind.Index(vs[0], with_index_values(i, vs, 1).0))
             },
             ExprKind.MatchE(s, arms) => {
                 if !arms_await(arms) { return with_kind(e, ExprKind.MatchE(self.expr(s), arms)) }
@@ -432,14 +486,16 @@ impl Norm {
     }
 
     // A call's callee, evaluated before its arguments: hoisted when an
-    // argument has an `await`, but for a variable a method may change in place.
+    // argument has an `await`, but for a place a method may change in place,
+    // of which only the indices are (`place`).
     fun callee(var self, c: Expr, args: [Expr]) -> Expr {
         let later = any_await(args)
         return match c.kind {
             ExprKind.Name(n) => c,
             ExprKind.GetField(recv, f) => {
+                if is_place(recv) { return with_kind(c, ExprKind.GetField(self.place(recv, later), f)) }
                 var r2 = self.expr(recv)
-                if later && !is_place(r2) { r2 = self.hoist(r2) }
+                if later { r2 = self.hoist(r2) }
                 with_kind(c, ExprKind.GetField(r2, f))
             },
             _ => {
