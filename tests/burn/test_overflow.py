@@ -367,6 +367,22 @@ class TestOverflow(unittest.TestCase):
             if CAN_BUILD_NATIVE:
                 self.assertEqual(build_and_run(path, True), ("12499900000\n", "", 0))
 
+    def test_a_function_past_a_branchs_reach_builds_checked(self):
+        # M3 (MYLA-551): aarch64's branch to an out-of-line trap reaches
+        # 1 MiB; the traps of a function past that (5,000 checked
+        # statements) go in islands in its code, or it doesn't assemble
+        # (`fixup value out of range: b.vs`)
+        src = ("fun big(a: int64, b: int64) -> int64 {\n    var s: int64 = 0\n" + "    s = s + a - b\n" * 5000
+               + "    return s + a\n}\nfun main() {\n    print(big(3, 2))\n    print(big(9223372036854775807, 0))\n}\n")
+        want = ("5003\n", "runtime error: integer overflow\n  --> {}:4:11\n", 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, src)
+            out, err, code = selfhost_run(path)
+            self.assertEqual((out, err.splitlines(True)[:2], code), (want[0], want[1].format(path).splitlines(True), 1))
+            if CAN_BUILD_NATIVE:
+                out, err, code = build_and_run(path, True)
+                self.assertEqual((out, err.splitlines(True)[:2], code), (want[0], want[1].format(path).splitlines(True), 1))
+
     def test_what_fits_is_the_same_everywhere(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, FITS)
