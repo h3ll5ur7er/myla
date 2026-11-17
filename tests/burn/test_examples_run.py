@@ -63,6 +63,7 @@ EXPECTED = {
     "time_and_math.my": "1.41\ntrue\n3.141592653589793\nanswered 7\ngave up\n7\ntrue\n",
     "transforms.my": "(243, 275)\n(320, 249)\n(235, 164)\n(320, 154)\n(320, 312)\n(397, 275)\n(320, 179)\n(405, 164)\ntrue\n",
     "book_api.my": 'GET /api/books/2 -> 200 {"id":2,"title":"The Dispossessed","year":1974} (version 1)\nGET /api/books/search?q=dark -> 200 {"query":"dark","found":[{"id":1,"title":"The Left Hand of Darkness","year":1969}]} (version 1)\nGET /api/books/9 -> 404 {"error":"no book 9"} (version 1)\nPOST /api/books -> 200 {"id":4,"title":"The Lathe of Heaven","year":1971} (version 1)\nPOST /api/books -> 422 {"error":"$.title: missing field"} (version 1)\nDELETE /api/books/2 -> 405 method not allowed (version 1)\nGET / -> 200 see /api/books/{id} (version -)\n',
+    "agent.my": 'claude: Let me look at the notes.\n  list_files {"path":"."} -> 3 lines\n  read_file {"path":"ideas.txt"} -> 2 lines\n  read_file {"path":"todo.txt"} -> 2 lines\nclaude: Writing the summary.\n  write_file {"path":"summary.md","content":"# Summary\\n\\n- Teach the toaster to compile.\\n- Buy a towel.\\n"} -> wrote 58 bytes\nclaude: Done: summary.md has the first line of each note (wrote 58 bytes).\nsummary.md:\n# Summary\n\n- Teach the toaster to compile.\n- Buy a towel.\ndone\n',
 }
 
 def run_file(path: str) -> str:
