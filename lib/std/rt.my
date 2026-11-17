@@ -2676,32 +2676,58 @@ pub fun exit_program(code: int) {
 // cell, or 0 for none). The head is taken off as it is written, so a case's
 // end has one record. Whether this process is a test child that had none
 // yet. It allocates nothing.
+//
+// The record is one write where it fits in the head's cell, whose bytes
+// `reporting` made RECORD_ROOM long: a write of at most PIPE_BUF bytes to a
+// pipe is never cut, so another worker's write to stderr lands before it or
+// after it (the 2026-11-17 review's M2: it was three writes, and a noisy
+// task cut them). A longer one is written in pieces, after the other
+// workers stopped when a task failed (`panic_report_tasks`).
 fun test_record(kind: int64, n: int64, text: int64) -> bool {
     let head = __xchg64(__rt_addr("__test_report"), 0)
     if head == 0 {
         return false
     }
-    write_err(head)
-    let end = __rt_addr("__panic_buf") + 32
-    var at = end - 1
-    __store8(at, 59u8)  // ';'
-    var v = n
-    while true {
-        at -= 1
-        __store8(at, (48 + v % 10) as uint8)
-        v = v / 10
-        if v == 0 {
-            break
+    let tn = if text != 0 { __load64(text) } else { 0 }
+    let buf = head + 8
+    var at = __load64(head)
+    __store8(buf + at, kind as uint8)
+    __store8(buf + at + 1, 58u8)  // ':'
+    at += 2
+    var p: int64 = 1
+    while p <= n / 10 {
+        p *= 10
+    }
+    while p > 0 {
+        __store8(buf + at, (48 + n / p % 10) as uint8)
+        p = p / 10
+        at += 1
+    }
+    __store8(buf + at, 59u8)  // ';'
+    at += 1
+    if at + tn <= RECORD_ROOM {
+        if tn > 0 {
+            __copy_bytes(buf + at, text + 8, tn)
         }
+        os.write_all(2, buf, at + tn)
+        return true
     }
-    at -= 2
-    __store8(at, kind as uint8)
-    __store8(at + 1, 58u8)  // ':'
-    os.write_all(2, at, end - at)
-    if text != 0 {
-        write_err(text)
-    }
+    os.write_all(2, buf, at)
+    write_err(text)
     return true
+}
+
+// The bytes of a test child's record head's cell (std.test's `reporting`
+// makes it as long, its `RECORD_ROOM`): PIPE_BUF on Linux, what a write to
+// a pipe keeps whole.
+const RECORD_ROOM: int64 = 4096
+
+// Whether this is a test child whose record of a runtime error with the
+// message `msg` (a string's cell) can't be written at once (`test_record`).
+fun record_in_pieces(msg: int64) -> bool {
+    let head = __load64(__rt_addr("__test_report"))
+    // (the kind, `:`, at most 19 digits and `;`)
+    return head != 0 && __load64(head) + 22 + __load64(msg) > RECORD_ROOM
 }
 
 // The exit hook: the terminal `__term_raw` made raw, if nothing put it back
@@ -2728,8 +2754,13 @@ pub fun panic_report(msg: int64, pos: int64) {
     exit_program(1)
 }
 
-// `panic_report` with tasks: the end waits for the other workers (D97).
+// `panic_report` with tasks: the end waits for the other workers (D97),
+// and so does a test child's record that is written in pieces, which
+// another worker's write would cut (M2).
 pub fun panic_report_tasks(msg: int64, pos: int64) {
+    if record_in_pieces(msg) {
+        failed_wait()
+    }
     report_error(msg, pos)
     failed_wait()
     exit_program(1)

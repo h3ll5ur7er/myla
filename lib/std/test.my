@@ -132,11 +132,20 @@ pub fun program() -> str {
 // `exit` ended is the last one, and the next run starts after it. Run by
 // hand without either flag, where no process can be started the cases run
 // in the harness itself, in order, and the first runtime error ends the run.
+//
+// A case has a time limit (D259), MYLA_TEST_TIMEOUT's seconds, which
+// `myla test --timeout` sets (60 by default; none when the variable isn't
+// set): past it the runner kills the child, `timed out after <n> s`. On
+// Linux a child leads a process group of its own, which the runner kills as
+// the case ends or passes its limit, so nothing the case started outlives
+// it; and it dies with the runner, as the runner dies with `myla test`
+// (`dies_with_parent`).
 
 import std.fs as fs
 import std.path_style as style
-from std.process import args, exit, command, ExitStatus, Output, env
+from std.process import args, exit, command, Command, ExitStatus, Stdio, SpawnError, env
 from std.io import write, eprint
+from std.platform import TARGET
 from std.time import now_ns
 from std.num import format_float
 
@@ -191,17 +200,182 @@ fun new_nonce() -> str {
 // nonce `argv` names after `--case <n>` or `--from <n>` ("" without one, and
 // then no records), given to the runtime too, which writes the record of a
 // runtime error or an `exit` with it (`__test_report`: a string's cell of
-// its own, which stays as long as the process).
+// its own, which stays as long as the process, its bytes RECORD_ROOM long:
+// std.rt's `test_record` builds the record there and writes it at once).
+// The cases see only the program in `process.args()`, as interpreted: the
+// runner's words and its nonce are taken off the arguments (the 2026-11-17
+// review's M2 and its Low item).
 pub fun reporting(argv: [str]) -> str {
     if argv.len() != 4 || (argv[1] != "--case" && argv[1] != "--from") { return "" }
     let head = record_head(argv[3])
     let n = head.len() as int64
-    let cell = __alloc(n + 8)
+    let cell = __alloc(RECORD_ROOM + 8)
     __store64(cell, n)
     __copy_bytes(cell + 8, __addr_of(head) + 8, n)
     __store64(__rt_addr("__test_report"), cell)
+    __store64(__argv() + 8, 0)
+    if argv[1] == "--case" {
+        dies_with_parent()
+        own_group()
+    }
     return head
 }
+
+// The system calls `dies_with_parent` and `own_group` make on Linux: the
+// numbers of prctl and setpgid; 0 elsewhere, where neither is made.
+fun linux_calls() -> (int64, int64) {
+    if TARGET == "x86_64-linux" { return (157, 109) }
+    if TARGET == "aarch64-linux" { return (167, 154) }
+    return (0, 0)
+}
+
+// This process is killed when its parent ends (Linux's PR_SET_PDEATHSIG
+// with SIGKILL): a test child with its runner, the runner with `myla test`
+// (D259: killing `myla test --native` left the harness and its child
+// behind). Elsewhere nothing.
+fun dies_with_parent() {
+    let (prctl, setpgid) = linux_calls()
+    if prctl == 0 { return }
+    let r = __syscall(prctl, 1, 9, 0)
+}
+
+// This process leads a process group of its own, which its children join
+// (Linux's setpgid), for the runner to kill whole (`end_group`).
+fun own_group() {
+    let (prctl, setpgid) = linux_calls()
+    if setpgid == 0 { return }
+    let r = __syscall(setpgid, 0, 0, 0)
+}
+
+// The process group of the test child `pid` killed (SIGKILL; on Linux,
+// where it leads one, `own_group`), with what it started that is still
+// there. A group already gone, or one the child had no time to lead, is no
+// error: the child itself is killed through its `Child` too.
+fun end_group(pid: int32) {
+    let (prctl, setpgid) = linux_calls()
+    if setpgid == 0 || pid <= 0 { return }
+    __kill(-pid, 9)
+}
+
+// A case's time limit natively, in seconds (MYLA_TEST_TIMEOUT, which `myla
+// test` sets, D259): 0 for none, as without the variable.
+#test(Some("60"))[60]
+#test(Some("x"))[0]
+#test(None)[0]
+fun timeout_of(v: Option<str>) -> int32 {
+    let t = match v {
+        Some(t) => t,
+        None => { return 0 },
+    }
+    if t.len() == 0 || t.len() > 5 { return 0 }
+    var n = 0
+    var i = 0
+    while i < t.len() {
+        if t[i] < '0' || t[i] > '9' { return 0 }
+        n = n * 10 + (t[i] as int32 - 48)
+        i = i + 1
+    }
+    return n
+}
+
+// The verdict on a case past its time limit of `secs` seconds, as the
+// interpreter's `myla test` gives it.
+#test(5)["timed out after 5 s"]
+pub fun timed_out(secs: int32) -> str {
+    return f"timed out after {secs} s"
+}
+
+// How a command run within a time limit ended: what it wrote on stdout
+// and stderr, its status, and whether it passed the limit (and was killed).
+pub struct Timed { stdout: str, stderr: str, status: ExitStatus, late: bool }
+
+// `c` run with an empty stdin as `output` runs it, for at most `secs`
+// seconds (0: no limit) from its start or from the last `mark` it wrote on
+// stderr ("" for none: a run of several cases marks each one's beginning),
+// its output and error read as they come: past the limit it is killed, its
+// process group too where it leads one. Once it has ended, so has its group
+// (a child of its holding its output would keep the reads going).
+pub fun output_within(c: Command, secs: int32, mark: str) -> Result<Timed, SpawnError> {
+    var child = c.stdin_from(Stdio.Null).spawn()?
+    let limit = (secs as int64) * 1000000000
+    var deadline = if secs > 0 { now_ns() + limit } else { 0i64 }
+    var tail = ""
+    var ofd: int32 = -1
+    var efd: int32 = -1
+    if let Some(r) = child.take_stdout() { ofd = r.descriptor() }
+    if let Some(r) = child.take_stderr() { efd = r.descriptor() }
+    var out = StringBuilder()
+    var err = StringBuilder()
+    var late = false
+    var ended = false
+    var turn = 0
+    while !late && (ofd >= 0 || efd >= 0 || !ended) {
+        if !ended {
+            match child.try_wait() {
+                Ok(Some(st)) => {
+                    ended = true
+                    end_group(child.id())
+                },
+                Ok(None) => {},
+                Err(e) => { ended = true },
+            }
+        }
+        if deadline > 0 && now_ns() >= deadline {
+            late = true
+        } else {
+            // the stream with bytes, else a little while on each in turn
+            var fd = -1
+            if ofd >= 0 && __poll(ofd, 0) != 0 { fd = ofd }
+            else if efd >= 0 && __poll(efd, 0) != 0 { fd = efd }
+            else if ofd < 0 && efd < 0 { __sleep_ns(10000000) }
+            else {
+                let idle = if (turn % 2 == 0 && ofd >= 0) || efd < 0 { ofd } else { efd }
+                if __poll(idle, 10) != 0 { fd = idle }
+                turn += 1
+            }
+            if fd >= 0 {
+                let chunk = __read(fd, 65536)
+                if chunk.len() == 0 || __io_errno() != 0 {
+                    __close(fd)
+                    if fd == ofd { ofd = -1 } else { efd = -1 }
+                } else if fd == ofd {
+                    out.append(chunk)
+                } else {
+                    err.append(chunk)
+                    if mark != "" && deadline > 0 {
+                        // (a mark cut between two reads too)
+                        let seen = tail + chunk
+                        if last_at(seen, mark, false) >= 0 { deadline = now_ns() + limit }
+                        tail = after(seen, max0(seen.len() - mark.len() + 1))
+                    }
+                }
+            }
+        }
+    }
+    if late {
+        end_group(child.id())
+        let k = child.kill()
+    }
+    if ofd >= 0 { __close(ofd) }
+    if efd >= 0 { __close(efd) }
+    let st = match child.wait() {
+        Ok(st) => st,
+        Err(e) => ExitStatus.Signaled(9),
+    }
+    return Ok(Timed { stdout: out.build(), stderr: err.build(), status: st, late: late })
+}
+
+// `n`, or 0 for a negative one.
+#test(-2)[0]
+#test(3)[3]
+fun max0(n: int32) -> int32 {
+    if n < 0 { return 0 }
+    return n
+}
+
+// The bytes of a record head's cell: std.rt's RECORD_ROOM, PIPE_BUF on
+// Linux, what a write to a pipe keeps whole.
+const RECORD_ROOM: int64 = 4096
 
 // The runtime writes no record from now on: the harness ends by itself.
 fun reporting_ends() {
@@ -308,6 +482,8 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
     let root = f"{fs.temp_root()}{sep}myla-test-{now_ns()}"
     let nonce = new_nonce()
     let head = record_head(nonce)
+    let secs = timeout_of(env("MYLA_TEST_TIMEOUT"))
+    dies_with_parent()
     var lines: [str] = []
     while k < cases.len() {
         let dir = f"{root}{sep}c{k}"
@@ -315,23 +491,28 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
         argv.push("--case")
         argv.push(f"{k}")
         argv.push(nonce)
-        let ran = command(exe).args(argv).env("MYLA_TEST_DIR", dir).env("MYLA_TEST_TOOL", program).stdin("").output()
+        let ran = output_within(command(exe).args(argv).env("MYLA_TEST_DIR", dir).env("MYLA_TEST_TOOL", program), secs, "")
         var started = true
-        var out = Output { stdout: [], stderr: [], status: ExitStatus.Exited(0) }
+        var out = Timed { stdout: "", stderr: "", status: ExitStatus.Exited(0), late: false }
         match ran {
-            Ok(o) => { out = o },
+            Ok(t) => { out = t },
             Err(e) => { started = false },
         }
         if fs.exists(dir) { let gone = fs.remove_dir_all(dir) }
         if !started {
             if k == 0 { return None }
             lines.push(f"FAIL  {cases[k].name}: could not start the case's process\n")
+        } else if out.late {
+            // what it wrote on stderr is passed on, as a case's is
+            let r = record_in(out.stderr, head)
+            if r.rest != "" { eprint(r.rest) }
+            for l in case_lines(cases[k], Some(timed_out(secs)), lines_of(out.stdout)) { lines.push(l) }
         } else {
             let code = match out.status {
                 ExitStatus.Exited(c) => c,
                 ExitStatus.Signaled(s) => -s,
             }
-            let (verdict, shown) = case_detail(cases[k], text(out.stdout), text(out.stderr), code, head)
+            let (verdict, shown) = case_detail(cases[k], out.stdout, out.stderr, code, head)
             match verdict { None => { passed = passed + 1 }, Some(d) => {} }
             for l in case_lines(cases[k], verdict, shown) { lines.push(l) }
         }
@@ -399,7 +580,10 @@ pub fun case_detail(c: Case, stdout: str, stderr: str, code: int32, head: str) -
 // (with the records of the run whose head is `head`, D191). A case that
 // ended without one ended outside the runtime: by a signal, or by a trap an
 // emulator reported as the runtime does, `runtime error: …` last on stderr
-// (wasm32's, `tools/wasm/run.mjs`).
+// (wasm32's, `tools/wasm/run.mjs`). A child a signal ended has no record:
+// the runtime writes one as the process ends, by itself (a case that wrote
+// a `P` record of its own and had itself killed passed, the 2026-11-17
+// review's M2).
 #test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "warn\n\u{1}myla-1\u{1}F:2;no", 1, "\u{1}myla-1\u{1}")[(Some("no"), [], "warn\n")]
 #test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-done\u{1}runtime error: fake\n\u{1}myla-1\u{1}X:1;", 1, "\u{1}myla-1\u{1}")[(Some("exited with status 1"), [], "\u{1}myla-done\u{1}runtime error: fake\n")]   // marks of its own
 #test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-2\u{1}P:0;\u{1}myla-1\u{1}X:3;", 3, "\u{1}myla-1\u{1}")[(Some("exited with status 3"), [], "\u{1}myla-2\u{1}P:0;")]   // another run's record
@@ -407,14 +591,15 @@ pub fun case_detail(c: Case, stdout: str, stderr: str, code: int32, head: str) -
 #test(Case { name: "t", kind: 1, message: "stack overflow", code: 0 }, "", "w\nruntime error: stack overflow\n\u{1}myla-1\u{1}E:14;stack overflow", 1, "\u{1}myla-1\u{1}")[(None, [], "w\n")]   // the runtime's own line taken off
 #test(Case { name: "t", kind: 1, message: "boom", code: 0 }, "", "runtime error: fake\nruntime error: boom\n", 1, "\u{1}myla-1\u{1}")[(None, [], "runtime error: fake\n")]   // an emulator's report, last
 #test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-1\u{1}E:9;cut", 1, "\u{1}myla-1\u{1}")[(Some("exited with status 1"), [], "\u{1}myla-1\u{1}E:9;cut")]   // a record cut short is none
+#test(Case { name: "t", kind: 0, message: "", code: 0 }, "", "\u{1}myla-1\u{1}P:0;", -9, "\u{1}myla-1\u{1}")[(Some("killed by signal 9"), [], "\u{1}myla-1\u{1}P:0;")]   // a record a case forged
 pub fun case_outcome(c: Case, stdout: str, stderr: str, code: int32, head: str) -> (Option<str>, [str], str) {
     let shown = lines_of(stdout)
+    if code < 0 { return (Some(f"killed by signal {-code}"), shown, stderr) }
     let r = record_in(stderr, head)
     if r.kind == "P" { return (None, shown, r.rest) }
     if r.kind == "F" { return (Some(r.text), shown, r.rest) }
     if r.kind == "E" { return (failed(c, r.text), shown, without_overflow_line(r.rest, r.text)) }
     if r.kind == "X" { return (exited(c, r.n), shown, r.rest) }
-    if code < 0 { return (Some(f"killed by signal {-code}"), shown, stderr) }
     var at = -1
     if code == 1 {
         at = last_at(stderr, ERROR_HEAD, true)
