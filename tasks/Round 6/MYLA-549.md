@@ -2,7 +2,7 @@
 id: MYLA-549
 title: "R7 std.http: a request that has begun holds a worker; the client's redirect and write checks"
 type: bug
-status: todo
+status: review
 priority: high
 labels: [std, http, security, round-6]
 ---
@@ -60,3 +60,11 @@ Cost:
 Suites: `scripts/test.sh fast` (867 tests, the one failure `test_embedded_std`, as expected until the seed commit); `scripts/test.sh` (1,549 tests, 341 skipped; failures `test_embedded_std` and `test_children_run_in_parallel`, the known timing test, which passes alone); `tests.burn.test_http` natively (12 tests, `HttpOnWasm` skipped), with `MYLA_TEST_TARGET=aarch64-linux` (12, the same skip) and `scripts/test-target.py wasm32-wasi tests.burn.test_http` (`HttpOnWasm`); `build/myla test lib/std/http.my --stdlib lib`: 225/225 interpreted, `--native`, `--target aarch64-linux` and `--target wasm32-wasi` (Node). After the last commit (the client's framing looked at only when it is there) again: `tests.burn.test_http` natively (12, OK), `MylaClient` and `MylaServer` on aarch64, the 225 cases `--native`, on aarch64 and on wasm32.
 
 Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7 (2026-11-17, [[MYLA-794]])
+
+- [x] H7: with `max_connections` filled by one-byte requests, eviction closed every newcomer (`http_evict_dos.py`: 99 of 100 clients unanswered in every wave). Eviction closes the parked connection that has waited longest since it last got on (`Pending.evicted`): every wave answered, 100 of 100
+- [x] M8: every parked connection kept its body (100 of 4 MB: 598 MB); each piece of one waiting copied its body so far twice. The bodies kept share `workers` times `max_body_bytes` (past it 503), and a piece is read on inside `Pending` (`resume`): 16 MB in pieces of 1,460 bytes cost 0.63 s of CPU where it cost 6.52 s
+- [ ] The slow readers (the write side, "old"): [[MYLA-833]]
+
+The changes, the proposals and the evidence are in [[MYLA-794]].

@@ -2,7 +2,7 @@
 id: MYLA-755
 title: "A busy worker glances at the poller every 64 frames, not by time: under load no worker polls for seconds"
 type: bug
-status: todo
+status: review
 priority: medium
 labels: [concurrency, performance]
 ---
@@ -41,3 +41,9 @@ Suggested decision row: "**A busy worker glances at the poller once a millisecon
 - **The other targets' assembly**: BASE's `stage3` and this branch's, both given this branch's library, give byte-identical assembly for `selfhost/gen_main.my`, `examples/maps.my` and `examples/concurrency.my` on `x86_64-linux`, `aarch64-linux` and `wasm32-wasi`; on `x86_64-windows` they differ in `__win_on_ctrl`'s eight lines and the import list's `PostQueuedCompletionStatus` ([[MYLA-744]]). The library's change gives every native program's `exec_run` its new lines and `glance_every`, on every target, by design.
 
 Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7 (2026-11-17, [[MYLA-794]])
+
+- [x] M1: with the millisecond's glance alone, a loopback ping-pong beside a task that only yields made 499 round trips a second (98,942 with the 64-turn glance). A busy worker glances every 64 turns too while its glances wake frames, twice as many turns after each that wakes none (`glance_gap`): 93,121 a second, and the latency test `BusyWorkers` still passes (40 ms on 1 worker, where 64 turns gave 581 ms)
+
+The change, the proposal (D245 amended) and the measurements, natively and under Wine, are in [[MYLA-794]].

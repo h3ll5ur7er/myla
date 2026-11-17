@@ -31,7 +31,6 @@ The targets are x86-64 and aarch64 Linux, wasm32 on WASI and x86-64 Windows; mac
 - Natively, on 16 workers, armed timers make every loop top take `__timer_lock`: CPU-bound tasks about 15 % slower ([[MYLA-296]]).
 - A trait method can't be async, so there is no async `Read` or `Write` ([[MYLA-434]]).
 - The poller takes at most four events a wait (under 2 percent to gain, [[MYLA-531]]); a keep-alive request through std.http's lot costs 4 to 6 percent more than a worker waiting on its connection ([[MYLA-530]]).
-- **Runtime:** I/O beside a task that only yields fell from 98,942 to 499 loopback round trips a second with D245's millisecond glance ([[MYLA-755]]); `net.line_reader_with` overflows for a limit near the largest `int`, and a forged `Signals` value starts listening ([[MYLA-794]]).
 
 ## Tooling in Myla
 
@@ -47,7 +46,7 @@ The targets are x86-64 and aarch64 Linux, wasm32 on WASI and x86-64 Windows; mac
 
 ## Standard library
 
-- **std.http:** with `max_connections` filled by one-byte requests, eviction closes the newcomer: 99 of 100 normal clients go unanswered ([[MYLA-549]]); bodies begun may hold `max_connections × max_body_bytes`, and slow readers hold the workers ([[MYLA-794]]).
+- **std.http:** a response being sent holds its worker for as long as its client reads 64 KiB within each `write_ms`: 64 slow readers of 8 MB hold every worker of a default server ([[MYLA-833]]).
 - **The router:** `static_files` leaves its root on Windows (`..%5c`); malformed patterns are taken silently ([[MYLA-613]]). std.json parses a 64,000-digit number in 11.7 s, so four 300 kB bodies stop a server; `static_files` serves dot files and follows symlinks ([[MYLA-795]]).
 - **std.xml:** the stream reader holds back whole events when a read cuts a multi-byte character, and a DOCTYPE over short reads is quadratic ([[MYLA-460]]).
 - **Numerics:** `json.decode<Matrix>` accepts a 65536×65536 shape with no data in a plain build, and `inverse` of a singular `Mat4` gives `Some` ([[MYLA-587]]); `sinh` and `tanh` are up to 74,000 ulps off ([[MYLA-585]]); `math.log10` near 1 is off in the eleventh digit, and printing a float costs up to 6.5 M instructions ([[MYLA-796]]).
