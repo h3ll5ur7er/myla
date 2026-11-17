@@ -4889,8 +4889,8 @@ impl Checker {
         }
         // a tuple, list, `Some`, `Ok` or `Err` of literals left of `==`
         // takes the right side's type, as a literal does (MYLA-544,
-        // MYLA-609): `Some(1) == Some(x)`, `(1, 1) == (x, 1)` with `x: int64`;
-        // a right side that takes its type from the left, `None`, keeps it
+        // MYLA-609): `Some(1) == Some(x)`, `(1, 1) == (x, 1)` with `x: int64`
+        // (not beside `None`, `Ok(x)` or `Err(e)`, which take theirs from it)
         if (op == "==" || op == "!=") && literal_compound(l) && !literal_compound(r) && !adapts(r) && (!self.other_side_first(r) || is_some_call(r)) {
             let rt0 = self.expect_value(r, None)?
             let lt0 = self.expect_value(l, Some(rt0))?
@@ -5022,6 +5022,15 @@ impl Checker {
             return Err(terr_at(e.line, e.col, e.sp, format("cannot compare values of type '{}'", type_name(common))))
         }
         return Ok(Type.TBool)
+    }
+
+    // Whether `t` is indexed by an `Index` impl (D200): a struct or enum
+    // with one, or a type parameter.
+    fun indexes_by_impl(self, t: Type) -> bool {
+        if is_type_param(t) { return true }
+        if !is_struct_or_enum(t) { return false }
+        let key = match self.type_key(t) { Some(k) => k, None => "" }
+        return self.op_cands("Index", key).len() > 0
     }
 
     // Whether the right operand's type `rt` picks an impl of `op`'s trait
@@ -5214,14 +5223,14 @@ impl Checker {
             for oi in self.op_impls {
                 if oi.tr == tr && !oi.r_self && type_eq(oi.r, rt) && !is_struct_or_enum(oi.target) {
                     if type_eq(oi.target, lt0) { own = true }
-                    if waits || is_float(lt0) == is_float(oi.target) {
+                    if is_float(lt0) == is_float(oi.target) {
                         hint = Some(oi.target)
                         n += 1
                     }
                 }
             }
             if n != 1 { hint = None }
-            if waits { lt = self.expect_value(l, no_float_for_int(hint, l))? }
+            if waits { lt = self.expect_value(l, hint)? }
             else if !own {
                 match hint {
                     Some(h) => { lt = self.expect_value(l, Some(h))? },
@@ -8009,7 +8018,7 @@ impl Checker {
                     },
                     // `g[0].a = 5` on a type with `Index` (D200): its element
                     // is a value the impl gives, not a place
-                    _ if is_struct_or_enum(base.ty) || is_type_param(base.ty) => Err(with_notes(terr_at(e.line, e.col, e.sp, format("an element of '{}' is not a place: its 'Index' impl gives a value, which can't be changed in place", type_name(base.ty))), [Note { label: "help", msg: "read it into a 'var', change that, and assign it back by 'IndexSet' ('x[i] = v')", line: 0, col: 0, sp: no_span() }])),
+                    _ if self.indexes_by_impl(base.ty) => Err(with_notes(terr_at(e.line, e.col, e.sp, format("an element of '{}' is not a place: its 'Index' impl gives a value, which can't be changed in place", type_name(base.ty))), [Note { label: "help", msg: "read it into a 'var', change that, and assign it back by 'IndexSet' ('x[i] = v')", line: 0, col: 0, sp: no_span() }])),
                     _ => Err(terr_at(e.line, e.col, e.sp, format("type '{}' is not a list and cannot be indexed with `[...]`", type_name(base.ty)))),
                 }
             },
