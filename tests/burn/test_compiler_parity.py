@@ -9813,7 +9813,63 @@ async fun main() {
     print(await st.report())
     print(f"{mine.len()} {tags.len()} {sb.build()}")
 }
-""",    "operator_impls_whose_bounds_hold": r"""// H1 (MYLA-612): operator impls with bounds, used where the bounds hold:
+""",    "literals_left_of_operators_take_their_type": r"""// M15 and the left literals (MYLA-612, MYLA-544, MYLA-609): a literal on
+// the left of an operator takes its type from the impl or the other side
+import std.vector32 as v32
+
+struct B<T> {
+    v: T,
+}
+
+struct V {
+    x: int,
+}
+
+impl<T> Mul<B<str>, str> for B<T> {
+    fun mul(self, n: B<str>) -> str {
+        return "by " + n.v
+    }
+}
+
+impl<T> Mul<B<T>, B<T>> for B<T> {
+    fun mul(self, n: B<T>) -> B<T> {
+        return n
+    }
+}
+
+impl Mul<V, V> for int64 {
+    fun mul(self, k: V) -> V {
+        return V { x: k.x * (self as int) }
+    }
+}
+
+fun eqs(x: int64) -> str {
+    let a = Some(1) == Some(x)
+    let b = (1, 1) == (x, 1)
+    let c = [1] == [x]
+    let d = Some(5000000000) == Some(x)
+    let e = (Some(3), [1, 2]) != (Some(x), [1, 2])
+    return f"{a} {b} {c} {d} {e}"
+}
+
+fun main() {
+    let b = B { v: "b" }
+    print(B { v: 1 } * b)
+    print((B { v: 2 } * B { v: 3 }).v)
+    let w = v32.vec3(1.0, 2.0, 3.0)
+    let c = 2.0 * w
+    print(c.y)
+    let d = -0.5 * w
+    print(d.z)
+    let v = V { x: 3 }
+    print((2 * v).x)
+    print((-4 * v).x)
+    print(eqs(1))
+    print(eqs(3))
+    print(eqs(5000000000))
+}
+""",
+    "operator_impls_whose_bounds_hold": r"""// H1 (MYLA-612): operator impls with bounds, used where the bounds hold:
 // `*` by a type argument, `*=`, unary `-`, `x[i]`, `x[i] = v` and a
 // `T: Mul<float>` argument, on concrete types and in generic code
 trait Conv<T> {
@@ -11919,6 +11975,10 @@ PINNED = {
     "values_nested_through_closures": '7\n1\n1\n2\n5\n50001 100000 50000 100000\nreleased\n',
     # MYLA-612 (H1): new; the bounds are checked where an operator picks its
     # impl, and a program that meets them runs as before
+    # MYLA-612 (M15), MYLA-544, MYLA-609: new; a type error before (the
+    # struct literal took the right operand's type, the others stayed
+    # `float64`, `int32` and `Option<int32>`)
+    "literals_left_of_operators_take_their_type": 'by b\n3\n4\n-1.5\n6\n-12\ntrue true true false true\nfalse false false false false\nfalse false false true true\n',
     "operator_impls_whose_bounds_hold": 'A7*2\n-A7\na7[3]\nA7:5=z\n3\nA7:5=za7\n6\nA7*3 -A7\na7[1] A7:4=q\n',
 }
 

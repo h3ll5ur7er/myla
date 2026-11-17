@@ -2364,10 +2364,12 @@ fun load_linked(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
         // a native build has tasks where an `async let` is in any body
         // loaded, read or not, as when every body was read (D90, MYLA-413)
         let tasks = if opts.runtime { lazy.task_line() } else { 0 }
-        bodies = LazyBodies { ids: lazy_ids, keys: lazy.keys, parse: (key: int64) => table.read(key), task_line: tasks }
+        bodies = LazyBodies { ids: lazy_ids, keys: lazy.keys, parse: (key: int64) => table.read(key), task_line: tasks, files: [] }
         // the oracle of the lazy load (MYLA-552): every body read now
         if eager_bodies() { decls = read_every_body(decls, bodies) }
     }
+    // each declaration's file, which the checker's notes name (D257)
+    for sp in ld.spans { bodies.files.push((sp.first_id, sp.path)) }
     return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans, std_impls: std_impls, bodies: bodies })
 }
 

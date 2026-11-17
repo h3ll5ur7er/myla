@@ -1,0 +1,10 @@
+type error: duplicate impl of trait 'Show' for type 'S' (at most one user impl per trait/type pair)
+  --> examples/errors/type_trait_duplicate_impl.my:13:1
+   |
+13 | impl Show for S {
+   | ^^^^^^^^^^^^^^^^^
+note: the other impl is here
+  --> examples/errors/type_trait_duplicate_impl.my:10:1
+   |
+10 | impl Show for S {
+   | ^^^^^^^^^^^^^^^^^

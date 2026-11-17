@@ -133,6 +133,54 @@ class TestModuleIdCollision(unittest.TestCase):
                 "  --> proj/main.my:2:6\n"), proc.stderr)
 
 
+# D257 (MYLA-790): any module may implement any trait for any type, an
+# operator's included: `extra` gives `geo.V` a `Neg`, and the entry a
+# `Mul<str, str>` beside geo's own `Mul<int>`
+IMPLS_GEO = 'pub struct V {\n    x: int,\n}\n\nimpl Mul<int> for V {\n    fun mul(self, k: int) -> V {\n        return V { x: self.x * k }\n    }\n}\n'
+IMPLS_EXTRA = 'from .geo import V\n\n// any module may implement any trait for any type (D257)\nimpl Neg<int> for V {\n    fun neg(self) -> int {\n        return -self.x\n    }\n}\n\npub fun twice(n: int) -> int {\n    return -(V { x: n * 2 })\n}\n'
+IMPLS_MAIN = 'from .geo import V\nfrom .extra import twice\n\n// any module may implement any trait for any type (D257): the type\'s own\n// `Mul<int>` beside this one\nimpl Mul<str, str> for V {\n    fun mul(self, k: str) -> str {\n        return f"{self.x}{k}"\n    }\n}\n\nfun main() {\n    print((V { x: 2 } * 3).x)\n    print(V { x: 2 } * "a")\n    print(twice(1))\n}\n'
+
+
+class TestImplsAcrossModules(unittest.TestCase):
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_any_module_may_implement_a_trait(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_program(tmp, IMPLS_GEO, "geo.my")
+            write_program(tmp, IMPLS_EXTRA, "extra.my")
+            path = write_program(tmp, IMPLS_MAIN)
+            self.assertEqual(run_file_both_now(path), ("6\n2a\n-2\n", "", 0))
+
+    def test_two_impls_with_the_same_arguments_are_both_named(self):
+        # wherever they are: the error at one, a note naming the other, by
+        # its file when it is another's, by its module when it is the
+        # library's; the error is at the program's impl, not the library's
+        import subprocess
+        from ._tools import STDLIB_ROOT, selfhost_tool
+        again = IMPLS_MAIN.replace("impl Mul<str, str> for V {\n    fun mul(self, k: str) -> str {\n        return f\"{self.x}{k}\"",
+                                   "impl Mul<int> for V {\n    fun mul(self, k: int) -> V {\n        return self")
+        self.assertNotEqual(again, IMPLS_MAIN)
+        vec = ("from std.vector32 import Vec3\n\nimpl Mul<float32> for Vec3 {\n    fun mul(self, k: float32) -> Vec3 {\n"
+               "        return self\n    }\n}\n\nfun main() {\n}\n")
+        for main, want in (
+            (again, "type error: duplicate impl of trait 'Mul<int32, …>' for type 'geo.V' (one per type of the right "
+                    "operand or index)\n  --> geo.my:5:1\n"),
+            (vec, "type error: duplicate impl of trait 'Mul<float32, …>' for type 'vector32.Vec3' (one per type of the "
+                  "right operand or index)\n  --> main.my:3:1\n"),
+        ):
+            with self.subTest(want=want), tempfile.TemporaryDirectory() as tmp:
+                write_program(tmp, IMPLS_GEO, "geo.my")
+                write_program(tmp, IMPLS_EXTRA, "extra.my")
+                write_program(tmp, main)
+                proc = subprocess.run([selfhost_tool("main"), "check", "main.my", "--stdlib", STDLIB_ROOT],
+                                      capture_output=True, text=True, cwd=tmp)
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertTrue(proc.stderr.startswith(want), proc.stderr)
+                if main is again:
+                    self.assertIn("\nnote: the other impl is at main.my:6:1\n", proc.stderr + "\n")
+                else:
+                    self.assertRegex(proc.stderr, r"\nnote: the other impl is std\.vector32's, at \S*std/vector32\.my:\d+:1\n")
+
+
 class TestARootStdFolderIsRefused(unittest.TestCase):
     def test_it_is_reported_at_the_import(self):
         # D255 (MYLA-790, MYLA-584): a program's own `std/` folder (or
