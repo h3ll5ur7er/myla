@@ -133,5 +133,52 @@ class TestModuleIdCollision(unittest.TestCase):
                 "  --> proj/main.my:2:6\n"), proc.stderr)
 
 
+class TestARootStdFolderIsRefused(unittest.TestCase):
+    def test_it_is_reported_at_the_import(self):
+        # D255 (MYLA-790, MYLA-584): a program's own `std/` folder (or
+        # `std.my`) at its root would be named as the library's modules
+        # are, `std$process`, and got their privileges: an empty `exit` of
+        # its `std/process.my` passed for one that never returns, and its
+        # `std/fmt.my` collided with std.fmt in a build. The loader refuses
+        # it at the import, for every command; a `std/` below the root is
+        # any folder
+        import subprocess
+        from ._tools import STDLIB_ROOT, selfhost_tool
+        cases = (
+            ("std/process.my", "pub fun exit(code: int) { }\n",
+             "from .std.process import exit\nfun f(n: int) -> str {\n    if n > 0 { return \"pos\" }\n    exit(1)\n}\n"
+             "fun main() {\n    print(f(0))\n}\n", ".std.process"),
+            ("std/task.my", "pub fun cancel(x: int) -> int {\n    return x + 1\n}\n",
+             "from .std.task import cancel\nfun main() {\n    print(cancel(1))\n}\n", ".std.task"),
+            ("std/fmt.my", "pub fun fmt_int(a: int) -> int {\n    return a + 1\n}\n",
+             "from .std.fmt import fmt_int\nfun main() {\n    let a = 5\n    print(f\"{a:>4}|{fmt_int(a)}\")\n}\n", ".std.fmt"),
+            ("std.my", "pub fun one() -> int {\n    return 1\n}\n",
+             "from .std import one\nfun main() {\n    print(one())\n}\n", ".std"),
+        )
+        for module, text, main, dotted in cases:
+            for cmd in ("check", "run", "build"):
+                with self.subTest(module=module, cmd=cmd), tempfile.TemporaryDirectory() as tmp:
+                    os.makedirs(os.path.join(tmp, "std"))
+                    write_program(tmp, text, module)
+                    write_program(tmp, main)
+                    argv = [selfhost_tool("main"), cmd, "main.my", "--stdlib", STDLIB_ROOT]
+                    if cmd == "build":
+                        argv += ["-o", "prog"]
+                    proc = subprocess.run(argv, capture_output=True, text=True, cwd=tmp)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertTrue(proc.stderr.startswith(
+                        f"module error: cannot import '{dotted}': a folder or file named 'std' at the program's "
+                        "root is refused, as 'std' is the standard library (rename it)\n"
+                        "  --> main.my:1:6\n"), proc.stderr)
+        # below the root, `std` is a folder like any other
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "sub", "std"))
+            write_program(os.path.join(tmp, "sub", "std"), "pub fun exit(code: int) { }\n", "process.my")
+            write_program(tmp, "from .sub.std.process import exit\nfun main() {\n    exit(1)\n    print(2)\n}\n")
+            proc = subprocess.run([selfhost_tool("main"), "run", "main.my", "--stdlib", STDLIB_ROOT],
+                                  capture_output=True, text=True, cwd=tmp)
+            self.assertEqual((proc.returncode, proc.stdout), (0, "2\n"), proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

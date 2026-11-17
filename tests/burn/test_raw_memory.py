@@ -182,18 +182,20 @@ class RawMemory(unittest.TestCase):
         # MYLA-584: the checker took any function named `std$…` for the
         # library's, so a module of the program's own `std/` (`std$raw`)
         # called a raw-memory primitive with no type error and a `__`
-        # primitive with no warning; it is the program's, as under `other/`
+        # primitive with no warning; it is the program's, as under `other/`.
+        # Since D255 the loader refuses a `std/` at the program's root, so
+        # `sub/std/` stands for it: a folder named `std` below the root
         raw = "pub fun peek(s: str) -> int64 {\n    let p = __addr_of(s)\n    return __load64(p)\n}\n"
         helper = 'pub fun say() {\n    let n = __write(1, "hi\\n")\n}\n'
-        for directory in ("std", "other"):
+        for directory in ("sub/std", "other"):
             with self.subTest(directory=directory), tempfile.TemporaryDirectory() as tmp:
-                os.mkdir(os.path.join(tmp, directory))
+                os.makedirs(os.path.join(tmp, directory))
                 for name, text in (("raw.my", raw), ("helper.my", helper)):
                     with open(os.path.join(tmp, directory, name), "w", encoding="utf-8") as fh:
                         fh.write(text)
                 cases = (
-                    ("raw.my", f"from .{directory}.raw import peek\nfun main() {{\n    print(peek(\"abcdefgh\") != 0)\n}}\n"),
-                    ("helper.my", f"from .{directory}.helper import say\nfun main() {{\n    say()\n}}\n"),
+                    ("raw.my", f"from .{directory.replace('/', '.')}.raw import peek\nfun main() {{\n    print(peek(\"abcdefgh\") != 0)\n}}\n"),
+                    ("helper.my", f"from .{directory.replace('/', '.')}.helper import say\nfun main() {{\n    say()\n}}\n"),
                 )
                 for module, main in cases:
                     path = os.path.join(tmp, "main.my")

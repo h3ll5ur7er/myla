@@ -181,16 +181,18 @@ class ImportedStdBodies(unittest.TestCase):
         # MYLA-413 (C4 of the review of 2026-11-12): laziness goes by the
         # file's root, not by a module id that starts `std$`: a program's own
         # `std/helper.my` is read whole, its type error and its parse error
-        # reported as those of `other/helper.my` are
+        # reported as those of `other/helper.my` are. Since D255 a `std/` at
+        # the program's root is refused, so `sub/std/` stands for it
         bad_type = "pub fun ok() -> int {\n    return 1\n}\n\npub fun broken() -> int {\n    return \"no\"\n}\n"
         bad_parse = "pub fun ok() -> int {\n    return 1\n}\n\npub fun garbled() -> int {\n    let = 1\n    return 2\n}\n"
         for text, want in ((bad_type, "type error: return type mismatch"), (bad_parse, "parse error: expected variable name")):
-            for d in ("std", "other"):
+            for d in ("sub/std", "other"):
                 with self.subTest(dir=d, want=want):
-                    root = os.path.join(self.work, "own_" + d)
+                    own = "own_" + d.replace("/", "_")
+                    root = os.path.join(self.work, own)
                     os.makedirs(os.path.join(root, d), exist_ok=True)
-                    self.write(f"own_{d}/{d}/helper.my", text)
-                    path = self.write(f"own_{d}/main.my", f"from .{d}.helper import ok\n\nfun main() {{\n    print(ok())\n}}\n")
+                    self.write(f"{own}/{d}/helper.my", text)
+                    path = self.write(f"{own}/main.my", f"from .{d.replace('/', '.')}.helper import ok\n\nfun main() {{\n    print(ok())\n}}\n")
                     for cmd in ("check", "run"):
                         proc = self.myla_cmd(cmd, path)
                         self.assertEqual(proc.returncode, 1, (cmd, proc.stdout))
