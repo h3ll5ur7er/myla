@@ -5272,10 +5272,14 @@ impl Lower {
         }
         if !cg.has_func(name) { return self.unsupported("a format spec without std.fmt") }
         let spec = self.expr(cg, sp)
-        if cg.has_func("std$fmt$spec_error") {
-            // a spec that isn't one is the caller's: reported here, as the
-            // interpreter does, not inside std.fmt (D183, MYLA-565)
-            let why = self.call_owning(cg, "std$fmt$spec_error", [spec])
+        if cg.has_func("std$fmt$spec_misfit") {
+            // a spec that isn't one, or doesn't fit the type, is the
+            // caller's: reported here, as the interpreter does, not inside
+            // std.fmt (D183, MYLA-565)
+            let class = match t { Type.TInt(w, sg) => 0, Type.TFloat(w) => 1, _ => 2 }
+            let found = self.temp(Type.TStr)
+            self.add(Inst.Str(found, type_name(t)))
+            let why = self.call_owning(cg, "std$fmt$spec_misfit", [spec, self.int_const(class), found])
             let n = self.temp(Type.TInt(32, true))
             self.add_load(n, why, 0)
             let fine = self.temp(Type.TBool)

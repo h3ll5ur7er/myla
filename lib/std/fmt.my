@@ -110,6 +110,27 @@ pub fun spec_error(s: str) -> str {
     }
 }
 
+// Why `s` isn't a spec for a value of class `class` (`spec_need`'s) and
+// type `found`, "" when it is one that fits: what native code checks at
+// `x.format(spec)` on a builtin `T: Format`, and the interpreter too, so
+// that a spec given at run time that doesn't fit is the caller's runtime
+// error, as a hole's is a type error (the 2026-11-17 review's follow-up of
+// MYLA-565; it was ignored). `spec_error` stays for the seeds' code.
+#test("q", 0, "int32")["invalid format spec 'q'"]
+#test("x", 1, "float64")["the format spec 'x' needs an integer, found 'float64'"]
+#test(".3", 0, "int32")["the format spec '.3' needs a float, found 'int32'"]
+#test("+5", 2, "str")["the format spec '+5' needs a number, found 'str'"]
+#test(">8.2", 1, "float32")[""]
+pub fun spec_misfit(s: str, class: int32, found: str) -> str {
+    let sp = match parse_spec(s) {
+        Ok(sp) => sp
+        Err(why) => { return why }
+    }
+    let need = spec_need(sp, class)
+    if need == "" { return "" }
+    return format("the format spec '{}' {}, found '{}'", s, need, found)
+}
+
 // What the spec `sp` needs that a value of class `class` (0 an integer, 1 a
 // float, 2 text: `str`, `char`, `bool`) isn't, as the checker's message ends
 // ("needs a float"); "" when it fits.

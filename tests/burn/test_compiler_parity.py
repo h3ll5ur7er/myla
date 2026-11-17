@@ -11575,6 +11575,9 @@ class TestCompilerParity(unittest.TestCase):
         for name, text in (("runtime_spec_of_an_int", "invalid format spec 'q'"),
                            ("runtime_spec_of_a_float", "invalid format spec '9999999': a width above 1000000"),
                            ("runtime_spec_of_text", "invalid format spec '.x'"),
+                           ("runtime_spec_misfit_of_a_float", "the format spec 'x' needs an integer, found 'float64'"),
+                           ("runtime_spec_misfit_of_an_int", "the format spec '.3' needs a float, found 'int32'"),
+                           ("runtime_spec_misfit_of_text", "the format spec '+5' needs a number, found 'str'"),
                            ("runtime_spec_with_std_fmt", "invalid format spec '<<<'")):
             with self.subTest(program=name):
                 at = ":3:62\n" if name == "runtime_spec_with_std_fmt" else ":1:62\n"
@@ -11958,6 +11961,14 @@ RUNTIME_ERRORS = {
                                 'fun main() {\n    print(show(2.5, ".1"))\n    print(show(2.5, "9999999"))\n}\n'),
     "runtime_spec_of_text": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
                              'fun main() {\n    print(show("ab", "^4"))\n    print(show(true, ".x"))\n}\n'),
+    # MYLA-792 (the 2026-11-17 review's follow-up of MYLA-565): a spec that
+    # doesn't fit the value's type, ignored on every runner before
+    "runtime_spec_misfit_of_a_float": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                       'fun main() {\n    print(show(2.5, ">5"))\n    print(show(2.5, "x"))\n}\n'),
+    "runtime_spec_misfit_of_an_int": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                      'fun main() {\n    print(show(5, "x"))\n    print(show(5, ".3"))\n}\n'),
+    "runtime_spec_misfit_of_text": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                    'fun main() {\n    print(show(true, "^6"))\n    print(show("s", "+5"))\n}\n'),
     "runtime_spec_with_std_fmt": ('import std.fmt as fmt\n\nfun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
                                   'fun main() {\n    print(fmt.pad("a", ">2"))\n    print(show(\'c\', "<<<"))\n}\n'),
 }
