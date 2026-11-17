@@ -20,7 +20,7 @@ Found by [[MYLA-705]]. The `#test` cases of [[lib/std/process.my]] start `cat`, 
 - **The excuse** of `std.process` on x86_64-windows is gone from `tests/burn/_targets.py`'s `SKIP_PROGRAMS`; wasm32 needs none (its first spawn is `Unsupported`, which each case returns at).
 - **Docs:** [[Language/Standard-library/Test]] (the test tool), [[Language/Standard-library/Rt]] (`test_tool`), the `myla` skill's toolchain reference (`MYLA_TEST_TOOL`).
 
-## Proposals
+## Proposals (accepted 2026-11-17: the first is D249, the second and third stand as written)
 
 1. **The cases' children are the test tool: the program running the cases, in a mode of its own** (built). Natively the harness (`<harness> --test-tool …`), interpreted `myla` (`myla --test-tool …`), found with `__test_tool()`. It needs no build and no file beyond the runner, runs at native speed interpreted too (16 MiB through `zeros | count`), and under Wine the harness's own `Z:\…\harness.exe` path, which the runner already starts its cases by. It costs every harness the tool's code: a program calling `run_in_children` is 109,520 bytes with `tool_mode`, 102,048 without (2026-11-16, this branch).
    - *A helper that std.test builds* (`myla test` compiles a `std/test_tool.my` for the target once a run and gives its path): a build per `myla test` that needs it (a link with lld-link for Windows), a way to tell which files need it, and for the interpreter a native build for the host besides.

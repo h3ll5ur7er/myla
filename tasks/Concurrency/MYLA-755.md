@@ -22,7 +22,7 @@ Not small: in the traced run each of the 16 workers ran about six frames in thos
 
 What it doesn't bound: a run of 64 turns that are short and then become long at once costs at most those 64 long turns before the next read (the read after them sets `every` to 1); a single frame that computes without suspending holds its worker, as before.
 
-## Proposals
+## Proposals (accepted 2026-11-17: D245)
 
 1. **A clock read about every 250 µs of turns, at most every 64, each worker its own** (built): the glance once a millisecond has passed since this worker's last. Alternatives:
    - **The clock at every turn**: the bound needs no adaptation, but on Linux each read is a `clock_gettime` system call (130 ms for a million reads here, `std.time.now_ns()`, 2026-11-16, 0adad44, about 3.5 turns of the executor's): 8 tasks yielding 200,000 times each beside a watched descriptor took 276 ms against 61 ms (median of 9, 1 worker), where this one takes 62.
