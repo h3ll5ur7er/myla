@@ -14,7 +14,8 @@ labels: [examples, http, json]
 
 ## Evidence
 
-- `build/myla test examples/agent.my`: 28/28 passed. `myla run` without a task: the mock conversation lists the notes, reads the two `.txt` files in one turn, writes `summary.md` from what it read, ends; the native build prints the same.
+- `build/myla test examples/agent.my`: 29/29 passed. `myla run` without a task: the mock conversation lists the notes, reads the two `.txt` files in one turn, writes `summary.md` from what it read, ends; the native build prints the same.
 - The HTTPS path against the real API with a dummy key: `failed: authentication_error: invalid x-api-key` (curl's TLS, the headers and the error reading work). No key was available here for a billed run.
 - `python3 -m unittest tests.burn.test_examples_run tests.burn.test_examples_compile tests.burn.test_examples_tests`: 85 tests OK.
-- Not covered: std.http has no TLS, so HTTPS needs curl on the PATH; no streaming (a reply arrives whole).
+- A model served locally that speaks the Messages API: `ANTHROPIC_BASE_URL=http://…` goes through std.http, `AGENT_MODEL` names the model, no key needed, and neither the `fallbacks` field nor its beta header is sent (only to `https://api.anthropic.com`). With nothing listening: `failed: connection failed: ConnectionRefused`, exit 1.
+- Not covered: std.http has no TLS (roadmap #40), so HTTPS needs curl on the PATH; no streaming (a reply arrives whole).

@@ -3,10 +3,12 @@
 //
 //   myla run examples/agent.my "Summarise the notes into summary.md" notes/
 //
-// sends the task to Claude (ANTHROPIC_API_KEY; ANTHROPIC_BASE_URL to change
-// the host), runs each tool it asks for inside the directory, sends the
-// results back, and repeats until it is done. std.http speaks plain HTTP
-// only, so an https URL goes through curl. Without a task it runs offline:
+// sends the task to Claude (ANTHROPIC_API_KEY), runs each tool it asks for
+// inside the directory, sends the results back, and repeats until it is
+// done. ANTHROPIC_BASE_URL=http://localhost:8080 talks to a model served
+// locally that speaks the Messages API instead (AGENT_MODEL names it; no
+// key needed). std.http speaks plain HTTP only, so an https URL goes
+// through curl until std has TLS (roadmap #40). Without a task it runs offline:
 // a scripted stand-in for the API on a local port (`mock_reply`) plays one
 // conversation, so the whole loop runs and is checked by the example tests.
 import std.bytes as bytes
@@ -19,8 +21,10 @@ from std.http import Request
 from std.json import Json
 
 const MODEL: str = "claude-opus-5-5"
+const ANTHROPIC: str = "https://api.anthropic.com"
 const API_VERSION: str = "2026-10-21"
-// on a refusal, the API answers with a fallback model in the same call
+// on a refusal, Anthropic's API answers with a fallback model in the same
+// call; a local server wouldn't know the field, so it gets neither
 const FALLBACK_BETA: str = "server-side-fallback-2026-07-01"
 const MAX_TURNS: int = 20
 const SYSTEM: str = "You work in a directory through the tools. Paths are relative to it. When the task is done, say in one sentence what you did."
@@ -163,16 +167,20 @@ fun results_message(calls: [Call], results: [(str, bool)]) -> str {
 }
 
 // The request: the model, the tools and the whole conversation so far.
-#test(["{\"role\":\"user\",\"content\":\"Hi\"}"])["{\"model\":\"claude-opus-5-5\",\"max_tokens\":16000,\"system\":\"You work in a directory through the tools. Paths are relative to it. When the task is done, say in one sentence what you did.\",\"tools\":[{\"name\":\"list_files\",\"description\":\"List the names in a directory of the workspace; directories end with /.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"name\":\"read_file\",\"description\":\"Read a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"name\":\"write_file\",\"description\":\"Create or replace a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}],\"fallbacks\":\"default\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}"]
-fun request_body(messages: [str]) -> str {
-    return json.to_string(json.obj([
-        ("model", json.text(MODEL)),
+#test("claude-opus-5-5", true, ["{\"role\":\"user\",\"content\":\"Hi\"}"])["{\"model\":\"claude-opus-5-5\",\"max_tokens\":16000,\"system\":\"You work in a directory through the tools. Paths are relative to it. When the task is done, say in one sentence what you did.\",\"tools\":[{\"name\":\"list_files\",\"description\":\"List the names in a directory of the workspace; directories end with /.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"name\":\"read_file\",\"description\":\"Read a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"name\":\"write_file\",\"description\":\"Create or replace a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}],\"fallbacks\":\"default\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}"]
+#test("llama3", false, ["{\"role\":\"user\",\"content\":\"Hi\"}"])["{\"model\":\"llama3\",\"max_tokens\":16000,\"system\":\"You work in a directory through the tools. Paths are relative to it. When the task is done, say in one sentence what you did.\",\"tools\":[{\"name\":\"list_files\",\"description\":\"List the names in a directory of the workspace; directories end with /.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"name\":\"read_file\",\"description\":\"Read a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}},{\"name\":\"write_file\",\"description\":\"Create or replace a text file of the workspace.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}],\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}"]
+fun request_body(model: str, fallbacks: bool, messages: [str]) -> str {
+    var fields = [
+        ("model", json.text(model)),
         ("max_tokens", Json.Int(16000)),
         ("system", json.text(SYSTEM)),
         ("tools", json.arr(tools().map((t: str) => json.parse(t).unwrap_or(Json.Null)))),
-        ("fallbacks", json.text("default")),
-        ("messages", json.arr(messages.map((m: str) => json.parse(m).unwrap_or(Json.Null)))),
-    ]))
+    ]
+    if fallbacks {
+        fields.push(("fallbacks", json.text("default")))
+    }
+    fields.push(("messages", json.arr(messages.map((m: str) => json.parse(m).unwrap_or(Json.Null)))))
+    return json.to_string(json.obj(fields))
 }
 
 // A reply read: its stop reason, text and tool calls, or the API's error.
@@ -213,7 +221,6 @@ async fun post(base: str, key: str, body: str) -> Result<str, str> {
             .with_header("content-type", "application/json")
             .with_header("x-api-key", key)
             .with_header("anthropic-version", API_VERSION)
-            .with_header("anthropic-beta", FALLBACK_BETA)
             .with_body(body))
         return match await http.send_async(req) {
             Ok(resp) => Ok(resp.text())
@@ -223,7 +230,8 @@ async fun post(base: str, key: str, body: str) -> Result<str, str> {
     let (path, f) = fs.make_temp_file().map_err((e: fs.IoError) => f"{e}")?
     var file = f
     let closed = file.close()
-    let headers = f"content-type: application/json\nx-api-key: {key}\nanthropic-version: {API_VERSION}\nanthropic-beta: {FALLBACK_BETA}\n"
+    let beta = if base == ANTHROPIC { f"anthropic-beta: {FALLBACK_BETA}\n" } else { "" }
+    let headers = f"content-type: application/json\nx-api-key: {key}\nanthropic-version: {API_VERSION}\n{beta}"
     fs.write_to_file(path, headers).map_err((e: fs.IoError) => f"{e}")?
     let out = await process.command("curl").args(["-sS", "-X", "POST", url, "-H", f"@{path}", "--data-binary", "@-"]).stdin(body).output_async()
     let removed = fs.remove_file(path)
@@ -234,10 +242,10 @@ async fun post(base: str, key: str, body: str) -> Result<str, str> {
 }
 
 // The loop: ask, run the tools Claude asks for, answer, until it's done.
-async fun run_agent(base: str, key: str, root: str, task: str) -> Result<str, str> {
+async fun run_agent(base: str, key: str, model: str, root: str, task: str) -> Result<str, str> {
     var messages = [user_message(task)]
     for n in 0..MAX_TURNS {
-        let reply = await post(base, key, request_body(messages))
+        let reply = await post(base, key, request_body(model, base == ANTHROPIC, messages))
         let turn = read_turn(reply?)?
         messages.push(assistant_message(turn.content))
         if turn.text != "" {
@@ -323,7 +331,7 @@ async fun demo() -> Result<str, str> {
     var l = net.listen(net.addr(net.loopback(), 0)).map_err((e: fs.IoError) => f"{e}")?
     let port = l.local_addr().map_err((e: fs.IoError) => f"{e}")?.port
     async let server = http.serve_n(l, 4, (r: Request) => http.response(200, mock_reply(r.text())).with_header("content-type", "application/json"))
-    let answer = await run_agent(f"http://127.0.0.1:{port}", "demo", root, "Summarise the notes into summary.md.")
+    let answer = await run_agent(f"http://127.0.0.1:{port}", "demo", MODEL, root, "Summarise the notes into summary.md.")
     let served = await server
     let closed = l.close()
     let written = fs.read_to_string(f"{root}/summary.md").unwrap_or("(nothing)")
@@ -343,17 +351,22 @@ async fun main() {
         }
         return
     }
+    let base = process.env("ANTHROPIC_BASE_URL").unwrap_or(ANTHROPIC)
+    let model = process.env("AGENT_MODEL").unwrap_or(MODEL)
+    // a local server usually takes any key
     let key = match process.env("ANTHROPIC_API_KEY") {
         Some(k) => k
         None => {
-            print("set ANTHROPIC_API_KEY first")
-            process.exit(2)
-            return
+            if base == ANTHROPIC {
+                print("set ANTHROPIC_API_KEY first")
+                process.exit(2)
+                return
+            }
+            "local"
         }
     }
-    let base = process.env("ANTHROPIC_BASE_URL").unwrap_or("https://api.anthropic.com")
     let root = if argv.len() > 2 { argv[2] } else { "." }
-    match await run_agent(base, key, root, argv[1]) {
+    match await run_agent(base, key, model, root, argv[1]) {
         Ok(a) => print("done")
         Err(e) => {
             print(f"failed: {e}")
