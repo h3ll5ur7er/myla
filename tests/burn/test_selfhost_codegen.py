@@ -2050,7 +2050,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
         emptied goes back to its ring's start. The program reads its own
         resident size (a peak through the harness counts its parent's
         memory before the exec); on wasm32 the ring is part of the linear
-        memory from the start, whose peak is bounded."""
+        memory from the start, whose peak is bounded. Three callers at once
+        keep the queue from draining: a short queue that drifted is moved
+        back to its ring's start (MYLA-791)."""
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "calls.my")
             with open(path, "w", encoding="utf-8") as fh:
@@ -2067,13 +2069,14 @@ class SelfHostedCodegenParity(unittest.TestCase):
                             del os.environ["MYLA_THREADS"]
                         else:
                             os.environ["MYLA_THREADS"] = old
-                    total, grown = out.split()
-                    self.assertEqual((total, code), ("1000000", 0))
+                    total, grown, three, grown3 = out.split()
+                    self.assertEqual((total, three, code), ("1000000", "1000000", 0))
                     if TEST_TARGET == "wasm32-wasi":
                         # (/proc there is Node's own)
                         self.assertLess(peak, 64, f"peak {peak:.1f} MB")
                     else:
                         self.assertLess(int(grown), 1024, f"{threads} workers: {grown} kB more resident")
+                        self.assertLess(int(grown3), 1024, f"{threads} workers, 3 callers: {grown3} kB more resident")
 
     def test_deep_values_are_released_in_a_bounded_stack(self) -> None:
         """MYLA-389: a value nested 100,000 deep through an enum held in a
@@ -2475,6 +2478,14 @@ async fun main() {
     let after = resident_kb()
     print(t)
     print(if before < 0 || after < 0 { -1 } else { after - before })
+    // three callers at once: the queue never drains (MYLA-791)
+    async let x = calls(b, 333000)
+    async let y = calls(b, 333000)
+    async let z = calls(b, 334000)
+    let three = await x + await y + await z
+    let after3 = resident_kb()
+    print(three)
+    print(if after < 0 || after3 < 0 { -1 } else { after3 - after })
 }
 """
 
