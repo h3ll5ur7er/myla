@@ -1,0 +1,13 @@
+type error: unknown type 'Nope'
+  --> examples/errors/type_op_impl_unresolved_argument.my:12:10
+   |
+12 | impl Mul<Nope> for V {
+   |          ^^^^
+
+type error: unknown type 'Nope'
+  --> examples/errors/type_op_impl_unresolved_argument.my:18:10
+   |
+18 | impl Mul<Nope> for V {
+   |          ^^^^
+
+error: aborting due to 2 previous errors

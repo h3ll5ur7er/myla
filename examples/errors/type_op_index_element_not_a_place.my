@@ -1,0 +1,31 @@
+//~ type error: an element of 'G' is not a place: its 'Index' impl gives a value, which can't be changed in place
+//~ span: g[0]
+//~ help: read it into a 'var', change that, and assign it back by 'IndexSet' ('x[i] = v')
+// `g[0].a = 5` on a type with `Index` and `IndexSet` (D200): the element
+// is the value `index` returns, not a place to change. It said "type 'G'
+// is not a list and cannot be indexed".
+struct P {
+    a: int,
+}
+
+struct G {
+    cells: [P],
+}
+
+impl Index<int, P> for G {
+    fun index(self, i: int) -> P {
+        return self.cells[i]
+    }
+}
+
+impl IndexSet<int, P> for G {
+    fun set_index(var self, i: int, v: P) {
+        self.cells[i] = v
+    }
+}
+
+fun main() {
+    var g = G { cells: [P { a: 1 }] }
+    g[0].a = 5
+    print(g[0].a)
+}

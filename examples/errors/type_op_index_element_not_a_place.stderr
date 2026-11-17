@@ -1,0 +1,6 @@
+type error: an element of 'G' is not a place: its 'Index' impl gives a value, which can't be changed in place
+  --> examples/errors/type_op_index_element_not_a_place.my:29:6
+   |
+29 |     g[0].a = 5
+   |     ^^^^
+help: read it into a 'var', change that, and assign it back by 'IndexSet' ('x[i] = v')

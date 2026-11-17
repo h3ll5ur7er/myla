@@ -1081,6 +1081,29 @@ pub fun op_method_name(m: str, r: Type, r_self: bool) -> str {
     return m + "$" + if r_self { "self" } else { type_token(r) }
 }
 
+// A trait's method `m` as a program wrote it: an operator method without
+// the right operand's type that names it beside the trait's others (D200),
+// `mul` of `mul$float64`.
+#test("mul$float64")["mul"]
+#test("set_index$int32")["set_index"]
+#test("next")["next"]
+fun written_method(m: str) -> str {
+    var i = 0
+    while i < m.len() {
+        if m[i] == '$' { return m[:i] }
+        i += 1
+    }
+    return m
+}
+
+// `written_method` of each of `ms`.
+#test(["mul$float64", "neg"])[["mul", "neg"]]
+fun written_methods(ms: [str]) -> [str] {
+    var out: [str] = []
+    for m in ms { out.push(written_method(m)) }
+    return out
+}
+
 // The type a right operand (or index) `x` is read with beside impls taking
 // the right operands `rs` (D200): the only one's; for a number literal, the
 // only one of its kind, so `v * 2.0` picks `Mul<float32, …>` beside a
@@ -3893,7 +3916,13 @@ impl Checker {
                         }
                     }
                     // an operator's impl by its type arguments (D200): one per
-                    // right operand's type, its method named by that type
+                    // right operand's type, its method named by that type; one
+                    // whose argument didn't resolve has had its error, and is
+                    // left out rather than compared with the others
+                    if is_op_trait(tn) && conforms && target_ok && list_has_error(trait_args) {
+                        self.lose_impl(methods, trait_name)
+                        return Ok(0)
+                    }
                     if is_op_trait(tn) && conforms && target_ok {
                         match self.op_impl_kind(ln, cl, sp, tn, target, key, trait_args) {
                             Ok(k) => { op_kind = k },
@@ -4166,7 +4195,7 @@ impl Checker {
             if !contains_str(impl_names, tm.name) && !contains_str(missing, tm.name) { missing.push(tm.name) }
         }
         if missing.len() > 0 {
-            return Err(terr_at(ln, cl, sp, format("impl of trait '{}' for '{}' is missing method(s): {}", trinfo.name, key, join_strs(sorted_strs(missing), ", "))))
+            return Err(terr_at(ln, cl, sp, format("impl of trait '{}' for '{}' is missing method(s): {}", trinfo.name, key, join_strs(sorted_strs(written_methods(missing)), ", "))))
         }
         // extra: impl methods not declared by the trait
         var extra: [str] = []
@@ -4176,7 +4205,7 @@ impl Checker {
             if !in_trait && !contains_str(extra, nm) { extra.push(nm) }
         }
         if extra.len() > 0 {
-            return Err(terr_at(ln, cl, sp, format("impl of trait '{}' for '{}' declares method(s) not in the trait: {}", trinfo.name, key, join_strs(sorted_strs(extra), ", "))))
+            return Err(terr_at(ln, cl, sp, format("impl of trait '{}' for '{}' declares method(s) not in the trait: {}", trinfo.name, key, join_strs(sorted_strs(written_methods(extra)), ", "))))
         }
         var broken = false
         for tm in trinfo.methods {
@@ -4187,12 +4216,16 @@ impl Checker {
             }
             let sig = match sig_opt { Some(x) => x, None => { return Ok(false) } }
             let recv = match sig.decl.receiver { Some(r) => r, None => "" }
+            let mn = written_method(tm.name)
             if recv != tm.receiver {
                 // a function without `self` (D172) on one side
-                if recv == "" { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("'{}' in impl of trait '{}' for '{}' has no receiver but the trait declares '{}'", tm.name, trinfo.name, key, tm.receiver))) }
-                if tm.receiver == "" { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares a function without 'self'", tm.name, trinfo.name, key, recv))) }
-                return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares '{}'", tm.name, trinfo.name, key, recv, tm.receiver)))
+                if recv == "" { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("'{}' in impl of trait '{}' for '{}' has no receiver but the trait declares '{}'", mn, trinfo.name, key, tm.receiver))) }
+                if tm.receiver == "" { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares a function without 'self'", mn, trinfo.name, key, recv))) }
+                return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares '{}'", mn, trinfo.name, key, recv, tm.receiver)))
             }
+            // a trait's method is called without `await`, by an operator, a
+            // bound or a format hole: it can't suspend (D256, until MYLA-434)
+            if sig.decl.is_async { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' can't be 'async': the trait's method isn't, and it is called without 'await'", mn, trinfo.name, key))) }
             var exp_params: [Type] = []
             for p in tm.params { exp_params.push(subst_self(p, target, pmap)) }
             let exp_ret = opt_subst_self(tm.ret, target, pmap)
@@ -4207,7 +4240,7 @@ impl Checker {
                     rest.push(exp_params[k])
                     k = k + 1
                 }
-                return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' does not match the trait signature (expected '({}) -> {}')", tm.name, trinfo.name, key, type_names(rest), opt_type_name(exp_ret))))
+                return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' does not match the trait signature (expected '({}) -> {}')", mn, trinfo.name, key, type_names(rest), opt_type_name(exp_ret))))
             }
         }
         return Ok(!broken)
@@ -4909,7 +4942,18 @@ impl Checker {
                 Some(ct) => { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}': {}", op, type_name(lt), self.not_trait_why(ct.0, ct.1)))) },
                 None => {},
             }
-            return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}': it needs 'impl {} for {}'{}", op, type_name(lt), trnm, type_name(lt), if_str(trnm == "Eq", " (or '#derive(Eq)')", ""))))
+            // the impl the right operand asks for, `impl Div<float64> for V`
+            // for `v / 2.0` (D200)
+            var wanted = trnm
+            if kind == "arith" {
+                // (a right operand that doesn't type leaves the classic one)
+                let rt = match known_rt {
+                    Some(t) => t,
+                    None => match self.expect_value(r, None) { Ok(t) => t, Err(x) => lt },
+                }
+                if !type_eq(rt, lt) && !has_error(rt) { wanted = format("{}<{}>", trnm, type_name(rt)) }
+            }
+            return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}': it needs 'impl {} for {}'{}", op, type_name(lt), wanted, type_name(lt), if_str(trnm == "Eq", " (or '#derive(Eq)')", ""))))
         }
         // the left side's type for the right one's, `opt == None` (MYLA-379)
         let rt = match known_rt {
@@ -7804,6 +7848,9 @@ impl Checker {
                         if !is_int(it) { return Err(terr_at(index.line, index.col, index.sp, format("list index must be an integer, found '{}'", type_name(it)))) }
                         Ok(LValue { ty: el, mutable: base.mutable })
                     },
+                    // `g[0].a = 5` on a type with `Index` (D200): its element
+                    // is a value the impl gives, not a place
+                    _ if is_struct_or_enum(base.ty) || is_type_param(base.ty) => Err(with_notes(terr_at(e.line, e.col, e.sp, format("an element of '{}' is not a place: its 'Index' impl gives a value, which can't be changed in place", type_name(base.ty))), [Note { label: "help", msg: "read it into a 'var', change that, and assign it back by 'IndexSet' ('x[i] = v')", line: 0, col: 0, sp: no_span() }])),
                     _ => Err(terr_at(e.line, e.col, e.sp, format("type '{}' is not a list and cannot be indexed with `[...]`", type_name(base.ty)))),
                 }
             },
@@ -9764,6 +9811,10 @@ impl Checker {
     fun check_track_caller(var self, fd: FunData, attr: Attribute, key: str) -> Result<int32, CheckErr> {
         let none = match attr.outputs { Some(x) => false, None => true }
         if attr.args.len() > 0 || !none { return Err(terr_at(attr.line, attr.col, attr.sp, "'#track_caller' takes no arguments")) }
+        match track_attr(fd.attributes) {
+            Some(first) => { if first.line != attr.line || first.col != attr.col { return Err(terr_at(attr.line, attr.col, attr.sp, "'#track_caller' is given twice: it stands on a function once")) } },
+            None => {},
+        }
         if key != "" && self.actors.contains(key) { return Err(terr_at(attr.line, attr.col, attr.sp, "'#track_caller' can't stand on an actor's method")) }
         if fd.is_async { return Err(terr_at(attr.line, attr.col, attr.sp, "'#track_caller' can't stand on an async function")) }
         return Ok(0)

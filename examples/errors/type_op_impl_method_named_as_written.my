@@ -1,0 +1,12 @@
+//~ type error: method 'set_index' in impl of trait 'IndexSet' for 'G' does not match the trait signature (expected '(int32, int32) -> ()')
+//~ span: fun set_index(var self, i: int, v: str) { }
+// A message names an operator impl's method as the program wrote it,
+// `set_index`, not by the name that tells it from the trait's others
+// (`set_index$int32`, D200).
+struct G {
+    c: [int],
+}
+
+impl IndexSet<int, int> for G {
+    fun set_index(var self, i: int, v: str) { }
+}

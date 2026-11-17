@@ -1,0 +1,24 @@
+//~ type error: method 'add' in impl of trait 'Add' for 'V' can't be 'async': the trait's method isn't, and it is called without 'await'
+//~ span: async fun add(self, k: V) -> V {
+// A trait's method is called without `await` (by `+` here, by a bound or a
+// format hole elsewhere), so its impl can't make it `async` (D256, until
+// MYLA-434 designs async trait methods). `v + v` called the async `add`
+// from plain code: 6 interpreted, a crash natively, an internal error on
+// wasm32.
+import std.task as task
+
+struct V {
+    x: float,
+}
+
+impl Add for V {
+    async fun add(self, k: V) -> V {
+        await task.sleep(1)
+        return V { x: self.x + k.x }
+    }
+}
+
+fun main() {
+    let v = V { x: 3.0 }
+    print((v + v).x)
+}
