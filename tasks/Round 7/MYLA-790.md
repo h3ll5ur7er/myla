@@ -42,7 +42,7 @@ Work package of [[Project/Review-2026-11-17]], lane "Checker" (section 5). Files
   - `tests/burn/test_raw_memory.py` and `tests/burn/test_lazy_std.py` (MYLA-584's and MYLA-413's own-`std/` tests) use `sub/std/`, as D255 refuses a root `std/`.
   - `#test` cases: `op_bound_failing`, `written_method` ×3, `written_methods`, `literal_compound` ×5, `is_some_call` ×2, `Loader.own_std` ×4. `myla test selfhost/checker.my`: 1,049 of 1,049 before the last cases, all pass after; `selfhost/loader.my`: 174 of 174 (+4).
 - **The review's literal generator** (`repro-r6/checker/generators/R6c_p_lit_gen.py`, run with this branch's toolchain and with `tuple_eq` and `opt_eq` counted, which the reviewer left out as known): 4,108 cases: at BASE 142 wrong (71 `tuple_eq` and 71 `opt_eq`, a literal that fits `int64` refused beside an `int64`), on this branch 0 wrong.
-- **Suites**: see the section below, filled in at the end of the lane.
+- **Suites** (at `4fdf37e`): `scripts/bootstrap.sh` reaches its byte-identical fixed point and `scripts/check-seed.sh` passes (the seeds unchanged: nothing staged); `scripts/test.sh fast` 1,039 tests OK (7 skipped); the slow suites `test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_lsp`, `test_operator_traits`, `test_modules`, `test_raw_memory`, `test_lazy_std`, `test_doc_blocks`, `test_linalg`: 877 OK; `scripts/test.sh` (all) 1,809 tests OK (390 skipped, the targets without their emulators here). The change is the checker's and the loader's only, so no other target was run.
 
 ## Proposals
 
