@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import unittest
 
+from ._native import CAN_BUILD_NATIVE
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 PROGRAM = """fun first(n: int) -> str {
@@ -121,6 +122,39 @@ class LabelsPerFunction(unittest.TestCase):
         # a string literal by its text, a float constant by its bits
         self.assertRegex(asm, r"\.Lstr[0-9a-z]{7}:")
         self.assertRegex(asm, r"\.Lfc3ff8000000000000:\n\t\.quad 4609434218613702656\n")   # 1.5
+
+    def test_no_other_label_reads_as_a_functions(self) -> None:
+        # M5 (MYLA-810): a label of the runtime's, or any other that isn't a
+        # function's, never has a function's form, `.L<name>_<n>`,
+        # `.L<name>_p<n>` or `.L<name>_ret`, with `<name>` one a program's
+        # function could have: a function named `segv` didn't assemble, its
+        # epilogue being the runtime's `.Lsegv_ret` (and `win_ctrl` on Windows)
+        for target in ("x86_64-linux", "aarch64-linux", "x86_64-windows"):
+            with self.subTest(target=target):
+                asm = self.assembly(PROGRAM, target)
+                own = set(functions(asm))
+                for lab in re.findall(r"^(\.L[^\s:]+):", asm, re.M):
+                    m = re.match(r"\.L([A-Za-z_][A-Za-z0-9_]*)_(\d+|p\d+|ret)$", lab)
+                    if m:
+                        self.assertTrue("myla_" + m.group(1) in own, lab)
+
+    def test_a_function_may_be_named_like_a_runtime_label(self) -> None:
+        # M5 (MYLA-810): `.Lsegv_ret` was the runtime's too
+        src = ("fun segv(n: int) -> int {\n    if n > 10 { return n }\n    return segv(n + 1) + 1\n}\n"
+               "fun win_ctrl(n: int) -> int {\n    if n > 1 { return n }\n    return win_ctrl(n + 1)\n}\n"
+               "fun main() {\n    print(segv(1))\n    print(win_ctrl(0))\n}\n")
+        path = os.path.join(self._tmp.name, "segv.my")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(src)
+        for target in ("x86_64-linux", "aarch64-linux", "x86_64-windows"):
+            with self.subTest(target=target):
+                exe = os.path.join(self._tmp.name, "segv-" + target)
+                proc = subprocess.run([selfhost_tool("main"), "build", path, "-o", exe, "--stdlib", STDLIB_ROOT,
+                                       "--target", target], capture_output=True, text=True, timeout=600)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+        if CAN_BUILD_NATIVE:
+            out = subprocess.run([os.path.join(self._tmp.name, "segv-x86_64-linux")], capture_output=True, text=True)
+            self.assertEqual((out.stdout, out.returncode), ("21\n2\n", 0))
 
 if __name__ == "__main__":
     unittest.main()

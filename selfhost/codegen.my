@@ -1186,7 +1186,8 @@ impl CodeGen {
     // whose label it is; "" for none (outside a function). A mangled name
     // is a symbol's (`myla_<name>`) and a suffix has no `_`, so a label
     // reads back to one function, and to none of the runtime's named labels
-    // (`.Lsw_next`, `.Lstr_true`).
+    // (`.Lsw_next`, `.Lstr_true`), none of which ends in `_ret` or a
+    // number (`.Lsegv_done`; test_label_names checks it, MYLA-810).
     #test(codegen_on("[int]"), "")[()]
     fun begin_labels(var self, mangled: str) {
         self.label_fn = mangled
