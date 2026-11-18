@@ -178,7 +178,7 @@ The built-in types:
 | --- | --- | --- |
 | `int8` … `int64`, `uint8` … `uint32` | a number | an `Int`, or a whole `Float` (`2.0`, `1e3`), in the type's range: `128` for an `int8` is `OutOfRange`, `1.5` `WrongType` |
 | `uint64` | a number; above `int64`'s range the nearest float, `1.8446744073709552e+19` | the same, or a whole `Float` below 2^64. Above 2^63 only a value a float64 holds (a multiple of 2048) comes back as itself: `decode` refuses an integer in the text that would lose its low bits, and the largest values, whose float is 2^64, are out of range; but `encode` of `9223372036854775809` writes the float `9.223372036854776e+18`, which reads back as `9223372036854775808` ([[MYLA-424]]) |
-| `float64`, `float32` | a number; NaN and the infinities `null` | a `Float` or an `Int`; `null` is `WrongType`, a finite number beyond `float32`'s range `OutOfRange`. A `float32` is written in its shortest form, `0.1` and not `0.10000000149011612` |
+| `float64`, `float32` | a number; NaN and the infinities `null` | a `Float` or an `Int`; `null` is NaN, so a NaN reads back and an infinity comes back as NaN ([[MYLA-851]], as a vector's component, D291); a finite number beyond `float32`'s range `OutOfRange`. A `float32` is written in its shortest form, `0.1` and not `0.10000000149011612` |
 | `bool`, `str` | `true`/`false`, a string | the same |
 | `char` | a string of the one character | a string of exactly one character |
 | `[T]` | an array | an array, each item's index in an error's path |
