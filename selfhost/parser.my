@@ -53,13 +53,24 @@ pub struct BodySite { line: int32, col: int32, start: int32, end: int32, first_i
 // Python parser's MAX_NESTING): past it, a parse error, not a stack overflow.
 const MAX_NESTING: int32 = 256
 
-// How many binary operators, casts, calls, indexes and fields an expression
-// may have outside its brackets, with those of the expressions it is in
-// (`Parser.chain`): `a + b + …` and `s.f().g()…` make their left operand a
-// level deeper each, a tree as deep as they are long, which the checker and
-// the rest walk recursively, so past it a parse error, not a stack overflow
-// (MYLA-545: 16,000 `&&` overflowed the checker's stack, 12,000 didn't).
-const MAX_CHAIN: int32 = 8192
+// How many binary operators, casts, calls, indexes, fields and `else if`
+// arms an expression may have outside its brackets, with those of the
+// expressions it is in (`Parser.chain`): `a + b + …`, `s.f().g()…`, `x |> f
+// |> g …` and `else if` make their left operand or their next arm a level
+// deeper each, a tree as deep as they are long, which the checker and the
+// rest walk recursively, so past it a parse error, not a stack overflow
+// (MYLA-545). It holds for the tools of both Linux targets with room: the
+// checker built for aarch64 overflowed its 120 MiB at 4,187 `&&`, 1,388
+// method calls and 1,593 `|> f` (x86-64's at 12,625, 4,144 and 4,781; M10
+// of the review of 2026-11-17, where 8,192 let 6,000 `|> id` through).
+const MAX_CHAIN: int32 = 2048
+
+// What a call and a `|>` count towards `MAX_CHAIN` (an operator, cast,
+// index, field or `else if` arm counts 1): a level of each takes the
+// checker's walk about that many times the stack a binary operator's does,
+// on both targets (M10).
+const CALL_WEIGHT: int32 = 2
+const PIPE_WEIGHT: int32 = 3
 
 
 #test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false, skip_tests: false, sites: [], elems: false, chain: 0 }]
@@ -627,8 +638,17 @@ impl Parser {
     // pair of a load and a store an expression: a pair for each level of
     // precedence was 0.25 percent of a check (MYLA-545).
     fun chained(var self, op: Token) {
-        self.chain += 1
-        if self.chain > MAX_CHAIN { self.fail_at(op, format("more than {} operators, calls and fields in one expression: split it with a 'let'", MAX_CHAIN)) }
+        self.chained_by(op, 1)
+    }
+
+    // `op` counted `weight` times: a level of the tree that costs the
+    // checker's walk that many times the stack an operator's does (a call 2,
+    // a `|>` 3; M10 of the review of 2026-11-17).
+    fun chained_by(var self, op: Token, weight: int32) {
+        self.chain += weight
+        if self.chain > MAX_CHAIN {
+            self.fail_at(op, format("more than {} operators, calls, fields and 'else if' arms in one expression (a call counts two, a '|>' three): split it with a 'let' or a 'match'", MAX_CHAIN))
+        }
     }
 
     fun fail_at(var self, tok: Token, msg: str) {
@@ -1553,9 +1573,14 @@ impl Parser {
         var otherwise: Option<ElseTail> = None
         let saved = self.pos
         self.skip_newlines()
-        if self.match1(TokenKind.ELSE) {
+        if self.check(TokenKind.ELSE) {
+            let el = self.advance()
             if self.check(TokenKind.IF) {
+                // each `else if` nests the next arm a level deeper (M10)
+                let chain = self.chain
+                self.chained(el)
                 otherwise = Some(ElseTail.ElseIf(self.if_stmt()))
+                self.chain = chain
             } else {
                 otherwise = Some(ElseTail.ElseBlock(self.block()))
             }
@@ -1621,9 +1646,13 @@ impl Parser {
         var otherwise = ExprOrBlock.EB_Block(Block { line: then.line, col: then.col, sp: then.sp, stmts: [] })
         let saved = self.pos
         self.skip_newlines()
-        if self.match1(TokenKind.ELSE) {
+        if self.check(TokenKind.ELSE) {
+            let el = self.advance()
             if self.check(TokenKind.IF) {
+                let chain = self.chain
+                self.chained(el)
                 let chained = self.if_stmt()
+                self.chain = chain
                 otherwise = ExprOrBlock.EB_Block(self.valued(Block { line: chained.line, col: chained.col, sp: chained.sp, stmts: [chained] }))
             } else {
                 otherwise = ExprOrBlock.EB_Block(self.valued(self.block()))
@@ -1904,7 +1933,7 @@ impl Parser {
         while self.check(TokenKind.PIPEGT) {
             let op = self.advance()
             let rhs = self.logic_or()
-            self.chained(op)
+            self.chained_by(op, PIPE_WEIGHT)
             let spliced = match rhs.kind {
                 ExprKind.Call(callee, args, targs) => ExprKind.Call(callee, cons_expr(expr, args), targs),
                 _ => ExprKind.Call(rhs, [expr], []),
@@ -2151,7 +2180,7 @@ impl Parser {
                 let args = self.call_args()
                 self.expect(TokenKind.RPAREN, "')'")
                 expr = self.mk_expr_at(st, lp.line, lp.column, ExprKind.Call(expr, args, []))
-                self.chained(lp)
+                self.chained_by(lp, CALL_WEIGHT)
             } else if self.check(TokenKind.LBRACKET) {
                 let lb = self.advance()
                 let index = self.index_or_slice(lb)
@@ -2185,7 +2214,7 @@ impl Parser {
                         let args = self.call_args()
                         self.expect(TokenKind.RPAREN, "')'")
                         expr = self.mk_expr_at(st, lp.line, lp.column, ExprKind.Call(expr, args, targs))
-                        self.chained(lp)
+                        self.chained_by(lp, CALL_WEIGHT)
                     },
                     None => {
                         // `Box<int>.zero()`: a generic type's function is
@@ -2310,6 +2339,9 @@ impl Parser {
         let el = self.advance()
         var otherwise = ExprOrBlock.EB_Block(then)
         if self.check(TokenKind.IF) {
+            // each `else if` nests the next arm a level deeper (M10), given
+            // back with the expression the `if` is in
+            self.chained(el)
             otherwise = ExprOrBlock.EB_Expr(self.if_expr())
         } else {
             otherwise = ExprOrBlock.EB_Block(self.valued(self.block()))
@@ -2325,9 +2357,10 @@ impl Parser {
         if !self.check(TokenKind.ELSE) {
             self.fail_at(kw, "an 'if' used as a value needs an 'else'")
         }
-        self.skip()
+        let el = self.advance()
         var otherwise = ExprOrBlock.EB_Block(then)
         if self.check(TokenKind.IF) {
+            self.chained(el)
             otherwise = ExprOrBlock.EB_Expr(self.if_expr())
         } else {
             otherwise = ExprOrBlock.EB_Block(self.valued(self.block()))

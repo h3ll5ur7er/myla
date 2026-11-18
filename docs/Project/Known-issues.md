@@ -11,7 +11,7 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 - **Interpreter:** `myla run` of an empty program costs 29.3 M instructions where it cost 24.0 M at round 5 (35.7 M before its constants were evaluated when first named, 2026-11-17 on `fe30af6`, [[MYLA-792]]); most of the rest is the implicit `std.float`'s ([[MYLA-796]]).
 - `--checked` int64 arithmetic is twice as slow by time in hot loops on x86-64 (`s += i * 3 - (i >> 1)`: 0.22 s against 0.11 s plain, 0.25 s with the trap inline on the same machine, where the review measured 0.62 s against 0.12 s): each check is now a `jo` to its trap after the function's return, one not-taken branch per operation ([[MYLA-551]]).
 - **Build, polymorphic recursion:** a finite program that wraps a type already 64 deep once more (`wrap([x])` of a 64-deep `x`) checks and runs, but `myla build` refuses it as 65 types deep ([[MYLA-624]]).
-- **Loading:** text that starts `#test` inside a function body of an imported module is skipped unparsed; 6,000 `|> id` overflow the compiler's stack ([[MYLA-793]]). A hello world's check costs 25.4 M instructions where it cost 20.7 M before the implicit `std.float`, and no test bounds it ([[MYLA-585]], [[MYLA-793]]).
+- **Loading:** a hello world's check costs 25.4 M instructions where it cost 20.7 M before the implicit `std.float` ([[MYLA-585]]); `tests/burn/test_check_cost.py` bounds it and the run's, with 10 percent of headroom ([[MYLA-793]]). The wasm32 tools' checker (the playground's) overflows its stack at about 530 `&&` in one expression, under the parse limit of 2,048 ([[MYLA-826]]).
 
 ## Backends and platforms
 
