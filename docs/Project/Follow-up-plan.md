@@ -141,3 +141,23 @@ Eight decisions are the owner's (section 4 of the review), taken on 2026-11-17 a
 They run in two waves on the 4 CPUs of the machine that integrates them: first the checker, lowering, interpreter, HTTP and Windows lanes, then the parser and loader, router, numerics, XML and docs lanes. The website lane waits: another agent works on the website meanwhile.
 
 Left for later, as before: [[MYLA-433]], [[MYLA-434]], [[MYLA-504]], [[MYLA-530]], [[MYLA-531]], [[MYLA-377]], [[MYLA-317]], [[MYLA-368]], and [[MYLA-885]] (the poller in Myla's terms, the box [[MYLA-716]] left). Part 2 of the review of 9 November, the whole-codebase pass, is still to come.
+
+## Round 7's follow-ups (2026-11-18)
+
+What round 7 left open, grouped by the files it touches so that lanes running side by side merge with few conflicts. Master's x86_64-windows suites and its `windows` job were red after round 7's merges, so the concurrency and Windows lane comes first and is merged on its own. Its causes: a hang under Wine ([[MYLA-759]]) and the last of 20 HTTP requests lost on real Windows ([[MYLA-863]]). The Wine prefix's setup, also part of it, is fixed before the wave (PR #83).
+
+**Wave 1**, five lanes side by side:
+
+| Lane | Tasks | Files | Shares, by function, with |
+| --- | --- | --- | --- |
+| Concurrency and Windows CI | [[MYLA-759]], [[MYLA-863]], [[MYLA-781]], [[MYLA-861]], [[MYLA-819]]'s Windows part (job objects), [[MYLA-745]] | `lib/std/rt.my` (the executor, `await`), `platform_windows.my` (the heap, the poller), `http.my`'s `serve_with` and `Tally`, `tests/burn` | rt.my with Numerics; platform_windows.my with Linux platform; interp.my's `await` with Interpreter |
+| Interpreter and harness | [[MYLA-817]], [[MYLA-818]], [[MYLA-819]]'s Linux part | `selfhost/interp.my`, `harness.my`, `driver.my`, `main.my`, `lib/std/test.my` | interp.my with both others |
+| Compiler | [[MYLA-802]], [[MYLA-826]] | `selfhost/checker.my`, `ir_a64.my`; the wasm32 tools' stack (`tools/wasm/`, the website's agent's) | |
+| Numerics | [[MYLA-843]], [[MYLA-849]], [[MYLA-850]], [[MYLA-851]] | `lib/std/num.my`, `hash.my`, `json.my`, `scripts/gen_std_linalg.py`; rt.my's float printing; interp.my and lower.my for a caller's position | rt.my |
+| Linux platform | [[MYLA-758]], [[MYLA-862]] | `platform.my` and `platform_aarch64.my` made one module over per-architecture call numbers; `process.my` | platform_windows.my's `run_with` |
+
+The concurrency lane is merged on its own as soon as it is done; the other four together after it, the Linux platform last, as it reshapes two whole modules. Each lane's new tasks take ids from its own range of 886 to 925.
+
+**Wave 2**, after wave 1: HTTP and files, [[MYLA-833]] (a slow reader parked), [[MYLA-841]] (where a link leads) and [[MYLA-842]]. Both 833 and 841 need a new primitive, so this lane alone stages the seeds (D207). 841's primitive goes into the one Linux module that wave 1 makes.
+
+Not in a wave: [[MYLA-885]] (the poller in Myla's terms) would rewrite the poller in every platform module, after both platform lanes; [[MYLA-799]] (the website) waits for its agent. The tasks round 7 left in `review` wait for the owner's sign-off.
