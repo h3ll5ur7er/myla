@@ -2153,8 +2153,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
                         self.assertEqual(got, want, f"{workers} workers")
 
     def test_children_run_in_parallel(self) -> None:
-        """Eight CPU-bound children on as many workers as CPUs: the process
-        uses well over one CPU's time per second of wall time (D89 (3))."""
+        """Eight CPU-bound children on as many workers as CPUs end well
+        before they do on one worker (D89 (3))."""
         if (os.cpu_count() or 1) < 2:
             self.skipTest("one CPU")
         with tempfile.TemporaryDirectory() as tmp:
@@ -2165,23 +2165,27 @@ class SelfHostedCodegenParity(unittest.TestCase):
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(self._emit_asm(path, STDLIB_ROOT))
             assemble(exe + ".s", exe)
-            env = dict(os.environ)
-            env.pop("MYLA_THREADS", None)
-            # on a busy machine the children share the CPUs with other
-            # processes, so the ratio is taken from the best of three runs
-            ratios = []
+            many = dict(os.environ)
+            many.pop("MYLA_THREADS", None)
+            one = dict(os.environ, MYLA_THREADS="1")
+            # its twin on one worker, the two run in turn, the best of three
+            # each: a share of the CPU time beside the wall time failed when
+            # a full run's other processes took the CPUs (MYLA-745), while
+            # the children still ran on many workers at once
+            walls: dict[str, list[float]] = {"one": [], "many": []}
             for _ in range(3):
-                proc = subprocess.run(
-                    [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, *run_argv(exe, exe)[0]],
-                    capture_output=True, text=True, env=env,
-                )
-                out, cpu, wall = proc.stdout, *map(float, proc.stderr.split()[-2:])
-                self.assertEqual(out, "1\n")
-                ratios.append((cpu, wall))
-                if cpu > 1.5 * wall:
+                for name, env in [("one", one), ("many", many)]:
+                    proc = subprocess.run(
+                        [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, *run_argv(exe, exe)[0]],
+                        capture_output=True, text=True, env=env,
+                    )
+                    self.assertEqual(proc.stdout, "1\n")
+                    walls[name].append(float(proc.stderr.split()[-1]))
+                if min(walls["one"]) > 1.5 * min(walls["many"]):
                     break
-            cpu, wall = max(ratios, key=lambda r: r[0] / max(r[1], 1e-9))
-            self.assertGreater(cpu, 1.5 * wall, f"cpu {cpu:.2f} s, wall {wall:.2f} s (best of {len(ratios)})")
+            alone, together = min(walls["one"]), min(walls["many"])
+            self.assertGreater(alone, 1.5 * together,
+                               f"{together:.2f} s on every worker, {alone:.2f} s on one (best of {len(walls['one'])})")
 
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PINNED, PROGRAMS

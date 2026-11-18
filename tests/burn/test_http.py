@@ -841,6 +841,35 @@ def sockets_of(pid: int) -> int:
     return n
 
 
+def socket_states(pid: int) -> str:
+    """The TCP sockets of the process `pid` (Linux's /proc): each one's
+    local and remote port, state and bytes queued to send and to read, for
+    a test's message."""
+    inodes = set()
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            link = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if link.startswith("socket:["):
+            inodes.add(link[8:-1])
+    states = {"01": "ESTABLISHED", "06": "TIME_WAIT", "07": "CLOSE", "08": "CLOSE_WAIT", "0A": "LISTEN"}
+    out = []
+    for table in ("tcp", "tcp6"):
+        try:
+            with open(f"/proc/{pid}/net/{table}", encoding="ascii") as fh:
+                rows = fh.read().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            w = row.split()
+            if w[9] in inodes:
+                tx, rx = (int(x, 16) for x in w[4].split(":"))
+                out.append(f"{int(w[1].split(':')[1], 16)}->{int(w[2].split(':')[1], 16)} "
+                           f"{states.get(w[3], w[3])} tx {tx} rx {rx}")
+    return "; ".join(out) or "none"
+
+
 def wait_for_sockets(pid: int, n: int, limit: float) -> int:
     """Waits, at most `limit` seconds, until the process `pid` has at most
     `n` sockets open; how many it has."""
@@ -925,7 +954,10 @@ class TimeLimits(unittest.TestCase):
             # listener only): reading is progress, and a holder read before
             # its write_ms passed gets the whole response (MYLA-555: once in
             # 9 runs under load, the second holder's handler started late)
-            self.assertEqual(wait_for_sockets(self.server_pid, 1, 10), 1)
+            # (the condition waited for, at most 30 s: 10 s once weren't
+            # enough under a full run's load, MYLA-745; the sockets left
+            # say which connection the server kept)
+            self.assertEqual(wait_for_sockets(self.server_pid, 1, 30), 1, socket_states(self.server_pid))
             for s in hold:
                 got, _ = end_of(s, 5)
                 self.assertLess(len(got), 8 << 20, "closed before the whole response")
@@ -1059,14 +1091,18 @@ class TimeLimits(unittest.TestCase):
         # worker until a guard's look gave it up for a waiting connection,
         # closing it: the first 200 requests ended in a reset.
         def check(port):
-            kept = []
+            # the 200 first requests sent at once, then their answers read:
+            # one after the other, the first connections waited for their
+            # next request as long as the last ones took, past `idle_ms`
+            # when a full run's load slowed the interpreted server
+            # (MYLA-745: the next request found its connection closed)
             t0 = time.monotonic()
-            for _ in range(200):
-                s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            kept = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(200)]
+            for s in kept:
                 s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            for s in kept:
                 r = recv_response(s)
                 self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"\r\n\r\nok"), r)
-                kept.append(s)
             first = time.monotonic() - t0
             silent = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(100)]
             time.sleep(0.2)
@@ -1083,17 +1119,17 @@ class TimeLimits(unittest.TestCase):
             self.assertLess(first, 10, "200 first requests")
             self.assertLess(took, 1, "a request beside 300 connections")
             self.assertLess(again, 10, "200 kept connections' next requests")
-            # quiet from now on: closed by the server within idle_ms (1.5 s)
+            # quiet from now on: closed by the server within idle_ms (3 s)
             # and a look of its keeper
             t2 = time.monotonic()
             for s in kept + silent:
-                self.assertEqual(end_of(s, 5)[0], b"")
-            self.assertLess(time.monotonic() - t2, 3)
+                self.assertEqual(end_of(s, 7)[0], b"")
+            self.assertLess(time.monotonic() - t2, 4.5)
             for s in kept + silent:
                 s.close()
 
         with tempfile.TemporaryDirectory() as tmp:
-            for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "1500", "5000", "5000"]).items():
+            for name, (argv, exe) in self.forms(tmp, ["15000", "2", "-", "3000", "5000", "5000"]).items():
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
 

@@ -206,10 +206,11 @@ async fun timed_rounds(s: TcpStream, rounds: int, times: int) -> int64 {
 }
 
 // The µs of 1,000 round trips alone, then beside `idle` tasks waiting to
-// accept (the best of 5 tries each), in one line.
+// accept, then alone again once they are cancelled (the best of 5 tries
+// each), in one line.
 async fun round_trips(idle: int) -> str {
     let l = listener()
-    async let e = echo(l, 10000)
+    async let e = echo(l, 15000)
     let c = connected(port_of(l))
     let alone = await timed_rounds(c, 1000, 5)
     let quiet = listener()
@@ -227,9 +228,6 @@ async fun round_trips(idle: int) -> str {
     }
     await task.sleep(1000)
     let crowded = await timed_rounds(c, 1000, 5)
-    if await e != 10000 {
-        panic("echo")
-    }
     task.cancel(idlers)
     var none = 0
     for g in await idlers {
@@ -238,7 +236,11 @@ async fun round_trips(idle: int) -> str {
     if none != 0 {
         panic("an idle task accepted")
     }
-    return f"{alone} {crowded}"
+    let again = await timed_rounds(c, 1000, 5)
+    if await e != 15000 {
+        panic("echo")
+    }
+    return f"{alone} {crowded} {again}"
 }
 
 // `waiting` tasks waiting to accept, `n` connections made one at a time,
@@ -480,10 +482,15 @@ class RoundTrips(_Built):
     def test_round_trips_beside_many_waiting_frames(self):
         # alone and then crowded in one process, the best of five tries
         # each: the machine may be shared
-        alone, crowded = (int(w) for w in self.run_text("round-trips", 50000, workers=1).split())
+        alone, crowded, again = (int(w) for w in self.run_text("round-trips", 50000, workers=1).split())
         # µs for 1,000: about the same (colder caches), not several times
-        # as much
-        self.assertLess(crowded, 1.5 * alone + 5000, f"{crowded} µs beside 50,000 waiting frames, {alone} µs alone")
+        # as much. Alone measured before and after (the slower of the two):
+        # a machine that a full run loads more meanwhile slows all three
+        # (MYLA-745: 45,470 µs beside the frames, 25,423 µs alone before
+        # them, on aarch64 under qemu in CI)
+        base = max(alone, again)
+        self.assertLess(crowded, 1.5 * base + 5000,
+                        f"{crowded} µs beside 50,000 waiting frames, {alone} µs alone before, {again} µs after")
 
 
 class Accepts(_Built):
