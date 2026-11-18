@@ -831,6 +831,7 @@ class Children(unittest.TestCase):
 SOCKETS = r"""import std.task as task
 import std.net as net
 import std.http as http
+import std.time as time
 import std.bytes as bytes
 from std.net import TcpListener, TcpStream
 from std.http import Request, Response
@@ -939,12 +940,17 @@ fun handle(r: Request) -> Response {
     return http.response(200, f"hello {r.method} {r.path()}")
 }
 
-// Its own HTTP server asked `n` times: the answers that were right.
+// Its own HTTP server asked `n` times: the answers that were right. Each
+// request has 30 s: one the server never answers is `timed out` then, with
+// how long it took and how many came back before, and the run ends with
+// its count (MYLA-798: on Windows the 20th once had no answer, and the run
+// waited 200 s, ending its wait as `connection failed: Cancelled`).
 async fun ask(port: int, n: int) -> int {
     var c = http.client()
     var right = 0
     for i in 0..n {
-        match await c.get_async(f"http://127.0.0.1:{port}/p{i}") {
+        let t0 = time.now_ms()
+        match await c.send_async(http.request("GET", f"http://127.0.0.1:{port}/p{i}").with_timeout(30000)) {
             Ok(r) => {
                 if r.status == 200 && r.text() == f"hello GET /p{i}" {
                     right += 1
@@ -953,7 +959,7 @@ async fun ask(port: int, n: int) -> int {
                 }
             }
             Err(e) => {
-                let no = failed(f"ask {i}: {e}")
+                let no = failed(f"ask {i}: {e} after {time.now_ms() - t0} ms, {right} answered before")
             }
         }
     }
