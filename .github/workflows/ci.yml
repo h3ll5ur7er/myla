@@ -32,9 +32,9 @@ jobs:
   burn:
     name: Burn tests (native builds, error corpus, self-hosting gates)
     runs-on: ubuntu-24.04
-    # the burn step takes about 22 minutes; the runner's apt took 18 and 29
+    # the burn step takes about 22 minutes; the runner's apt took 18 to 37
     # minutes to install the tools on 2026-11-18 (PR #81), past 30 in all
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
       # the runner's own python3 (3.12), not actions/setup-python: that sets
@@ -119,9 +119,10 @@ jobs:
     # (MYLA-268): on Windows what is still `Unsupported` (D210)
     name: Burn suites on ${{ matrix.target }}
     runs-on: ubuntu-24.04
-    # about 10 minutes of suites; the runner's apt took up to 29 minutes to
-    # install Wine on 2026-11-18 (PR #81)
-    timeout-minutes: 45
+    # about 10 minutes of suites; the runner's apt took up to 37 minutes to
+    # install Wine on 2026-11-18 (PR #81: cancelled at 45 eight minutes
+    # into its suites)
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
