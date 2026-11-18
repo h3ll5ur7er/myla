@@ -2,7 +2,7 @@
 id: MYLA-705
 title: "Windows step 6: child processes"
 type: feature
-status: todo
+status: review
 priority: medium
 labels: [platforms, windows]
 ---
@@ -62,3 +62,10 @@ A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 20
   - The bootstrap reaches its fixed point (28,807,148 bytes); `scripts/check-seed.sh` passes (the seeds bootstrap the merged sources, the embedded library is current); `scripts/test.sh fast`: 977 tests, OK (8 skipped).
 
 Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7 ([[MYLA-798]])
+
+- [x] H12, from the code: a child's failure is said (`test_windows.MANY_CHILDREN` on the standard error, the runner showing it), a read of a child's pipe that fails is `Other` of its cause instead of the stream's end, and a Windows program's workers' rings of ready frames are committed as they are touched (128 MiB of commit for a child of 16 workers before); M13: `env`'s names in any case, batch files named with trailing dots or spaces quoted for cmd
+- [ ] H12's rate on Windows itself: the `windows` job's rates step gives it (`rate process/many-children step 2 (…, 16 workers): N of 10 right`, with the commit charge), [[MYLA-798]] says what to look for; open until a run of the job has it
+
+What changed, and the evidence, are [[MYLA-798]]'s.

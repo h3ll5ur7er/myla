@@ -21,7 +21,7 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 
 The targets are x86-64 and aarch64 Linux, wasm32 on WASI and x86-64 Windows; macOS is planned ([[MYLA-62]]).
 
-- **Windows:** on the real runner `process/many-children` counted 393 of 400 children once (CI run 246 of `e153ee08`), and the case can't say why; `env("PATH")` is case-sensitive; a batch file named with a trailing dot gets the wrong quoting ([[MYLA-705]]). No long paths, `/` written into verbatim paths, a deferred close without a limit ([[MYLA-798]]).
+- **Windows:** on the real runner `process/many-children` counted 393 of 400 children once (CI run 246 of `e153ee08`); the case now says what each child that failed gave, and CI's `windows` job gives its rate and the system's commit charge ([[MYLA-798]]). A program of many workers still commits 16 MiB of heap for each worker that allocates ([[MYLA-861]]).
 - `gen_main` ignores a failed write of its output ([[MYLA-718]]); a function named with a letter outside ASCII doesn't assemble with clang ([[MYLA-775]]).
 
 
