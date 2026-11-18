@@ -636,7 +636,7 @@ Import: `import std.num as num`.
   - `pub fun format_float(x: float64) -> str` (Python repr), `pub fun format_fixed(x: float64, prec: int32) -> str`
   - `pub fun to_radix(n: int64, radix: int) -> str`, `pub fun to_radix_u64(n: uint64, radix: int) -> str`
   - `pub fun to_hex(n: uint64, width: int = 0) -> str`, `pub fun to_binary(n: uint64, width: int = 0) -> str`
-- Internal (literals): `f64_literal_bits(lexeme: str) -> uint64`, `f32_round_bits(bits: uint64) -> uint64`, `float_from_bits(bits: uint64) -> float64`, `pow2(k: int32) -> float64`
+- Internal (literals): `f64_literal_bits(lexeme: str) -> uint64`, `decimal_bits(m: uint64, e: int32) -> uint64` (std.rt reads printed digits back by it), `f32_round_bits(bits: uint64) -> uint64`, `float_from_bits(bits: uint64) -> float64`, `pow2(k: int32) -> float64`
 - Gotchas:
   - **`parse_int` is `Option<int64>`, not `int`**: `let v: int = num.parse_int(s).unwrap_or(0)` is a type error. Use `parse_int32` (a `Result`) for an `int`.
   - `parse_int` and `parse_float` are `Option`s, but the others are `Result`s.

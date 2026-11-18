@@ -5945,7 +5945,8 @@ fun reads_back(m: uint64, e: int64, mag: uint64, f32: bool) -> bool {
         }
         b = __f64_bits(y)
     } else {
-        b = num.f64_literal_bits(uint_to_str(m) + "e" + int_to_str(e))
+        // in integers, as a literal is read (Eisel–Lemire, MYLA-849)
+        b = num.decimal_bits(m, e as int32)
     }
     if f32 {
         b = num.f32_round_bits(b)
