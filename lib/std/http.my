@@ -48,6 +48,7 @@ import std.list as list_m
 import std.option as option_m
 import std.json as json_m
 import std.fs as fs_m
+import std.path_style as style_m
 import std.num as num_m
 
 // --- errors --------------------------------------------------------------------------
@@ -905,7 +906,9 @@ impl Request {
 
 // An HTTP response: the status, its reason phrase, the version, headers,
 // the body and the trailers of a chunked one. The client sets `url` to the
-// URL it came from, after the redirects.
+// URL it came from, after the redirects. A body sent from a file
+// (`static_files`, D260) is `file`, its path, with `body` empty: the server
+// sends the file as it reads it, and `text()` and `bytes()` read it.
 #derive(Eq)
 pub struct Response {
     status: int,
@@ -915,11 +918,12 @@ pub struct Response {
     body: str,
     trailers: Headers,
     url: str,
+    file: str,
 }
 
 // A response with the status `status`, its standard reason phrase, and
 // the body `body`; the server adds the framing (`Content-Length`).
-#test(200, "hi")[Response { status: 200, reason: "OK", version: "HTTP/1.1", headers: Headers { items: [] }, body: "hi", trailers: Headers { items: [] }, url: "" }]
+#test(200, "hi")[Response { status: 200, reason: "OK", version: "HTTP/1.1", headers: Headers { items: [] }, body: "hi", trailers: Headers { items: [] }, url: "", file: "" }]
 pub fun response(status: int, body: str) -> Response {
     return Response {
         status: status,
@@ -929,6 +933,7 @@ pub fun response(status: int, body: str) -> Response {
         body: body,
         trailers: headers(),
         url: "",
+        file: "",
     }
 }
 
@@ -961,17 +966,33 @@ impl Response {
     }
 
     // The body as UTF-8 text: valid text as it is, each byte that isn't
-    // valid UTF-8 replaced by U+FFFD.
+    // valid UTF-8 replaced by U+FFFD. A file's is read (none when it can't
+    // be).
     #test(response(200, "caf\u{E9}"))["café"]
     fun text(self) -> str {
-        return lossy_utf8(self.body)
+        return lossy_utf8(read_in(self).body)
     }
 
-    // The body's bytes.
+    // The body's bytes, a file's read.
     #test(response(200, "hi"))[[104u8, 105u8]]
     fun bytes(self) -> [uint8] {
-        return bytes_m.from_str(self.body)
+        return bytes_m.from_str(read_in(self).body)
     }
+}
+
+// `r` with the file its body is sent from (`r.file`) read into `body`, ""
+// when it can't be read.
+fun read_in(r: Response) -> Response {
+    if r.file == "" {
+        return r
+    }
+    var c = r
+    c.body = match fs_m.read_bytes(r.file) {
+        Ok(b) => bytes_m.to_str(b),
+        Err(_) => "",
+    }
+    c.file = ""
+    return c
 }
 
 // --- the parser ----------------------------------------------------------------------
@@ -1429,6 +1450,7 @@ impl Parser {
             body: self.body.build(),
             trailers: self.trailers,
             url: "",
+            file: "",
         }
     }
 }
@@ -1683,9 +1705,11 @@ fun response_parts(r: Response, head_only: bool, close: bool, keep_10: bool, chu
         return Err(HttpError.BadStartLine)
     }
     let quiet = no_body_status(r.status)
-    let chunk = !quiet && !head_only && chunk_ok && r.trailers.len() > 0
+    // a file's body is sent after the head, `opened_file` its length
+    let from_file = r.file != ""
+    let chunk = !quiet && !head_only && chunk_ok && r.trailers.len() > 0 && !from_file
     var h = r.headers
-    if !(head_only && h.has("Content-Length")) {
+    if !((head_only || from_file) && h.has("Content-Length")) {
         h.remove("Content-Length")
     }
     h.remove("Transfer-Encoding")
@@ -1728,7 +1752,7 @@ fun response_parts(r: Response, head_only: bool, close: bool, keep_10: bool, chu
 // `Transfer-Encoding: chunked` and the trailers when `r` has trailers;
 // then the body.
 pub fun format_response(r: Response) -> Result<str, HttpError> {
-    let p = response_parts(r, false, false, false, true)?
+    let p = response_parts(read_in(r), false, false, false, true)?
     return Ok(p.0 + p.1)
 }
 
@@ -3412,12 +3436,21 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
         req.peer = peer
         var close = p.close_after || !persistent(req.version, req.headers)
         var parts: Result<(str, str), HttpError> = Err(HttpError.BadHeader)
+        // a body sent from a file, after the head (D260, MYLA-795)
+        var body_file: Option<BodyFile> = None
+        var stream_file = false
         if req.version == "HTTP/1.1" && !req.headers.has("Host") {
             close = true
             parts = response_parts(response(400, "a request without Host\n"), false, true, false, false)
         } else {
             // the handler's time isn't limited
-            let resp = await handler(req)
+            var resp = await handler(req)
+            if resp.file != "" {
+                let opened = opened_file(resp)
+                resp = opened.0
+                body_file = opened.1
+                stream_file = !same_name(req.method, "HEAD") && !no_body_status(resp.status)
+            }
             close = close || resp.headers.has_token("Connection", "close") || (close_at >= 0 && time.now_ms() >= close_at)
             let keep_10 = !close && req.version == "HTTP/1.0"
             parts = response_parts(resp, same_name(req.method, "HEAD"), close, keep_10, req.version == "HTTP/1.1")
@@ -3426,6 +3459,14 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
         match parts {
             Ok(two) => {
                 sent = await link.send_parts(two, o.write_ms)
+                match body_file {
+                    Some(bf) => {
+                        if stream_file && sent_ok(sent) {
+                            sent = await link.send_file(bf, o.write_ms)
+                        }
+                    }
+                    None => {}
+                }
             }
             Err(e) => {
                 // the handler's response can't be sent (a header with CR
@@ -3434,6 +3475,13 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
                 let body = f"invalid response: {e.message()}\n"
                 sent = await link.send_parts((f"HTTP/1.1 500 Internal Server Error\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}", ""), o.write_ms)
             }
+        }
+        match body_file {
+            Some(bf) => {
+                var f = bf.f
+                let shut = f.close()
+            }
+            None => {}
         }
         answered += 1
         if counted {
@@ -3691,7 +3739,10 @@ pub async fun serve_n(l: TcpListener, n: int, handler: (Request) -> Response) ->
 // middleware is a function from a handler to a handler (`wrap`). A pattern's
 // segments are literal, `{name}` (one segment), `{name:int}` (one of digits)
 // or, last, `{name:path}` (the rest, maybe none); the handler reads them with
-// `req.param(name)` and `req.param_int(name)`. The most specific route
+// `req.param(name)` and `req.param_int(name)`. A pattern that is none of
+// these (an unknown kind, `{name:path}` before another segment, a brace in
+// a literal segment, a name twice) is a runtime error naming it when the
+// route is added (D184, MYLA-795). The most specific route
 // matching a path answers it (a literal segment before a parameter, a typed
 // parameter before an untyped one, the first registered among equals); a
 // path some route matches for another method is answered 405 with `Allow`,
@@ -3714,15 +3765,32 @@ pub struct Router {
     wraps: [((Request) -> Response) -> (Request) -> Response],
 }
 
-// A router of the routes under `base` ("" or "/" for the root, "/api").
+// A router of the routes under `base` ("" or "/" for the root, "/api"),
+// which is literal: a brace in it (a parameter) is a runtime error.
+#test("/api/{v}")[panic("http.router: the base '/api/{v}' has a brace: a base is literal")]
 pub fun router(base: str) -> Router {
+    if base.contains("{") || base.contains("}") {
+        panic(f"http.router: the base '{base}' has a brace: a base is literal")
+    }
     return Router { base: base, routes: [:], wraps: [] }
 }
 
 impl Router {
     // `handler` for the requests of `method` matching `path` (below the
-    // router's base); one for the same method and pattern is replaced.
+    // router's base); one for the same method and pattern is replaced. A
+    // malformed pattern is a runtime error (`pattern_problem`).
+    #test(router(""), "GET", "/files/{p:path}/meta", (req: Request) => response(200, ""))[panic("http: the route pattern '/files/{p:path}/meta': {p:path} isn't the last segment, and a path parameter takes the rest of the path")]
     fun route(var self, method: str, path: str, handler: (Request) -> Response) {
+        self.add_route(method, path, handler, false)
+    }
+
+    // `route`, `reserved` letting a parameter's name start with `%` (the
+    // router's own: `static_files`' `{%file:path}`).
+    fun add_route(var self, method: str, path: str, handler: (Request) -> Response, reserved: bool) {
+        let problem = pattern_problem(path, reserved)
+        if problem != "" {
+            panic(f"http: the route pattern '{path}': {problem}")
+        }
         self.routes[method + " " + path] = Route { method: method, path: path, handler: handler, mount: false }
     }
 
@@ -3752,12 +3820,17 @@ impl Router {
         self.routes["* " + sub.base + "/"] = Route { method: "*", path: sub.base, handler: sub.handler(), mount: true }
     }
 
-    // The files below the directory `dir` at `prefix` (`/assets` serves
-    // `dir/app.css` as `/assets/app.css`), for GET; a path with a `..` or
-    // a file that can't be read is 404.
-    fun static_files(var self, prefix: str, dir: str) {
+    // The regular files below the directory `dir` at `prefix` (`/assets`
+    // serves `dir/app.css` as `/assets/app.css`), for GET, each sent from
+    // the file as it is read (D260, MYLA-795). Anything else is 404: a path
+    // that leaves `dir`, a symbolic link below it, a directory, a FIFO or a
+    // device, a file that can't be read, a dot file's (`.env`, `.git/`)
+    // unless `dot_files`, and on Windows a device's name (`nul`, `con.txt`),
+    // a name ending in a dot or a space, one with `:` and the like, or a
+    // short name's (`~1`); `served_segments` has the rules.
+    fun static_files(var self, prefix: str, dir: str, dot_files: bool = false) {
         let d = dir
-        self.route("GET", prefix + "/{%file:path}", (req: Request) => file_response(d, req.param("%file")))
+        self.add_route("GET", prefix + "/{%file:path}", (req: Request) => file_response(d, req.param("%file"), dot_files), true)
     }
 
     // `middleware` around the router's handler: one added later runs inside
@@ -3872,6 +3945,76 @@ fun segs_start(segs: [str], prefix: [str]) -> bool {
     return true
 }
 
+// What is wrong with the route pattern `path`, "" when nothing (MYLA-795):
+// each segment is literal (no `{` or `}` in it) or a whole `{name}`,
+// `{name:int}` or `{name:path}`, `{name:path}` the last; a name is letters,
+// digits and `_`, each once (`reserved`: it may start with `%`, the
+// router's own).
+#test("/users/{id:int}/posts/{slug}", false)[""]
+#test("/files/{p:path}", false)[""]
+#test("/", false)[""]
+#test("/files/{p:path}/meta", false)["{p:path} isn't the last segment, and a path parameter takes the rest of the path"]
+#test("/items/{id:integer}", false)["{id:integer} is of the unknown kind 'integer' (the kinds are int and path)"]
+#test("/items/{id:}", false)["{id:} is of the unknown kind '' (the kinds are int and path)"]
+#test("/items/{id", false)["'{id' has a brace but isn't a parameter, {name} or {name:kind}"]
+#test("/items/x{id}", false)["'x{id}' has a brace but isn't a parameter, {name} or {name:kind}"]
+#test("/items/{a{b}", false)["'{a{b}' has a brace but isn't a parameter, {name} or {name:kind}"]
+#test("/items/{}", false)["{} has no name (letters, digits and _)"]
+#test("/items/{a-b}", false)["{a-b} has no name (letters, digits and _)"]
+#test("/a/{id}/b/{id:int}", false)["the parameter 'id' is named twice"]
+#test("/a/{%rest}", false)["{%rest} has no name (letters, digits and _)"]
+#test("/a/{%file:path}", true)[""]
+fun pattern_problem(path: str, reserved: bool) -> str {
+    let segs = split_path(path)
+    var names: [str] = []
+    var i = 0
+    while i < segs.len() {
+        let seg = segs[i]
+        if seg.contains("{") || seg.contains("}") {
+            let inner = if seg.len() >= 2 { seg[1:seg.len() - 1] } else { "" }
+            if !(seg.len() >= 2 && seg.starts_with("{") && seg.ends_with("}")) || inner.contains("{") || inner.contains("}") {
+                return f"'{seg}' has a brace but isn't a parameter, {{name}} or {{name:kind}}"
+            }
+            let p = match param_of(seg) {
+                Some(x) => x,
+                None => ("", ""),
+            }
+            if !param_name(p.0, reserved) {
+                return f"{seg} has no name (letters, digits and _)"
+            }
+            if seg.contains(":") && p.1 != "int" && p.1 != "path" {
+                return f"{seg} is of the unknown kind '{p.1}' (the kinds are int and path)"
+            }
+            if p.1 == "path" && i < segs.len() - 1 {
+                return f"{seg} isn't the last segment, and a path parameter takes the rest of the path"
+            }
+            if names.contains(p.0) {
+                return f"the parameter '{p.0}' is named twice"
+            }
+            names.push(p.0)
+        }
+        i += 1
+    }
+    return ""
+}
+
+// Whether `name` names a parameter: letters, digits and `_`, at least one;
+// with `reserved`, after a `%` (the router's own).
+#test("id_2", false)[true]
+#test("%file", false)[false]
+#test("%file", true)[true]
+#test("", false)[false]
+fun param_name(name: str, reserved: bool) -> bool {
+    var i = if reserved && name.starts_with("%") { 1 } else { 0 }
+    if i >= name.len() { return false }
+    while i < name.len() {
+        let c = name[i]
+        if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') { return false }
+        i += 1
+    }
+    return true
+}
+
 // A pattern segment's parameter: its name and kind ("", "int", "path"), or
 // none for a literal segment.
 #test("{id:int}")[Some(("id", "int"))]
@@ -3951,19 +4094,210 @@ fun all_digits(s: str) -> bool {
     return true
 }
 
-// The file `rel` below `dir`: 200 with its bytes and a content type by its
-// extension; 404 for a path with `..` or a file that can't be read.
-fun file_response(dir: str, rel: Option<str>) -> Response {
+// The regular file `rel` (decoded) names below `dir` (D260): 200, its body
+// sent from the file (`Response.file`) with a content type by its
+// extension; 404 when `served_segments` refuses the path, or when one of
+// its parts below `dir` isn't what the path makes it, a directory and then
+// a regular file, without following a symbolic link: a link, a FIFO, a
+// device, a socket or nothing. A FIFO is never opened, so it can't hold a
+// worker.
+fun file_response(dir: str, rel: Option<str>, dot_files: bool) -> Response {
+    let not_found = response(404, "not found")
     let p = match rel {
         Some(x) => x,
-        None => { return response(404, "not found") }
+        None => { return not_found }
     }
-    for seg in p.split("/") {
-        if seg == ".." || seg == "" { return response(404, "not found") }
+    let segs = match served_segments(p, style_m.WINDOWS, dot_files) {
+        Some(s) => s,
+        None => { return not_found }
     }
-    return match fs_m.read_bytes(dir + "/" + p) {
-        Ok(b) => response(200, bytes_m.to_str(b)).with_header("Content-Type", content_type(p)),
-        Err(_) => response(404, "not found"),
+    if segs.len() == 0 {
+        return not_found
+    }
+    var at = dir
+    var i = 0
+    while i < segs.len() {
+        at = at + "/" + segs[i]
+        let kind = match fs_m.symlink_metadata(at) {
+            Ok(m) => m.kind,
+            Err(_) => { return not_found }
+        }
+        let want = if i == segs.len() - 1 { fs_m.FileKind.File } else { fs_m.FileKind.Dir }
+        if kind != want {
+            return not_found
+        }
+        i += 1
+    }
+    var r = response(200, "").with_header("Content-Type", content_type(segs[^1]))
+    r.file = at
+    return r
+}
+
+// The segments of the path `rel` below a served directory (D260): split on
+// each separator of the target (`windows`: `\` as `/`), an empty segment or
+// `.` dropped, `..` taking the one before it off; none when that would
+// leave the directory, or when a segment is refused: a dot file's (`.env`)
+// unless `dot_files`, one with a control character; on Windows one with
+// `<>:"|?*` (a drive, a stream: `app.css::$DATA`), one ending in a dot or
+// a space (Windows drops them, so `app.css.` would be `app.css`), a
+// device's name (`nul`, `CON.txt`, `com1`: the name up to its first dot),
+// and a short name's (`~` and a digit, as `TOPSEC~1.TXT` may name a dot
+// file).
+#test("a/b.css", false, false)[Some(["a", "b.css"])]
+#test("a//./b/../c.css", false, false)[Some(["a", "c.css"])]
+#test("../top.txt", false, false)[None]
+#test("a/../../top.txt", false, false)[None]
+#test("..\\top.txt", false, false)[None]
+#test("..\\top.txt", false, true)[Some(["..\\top.txt"])]
+#test("..\\top.txt", true, false)[None]
+#test("sub\\..\\..\\top.txt", true, false)[None]
+#test("sub\\a.txt", true, false)[Some(["sub", "a.txt"])]
+#test(".env", false, false)[None]
+#test("a/.git/config", false, false)[None]
+#test(".well-known/x", false, true)[Some([".well-known", "x"])]
+#test("../x", false, true)[None]
+#test("a\u{0}.png", false, false)[None]
+#test("C:\\windows\\win.ini", true, false)[None]
+#test("c:/windows/win.ini", true, false)[None]
+#test("c:/windows/win.ini", false, false)[Some(["c:", "windows", "win.ini"])]
+#test("app.css::$DATA", true, false)[None]
+#test("app.css.", true, false)[None]
+#test("app.css ", true, false)[None]
+#test("app.css.", false, false)[Some(["app.css."])]
+#test("nul", true, false)[None]
+#test("CON.txt", true, false)[None]
+#test("a/Com1", true, false)[None]
+#test("lpt9.log", true, false)[None]
+#test("conin$", true, false)[None]
+#test("aux .txt", true, false)[None]
+#test("nul", false, false)[Some(["nul"])]
+#test("console.txt", true, false)[Some(["console.txt"])]
+#test("com10", true, false)[Some(["com10"])]
+#test("TOPSEC~1.TXT", true, false)[None]
+#test("a~b.txt", true, false)[Some(["a~b.txt"])]
+#test("APP.CSS", true, false)[Some(["APP.CSS"])]
+fun served_segments(rel: str, windows: bool, dot_files: bool) -> Option<[str]> {
+    var out: [str] = []
+    let unified = if windows { rel.replace("\\", "/") } else { rel }
+    for seg in unified.split("/") {
+        if seg == "" || seg == "." {
+            continue
+        }
+        if seg == ".." {
+            if out.len() == 0 {
+                return None
+            }
+            let dropped = out.pop()
+            continue
+        }
+        if (seg.starts_with(".") && !dot_files) || !served_name(seg, windows) {
+            return None
+        }
+        out.push(seg)
+    }
+    return Some(out)
+}
+
+// Whether the segment `seg` may name a served file (`served_segments`):
+// no control character; on Windows none of `<>:"|?*`, no dot or space at
+// its end, no device's name, no short name's `~` and digit.
+fun served_name(seg: str, windows: bool) -> bool {
+    var i = 0
+    while i < seg.len() {
+        let c = seg[i]
+        if c < 32u8 || c == 127u8 {
+            return false
+        }
+        if windows {
+            if c == '<' || c == '>' || c == ':' || c == '"' || c == '|' || c == '?' || c == '*' {
+                return false
+            }
+            if c == '~' && i + 1 < seg.len() && seg[i + 1] >= '0' && seg[i + 1] <= '9' {
+                return false
+            }
+        }
+        i += 1
+    }
+    if !windows {
+        return true
+    }
+    if seg.ends_with(".") || seg.ends_with(" ") {
+        return false
+    }
+    let stem = match seg.find(".") {
+        Some(k) => seg[:k],
+        None => seg,
+    }
+    return !windows_device(stem.trim_end().to_lower())
+}
+
+// Whether `name` (lower case) is one of Windows' device names, which name
+// the device in every directory and with any extension.
+#test("nul")[true]
+#test("com\u{B9}")[true]
+#test("lpt0")[true]
+#test("conout$")[true]
+#test("nulx")[false]
+fun windows_device(name: str) -> bool {
+    if name == "con" || name == "prn" || name == "aux" || name == "nul" || name == "conin$" || name == "conout$" || name == "clock$" {
+        return true
+    }
+    if name.starts_with("com") || name.starts_with("lpt") {
+        let n = name[3:]
+        return (n.len() == 1 && n[0] >= '0' && n[0] <= '9') || n == "\u{B9}" || n == "\u{B2}" || n == "\u{B3}"
+    }
+    return false
+}
+
+// A file a response's body is sent from, open, and its size then.
+struct BodyFile {
+    f: fs_m.File,
+    size: int64,
+}
+
+// `r`, whose body is the file `r.file`, as the server sends it (D260): the
+// file opened, `Content-Length` its size; 404 when it is no longer a
+// regular file or can't be read.
+fun opened_file(r: Response) -> (Response, Option<BodyFile>) {
+    var f = match fs_m.open(r.file) {
+        Ok(f) => f,
+        Err(_) => { return (response(404, "not found"), None) }
+    }
+    let size = match f.metadata() {
+        Ok(m) => if m.is_file() { m.size } else { -1i64 },
+        Err(_) => -1i64,
+    }
+    if size < 0 {
+        let shut = f.close()
+        return (response(404, "not found"), None)
+    }
+    var c = r
+    c.headers.set("Content-Length", f"{size}")
+    return (c, Some(BodyFile { f: f, size: size }))
+}
+
+impl Link {
+    // The `size` bytes of the file `bf` sent after a response's head
+    // (D260), read and sent 64 KiB at a time, so that a file is never held
+    // whole; within `write_ms` as `send`. A file that ends sooner (cut
+    // while it was sent) is `Truncated`, and the connection closes.
+    async fun send_file(var self, bf: BodyFile, write_ms: int) -> Result<(), HttpError> {
+        var f = bf.f
+        var left = bf.size
+        while left > 0 {
+            let n = if left > WRITE_STEP as int64 { WRITE_STEP } else { left as int }
+            let chunk = match f.read(n) {
+                Ok(b) => b,
+                Err(e) => { return Err(io_error(e)) }
+            }
+            if chunk.len() == 0 {
+                return Err(HttpError.Truncated)
+            }
+            let sent = await self.send(bytes_m.to_str(chunk), write_ms)
+            sent?
+            left -= chunk.len() as int64
+        }
+        return Ok(())
     }
 }
 
