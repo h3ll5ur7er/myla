@@ -2,7 +2,7 @@
 id: MYLA-826
 title: "The aarch64 and wasm32 tools' checker takes far more stack a level than x86-64's"
 type: bug
-status: in-progress
+status: review
 priority: low
 labels: [checker, aarch64, wasm, round-7]
 ---
@@ -41,6 +41,8 @@ Reproduction: `python3 -c 'print("fun main() {\n    let x = true\n    let t = x"
 **wasm32.** The task assumed the shadow stack; V8's own call stack (about 1 MB, Node's default and a browser's) runs out first for `&&` and `else if`, the shadow stack first for calls and `|>`, both near the same depth, and a page can't raise V8's. So the limit follows the target the tools are built for: `MAX_CHAIN_WASM` (256) in the tools built for wasm32 (`chain_limit` in [[selfhost/parser.my]], by `target.host()`), which leaves them twice the room the Linux tools have under 2,048. Nothing changed in `tools/wasm/` or `selfhost/runtime_wasm.my`. See the proposal below.
 
 **Tests.** `test_selfhost_parser`'s long chains are `check_long_chains(tool, limit)`, run natively (2,048), with the aarch64 tools under qemu with Linux's 120 MiB (`test_the_aarch64_tools_hold_a_long_chain`, 2,048: passes, in 29 s) and with the wasm32 tools under Node's own stack (`test_the_wasm32_tools_hold_a_long_chain`, 256: passes, in 20 s). Before, with the wasm32 tools' limit 2,048: 11 of its 23 cases `runtime error: stack overflow`.
+
+**Suites** (the branch with [[MYLA-802]]): `scripts/bootstrap.sh` reaches the fixed point; `scripts/check-seed.sh` passes for the x86-64 seed and, under qemu (`MYLA_ARCH=aarch64 AS=aarch64-linux-gnu-as LD=aarch64-linux-gnu-ld MYLA_RUN=qemu-aarch64`), for the aarch64 seed: its stage 1 with the new backend builds stages 2 and 3 byte for byte alike, so the aarch64 compiler built with shared cells compiles itself as the x86-64 one does; the Windows seed's output (x86-64's) is unchanged. `scripts/test-target.py aarch64-linux`: 39 of 39 suites; `wasm32-wasi`: 39 of 39. `scripts/test.sh fast`; `test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_lsp`, `test_std_modules`, `test_overflow`, `test_test_native`, `test_selfhost_parser`, `test_aarch64`, `test_wasm`, `test_operator_traits`, `test_doc_blocks`; `test_windows` and `test_debug_info` under Wine (with `TMPDIR` unset, as this container needs); `scripts/test.sh` (all): 1,859 tests, OK (390 skipped).
 
 ## Proposals
 

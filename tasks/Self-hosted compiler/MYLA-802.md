@@ -2,7 +2,7 @@
 id: MYLA-802
 title: "Checker: a type parameter only an operator bound names isn't fixed by the argument's impl (`C: Index<int, T>`)"
 type: bug
-status: in-progress
+status: review
 priority: low
 labels: [checker, generics, round-7]
 ---
