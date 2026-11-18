@@ -158,7 +158,10 @@ impl Hasher {
 // own (its elements in turn), as no impl can name a tuple of any length.
 // A float adds its bits (D198): -0.0 as 0.0, which it equals; a NaN, which
 // is unequal to itself and would be a key no lookup finds, is the runtime
-// error `cannot hash NaN`.
+// error `cannot hash NaN`. A map operation looks for one first, the key or
+// a member of its tuple or derived struct, and reports it at the program's
+// key instead (MYLA-850): this panic is for a NaN in a list or an enum, and
+// for a program's own `x.hash(h)`.
 
 impl Hash for float64 {
     #test(-0.0, new())[0.0.hash(new())]

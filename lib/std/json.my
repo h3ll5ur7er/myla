@@ -5,9 +5,10 @@
 // with: the same values, the same error messages and positions (Python
 // 3.13's wording), and `to_string` writes what
 // `json.dumps(v, ensure_ascii=False, separators=(",", ":"))` writes. Like
-// Python, they accept and write `NaN`, `Infinity` and `-Infinity`. Unlike
-// Python, a `\u` escape of a lone surrogate is an error, since a Myla string
-// holds UTF-8.
+// Python, `parse` accepts `NaN`, `Infinity` and `-Infinity`; unlike it,
+// `to_string` writes them as `null`, which JSON has (MYLA-424), and a float
+// reads `null` as NaN (MYLA-851). Unlike Python, a `\u` escape of a lone
+// surrogate is an error, since a Myla string holds UTF-8.
 //
 // Typed values (D172, MYLA-385): `ToJson` and `FromJson`, their impls for
 // the built-in types, and `encode`/`decode<T>` over them; `#derive(Json)`
@@ -934,8 +935,8 @@ fun pretty_round_trip() {
 // object of its fields, named as written, an `Option` field left out when it
 // is `None`) and for an enum (`"Red"` for a variant without payload,
 // `{"Dot": x}` for one with one, `{"Line": [a, b]}` for one with more).
-// Writing never fails: a non-finite float is `null`, a `uint64` beyond
-// `int64` a float.
+// Writing never fails: a non-finite float is `null` (which a float reads
+// as NaN, MYLA-851), a `uint64` beyond `int64` a float.
 pub trait ToJson {
     fun to_json(self) -> Json
 }
@@ -1265,10 +1266,16 @@ impl ToJson for float64 {
 }
 
 impl FromJson for float64 {
+    // `null` is NaN, as `to_json` writes a NaN and the infinities, so that
+    // a float reads back (MYLA-851, as the linear algebra types' components
+    // do, D291); an `Option<float64>`'s `null` is still `None`
+    #test(Json.Int(2))[Ok(2.0)]
+    #test(Json.Bool(true))[Err(JsonError { kind: JsonErrorKind.WrongType, msg: "expected a number, found true", line: 0, col: 0, path: "$" })]
     fun from_json(j: Json) -> Result<float64, JsonError> {
         return match j {
             Json.Float(f) => Ok(f)
             Json.Int(n) => Ok(n as float64)
+            Json.Null => Ok(0.0 / 0.0)
             _ => Err(wrong_type("a number", j))
         }
     }
@@ -1438,6 +1445,30 @@ fun built_in_types_round_trip() {
         Ok(v) => assert(false, "40000 is no int16")
         Err(e) => assert(f"{e}" == "$[1]: 40000 is out of range for int16", f"{e}")
     }
+}
+
+// A NaN float goes to JSON and back (MYLA-851): written as `null`, read
+// as NaN, as the linear algebra types read a component (D291); an infinity
+// comes back as NaN.
+#test
+fun non_finite_floats_round_trip() {
+    let nan = 0.0 / 0.0
+    let text = encode([nan, 1.5, 1.0 / 0.0])
+    assert(text == "[null,1.5,null]", text)
+    match decode<[float64]>(text) {
+        Ok(xs) => assert(xs.len() == 3 && xs[0] != xs[0] && xs[1] == 1.5 && xs[2] != xs[2], encode(xs))
+        Err(e) => assert(false, f"{e}")
+    }
+    match decode<[float32]>(encode([nan as float32, 0.1f32])) {
+        Ok(ys) => assert(ys.len() == 2 && ys[0] != ys[0] && ys[1] == 0.1f32, encode(ys))
+        Err(e) => assert(false, f"{e}")
+    }
+    // an `Option`'s `null` stays `None`
+    match decode<[Option<float64>]>("[null, 2.5]") {
+        Ok(os) => assert(os.len() == 2 && os[0] == None && os[1] == Some(2.5), "options")
+        Err(e) => assert(false, f"{e}")
+    }
+    assert(outcome(decode<float64>("\"1.5\"")) == "$: expected a number, found a string", "a string")
 }
 
 // An error's text, or "ok" (for the test functions).

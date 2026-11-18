@@ -1293,6 +1293,8 @@ impl Interp {
                     Some(n) => { k = Value.VInt(value_len(self.settled_value(p)) - as_int(self.eval(n))) },
                     None => { k = self.eval(i) },
                 }
+                // a map's (a type's own `Index` may take a float)
+                if self.nan_key(k) && is_vmap(self.settled_value(p)) && self.nan_key_at(k, i) { return p }
                 p.steps.push(Step.SIndex(k, e, -2, 0))
                 p
             },
@@ -4031,6 +4033,7 @@ impl Interp {
         var m = new_mapv()
         for en in entries {
             let k = self.eval(en.key)
+            if self.nan_key_at(k, en.key) { return Value.VUnit }
             // the key hashed and found after its value, as natively, and as
             // a store into a container is (MYLA-4, MYLA-546)
             let v = self.eval(en.value)
@@ -4053,7 +4056,7 @@ impl Interp {
         let c = self.eval(tgt)
         if is_slice_expr(idx) { return self.eval_slice(e, c, idx) }
         let k = self.index_value(c, idx)
-        if self.stop() { return Value.VUnit }
+        if self.stop() || (is_vmap(c) && self.nan_key_at(k, idx)) { return Value.VUnit }
         // the key's place found once, for the check and the read (MYLA-506)
         let kt = self.hashed_index_key(k, e)
         let at = self.place_in(c, k, kt)
@@ -5176,6 +5179,37 @@ impl Interp {
         return value_hash(v)
     }
 
+    // Whether the map key `v`, the value of `at`, holds a NaN float, itself
+    // or in a tuple's or a derived struct's member: then the program stops
+    // with `cannot hash NaN` at `at` (in a function that reports its
+    // caller's position, at its call), where its map operation is, as
+    // native code's `nan_key_check` does (MYLA-850). A NaN in a list or an
+    // enum is std.hash's `hash` to find, where it hashes it.
+    fun nan_key_at(var self, v: Value, at: Expr) -> bool {
+        if !self.nan_key(v) { return false }
+        self.fail(self.failure_at(at), "cannot hash NaN")
+        return true
+    }
+
+    #test(interp_on("[int]"), Value.VTuple([Value.VInt(1), Value.VFloat(0.0 / 0.0)]))[true]
+    #test(interp_on("[int]"), Value.VList([Value.VFloat(0.0 / 0.0)]))[false]
+    #test(interp_on("[int]"), Value.VFloat(1.5))[false]
+    fun nan_key(self, v: Value) -> bool {
+        return match v {
+            Value.VFloat(f) => f != f,
+            Value.VTuple(es) => self.any_nan_key(es),
+            Value.VStruct(n, fns, fvs) => !self.own_hash.contains(n) && self.any_nan_key(fvs),
+            _ => false,
+        }
+    }
+
+    fun any_nan_key(self, vs: [Value]) -> bool {
+        for v in vs {
+            if self.nan_key(v) { return true }
+        }
+        return false
+    }
+
     fun written_hash(var self, key: str, v: Value, t: Option<Type>) -> int64 {
         let h0 = Value.VStruct("Hasher", ["state"], [Value.VInt(0)])
         let fi = self.func_idx(key + ".hash")
@@ -5874,12 +5908,14 @@ impl Interp {
         if c == B_CONTAINS {
             let m = self.eval(args[0])
             let k = self.eval(args[1])
+            if self.nan_key_at(k, args[1]) { return Value.VUnit }
             let kt = self.hashed_key_type(args[0])
             return Value.VBool(self.place_in(m, k, kt) >= 0)
         }
         if c == B_REMOVE {
             let p = self.place_of(args[0])
             let k = self.eval(args[1])
+            if self.nan_key_at(k, args[1]) { return Value.VUnit }
             let q = self.settle(p, false)
             if self.stop() { return Value.VUnit }
             let kt = self.hashed_key_type(args[0])
