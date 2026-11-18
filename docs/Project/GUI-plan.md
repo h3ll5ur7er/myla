@@ -11,6 +11,9 @@ A brainstorm of 18 November 2026 for the next phase of development: a cross-plat
 | [[Project/GUI-plan/Architecture]] | The layers from the platform's window up to the app, the frame pipeline, the state model, the platforms, the phases |
 | [[Project/GUI-plan/Syntax-without-grammar-change]] | What a SwiftUI-like API looks like in today's Myla, with a program that runs |
 | [[Project/GUI-plan/Syntax-with-grammar-change]] | Grammar changes in three tiers, from small general features to a `view` declaration |
+| [[Project/GUI-plan/Data-bindings]] | How a control reads and writes state: bindings as values, conversions, what a message per field costs |
+| [[Project/GUI-plan/Testing-and-automation]] | Five levels from `#test` on a model to the built program driven over a socket; pictures, replay, generated tests |
+| [[Project/GUI-plan/Styling]] | Themes as data, inherited attributes, control styles as functions, named styles, the platform look |
 
 [TOC]
 
@@ -79,6 +82,7 @@ Done on 2026-11-18 at `dd57b05`, on a 4-CPU Xeon at 2.1 GHz, with the tools buil
 | `xs + ys` on lists | `operator '+' requires numeric or string operands`; `xs.concat(ys)` works |
 | A function named `Text` | Accepted: capitalised function names are only a convention |
 | `f(1) { … }`, `f(1, y: 3)`, `g(.Title)`, `[1, if c { 2 }]` | Each is a parse error today, so none of the proposed forms changes the meaning of a valid program |
+| Bindings (`Binding<T>` with a two-way `map`), a view found by its id and edited, a theme decoded with `#derive(Toml)`, a button style as a function of its state, a message log encoded to JSON and replayed | Checks; prints the same under `myla run` and natively (at `4ad9493`) |
 | Filling a 1920×1080 `[uint32]` in a plain Myla loop, native | 4 ms a frame (2 ns a pixel) |
 | Source-over blending the same area, native | 10 to 15 ms a frame |
 | The same two loops under `myla run` (at 192×108, scaled by 100) | 4.9 s and 24 s a frame: about 1,200 and 1,600 to 2,400 times slower |
