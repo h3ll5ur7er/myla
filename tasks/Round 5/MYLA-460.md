@@ -2,7 +2,7 @@
 id: MYLA-460
 title: "std.xml's stream reader is quadratic in an event's length over short reads"
 type: bug
-status: todo
+status: review
 priority: medium
 labels: [std, xml, streams, round-5]
 ---
@@ -86,3 +86,17 @@ Reopened ([[Project/Review-2026-11-12]]): the fix for the quadratic scan made th
 - `scripts/test.sh` once at the end of the lane (with [[MYLA-550]]): 1,549 tests; the three failures are the embedded library (behind `lib/` until the seed commit, twice) and `test_children_run_in_parallel`, which passes alone. Bootstrap fixed point byte-identical.
 
 Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Review 2026-11-17
+
+- [x] **H10:** an event is still held back when a read cuts a multi-byte character (`repro-r6/library/xml_stream_waits_cut_char.my`: pieces `<s>Gruesse aus K` + the first byte of `ö`, then the rest, gave `start s`, a blocked read, an error)
+- [x] The round-6 scan made a DOCTYPE quadratic over short reads (200 KB: 9.2 s, 26 ms before)
+
+### What changed (round 7)
+
+Done in [[MYLA-797]], which has the details and the evidence: the text lexer stops before a character the bytes so far cut (and holds back a `]` only at their end, or `]]`), so the text before it is given and the scan starts at the cut character; `scan_event` follows a DOCTYPE's literals and internal subset, so only its real end stops the reads and the doubling rule holds for it too; and `fill` keeps the bytes read before a failed read ([[MYLA-857]]). `stream_every_cut` checks, for seven documents cut in two at every byte and in pieces of every size with a failure after each part, that the events given before each failure are all the bytes read hold; `stream_work_is_linear` bounds the bytes lexed again for a long event of each kind, a measure that doesn't depend on the machine's load.
+
+### Evidence (round 7)
+
+- Before: `stream_every_cut` fails on H10 (`cut at 17: after 17 bytes start s, not start s|text Gruesse aus K`), `stream_work_is_linear` on the DOCTYPE (540,166 bytes lexed again for 4,009); after, both pass, 118/118 interpreted, natively, aarch64, wasm32.
+- `xml_stream_waits_cut_char.my` gives `start s`, `text Gruesse aus K`, `text öln`, `start m`, `end m` before the blocked read. The DOCTYPE of 200,000 bytes over 1-byte reads: 7,192 ms before, 12 ms after (native x86-64, one machine, one session, 2026-11-18, `e659342` and MYLA-797's branch).
