@@ -21,4 +21,6 @@ To reproduce: a stream that gives `<log>` a byte at a time and fails once after 
 
 ## Proposals
 
+Accepted by the owner on 2026-11-18 as D293.
+
 Whether a reader may be read again after an `Io` error isn't settled anywhere, and the stream readers differ: `std.csv`'s ends at one on purpose (`CsvStreamReader.fill` sets `done`). Built: `XmlStreamReader.read_event` may be called again and goes on (its iterator still ends after any error, as before), as a read that would block or was interrupted is no end of the stream. Alternatives: (a) an `Io` error ends the XML reader too, as std.csv's (then nothing needs keeping, but a stream that doesn't wait can't be read, and a test can't stop the reader at every byte in one pass); (b) the rule built here for every stream reader, std.csv's included (a change to std.csv, outside this lane). Recommended: (b), as a follow-up.

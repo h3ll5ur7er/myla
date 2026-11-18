@@ -30,6 +30,8 @@ At BASE `e659342` (round 7 with wave A); "before" is `build/myla` bootstrapped t
 
 ## Proposals
 
+Accepted by the owner on 2026-11-18 as D279 to D283 (proposal 1 is D279, 2 D280, 3 D281, 4 D282, 5 D283).
+
 1. **The chain limit (M10).** Built: `MAX_CHAIN` 2,048, a call counting 2 and a `|>` 3, so that it holds with room for the tools of both Linux targets (aarch64's checker overflowed at 4,187 `&&` with 8,192 allowed). Alternatives: keep 8,192 with the weights (x86-64 only: aarch64 tools overflow past about 4,100); a limit per host the tools run on (a program that checks on one machine wouldn't on another); make the checker's walk of a chain iterative (other lanes' files, much more work). The wasm32 tools overflow at about 530 `&&` even so: [[MYLA-826]].
 2. **A lazy module that doesn't parse.** Built: its errors are those of the module parsed whole. Alternative: a stricter body skipper (it can't know a brace is missing before it reads past it).
 3. **D186's note.** Built: read as a call, the note goes with an error that starts at the callee or its type arguments, not with one in the call's arguments alone. Alternative: drop it where the callee is a generic function with as many type parameters, which the loader can't know.

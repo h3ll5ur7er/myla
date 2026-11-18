@@ -48,4 +48,6 @@ Suites:
 
 ## Proposals
 
+Accepted by the owner on 2026-11-18 as D293 ([[MYLA-857]]'s proposal).
+
 See [[MYLA-857]]: whether `read_event` may be called again after an `Io` error. Built: yes.

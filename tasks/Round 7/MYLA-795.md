@@ -36,6 +36,8 @@ The changes outside the router: in the server part of `http.my`, `serve_ready` (
 
 ## Proposals
 
+Accepted by the owner on 2026-11-18 as D284 to D289 (proposals 1 to 6 in order).
+
 1. **Symbolic links below the root: every one is refused** (built), one that stays inside too. D260 says "no symlinks out of the root", but std.fs can't say where a link leads (no `readlink`, no canonical path, and no primitive for either). Alternatives: follow a link whose target stays under the root, which needs a primitive staged in the seeds on every target and in the interpreter ([[MYLA-841]]); follow every link (nginx's default, which D260 refuses).
 2. **`..` is resolved, not refused** (built): `/assets/sub/../app.css` is `app.css`, as Go's `path.Clean` and nginx do, and 404 only past the root. Alternative: 404 for any `..`, as before (stricter, but a well-formed relative link in a served page could 404).
 3. **Dot files: an argument, `static_files(prefix, dir, dot_files = false)`** (built), refusing every dot segment by default, `.well-known` too. Alternatives: a `StaticOptions` struct (room for an index file, cache headers), or `.well-known` served by default.

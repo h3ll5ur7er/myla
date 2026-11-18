@@ -41,6 +41,8 @@ Work package of [[Project/Review-2026-11-17]], lane "Numerics" (section 5). File
 
 ## Proposals
 
+Accepted by the owner on 2026-11-18 as D290 to D292 (proposals 1 to 3 in order).
+
 1. **When `inverse` is None** (M7, not settled by a decision). Built: the fixed sizes by the determinant, None when it is 0 or not finite (or the inverse isn't), the matrix scaled by a power of two where the determinant under- or overflows; `Matrix` by its pivots, None for a pivot of 0 (LAPACK's `getrf`, numpy's `inv`). An exactly singular matrix of small integers has a determinant of exactly 0, so it is None; one singular only by rounding still gets huge elements, as in glam and numpy. Alternatives: (a) a tolerance, None when a pivot (or the scaled matrix's determinant) is within n·ε of 0: catches the rounding cases too, but a badly scaled matrix that has an inverse (`diag(1e-20, 1)`) is then None unless its rows are equilibrated first, and the threshold is a choice no caller sees; (b) `Matrix` by its determinant too, which overflows for a large n.
 2. **A NaN in JSON** ([[MYLA-851]]): the linear algebra types read `null` as NaN (built), as std.json writes one; plain floats don't. The alternatives are in that task.
 3. **D258's form.** Built: the loader decides from the program's text, by the names of std.float's methods, before anything is checked. Alternative: the checker loads the module at the first float method it doesn't find, which is exact but needs the loader inside the checker (a module loaded mid-check, renamed and merged); the name test over-approximates only for an integer's `abs`, `min`, `max`, `pow`, `clamp`, `signum`, where it costs what every program paid before.
