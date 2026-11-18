@@ -887,25 +887,12 @@ fun free_spec(spec: int64) {
     __free(spec)
 }
 
-// A read of up to 4 KB of `fd` into `buf`: the bytes read, 0 for none yet
-// (EINTR), -1 at the end of the file or on an error.
-fun read_some(fd: int64, buf: int64) -> int64 {
-    let got = sys(SYS_READ, fd, buf, 4096)
-    if got == -INTERRUPTED {
-        return 0
-    }
-    if got <= 0 {
-        return -1
-    }
-    return got
-}
-
 // `program` (its path, not searched for) run with the argument vector
 // `argv` and the environment the process started with (fork and exec), its
 // stdout and stderr read as they come (poll), and waited for. Gives what it
 // wrote to stdout; `__set_run_stderr` and `__set_run_status` (its exit
-// code, a signal that ended it with exit code -1, or the cause of a failed
-// spawn) record the rest.
+// code, a signal that ended it with exit code -1, and the cause of a failed
+// spawn, or of a failed read of its output once it ended) record the rest.
 pub fun run(program: str, argv: [str]) -> [uint8] {
     return run_with([program], argv, [])
 }
@@ -934,6 +921,10 @@ pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
     let pipes = __alloc(24)
     let buf = __alloc(4096)
     var failure: int64 = 0
+    // (the cause of the first read of a pipe that failed: the run's, once
+    // the child ended, as Windows' `run_with` has it; MYLA-862: it was taken
+    // for the stream's end, and the output cut short with nothing said)
+    var failed: int64 = 0
     var exit_code: int64 = 0
     var signal: int64 = 0
     var r = sys(SYS_PIPE2, pipes, 524288, 0)
@@ -985,11 +976,17 @@ pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
                 continue
             }
             if ready < 0 {
+                if failed == 0 {
+                    failed = -ready
+                }
                 break
             }
             if out_fd >= 0 && (__load64(fds) >> 48) != 0 {
-                let got = read_some(out_fd, buf)
-                if got < 0 {
+                let got = sys(SYS_READ, out_fd, buf, 4096)
+                if got <= 0 && got != -INTERRUPTED {
+                    if got < 0 && failed == 0 {
+                        failed = -got
+                    }
                     sys(SYS_CLOSE, out_fd, 0, 0)
                     out_fd = -1
                 }
@@ -1000,8 +997,11 @@ pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
                 }
             }
             if err_fd >= 0 && (__load64(fds + 8) >> 48) != 0 {
-                let got = read_some(err_fd, buf)
-                if got < 0 {
+                let got = sys(SYS_READ, err_fd, buf, 4096)
+                if got <= 0 && got != -INTERRUPTED {
+                    if got < 0 && failed == 0 {
+                        failed = -got
+                    }
                     sys(SYS_CLOSE, err_fd, 0, 0)
                     err_fd = -1
                 }
@@ -1029,6 +1029,7 @@ pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
             } else {
                 exit_code = (status >> 8) & 255
             }
+            failure = failed
         }
     }
     __free(buf)
