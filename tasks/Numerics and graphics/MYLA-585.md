@@ -2,7 +2,7 @@
 id: MYLA-585
 title: Floats get methods (an implicit std.float)
 type: feature
-status: todo
+status: review
 priority: high
 labels: [stdlib, language]
 ---
@@ -28,3 +28,10 @@ The owner's decision D199 (2026-11-13). Floats have no methods today (`type 'flo
 - Docs: [[Language/Standard-library/Float]] (a tested example), [[Language/Standard-library]], [[Language/Modules]], [[Language/Standard-library/Math]], [[Architecture/Module-loader]], [[Development/Conventions]], [[Development/Testing]], the skill.
 
 Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7 ([[MYLA-796]])
+
+Reopened for M6 and M4; both done in [[MYLA-796]], whose Evidence has the details.
+
+- **M6**: `sinh`, `cosh`, `tanh` and `cbrt` are std.math's now, fdlibm's (with its `expm1`), and `log10` FreeBSD's; against the exact values the worst errors went from 1.28·10^15 ulps (`sinh` infinite past 709.78) to 2, `tanh` 58 → 2, `log10` 3.0·10^9 → 1 (near 1), `cbrt` 122 → 1. `(-0.0).tanh()` is `-0.0`, `710.0.sinh()` 1.1169973830808557e308. `NaN.clamp(0, 1)` is NaN. `tests/burn/test_math.py` holds them to the page's errors against the C library.
+- **M4, D258**: std.float, with the std.math it imports, is loaded only for a program that may call one of its methods (`without_unused_float` in [[selfhost/loader.my]]): a hello world's `myla check` 25.49 M → 21.45 M instructions, `myla run` 28.96 M → 24.86 M.

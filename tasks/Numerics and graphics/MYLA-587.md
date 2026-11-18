@@ -2,7 +2,7 @@
 id: MYLA-587
 title: std.vector, std.matrix and std.quaternion
 type: feature
-status: todo
+status: review
 priority: high
 labels: [stdlib, numerics, graphics]
 ---
@@ -50,3 +50,12 @@ Depends on [[MYLA-612]] (operators between different types) and [[MYLA-585]] (fl
 - JSON (D206): arrays as glTF writes them; `Vector` an array, `Matrix` `{rows, cols, data}`. Errors carry their path, and a `Matrix` whose data doesn't fit its shape is an error at `$.data`. std.json's `within` is now public for impls written by hand. Measured cost of the std.json import, before the impls: checking a program that uses std.vector went from 34 to 47 ms, building it from 148 to 174 ms. `test_linalg`'s `Json` test was written first and failed (`field 'translation' has type 'vector.Vec3', which isn't ToJson and FromJson`). It now passes interpreted, natively, on wasm32 and on aarch64 (qemu). Module cases, interpreted and `--native`: vector and vector32 21/21, matrix and matrix32 11/11, quaternion and quaternion32 4/4, json 103/103.
 
 Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7 ([[MYLA-796]])
+
+Reopened for H11 and the false box "`#test` cases on every value-returning function"; both done in [[MYLA-796]], whose Evidence has the details.
+
+- **H11**: a `Matrix`'s shape is counted in int64 (`shape_len`, `matrix`, `impl FromJson for Matrix`): `json.decode<Matrix>` of a 65536×65536 shape with no data is `$.data: a 65536x65536 matrix takes 4294967296 elements, got 0` on every runner, `zero_matrix(65536, 65536)` and `identity(46341)` a named runtime error; `row`, `col` and a `Vector`'s index out of range too (`tests/burn/test_linalg.Shapes`, interpreted, plain and `--checked`).
+- **M7**: `MatN.inverse` by the determinant, scaled by a power of two where it under- or overflows: the review's singular Mat4 is None, the identity times 1e-200 has its inverse.
+- **The cases**: written by `scripts/gen_std_linalg.py` from Python's numbers. Value-returning functions with a case: vector 20 of 133 → 132 of 134, matrix 10 of 120 → 128 of 129, quaternion 3 of 29 → 29 of 30 (left: the generic `with_spec`, and `Vector.map`, which a test function covers). Module cases, interpreted and `--native`: vector and vector32 176/176, matrix 197/197, matrix32 186/186, quaternion and quaternion32 43/43.
+- The Low items of the review's library list: `Format` takes its spec, `length` and `normalized` far from 1, a JSON `null` as NaN.
