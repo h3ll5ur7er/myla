@@ -328,10 +328,10 @@ async fun main() {
 """
 
 
-def _drained_slowly(argv: list[str], exe: str | None) -> tuple[int, bytes, int, float, float]:
+def _drained_slowly(argv: list[str], exe: str | None, pause: float = 0.02) -> tuple[int, bytes, int, float, float]:
     """`argv` run with its standard output a non-blocking pipe read 64 KiB
-    every 20 ms: the bytes read, its stderr, its exit code, its CPU time and
-    the wall time, in seconds."""
+    every `pause` seconds: the bytes read, its stderr, its exit code, its CPU
+    time and the wall time, in seconds."""
     r, w = os.pipe()
     os.set_blocking(w, False)
     t0 = time.monotonic()
@@ -341,7 +341,7 @@ def _drained_slowly(argv: list[str], exe: str | None) -> tuple[int, bytes, int, 
     with os.fdopen(r, "rb", buffering=0) as reader:
         while chunk := reader.read(65536):
             got += len(chunk)
-            time.sleep(0.02)
+            time.sleep(pause)
     err = p.stderr.read()
     p.stderr.close()
     _, status, usage = os.wait4(p.pid, 0)
@@ -358,17 +358,22 @@ class NonBlockingOutput(unittest.TestCase):
                 os.makedirs(os.path.join(tmp, kind))
                 for name, argv, exe in _argvs(os.path.join(tmp, kind), source):
                     with self.subTest(writes=kind, run=name):
+                        # its twin, read as fast as it writes: the CPU its
+                        # start and its writes take, on the machine as
+                        # loaded now (MYLA-745: a share of the wall time
+                        # alone failed under a full run's load, and under an
+                        # emulator, whose start costs more)
+                        _, _, _, cpu0, wall0 = _drained_slowly(argv, exe, 0)
                         got, err, code, cpu, wall = _drained_slowly(argv, exe)
                         self.assertEqual((got, err, code), (2048 * 1024, b"", 0))
                         # the reader alone takes 0.64 s; the interpreter's
                         # start (reading the library) is most of what is left
                         self.assertGreater(wall, 0.6)
-                        # a writer that spun would use all of it; under an
-                        # emulator the start costs more of the CPU (qemu
-                        # on CI: 0.42 of the wall time where this machine
-                        # gives 0.23, 2026-11-18 at e659342; master 0.26)
-                        share = 0.4 if TEST_TARGET == "" else 0.6
-                        self.assertLess(cpu, share * wall, f"{cpu:.2f} s of CPU in {wall:.2f} s")
+                        # a writer that spun would use the time it waited
+                        # (`wall - wall0`, about 0.6 s) on top of its twin's
+                        waited = max(wall - wall0, 0.5)
+                        self.assertLess(cpu - cpu0, 0.25 * waited,
+                                        f"{cpu:.2f} s of CPU in {wall:.2f} s, its twin {cpu0:.2f} s in {wall0:.2f} s")
 
 
 # MYLA-572: a read of two billion bytes of a short input, and how much the

@@ -41,7 +41,7 @@ import tempfile
 import time
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, wine, wine_env
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, wine, wine_env, wine_run
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 TOOLS = ("clang", "llvm-dlltool", "lld-link")
@@ -139,6 +139,38 @@ class WinePrefix(unittest.TestCase):
             server = shutil.which("wineserver") or server
             kill = subprocess.run([server, "-k"], env=env, capture_output=True, text=True, timeout=60)
             self.assertEqual(kill.returncode, 0, "no server for the prefix 6 s after wine_env")
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE and HAVE_WINDOWS, WINDOWS_SKIP)
+    def test_a_run_ends_with_its_program_whatever_the_services_hold(self):
+        """A program that is the first of its Wine server starts the prefix's
+        services, which outlive it holding its standard error as long as the
+        server lives (MYLA-759): `wine_run`'s run ends with the program. The
+        suites ran programs with `wine()` alone, and on 2026-11-18 a run of
+        `scopes_wait_for_children` that ended at once timed out at 60 s
+        (master's e6e1b9e), one without a time limit waited for over an
+        hour (4c91ba2); here such a run took the server's 30 s."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {k: v for k, v in os.environ.items() if k != "TMPDIR"}
+            env.update(WINEPREFIX=os.path.join(tmp, "prefix"), WINEDEBUG="-all")
+            quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+            server = shutil.which("wineserver") or os.path.join(os.path.dirname(wine()[0]), "wineserver")
+            # the prefix made, its boot's server and services stopped
+            subprocess.run([*wine(), "wineboot", "--init"], env=env, timeout=300, **quiet)
+            subprocess.run([server, "-w"], env=env, timeout=300, **quiet)
+            self.addCleanup(subprocess.run, [server, "-k"], env=env, timeout=60, **quiet)
+            with open(os.path.join(tmp, "main.my"), "w", encoding="utf-8") as fh:
+                fh.write('fun main() {\n    print("hello")\n}\n')
+            built = subprocess.run([selfhost_tool("main"), "build", "main.my", "--target", "x86_64-windows",
+                                    "--stdlib", STDLIB_ROOT, "-o", "prog.exe"], capture_output=True, text=True,
+                                   cwd=tmp, timeout=300)
+            self.assertEqual((built.stderr, built.returncode), ("", 0))
+            # a server kept 30 s, with no services yet: the program starts them
+            subprocess.run([server, "-p30"], env=env, timeout=60, **quiet)
+            start = time.monotonic()
+            ran = subprocess.run([*wine_run(), os.path.join(tmp, "prog.exe")], capture_output=True, cwd=tmp,
+                                 env=env, timeout=60)
+            self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"hello\n", b"", 0))
+            self.assertLess(time.monotonic() - start, 20, "the run waited for the server's 30 s")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -968,6 +1000,56 @@ fun handle(r: Request) -> Response {
     return http.response(200, f"hello {r.method} {r.path()}")
 }
 
+// What the HTTP server saw, for a run whose count is wrong (MYLA-863): the
+// paths of the requests it handled with the client's port for each (one
+// port a connection), and `serve_n`'s count once it came (-1: it failed or
+// ran out of time; -2 until then).
+actor Served {
+    paths: [str],
+    ports: [int],
+    count: int,
+}
+
+impl Served {
+    fun saw(var self, path: str, port: int) {
+        self.paths.push(path)
+        self.ports.push(port)
+    }
+
+    fun ended(var self, n: int) {
+        self.count = n
+    }
+
+    fun report(self) -> str {
+        var sb = StringBuilder()
+        sb.append(f"the HTTP server: {self.paths.len()} handled,")
+        var i = 0
+        var last = -1
+        var conns = 0
+        for p in self.paths {
+            if self.ports[i] != last {
+                conns += 1
+                last = self.ports[i]
+            }
+            sb.append(f" {p}@{self.ports[i]}")
+            i += 1
+        }
+        sb.append(f", {conns} connections in turn, ")
+        sb.append(if self.count != -2 { f"serve_n gave {self.count}" } else { "serve_n still serving" })
+        return sb.build()
+    }
+}
+
+// `handle`, the request noted in `seen` first.
+async fun handle_seen(seen: Served, r: Request) -> Response {
+    let port = match r.peer {
+        Some(a) => a.port
+        None => -1
+    }
+    await seen.saw(r.path(), port)
+    return handle(r)
+}
+
 // Its own HTTP server asked `n` times: the answers that were right. Each
 // request has 30 s: one the server never answers is `timed out` then, with
 // how long it took and how many came back before, and the run ends with
@@ -1038,13 +1120,19 @@ async fun serve_within(l: TcpListener, n: int) -> int {
     }
 }
 
-// `http.serve_n`, at most 200 s: how many requests it answered, or -1.
-async fun http_within(l: TcpListener, n: int) -> int {
-    return match await task.timeout(200000, async () => await http.serve_n(l, n, handle)) {
+// `http.serve_n` (`serve_with` and a limit of `n`, its handler noting each
+// request in `seen`), at most 200 s: how many requests it answered, or -1.
+async fun http_within(l: TcpListener, n: int, seen: Served) -> int {
+    var o = http.server_options()
+    o.max_requests = n
+    let serve = async () => await http.serve_with(l, o, async (r: Request) => await handle_seen(seen, r))
+    let k = match await task.timeout(200000, serve) {
         Some(Ok(k)) => k
         Some(Err(e)) => failed(f"the HTTP server: {e}") - 1
         None => failed("the HTTP server: still serving after 200 s") - 1
     }
+    await seen.ended(k)
+    return k
 }
 
 fun number(s: str) -> int {
@@ -1077,7 +1165,8 @@ async fun main() {
         Err(e) => { panic("addr") }
     }
     async let served = serve_within(l, clients)
-    async let answered = http_within(hl, 20)
+    let seen = Served { paths: [], ports: [], count: -2 }
+    async let answered = http_within(hl, 20, seen)
     // tasks 0 to clients - 1 the clients, then the children, then `ask`
     var ended: [bool] = []
     for k in 0..clients + kids + 1 {
@@ -1103,6 +1192,7 @@ async fun main() {
         Some(xs) => { results = xs }
         None => {
             eprintln(f"still running after 200 s, tasks:{await progress.pending()}")
+            eprintln(await seen.report())
             exit(2)
         }
     }
@@ -1113,6 +1203,7 @@ async fun main() {
     if ok != clients + kids + 20 {
         // (a server whose client gave up would wait for it for ever)
         eprintln(f"{ok} of {clients + kids + 20} right")
+        eprintln(await seen.report())
         exit(1)
     }
     let echoed = await served
@@ -1593,6 +1684,57 @@ class PlatformFollowUps(unittest.TestCase):
             proc.kill()
             proc.wait()
         self.assertGreaterEqual(biggest, 120 << 20, f"the largest reserved mapping: {biggest >> 20} MiB")
+
+    def test_the_heap_is_committed_as_it_is_used(self):
+        # MYLA-861: each worker that allocated at all (every one that read
+        # the clock while a timer waited) committed a 16 MiB chunk of the
+        # heap; a chunk is reserved now and committed 256 KiB at a time as
+        # cells reach it (Wine maps what is committed `rw-p`). At BASE 8 to
+        # 13 such mappings of 16 MiB, 2026-11-18
+        self.build("prog", HELPER)
+        proc = subprocess.Popen([*wine(), os.path.join(self.tmp, "prog.exe"), "sleep", "3000"], cwd=self.tmp,
+                                env=dict(os.environ, MYLA_THREADS="16"))
+        try:
+            time.sleep(2)
+            chunks = 0
+            with open(f"/proc/{proc.pid}/maps", encoding="ascii") as fh:
+                for line in fh:
+                    span, perms = line.split()[:2]
+                    lo, hi = (int(x, 16) for x in span.split("-"))
+                    if perms == "rw-p" and hi - lo == 16 << 20:
+                        chunks += 1
+            self.assertEqual(proc.wait(timeout=60), 0)
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertEqual(chunks, 0, "chunks of the heap committed whole")
+
+    def test_a_job_of_its_own_takes_its_children_along(self):
+        # MYLA-819: std.test's test child is in a job of its own on Windows
+        # (`own_job`, killing what is in it once its one handle closes), as
+        # it leads a process group on Linux: a case killed past its time
+        # limit left its children running. Under Wine `myla test` kills the
+        # case's Unix process group, children included, so the case itself
+        # can't show it here: a program in a job of its own ends, and the
+        # child it started, which outlives a program without one, is gone
+        # with it (only CI's Windows job runs a timed-out case's)
+        self.build("helper", HELPER)
+        self.build("prog", 'import std.process as process\nimport std.platform as os\nfrom std.process import Stdio\n\n'
+                           'fun main() {\n    print(os.own_job())\n'
+                           '    let c = process.command("./helper.exe").arg("sleep").arg("60123")\n'
+                           '    match c.stdout_from(Stdio.Null).stderr_from(Stdio.Null).spawn() {\n'
+                           '        Ok(child) => print("started")\n        Err(e) => print(f"{e}")\n    }\n}\n')
+        ran = self.run_exe()
+        self.assertEqual((ran.stdout.decode(), ran.stderr.decode(), ran.returncode), ("true\nstarted\n", "", 0))
+        left = ""
+        for _ in range(50):
+            left = subprocess.run(["pgrep", "-f", "helper.exe sleep 60123"], capture_output=True, text=True).stdout
+            if not left:
+                break
+            time.sleep(0.1)
+        if left:
+            subprocess.run(["pkill", "-f", "helper.exe sleep 60123"])
+        self.assertEqual(left, "", "the child outlived its parent's job")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

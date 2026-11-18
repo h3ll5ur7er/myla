@@ -2153,8 +2153,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
                         self.assertEqual(got, want, f"{workers} workers")
 
     def test_children_run_in_parallel(self) -> None:
-        """Eight CPU-bound children on as many workers as CPUs: the process
-        uses well over one CPU's time per second of wall time (D89 (3))."""
+        """Eight CPU-bound children on as many workers as CPUs: several of
+        the process's threads did a share of the work, and they ended well
+        before they do on one worker (D89 (3))."""
         if (os.cpu_count() or 1) < 2:
             self.skipTest("one CPU")
         with tempfile.TemporaryDirectory() as tmp:
@@ -2165,23 +2166,60 @@ class SelfHostedCodegenParity(unittest.TestCase):
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(self._emit_asm(path, STDLIB_ROOT))
             assemble(exe + ".s", exe)
-            env = dict(os.environ)
-            env.pop("MYLA_THREADS", None)
-            # on a busy machine the children share the CPUs with other
-            # processes, so the ratio is taken from the best of three runs
-            ratios = []
+            many = dict(os.environ)
+            many.pop("MYLA_THREADS", None)
+            one = dict(os.environ, MYLA_THREADS="1")
+            # a count, whatever the load: the CPU time of each of the
+            # process's threads once the work is done (the program waits
+            # for a line then); a tenth of it at least on two of them
+            argv, bin_exe = run_argv(exe, exe, ["hold"])
+            held = subprocess.Popen(argv, executable=bin_exe, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    text=True, env=many)
+            try:
+                self.assertEqual(held.stdout.readline(), "1\n")
+                ticks = []
+                for tid in os.listdir(f"/proc/{held.pid}/task"):
+                    try:
+                        with open(f"/proc/{held.pid}/task/{tid}/stat", encoding="ascii") as fh:
+                            fields = fh.read().rsplit(")", 1)[1].split()
+                    except OSError:
+                        continue
+                    ticks.append(int(fields[11]) + int(fields[12]))
+            finally:
+                held.stdin.close()
+                held.wait(timeout=120)
+            busy = [t for t in ticks if t * 10 >= sum(ticks)]
+            self.assertGreaterEqual(len(busy), 2, f"the threads' CPU ticks: {sorted(ticks, reverse=True)}")
+            if TEST_TARGET == "aarch64-linux":
+                # (under qemu the times say little: its threads gave 1.3
+                # CPUs to the 8 children where one worker took 3.6 s,
+                # 2026-11-18 under load)
+                return
+            # its twin on one worker, the two run in turn, the best of three
+            # each, less the time of each with no work (its start: under
+            # Wine most of a run): a share of the CPU time beside the wall
+            # time failed when a full run's other processes took the CPUs
+            # (MYLA-745), while the children still ran on many workers
+            runs = {"one": (one, []), "many": (many, []), "one0": (one, ["0"]), "many0": (many, ["0"])}
+            walls: dict[str, list[float]] = {name: [] for name in runs}
+
+            def work(name: str) -> float:
+                return min(walls[name]) - min(walls[name + "0"])
+
             for _ in range(3):
-                proc = subprocess.run(
-                    [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, *run_argv(exe, exe)[0]],
-                    capture_output=True, text=True, env=env,
-                )
-                out, cpu, wall = proc.stdout, *map(float, proc.stderr.split()[-2:])
-                self.assertEqual(out, "1\n")
-                ratios.append((cpu, wall))
-                if cpu > 1.5 * wall:
+                for name, (env, args) in runs.items():
+                    proc = subprocess.run(
+                        [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, *run_argv(exe, exe, args)[0]],
+                        capture_output=True, text=True, env=env,
+                    )
+                    self.assertEqual(proc.stdout, "1\n")
+                    walls[name].append(float(proc.stderr.split()[-1]))
+                if work("one") > 1.5 * work("many"):
                     break
-            cpu, wall = max(ratios, key=lambda r: r[0] / max(r[1], 1e-9))
-            self.assertGreater(cpu, 1.5 * wall, f"cpu {cpu:.2f} s, wall {wall:.2f} s (best of {len(ratios)})")
+            self.assertGreater(work("one"), 1.5 * work("many"),
+                               f"{work('many'):.2f} s on every worker, {work('one'):.2f} s on one, each less its "
+                               f"start ({min(walls['many0']):.2f} s, {min(walls['one0']):.2f} s; best of "
+                               f"{len(walls['one'])})")
 
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PINNED, PROGRAMS
@@ -2339,12 +2377,14 @@ async fun main() {
 # agree with one another.
 PARALLEL_WORK = """\
 import std.task as task
+from std.process import args
+from std.io import stdin
 
-fun crunch(seed: int64) -> int64 {
+fun crunch(seed: int64, n: int) -> int64 {
     var x: int64 = seed
     var acc: int64 = 0
     var i = 0
-    while i < 15000000 {
+    while i < n {
         x = (x * 48271) % 2147483647
         acc = (acc + x % 7) % 1000000007
         i = i + 1
@@ -2354,16 +2394,24 @@ fun crunch(seed: int64) -> int64 {
 
 #main
 async fun main() {
+    // (`0`: no work, the start and the tasks alone; `hold`: the work, then
+    // a line of the input waited for, while the test looks at the threads)
+    let a = args()
+    let n = if a.len() > 1 && a[1] == "0" { 0 } else { 15000000 }
     var fs: [async () -> int64] = []
     for k in 0..8 {
         let seed: int64 = (k + 1) as int64
-        fs.push(async () => crunch(seed))
+        fs.push(async () => crunch(seed, n))
     }
     var ones: int64 = 0
     for r in await task.all(fs) {
         ones = ones + r
     }
     print(ones / 8)
+    if a.len() > 1 && a[1] == "hold" {
+        var r = stdin()
+        let line = r.read_line()
+    }
 }
 """
 

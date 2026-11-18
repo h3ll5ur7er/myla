@@ -841,6 +841,35 @@ def sockets_of(pid: int) -> int:
     return n
 
 
+def socket_states(pid: int) -> str:
+    """The TCP sockets of the process `pid` (Linux's /proc): each one's
+    local and remote port, state and bytes queued to send and to read, for
+    a test's message."""
+    inodes = set()
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            link = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if link.startswith("socket:["):
+            inodes.add(link[8:-1])
+    states = {"01": "ESTABLISHED", "06": "TIME_WAIT", "07": "CLOSE", "08": "CLOSE_WAIT", "0A": "LISTEN"}
+    out = []
+    for table in ("tcp", "tcp6"):
+        try:
+            with open(f"/proc/{pid}/net/{table}", encoding="ascii") as fh:
+                rows = fh.read().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            w = row.split()
+            if w[9] in inodes:
+                tx, rx = (int(x, 16) for x in w[4].split(":"))
+                out.append(f"{int(w[1].split(':')[1], 16)}->{int(w[2].split(':')[1], 16)} "
+                           f"{states.get(w[3], w[3])} tx {tx} rx {rx}")
+    return "; ".join(out) or "none"
+
+
 def wait_for_sockets(pid: int, n: int, limit: float) -> int:
     """Waits, at most `limit` seconds, until the process `pid` has at most
     `n` sockets open; how many it has."""
@@ -925,7 +954,10 @@ class TimeLimits(unittest.TestCase):
             # listener only): reading is progress, and a holder read before
             # its write_ms passed gets the whole response (MYLA-555: once in
             # 9 runs under load, the second holder's handler started late)
-            self.assertEqual(wait_for_sockets(self.server_pid, 1, 10), 1)
+            # (the condition waited for, at most 30 s: 10 s once weren't
+            # enough under a full run's load, MYLA-745; the sockets left
+            # say which connection the server kept)
+            self.assertEqual(wait_for_sockets(self.server_pid, 1, 30), 1, socket_states(self.server_pid))
             for s in hold:
                 got, _ = end_of(s, 5)
                 self.assertLess(len(got), 8 << 20, "closed before the whole response")
@@ -1059,14 +1091,18 @@ class TimeLimits(unittest.TestCase):
         # worker until a guard's look gave it up for a waiting connection,
         # closing it: the first 200 requests ended in a reset.
         def check(port):
-            kept = []
+            # the 200 first requests sent at once, then their answers read:
+            # one after the other, the first connections waited for their
+            # next request as long as the last ones took, past `idle_ms`
+            # when a full run's load slowed the interpreted server
+            # (MYLA-745: the next request found its connection closed)
             t0 = time.monotonic()
-            for _ in range(200):
-                s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            kept = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(200)]
+            for s in kept:
                 s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            for s in kept:
                 r = recv_response(s)
                 self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"\r\n\r\nok"), r)
-                kept.append(s)
             first = time.monotonic() - t0
             silent = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(100)]
             time.sleep(0.2)
@@ -1083,17 +1119,17 @@ class TimeLimits(unittest.TestCase):
             self.assertLess(first, 10, "200 first requests")
             self.assertLess(took, 1, "a request beside 300 connections")
             self.assertLess(again, 10, "200 kept connections' next requests")
-            # quiet from now on: closed by the server within idle_ms (1.5 s)
+            # quiet from now on: closed by the server within idle_ms (3 s)
             # and a look of its keeper
             t2 = time.monotonic()
             for s in kept + silent:
-                self.assertEqual(end_of(s, 5)[0], b"")
-            self.assertLess(time.monotonic() - t2, 3)
+                self.assertEqual(end_of(s, 7)[0], b"")
+            self.assertLess(time.monotonic() - t2, 4.5)
             for s in kept + silent:
                 s.close()
 
         with tempfile.TemporaryDirectory() as tmp:
-            for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "1500", "5000", "5000"]).items():
+            for name, (argv, exe) in self.forms(tmp, ["15000", "2", "-", "3000", "5000", "5000"]).items():
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
 
@@ -1526,6 +1562,120 @@ ONE_PROGRAM_OUT = "".join(
 class OneProgram(unittest.TestCase):
     def test_a_client_and_a_server_on_the_reactor(self):
         self.assertEqual(run_both(ONE_PROGRAM), (ONE_PROGRAM_OUT, "", 0))
+
+
+# MYLA-863: `serve_n`'s server counts what its client got. A connection
+# closed under its answer (a client that asks for 8 MiB and closes without
+# reading) is no answer: the server's count reached its limit one request
+# early, and the kept-alive client's last request, sent again on a new
+# connection (the old one closed with the server), waited in the
+# listener's backlog until its time ran out. Then the client sends exactly
+# the server's limit over one kept connection: both counts must agree.
+TO_THE_LIMIT = PRELUDE + r"""import std.task as task
+import std.bytes as bytes
+
+actor Seen {
+    big: bool,
+}
+
+impl Seen {
+    fun saw_big(var self) {
+        self.big = true
+    }
+
+    fun big_seen(self) -> bool {
+        return self.big
+    }
+}
+
+async fun handle(seen: Seen, r: Request) -> Response {
+    if r.path() == "/big" {
+        await seen.saw_big()
+        var piece = StringBuilder()
+        for i in 0..64 {
+            piece.append("0123456789abcdef")
+        }
+        let k = piece.build()
+        var sb = StringBuilder(8388608)
+        for i in 0..8192 {
+            sb.append(k)
+        }
+        return http.response(200, sb.build())
+    }
+    return http.response(200, f"hello {r.path()}")
+}
+
+// a request for 8 MiB on a connection of its own, closed unread once the
+// server has the request
+async fun gone(port: int, seen: Seen) -> str {
+    var s = match await net.connect_async(net.addr(net.loopback(), port)) {
+        Ok(s) => s
+        Err(e) => { return f"connect: {e}" }
+    }
+    match await s.write_async(bytes.from_str("GET /big HTTP/1.1\r\nHost: x\r\n\r\n")) {
+        Ok(_) => {}
+        Err(e) => { return f"write: {e}" }
+    }
+    while !(await seen.big_seen()) {
+        await task.sleep(1)
+    }
+    let c = s.close()
+    return "gone"
+}
+
+// `n` requests over one kept connection: those answered right
+async fun ask(port: int, n: int) -> int {
+    var c = http.client()
+    var right = 0
+    for i in 0..n {
+        match await c.send_async(http.request("GET", f"http://127.0.0.1:{port}/p{i}").with_timeout(10000)) {
+            Ok(r) => {
+                if r.status == 200 && r.text() == f"hello /p{i}" {
+                    right += 1
+                }
+            }
+            Err(e) => { print(f"ask {i}: {e}, {right} answered before") }
+        }
+    }
+    c.close()
+    return right
+}
+
+#main
+async fun main() {
+    let n = 20
+    var l = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic("listen") }
+    }
+    let port = match l.local_addr() {
+        Ok(a) => a.port
+        Err(e) => { panic("addr") }
+    }
+    let seen = Seen { big: false }
+    var o = http.server_options()
+    o.max_requests = n
+    let serve = async () => await http.serve_with(l, o, async (r: Request) => await handle(seen, r))
+    async let served = task.timeout(20000, serve)
+    print(await gone(port, seen))
+    let right = await ask(port, n)
+    let count = match await served {
+        Some(Ok(k)) => f"{k}"
+        Some(Err(e)) => f"{e}"
+        None => "still serving after 20 s"
+    }
+    print(f"client {right} of {n}, server {count}")
+    let c = l.close()
+}
+"""
+TO_THE_LIMIT_OUT = "gone\nclient 20 of 20, server 20\n"
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipIf(NO_SOCKETS, NO_SOCKETS_WHY)
+class ToTheLimit(unittest.TestCase):
+    def test_the_servers_count_is_what_its_clients_got(self):
+        self.assertEqual(run_both(TO_THE_LIMIT), (TO_THE_LIMIT_OUT, "", 0))
 
 
 # --- wasm32: no sockets ------------------------------------------------------------

@@ -44,7 +44,7 @@ MODULES = {"x86_64-linux": "platform.my", "aarch64-linux": "platform_aarch64.my"
 # (its `TARGET` is the copy's `TARGET_NAME`)
 CALLS = {"x86_64-linux": "linux_calls.my"}
 # the constants that tell the targets apart
-PER_TARGET = {"TARGET", "RETURNS_MEMORY", "HUGE_PAGES", "PROCESSES", "SOCKETS"}
+PER_TARGET = {"TARGET", "RETURNS_MEMORY", "HUGE_PAGES", "HEAP_COMMIT", "PROCESSES", "SOCKETS"}
 # a target's own entry points, which its back end calls by name
 # (`backend_std_functions`): wasm32's and Windows' starts, which lay out the
 # arguments
@@ -136,7 +136,7 @@ class Declarations(unittest.TestCase):
 
     def test_the_numbering_outside_agrees(self):
         _, platform = interface(MODULES["x86_64-linux"])
-        causes = {c: v for c, (ty, v) in platform.items() if ty == "int64" and not c.startswith("KIND_")}
+        causes = {c: v for c, (ty, v) in platform.items() if ty == "int64" and not c.startswith("KIND_") and c not in PER_TARGET}
         ioerror = private_consts("ioerror.my")
         for c, v in causes.items():
             self.assertEqual(ioerror.get(c), v, f"std.ioerror's {c}")

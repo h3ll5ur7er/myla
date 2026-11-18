@@ -2845,7 +2845,12 @@ fun write_err_num(n: int64) {
 // `__big_free` instead, for a later big cell it is large enough for (the
 // review of 2026-11-06, R6: a power of two for every size and nothing
 // reused stopped a list at 2^26 elements). So a program holds about as
-// much address space as it uses.
+// much address space as it uses. Where the platform counts memory committed
+// against a limit (Windows, `os.HEAP_COMMIT` > 0), a chunk is reserved, its
+// first part committed, and `__heap_end` is the end of what is committed:
+// a cell past it commits the next part, in steps of HEAP_COMMIT, until the
+// chunk's end (`arena_committed`, MYLA-861: a 16 MiB chunk committed whole
+// for each worker that allocated at all).
 
 const CHUNK: int64 = 16777216  // 16 MiB, a power of two
 const HUGE_PAGE: int64 = 2097152  // 2 MiB, a huge page of x86-64's and aarch64's
@@ -2893,7 +2898,7 @@ pub fun alloc(n: int64) -> int64 {
     }
     let at = __rt_get("__heap_ptr")
     let next = at + 16 + size
-    if next <= __rt_get("__heap_end") {
+    if next <= __rt_get("__heap_end") || arena_committed(next) {
         __store64(__rt_addr("__heap_ptr"), next)
         __store64(at, size)
         __store64(at + 8, 1)
@@ -2902,12 +2907,73 @@ pub fun alloc(n: int64) -> int64 {
     return alloc_mapped(size)
 }
 
+// Whether the arena reaches `next` once more of its chunk is committed
+// (platforms that commit late, `os.HEAP_COMMIT`; chunks aligned to their
+// size): committed up to `next`, rounded up to a step, at most the chunk's
+// end. False where nothing is committed late, or the chunk ends first.
+fun arena_committed(next: int64) -> bool {
+    let step = os.HEAP_COMMIT
+    let end = __rt_get("__heap_end")
+    if step == 0 || end == 0 {
+        return false
+    }
+    let limit = ((end - 1) & -CHUNK) + CHUNK
+    if next > limit {
+        return false
+    }
+    var upto = (next + step - 1) & -step
+    if upto > limit {
+        upto = limit
+    }
+    if !os.commit_memory(end, upto - end) {
+        __trap_oom()
+    }
+    __store64(__rt_addr("__heap_end"), upto)
+    return true
+}
+
+// A chunk where the platform commits late: reserved aligned to its size (a
+// chunk more reserved and its ends given back), its part up to `first`
+// bytes committed before the ends are (a mapping with nothing committed
+// goes back whole, Windows' `unmap_memory`), `__heap_end` that part's end.
+fun chunk_reserved(first: int64) -> int64 {
+    let m = os.reserve_memory(CHUNK + CHUNK)
+    if m < 0 {
+        __trap_oom()
+    }
+    let start = (m + CHUNK - 1) & -CHUNK
+    let step = os.HEAP_COMMIT
+    var upto = (start + first + step - 1) & -step
+    if upto > start + CHUNK {
+        upto = start + CHUNK
+    }
+    if !os.commit_memory(start, upto - start) {
+        __trap_oom()
+    }
+    if start > m {
+        os.unmap_memory(m, start - m)
+    }
+    let end = m + CHUNK + CHUNK
+    if end > start + CHUNK {
+        os.unmap_memory(start + CHUNK, end - start - CHUNK)
+    }
+    __store64(__rt_addr("__heap_end"), upto)
+    return start
+}
+
 // A cell of `size` bytes when the arena is full: mapped on its own when it
 // is bigger than a chunk, else the first of a new chunk, which becomes the
 // arena (the rest of the old one stays unused).
 fun alloc_mapped(size: int64) -> int64 {
     if size + 16 > CHUNK {
         return alloc_big(size, 16, 0)
+    }
+    if os.HEAP_COMMIT != 0 {
+        let c = chunk_reserved(16 + size)
+        __store64(__rt_addr("__heap_ptr"), c + 16 + size)
+        __store64(c, size)
+        __store64(c + 8, 1)
+        return c + 16
     }
     let m = os.map_memory(CHUNK)
     if m < 0 {
@@ -2973,7 +3039,7 @@ pub fun alloc_tasks(n: int64) -> int64 {
     }
     let at = __rt_get("__heap_ptr")
     let next = at + 16 + size
-    if next <= __rt_get("__heap_end") {
+    if next <= __rt_get("__heap_end") || arena_committed(next) {
         __store64(__rt_addr("__heap_ptr"), next)
         __store64(at, size)
         __store64(at + 8, 1)
@@ -2988,6 +3054,14 @@ fun alloc_tasks_mapped(size: int64) -> int64 {
     var span = CHUNK
     if size + 32 > CHUNK {
         return alloc_big(size, 32, __rt_get("__worker_id"))
+    }
+    if os.HEAP_COMMIT != 0 {
+        let c = chunk_reserved(32 + size)
+        __store64(c, __rt_get("__worker_id"))
+        __store64(__rt_addr("__heap_ptr"), c + 32 + size)
+        __store64(c + 16, size)
+        __store64(c + 24, 1)
+        return c + 32
     }
     let m = map_aligned(span)
     if __rt_get("__heap_huge") != 0 {
