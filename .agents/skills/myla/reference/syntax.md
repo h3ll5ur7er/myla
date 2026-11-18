@@ -199,7 +199,7 @@ fun main() {
     let xs = [10, 20, 30, 40]
     let later = sub(_, 1)
     let h = inc >> inc
-    print((t.0).1 + xs[^1] + xs[1:3].len() + later(5) + h(0) + (10 |> sub(4)))
+    print(t.0.1 + xs[^1] + xs[1:3].len() + later(5) + h(0) + (10 |> sub(4)))
     let v = if xs.len() > 3 { "long" } else { "short" }
     print(v)
 }
