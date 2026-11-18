@@ -1286,7 +1286,8 @@ impl Interp {
                     Some(n) => { k = Value.VInt(value_len(self.settled_value(p)) - as_int(self.eval(n))) },
                     None => { k = self.eval(i) },
                 }
-                if self.nan_key_at(k, i) { return p }
+                // a map's (a type's own `Index` may take a float)
+                if self.nan_key(k) && is_vmap(self.settled_value(p)) && self.nan_key_at(k, i) { return p }
                 p.steps.push(Step.SIndex(k, e, -2, 0))
                 p
             },
@@ -3899,7 +3900,7 @@ impl Interp {
         let c = self.eval(tgt)
         if is_slice_expr(idx) { return self.eval_slice(e, c, idx) }
         let k = self.index_value(c, idx)
-        if self.stop() || self.nan_key_at(k, idx) { return Value.VUnit }
+        if self.stop() || (is_vmap(c) && self.nan_key_at(k, idx)) { return Value.VUnit }
         // the key's place found once, for the check and the read (MYLA-506)
         let kt = self.hashed_index_key(k, e)
         let at = self.place_in(c, k, kt)
