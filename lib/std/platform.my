@@ -1,13 +1,11 @@
-// std.platform — the platform layer under std.rt: Linux on x86-64
-// (MYLA-162, D117), over the generic system calls aarch64 has too
-// (MYLA-758): `openat`, `newfstatat`, `mkdirat`, `unlinkat`, `renameat2`,
-// `pipe2`, `dup3`, `ppoll`, `epoll_pwait` and `clone` for a fork, not the
-// older calls x86-64 has beside them. What differs between the
+// std.platform — the platform layer under std.rt: Linux, on x86-64 and on
+// aarch64 (MYLA-162, MYLA-163, D117), one module over the generic system
+// calls both have (MYLA-758): `openat`, `newfstatat`, `mkdirat`, `unlinkat`,
+// `renameat2`, `pipe2`, `dup3`, `ppoll`, `epoll_pwait` and `clone` for a
+// fork, not the older calls x86-64 has beside them. What differs between the
 // architectures, the calls' numbers, two records' layouts and two flags, is
 // std.linux_calls, a module with a copy per architecture
-// (`linux_calls_aarch64.my`, which the loader takes for it there, D223), so
-// that this module can be aarch64's too: until aarch64's seed knows that
-// copy (D207), aarch64 has its own, `platform_aarch64.my`.
+// (`linux_calls_aarch64.my`, which the loader takes for it there, D223).
 //
 // Everything the runtime written in Myla needs from the operating system
 // goes through this module: the heap's memory, files and directories, the
@@ -38,8 +36,9 @@ from .linux_calls import SYS_SETSOCKOPT, SYS_GETSOCKOPT, SYS_SHUTDOWN, SYS_SENDM
 from .linux_calls import SYS_READLINKAT
 
 // The target this module is the platform layer of, as `--target` names it:
-// the target a program built with it runs on (x86-64 Linux, std.linux_calls').
-// The toolchain's own build of it is its default target, the host's.
+// the target a program built with it runs on (x86-64 or aarch64 Linux,
+// std.linux_calls'). The toolchain's own build of it is its default target,
+// the host's.
 pub const TARGET: str = TARGET_NAME
 
 // What a function that fails gives: minus a cause code (D129, D209), never

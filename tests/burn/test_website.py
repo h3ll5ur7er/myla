@@ -233,7 +233,7 @@ class Samples(unittest.TestCase):
 class Reference(unittest.TestCase):
     def test_tools_doc_documents_the_standard_library(self) -> None:
         std = os.path.join(_REPO, "lib", "std")
-        internal = {"rt", "platform", "platform_aarch64", "linux_calls", "linux_calls_aarch64", "platform_wasm", "platform_windows", "slice"}
+        internal = {"rt", "platform", "linux_calls", "linux_calls_aarch64", "platform_wasm", "platform_windows", "slice"}
         modules = [os.path.join(std, f) for f in sorted(os.listdir(std)) if f.endswith(".my") and f[:-3] not in internal]
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "api.json")
