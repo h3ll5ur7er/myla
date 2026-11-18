@@ -23,6 +23,9 @@ from .ir_util import int_in, is_char_type, is_float_type, reachable_blocks, wrap
 
 // The argument words that come in registers (x0 to x7).
 const A64_WORDS: int32 = 8
+// `a64_island`'s distance, in lines of 4 bytes at most: 800 KB, short of a
+// conditional branch's 1 MiB by more than an instruction's lines can be
+const A64_ISLAND_LINES: int32 = 200000
 
 // Where a function's cells are: the temporaries' and the slots' offsets
 // above sp, the scratch cell's, the frame's size below x29. An async
@@ -177,6 +180,7 @@ impl CodeGen {
                         self.a64_inst(f, fr, insts[i])
                         i = i + 1
                     }
+                    self.a64_island()
                 }
                 if becomes {
                     if resume_at >= 0 { self.a64_state(fr, resume_at) }
@@ -361,6 +365,7 @@ impl CodeGen {
             None => {},
         }
         let lab = self.label()
+        if self.cold_traps.len() == 0 { self.cold_from = self.text.len() }
         self.cold_keys[key] = lab
         self.cold_traps.push(lab + ":")
         if p.line <= 0 { self.cold_traps.push("mov x1, #0") }
@@ -371,6 +376,23 @@ impl CodeGen {
         }
         self.cold_traps.push("bl __trap_" + kind)
         return lab
+    }
+
+    // The traps pending (`a64_cold_trap`) as an island in the function's
+    // code, behind a branch over them, when the first branch to them would
+    // otherwise get out of its reach: a `b.vs` or a `cbz` reaches 1 MiB
+    // either way (M3, MYLA-551: a function of 5,000 checked statements
+    // didn't assemble). Counted in lines of `text`, none more than one
+    // instruction; the traps after them start the next island, or go after
+    // the function's `ret`.
+    fun a64_island(var self) {
+        if self.cold_traps.len() == 0 || self.text.len() - self.cold_from + self.cold_traps.len() < A64_ISLAND_LINES { return }
+        let over = self.label()
+        self.emit("b " + over)
+        for line in self.cold_traps { self.emit(line) }
+        self.emit(over + ":")
+        self.cold_traps = []
+        self.cold_keys = [:]
     }
 
     // A checked build's check at `insts[i]` with what it checks (D175,

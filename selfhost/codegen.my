@@ -119,6 +119,9 @@ pub struct CodeGen {
     // key of its label
     cold_traps: [str],
     cold_keys: [str: str],
+    // aarch64: the line of `text` where the first of them was branched to
+    // (`a64_island`, M3)
+    cold_from: int32,
     ret_type: Option<Type>,
     // Reference-counting helper worklists: concrete owning types whose per-type
     // drop/clone routines must be emitted (deduped by mangled token).
@@ -417,7 +420,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         subst: [], fn_worklist: [], fn_seen: [:],
         lam_jobs: [], lam_seen: [:], partial_jobs: [], fnval_set: [],
         uses_float: false,
-        epilogue: "", cold_traps: [], cold_keys: [:], ret_type: None,
+        epilogue: "", cold_traps: [], cold_keys: [:], cold_from: 0, ret_type: None,
         need_drop: [], type_jobs: [], type_jobs_seen: [:], drop_emitted: [], drop_kinds: [], need_clone: [], clone_emitted: [],
         need_walk: [], need_deep: [], deep_inline: [], deep_clone: [], need_deepc: [], deepc_clone: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
@@ -1183,7 +1186,8 @@ impl CodeGen {
     // whose label it is; "" for none (outside a function). A mangled name
     // is a symbol's (`myla_<name>`) and a suffix has no `_`, so a label
     // reads back to one function, and to none of the runtime's named labels
-    // (`.Lsw_next`, `.Lstr_true`).
+    // (`.Lsw_next`, `.Lstr_true`), none of which ends in `_ret` or a
+    // number (`.Lsegv_done`; test_label_names checks it, MYLA-810).
     #test(codegen_on("[int]"), "")[()]
     fun begin_labels(var self, mangled: str) {
         self.label_fn = mangled

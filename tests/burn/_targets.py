@@ -59,6 +59,8 @@ SUITES = [
     "tests.burn.test_generated_deep_copies",
     "tests.burn.test_generated_reads",
     "tests.burn.test_generated_writes",
+    # each write to a place in async code against its sync twin (MYLA-809)
+    "tests.burn.test_async_place_writes",
     "tests.burn.test_generated_widths",
     "tests.burn.test_generated_extremes",
     "tests.burn.test_formats_checked",

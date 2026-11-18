@@ -682,6 +682,62 @@ fun settled_operands(es: [Expr], root: str) -> bool {
     return true
 }
 
+// Whether the arguments `args` of a method on the place `recv` (of the
+// variable `root`) are computed before the place is reached: one may change
+// or copy the variable (H4), or the place's last element may be missing and
+// an argument does something that a missing element's error would hide
+// (D193: the interpreter takes the place's indices, runs the arguments, then
+// finds that element, MYLA-791).
+#test(expr_of("g[5]"), [expr_of("val(7)")], "g")[true]
+#test(expr_of("g[5]"), [expr_of("n")], "g")[false]
+#test(expr_of("c.g"), [expr_of("val(7)")], "c")[false]
+fun args_before_place(recv: Expr, args: [Expr], root: str) -> bool {
+    if !settled_operands(args, root) { return true }
+    if !indexed_path(recv) { return false }
+    for a in args { if !quiet_operand(a) { return true } }
+    return false
+}
+
+// Whether the place `e` has an element on its path (which may be missing).
+#test(expr_of("a.b[i].c"))[true]
+#test(expr_of("a.b.0"))[false]
+fun indexed_path(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.GetField(x, f) => indexed_path(x),
+        ExprKind.TupleIndex(x, k) => indexed_path(x),
+        ExprKind.Index(x, i) => true,
+        _ => false,
+    }
+}
+
+// The place `e`'s last index's base: what the interpreter reaches when it
+// takes the place, before the arguments (`gg[5]` of `gg[5][0].xs`).
+#test(expr_of("gg[i][0].xs"))[expr_of("gg[i]")]
+fun last_index_base(e: Expr) -> Expr {
+    return match e.kind {
+        ExprKind.GetField(x, f) => last_index_base(x),
+        ExprKind.TupleIndex(x, k) => last_index_base(x),
+        ExprKind.Index(x, i) => x,
+        _ => e,
+    }
+}
+
+// Whether computing `e` does nothing that can be seen and can't fail: a
+// literal, a variable or a field of one, a lambda.
+#test(expr_of("a.b"))[true]
+#test(expr_of("f(1)"))[false]
+#test(expr_of("n + 1"))[false]
+fun quiet_operand(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.IntLit(v, sfx, ch, big) => true,
+        ExprKind.FloatLit(x, sfx) => true,
+        ExprKind.StrLit(x) => true,
+        ExprKind.BoolLit(b) => true,
+        ExprKind.Lambda(ps, rt, body, asy) => true,
+        _ => field_path(e),
+    }
+}
+
 // Whether one of `es` names the variable `root` (anything holding a block
 // counts as naming it).
 #test([expr_of("f(a.b, 1)")], "a")[true]
@@ -1903,8 +1959,15 @@ impl Lower {
             ExprKind.Index(base, idx) => {
                 let b2 = self.fixed_receiver(cg, base, call)
                 let nm = format("%index{}_{}", call, idx.id)
-                let held = self.held_value(cg, idx, nm)
-                let i2 = Expr { id: idx.id, line: idx.line, col: idx.col, sp: idx.sp, kind: ExprKind.Name(nm) }
+                var n = idx
+                match from_end_of(idx) {
+                    Some(x) => { n = x },
+                    None => {},
+                }
+                let held = self.held_value(cg, n, nm)
+                var i2 = Expr { id: n.id, line: n.line, col: n.col, sp: n.sp, kind: ExprKind.Name(nm) }
+                // a `^n` keeps its `^` (MYLA-811)
+                if n.id != idx.id { i2 = Expr { id: idx.id, line: idx.line, col: idx.col, sp: idx.sp, kind: ExprKind.Unary("^", i2) } }
                 Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Index(b2, i2) }
             },
             _ => e,
@@ -1920,11 +1983,34 @@ impl Lower {
             ExprKind.TupleIndex(recv, k) => Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.TupleIndex(self.held_place(cg, recv, call), k) },
             ExprKind.Index(base, idx) => {
                 let b2 = self.held_place(cg, base, call)
-                let i2 = self.held_operand(cg, idx, format("%index{}_{}", call, idx.id))
+                let i2 = self.held_index(cg, idx, format("%index{}_{}", call, idx.id))
                 Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Index(b2, i2) }
             },
             _ => e,
         }
+    }
+
+    // A method's receiver `e` taken before its arguments, which are computed
+    // before the place is reached (`args_before_place`): its indices held
+    // (`held_place`), and the elements on its path before the last index
+    // read, so that a missing one is reported before the arguments run and
+    // the last one after them, as the interpreter does (D193).
+    fun held_receiver(var self, cg: CodeGen, e: Expr, call: int32) -> Expr {
+        let held = self.held_place(cg, e, call)
+        let inner = last_index_base(held)
+        if indexed_path(inner) { self.discard(cg, inner) }
+        return held
+    }
+
+    // The index `idx` held as `held_operand` holds a value: for a `^n`
+    // (D142), which is no value of its own, what it counts, the `^` kept
+    // (`g[^k()].push(v)` wrote `g[0]`, MYLA-811).
+    fun held_index(var self, cg: CodeGen, idx: Expr, nm: str) -> Expr {
+        match from_end_of(idx) {
+            Some(n) => { return Expr { id: idx.id, line: idx.line, col: idx.col, sp: idx.sp, kind: ExprKind.Unary("^", self.held_operand(cg, n, nm)) } },
+            None => {},
+        }
+        return self.held_operand(cg, idx, nm)
     }
 
     // The parameter `name` (of type `t`) of an actor's method as a deep copy
@@ -4306,8 +4392,8 @@ impl Lower {
         // indices of the receiver's place and every argument computed first,
         // in order, so that the place is reached after them (H4)
         var argv = argv0
-        if root != "" && !tail && argv0.len() > 1 && !settled_operands(argv0[1:], root) {
-            argv = [self.held_place(cg, argv0[0], e.id)]
+        if root != "" && !tail && argv0.len() > 1 && args_before_place(argv0[0], argv0[1:], root) {
+            argv = [self.held_receiver(cg, argv0[0], e.id)]
             var j = 1
             while j < argv0.len() {
                 // a variable, or a field of one, that no later argument
@@ -4990,7 +5076,8 @@ impl Lower {
     fun map_contains(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
         let mt = self.place_type(cg, m)
         if !is_map_t(mt) { return self.unsupported("contains on that type") }
-        let cell = self.expr(cg, m)
+        // the map kept while a key that may replace it is computed (H4)
+        let cell = self.operand(cg, m, [k])
         let key = self.key_operand(cg, mt, k)
         let slot = self.map_lookup(cg, mt, cell, key)
         let d = self.temp(Type.TBool)
@@ -5095,8 +5182,8 @@ impl Lower {
     // change or copy the builder computed before it, in order (H4).
     fun sb_append(var self, cg: CodeGen, e: Expr, nm: str, args0: [Expr]) -> int32 {
         var args = args0
-        if !settled_operands(args0[1:], place_root(args0[0])) {
-            args = [self.held_place(cg, args0[0], e.id)]
+        if args_before_place(args0[0], args0[1:], place_root(args0[0])) {
+            args = [self.held_receiver(cg, args0[0], e.id)]
             var i = 1
             while i < args0.len() {
                 args.push(self.held_operand(cg, args0[i], format("%arg{}_{}", e.id, i)))

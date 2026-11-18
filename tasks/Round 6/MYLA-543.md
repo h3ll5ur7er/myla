@@ -2,7 +2,7 @@
 id: MYLA-543
 title: "R1 Native code: a value read from a container is freed by a later operand; order, leaks, recursive-enum keys"
 type: bug
-status: todo
+status: review
 priority: high
 labels: [lowering, native, memory, round-6]
 ---
@@ -95,3 +95,13 @@ It covers a direct recursion, one through other functions, through a lambda, a g
 Polymorphic recursion is a type error of the language, for every command, `myla run` included, and whether the program calls the function or not, as Go refuses an instantiation cycle; the checker reports what it can see (calls whose type arguments are written with the caller's type parameters) and the lowering's limit what it can't (through a trait's method). Recommended because then the runners agree, as with D119's `become` words, which the checker refuses for every command though only native code needs them. Alternatives: (a) only `myla check` and `myla build` refuse it and `myla run` runs it (a flag for the checker; `check` and `run` would disagree); (b) only a recursion reachable from the entry point is refused, as the build did (it needs the call graph from `main`; a library's `myla check` would say `ok` to what its users can't build); (c) leave it to the build, as before. Proposed text for the decisions page: "Polymorphic recursion (a generic function asking, directly or through others, for an instance of itself with a larger type) is a type error at the call that makes the type larger, for every command; the checker refuses what it can see, the build what it can't (a recursion through a trait's method)."
 
 Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7 ([[MYLA-791]])
+
+- [x] **H4**: `m.contains(k())` where `k()` replaces the map read the freed map natively (`true false true` for the interpreter's `true true true`; `5` for `200` once its cells were reused). `Lower.map_contains` takes the map as an operand kept while a later one may write its variable (`self.operand(cg, m, [k])`), as the review's copy did.
+- [x] D193's timing: a method on a place whose last element is missing ran its arguments after the error natively (`g[5].put(val(7))`); now before it, as interpreted. See [[MYLA-791]].
+- [x] Found on the way: [[MYLA-811]], `g[^at(1)].push(9)` wrote `g[0]` natively.
+
+### Evidence
+
+- `tests/burn/test_compiler_parity.py`, `contains_keeps_its_map_while_the_key_replaces_it` (new; both of the review's `uaf_map_contains_*.my` in one program): before, natively `true false false false 1`; after, the interpreter's `true false true false 50`, natively and on aarch64 (the review's two files: `true true true` and `200` on x86-64 and aarch64).
