@@ -28,6 +28,8 @@ Work package of [[Project/Review-2026-11-17]], lane "Lowering and ANF" (section 
 
 ## Proposals
 
+Accepted by the owner on 2026-11-18 as D268.
+
 D193's corner, which D193 doesn't settle: when is a missing element of a method's receiver reported? Built (recommended): **as the interpreter does, the place's last element after the arguments, the elements before it when the place is taken** — what `myla run` already did, as a `var self` method reads its receiver's value after its arguments (MYLA-74), and as a builtin `push` already did on both runners; native code changes only where an argument does something an error would hide. Alternatives: (a) every element after the arguments, as an assignment `gg[5][0] = val(7)` does (the interpreter's `place_of` would settle nothing before the arguments: another lane's file); (b) every element before the arguments, native code's old order (the interpreter would check the last step when it takes the place). Proposed row: "A method call on a place takes its indices and keys, then the elements before its last index, then runs its arguments, then finds the element at the last index: a missing one is reported there, after the arguments (`g[5].put(val(7))` runs `val(7)` first)."
 
 ## Evidence

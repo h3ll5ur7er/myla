@@ -55,3 +55,7 @@ Before: BASE `fe30af6`'s tools (bootstrapped in a scratch copy), the review's re
 - **Cases.** `selfhost/interp.my` 461/461, `lib/std/test.my` 99/99 (interpreted, `--native`, aarch64, wasm32), `lib/std/fmt.my` 45/45 (interpreted, `--native`), `lib/std/rt.my` 40/40, `selfhost/main.my` 6/6.
 - **Bootstrap**: `byte-identical fixpoint reached (29412039 bytes)`; `scripts/check-seed.sh`: the seed bootstraps the sources (no seed change: no new primitive, runtime variable or attribute).
 - **Suites** (a shared machine, load 8 to 16 on 4 cores): `scripts/test.sh fast` on the code of `e161a51`: `Ran 1028 tests in 1175 s, OK (skipped=7)`. `scripts/test.sh` once, on `063b0e3`: `Ran 1798 tests in 1620 s, FAILED (failures=1, skipped=390)`: `test_lazy_std`'s `test_every_name_a_back_end_writes_is_listed`, as `std$fmt$spec_error` stayed in `backend_std_functions` after no back end called it; fixed in `839d182`, and `tests.burn.test_lazy_std` then `Ran 9 tests, OK`. The bootstrap's fixed point again after it (29411757 bytes), `scripts/check-seed.sh` passes.
+
+## Proposals
+
+Accepted by the owner on 2026-11-18 as D272 and D273 (the proposals are in the pull request, PR #81).

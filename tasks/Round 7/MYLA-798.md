@@ -50,6 +50,8 @@ Work package of [[Project/Review-2026-11-17]], lane "Windows" (section 5). Files
 
 ## Proposals
 
+Accepted by the owner on 2026-11-18 as D274 to D278.
+
 1. **The deferred close waits 30 s at most** (built). Alternatives: as long as Linux's orphan probes take on loopback (about a minute); the socket's write timeout, which a close doesn't have; no limit with a cap on the number of closes waiting.
 2. **Lazy commit for the rings only, by the fault handler** (built). Alternatives: commit the heap's arenas lazily too, which a system call writing into a fresh buffer breaks (ERROR_NOACCESS, no fault reaches the handler), so that needs the allocator to commit as its bump pointer moves ([[MYLA-861]]); smaller rings on Windows (EXEC_CAP is D106's, the same on every target).
 3. **`env`'s names fold ASCII only** (built), as std.platform's `same_name` folds a child's environment; Windows folds all of Unicode's simple case mappings. Alternative: `CompareStringOrdinal` with ignore-case at each lookup, a system call per entry.
