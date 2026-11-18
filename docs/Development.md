@@ -10,7 +10,7 @@ How to change Myla safely: the test suites, the bootstrap and the working conven
 2. Change the self-hosted toolchain ([[Architecture/Self-hosted-compiler]]); a change of behaviour goes into its interpreter and its native backend alike, and into the [[Language]] pages.
 3. Add an example or a regression case: a positive program in `examples/` (registered in the run and compile burn tests) or a rejected one in `examples/errors/` with its `//~` directive.
 4. Run the quick burn tests while working, and all of them before committing ([[Development/Testing]]).
-5. If you touched `selfhost/` or `lib/std/`, run `scripts/bootstrap.sh` and check the fixed point, and if the compiler's output changed, make a new seed with `scripts/update-seed.sh` and commit it ([[Development/Bootstrap]]).
+5. If you touched `selfhost/` or `lib/std/`, run `scripts/bootstrap.sh` and check the fixed point, then `scripts/check-seed.sh`; commit `selfhost/embedded_std.my` with a change to `lib/std/`. A seed is updated only when it can no longer bootstrap the sources, in a `Stage:` commit of `scripts/update-seed.sh`'s seeds (D207, [[Development/Bootstrap]]).
 6. Update the wiki page that describes what you changed, record new design decisions on [[Project/Decisions]], and name the task in the commit message.
 
 ## Repository layout

@@ -170,7 +170,7 @@ Order of work: grammar → lexer/parser → AST (only if no desugaring fits) →
 - A test that would ask the retired Python oracle (`@golden`) about a new program fails "no recorded answer": give it its own expectation.
 - Grammar: `test_grammar.py` (wiki rules == EBNF, generated files current, random programs from the grammar parse, tree-sitter parses every repo .my file).
 - IR: `--emit-ir` on a probe (`build/stage3 p.my lib --emit-ir`) to see the lowering; `test_ir_contract.py` for new instructions.
-- Last: `scripts/bootstrap.sh` (fixed point), then `scripts/update-seed.sh` as the PR's last commit.
+- Last: `scripts/bootstrap.sh` (fixed point) and `scripts/check-seed.sh`; no new seed unless the old one can't bootstrap the sources (D207, which replaced D156's seed in every pull request): then the three commits above.
 
 **13. Docs and records**: `docs/Language/<page>.md` (Statements, Expressions-and-operators, Collections-and-strings, Types, …; every ```` ```myla ```` block is a tested program, `fragment`/`error` info strings otherwise), `docs/Language/Grammar.md`, `docs/Project/Decisions.md` (a new row at the top: `| Dnnn | date | **decision** … | reason |`), the task file in `tasks/<epic>/MYLA-n.md` (status, `## Evidence`), `docs/Development/Testing.md` (burn test table), the `myla` skill (`.claude/skills/myla/`, its `reference/` files included, mirrored identically in `.agents/skills/myla/`), and the architecture page of any stage you changed.
 

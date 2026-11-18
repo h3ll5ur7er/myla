@@ -11,7 +11,7 @@ The mode is chosen by the arguments, not by the directory: **file mode** when th
 | `myla run f.my [opts] [args…]` | load, check, interpret `main` (or the `#main` function). The program's argv is `[f.my, args…]`. Arguments after the file that aren't `--stdlib`/`--package`/`--root` go to the program, flags included; `--stdlib x` can't be passed to a program |
 | `myla test f.my [--only t] [--list] [--native] [--target T] [--timeout s]` | the `#test` cases declared **in `f.my` itself** (not in modules it imports); `--timeout`: a case's time limit in seconds, 60 by default, 0 for none (D259: `FAIL  f: timed out after 60 s`) |
 | `myla build f.my [-o out] [-g] [--checked] [--target T]` | native binary (default `a.out`); writes `out.s`, `out.o`, runs the assembler and linker, removes both; prints nothing on success |
-| `myla check f.my` | type-check; prints `ok` on stdout (warnings on stderr first), exit 0 |
+| `myla check f.my [--target T]` | type-check; prints `ok` on stdout (warnings on stderr first), exit 0; `--target`: with that target's std.platform, std.path, … (MYLA-798) |
 | `myla repl` | interactive interpreter (below) |
 | `myla new [--lib] <name>` | creates `<name>/myla.toml`, `.gitignore` (`build/`, `.myla/`), `src/main.my` (a `greeting` function with a `#test` and a `main`) or with `--lib` `src/<name>.my` (a `pub fun greeting`). Name: ASCII letter then letters, digits, `_`; not a keyword, not `std`; directory must not exist |
 | `myla build [-g] [--checked] [--target T]` | project: `src/main.my` → `build/<name>` (`-o` is accepted and ignored) |
@@ -205,7 +205,7 @@ geo = { git = "https://example.org/geo.git", tag = "v1.2" }      # or branch = "
 | `MYLA_REQUIRE_TARGETS=1`, `MYLA_REQUIRE_BROWSER=1` | burn tests | fail instead of skip when clang/lld/llvm-dlltool/qemu/Wine or Playwright are missing (CI sets them) |
 | `MYLA_TEST_TARGET` | burn tests | the target `scripts/test-target.py` runs a suite for |
 | `MYLA_PIN_DIAGNOSTICS=1` | `test_error_corpus` | writes missing `examples/errors/*.stderr` pins |
-| `MYLA_GENERATED=full`, `MYLA_GENERATED_SEED` | generated burn suites | all cases / another seed |
+| `MYLA_GENERATED=full`, `MYLA_GENERATED_SEED` | generated burn suites | all cases / another sample than seed 555's; a failure names both (D262) |
 
 ## Runtime semantics a program author meets
 
@@ -263,10 +263,13 @@ The compiler itself: `build/stage3 <file.my> <stdlib-dir> [--target T] [-g] [--c
 
 ## CI (`.github/workflows/ci.yml`, on push to master and PRs)
 
+A pull request's newer push cancels its older run; a master commit's run is never cancelled, so its seeds and tools are uploaded (D207).
+
 | Job | Runs |
 | --- | --- |
-| `burn` | the whole burn suite with gdb, clang, lld, llvm, qemu-user, wine64, Node, Go and tree-sitter, `MYLA_REQUIRE_TARGETS=1` |
-| `targets` (aarch64-linux, wasm32-wasi) | `scripts/test-target.py <target>` |
+| `burn` | the whole burn suite with gdb, lldb, clang, lld, llvm, qemu-user, wine64, Node, Go and tree-sitter, `MYLA_REQUIRE_TARGETS=1` |
+| `generated` | master only (and a manual run): the five `test_generated_*` modules with `MYLA_GENERATED=full` and `MYLA_GENERATED_SEED` the run's number (D262); a pull request's `burn` runs their sample of seed 555 |
+| `targets` (aarch64-linux, wasm32-wasi, x86_64-windows) | `scripts/test-target.py <target>` (Wine for Windows) |
 | `wasm-page` | the playground page in Chromium (Playwright) |
 | `bootstrap` | `scripts/bootstrap.sh build`, `scripts/check-seed.sh build`, stage3 builds `examples/hello.my`; on a push to master uploads the seeds and the x86-64 `myla`/`myla-lsp` as artifacts (90 days) |
 | `bootstrap-arm64` | `just bootstrap` on arm64 (the aarch64 seed), check-seed, every example built vs interpreted, stress runs; on a push to master uploads the aarch64 `myla`/`myla-lsp` |

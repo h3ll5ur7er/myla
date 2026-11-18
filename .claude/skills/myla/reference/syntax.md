@@ -140,6 +140,7 @@ Syntax `#name`, `#name(args)`, `#name[outputs]`, `#name(args)[outputs]`, one or 
 | `#main` | a non-generic function without parameters | the entry point (any name; `fun main()` needs none, `async fun main()` works without it too) |
 | `#derive(Eq, Hash, Json, Toml)` | struct, enum (generic too) | only these four |
 | `#allow(primitive, reentrancy)` | function, method, `impl` block | silence warnings (`primitive(__a, …)` for some primitives) |
+| `#track_caller` | a function or a method of a type's own `impl`, generic too; not async, an actor's or a trait impl's method, or the entry point; once | its `panic`, `assert` and `unreachable` report its call's position (MYLA-435); it can only be called (no function value, partial application or `become`) |
 
 Anything else (`#inline`, `#[test]`, `#deprecated`) is "unknown attribute".
 
@@ -172,7 +173,7 @@ A block `{ … }` is not an expression (`let v = { 1 }` is an error).
 | Call | `f(a, b,)` | trailing comma ok; no named args, no spread |
 | Explicit type args | `f<int>(x)`, `m.f<str>()`, `xs.conv<str>(g)` | after a name or `.name` only, see below |
 | Partial application | `f(_, 2)`, `f(1, _, _)` | `_` must be a whole argument, one per open position |
-| Field, tuple index | `p.x`, `t.0` | `t.0.1` is a lex error (`0.1` is a float): write `(t.0).1` |
+| Field, tuple index | `p.x`, `t.0`, `t.0.1` | a number right after `.` is always a tuple index, never a float (`t.0.1` is `(t.0).1`, MYLA-545) |
 | Index, from end | `xs[i]`, `xs[^1]` | `^` only inside `[ ]` |
 | Slice | `xs[1:3]`, `xs[:2]`, `xs[2:]`, `xs[::-1]`, `s[^2:]` | `a:b:step`; new values, clamped |
 | Try | `opt?`, `res?` | postfix |
@@ -236,5 +237,6 @@ A bare name that is a unit variant of the scrutinee's enum matches that variant;
 - `fn`/`func`, `let mut`, `::`, `&`, `'a`, `loop`, labels, `..=`, `where`, `type X = …`, `impl` blocks with `pub fun`, `#[attr]`, `r"…"`, `"""…"""`, `\x41`, `///` docs, Allman braces, leading-dot method chains, `.V` to construct (patterns only), struct shorthand `P { x }`, named arguments, `import a.b` expecting `b` to be bound, nested functions, block expressions, `x++`.
 - `str` and `bool` are keywords, `int`, `float` and `char` are not.
 - Struct fields need commas; enum variants don't.
-- `t.0.1` doesn't lex; `t.0 = v` isn't assignable.
+- `t.0 = v` isn't assignable (`t.0.1` reads a nested tuple's field).
+- Expressions, types, blocks and patterns nest at most 256 levels; one expression holds at most 2,048 operators, casts, indexes, fields and `else if` arms, a call counting 2 and a `|>` 3 (`MAX_CHAIN`, MYLA-793): past it a parse error, so split a generated chain with `let`s.
 - `x as int < y` needs parentheses.
