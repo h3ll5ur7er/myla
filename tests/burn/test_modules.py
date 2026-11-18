@@ -202,6 +202,10 @@ class TestARootStdFolderIsRefused(unittest.TestCase):
              "from .std.fmt import fmt_int\nfun main() {\n    let a = 5\n    print(f\"{a:>4}|{fmt_int(a)}\")\n}\n", ".std.fmt"),
             ("std.my", "pub fun one() -> int {\n    return 1\n}\n",
              "from .std import one\nfun main() {\n    print(one())\n}\n", ".std"),
+            # its `std/rt.my` checked and ran, and every build failed with
+            # `module id collision` (the review of 2026-11-17, MYLA-793)
+            ("std/rt.my", "pub fun rt_one() -> int {\n    return 1\n}\n",
+             "from .std.rt import rt_one\nfun main() {\n    print(rt_one())\n}\n", ".std.rt"),
         )
         for module, text, main, dotted in cases:
             for cmd in ("check", "run", "build"):
@@ -226,6 +230,61 @@ class TestARootStdFolderIsRefused(unittest.TestCase):
             proc = subprocess.run([selfhost_tool("main"), "run", "main.my", "--stdlib", STDLIB_ROOT],
                                   capture_output=True, text=True, cwd=tmp)
             self.assertEqual((proc.returncode, proc.stdout), (0, "2\n"), proc.stderr)
+        # and a `sub/std/rt.my` is built as any module
+        if CAN_BUILD_NATIVE:
+            with tempfile.TemporaryDirectory() as tmp:
+                os.makedirs(os.path.join(tmp, "sub", "std"))
+                write_program(os.path.join(tmp, "sub", "std"), "pub fun rt_one() -> int {\n    return 1\n}\n", "rt.my")
+                write_program(tmp, "from .sub.std.rt import rt_one\nfun main() {\n    print(rt_one())\n}\n")
+                proc = subprocess.run([selfhost_tool("main"), "build", "main.my", "-o", "prog", "--stdlib", STDLIB_ROOT],
+                                      capture_output=True, text=True, cwd=tmp)
+                self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+                proc = subprocess.run([os.path.join(tmp, "prog")], capture_output=True, text=True)
+                self.assertEqual(proc.stdout, "1\n")
+
+
+class TestAProgramInADirectoryNamedAsTheCarriedLibrary(unittest.TestCase):
+    def test_it_is_the_programs(self):
+        # the review of 2026-11-17 (MYLA-793): `myla check '<myla>/main.my'`
+        # took the program's `<myla>/std/helper.my` for the carried
+        # library's (`<myla>` is its root's name), read it lazily and didn't
+        # refuse it (D255): `ok`, as `cd '<myla>' && myla check main.my` isn't
+        import subprocess
+        from ._tools import selfhost_tool
+        helper = "pub fun ok() -> int {\n    return 1\n}\n\npub fun broken() -> int {\n    return \"not an int\"\n}\n"
+        for d, want in (("std", "module error: cannot import '.std.helper': a folder or file named 'std'"),
+                        ("sub/std", "type error: return type mismatch: expected 'int32', found 'str'")):
+            with self.subTest(dir=d), tempfile.TemporaryDirectory() as tmp:
+                os.makedirs(os.path.join(tmp, "<myla>", d))
+                write_program(os.path.join(tmp, "<myla>", d), helper, "helper.my")
+                write_program(os.path.join(tmp, "<myla>"), f"from .{d.replace('/', '.')}.helper import ok\n\nfun main() {{\n    print(ok())\n}}\n")
+                for cwd, path in ((tmp, "<myla>/main.my"), (os.path.join(tmp, "<myla>"), "main.my")):
+                    proc = subprocess.run([selfhost_tool("main"), "check", path], capture_output=True, text=True, cwd=cwd)
+                    self.assertEqual(proc.returncode, 1, (cwd, proc.stdout))
+                    self.assertTrue(proc.stderr.startswith(want), proc.stderr)
+
+
+class TestALibraryRootThroughASymlink(unittest.TestCase):
+    def test_its_module_is_the_roots(self):
+        # the review of 2026-11-17 (MYLA-793): a module of the library named
+        # through one spelling of its root and `--stdlib` through another (a
+        # symbolic link) was a program's module beside the library's, its
+        # impls twice: 18 duplicate methods for std.option
+        import shutil
+        import subprocess
+        from ._tools import STDLIB_ROOT, selfhost_tool
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(STDLIB_ROOT, os.path.join(tmp, "libcopy"))
+            os.symlink("libcopy", os.path.join(tmp, "liblink"))
+            for entry, root in (("libcopy", "liblink"), ("liblink", "libcopy"), (os.path.join(tmp, "libcopy"), "liblink")):
+                with self.subTest(entry=entry, root=root):
+                    proc = subprocess.run([selfhost_tool("main"), "test", f"{entry}/std/option.my", "--stdlib", root],
+                                          capture_output=True, text=True, cwd=tmp)
+                    self.assertEqual(proc.returncode, 0, proc.stdout[-500:] + proc.stderr[-500:])
+                    self.assertRegex(proc.stdout, r"\n(\d+)/\1 passed\.\n$")
+                    proc = subprocess.run([selfhost_tool("main"), "check", f"{entry}/std/fs.my", "--stdlib", root],
+                                          capture_output=True, text=True, cwd=tmp)
+                    self.assertEqual((proc.stdout, proc.stderr), ("ok\n", ""))
 
 
 if __name__ == "__main__":
