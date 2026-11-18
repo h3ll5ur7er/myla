@@ -35,7 +35,7 @@ from .stdroot import default_stdlib_root
 from .diag import render
 from .target import Target, host, parse_target, target_names
 from .driver import cmd_build, cmd_interp, cmd_test, cmd_test_native, load_for_host
-from .interp import TestOptions, all_tests
+from .interp import TestOptions, all_tests, DEFAULT_TIMEOUT
 from .project_cmd import project_build, project_run, project_test, project_check, project_clean, project_new, project_fetch, ends_with
 
 // The usage text, a line each (MYLA-178: `--help` prints it on stdout).
@@ -44,9 +44,10 @@ fun usage_lines() -> [str] {
         "usage: myla <command> [<file.my>] [options]",
         "commands on a file:",
         "  run   <file.my> [options] [args...]  interpret a program with these arguments",
-        "  test  <file.my> [--only <text>] [--list] [--native] [--target <t>] [options]  run its #test cases (--only: those whose",
-        "                                       function's name has the text; --list: name them without running them; --native:",
-        "                                       natively, through a harness built for this machine or --target's)",
+        "  test  <file.my> [--only <text>] [--list] [--native] [--target <t>] [--timeout <s>] [options]  run its #test cases",
+        "                                       (--only: those whose function's name has the text; --list: name them without",
+        "                                       running them; --native: natively, through a harness built for this machine or",
+        "                                       --target's; --timeout: a case's time limit in seconds, 0 for none, default " + f"{DEFAULT_TIMEOUT})",
         "  build <file.my> [-o <out>] [-g] [--checked] [--target <t>] [options]  compile to a binary (-g: debug information for gdb;",
         "                                       --checked: integer overflow is a runtime error, as in run and test;",
         "                                       <t>: " + target_names() + "; the default " + host().name + ", this machine's)",
@@ -56,7 +57,7 @@ fun usage_lines() -> [str] {
         "  new   [--lib] <name>                 create a project in the directory <name> (--lib: a library)",
         "  build [-g] [--checked] [--target <t>] [options]  compile src/main.my to build/<name>",
         "  run   [options] [args...]            interpret src/main.my with these arguments",
-        "  test  [--only <text>] [--list] [--native] [--target <t>] [options]  run the #test cases of every file under src/,",
+        "  test  [--only <text>] [--list] [--native] [--target <t>] [--timeout <s>] [options]  run the #test cases of every file under src/,",
         "                                       then the test programs and test files of tests/",
         "  check [options]                      type-check every file under src/",
         "  clean [--deps]                       remove build/ (--deps: and the fetched dependencies, .myla/)",
@@ -73,6 +74,23 @@ fun usage() {
     for l in usage_lines() { eprintln(l) }
 }
 
+// The whole seconds `s` writes in decimal, at most a day's; -1 for none.
+#test("60")[60]
+#test("0")[0]
+#test("")[-1]
+#test("1.5")[-1]
+#test("86401")[-1]
+fun seconds_of(s: str) -> int32 {
+    if s.len() == 0 || s.len() > 5 { return -1 }
+    var n = 0
+    for c in s {
+        if c < '0' || c > '9' { return -1 }
+        n = n * 10 + (c - '0')
+    }
+    if n > 86400 { return -1 }
+    return n
+}
+
 // A command's arguments: its file ("" in project mode), the load options,
 // `build`'s output and `-g`, `clean`'s `--deps`, `fetch`'s `--update`, `new`'s
 // name, `test`'s selection (D162), and the program's arguments (`run`).
@@ -85,8 +103,8 @@ struct CliError { msg: str, usage: bool }
 // The arguments after the command; `--stdlib`, `--package` and `--root` anywhere, `-o`
 // and `-g` for `build` (without `-o`, `a.out`, or `a` and the target's
 // suffix where it has one: `a.exe`), `--target` for `build` and `test`, `--deps` for
-// `clean`, `--update` for `fetch`, `--only`, `--list` and `--native` for
-// `test`. The first other argument is the file if
+// `clean`, `--update` for `fetch`, `--only`, `--list`, `--native` and
+// `--timeout` for `test`. The first other argument is the file if
 // it ends in `.my` (else there is none: project mode); then `run` passes the
 // rest to the program, `new` takes one name, and other commands reject them.
 #test(["/work/myla/selfhost/main.my", "new", "freshlib", "more"])[Err(CliError { msg: "myla: unknown option 'more'", usage: true })]
@@ -136,6 +154,12 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
         } else if cmd == "test" && a == "--list" {
             cl.tests.list = true
             j = j + 1
+        } else if cmd == "test" && a == "--timeout" && has_value {
+            // a case's time limit (D259)
+            let secs = seconds_of(argv[j + 1])
+            if secs < 0 { return Err(CliError { msg: "myla: --timeout takes whole seconds, 0 for none, not '" + argv[j + 1] + "'", usage: false }) }
+            cl.tests.timeout = secs
+            j = j + 2
         } else if cmd == "clean" && a == "--deps" {
             cl.deps = true
             j = j + 1

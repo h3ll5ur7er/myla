@@ -14,13 +14,14 @@ from .checker import OpImpl, find_op_impl, op_part, arith_trait
 from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_lot_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, add_overflows, sub_overflows, mul_overflows, int_min, int_neg_overflows, shift_out_of_range, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs, written_type_name
-from std.fmt import fmt_int, fmt_float, fmt_text, parse_spec
+from std.fmt import fmt_int, fmt_float, fmt_text, spec_misfit
 from std.slice import range_of, str_whole, take_str
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write, eprint, errno_text
 from std.process import exit
 import std.process as process_m  // `args`: the program `myla` was started as (MYLA-727)
 from std.fs import read_to_string, make_dir_all, remove_dir_all, temp_root
+from std.test import timed_out  // a case's verdict past its time limit (D259), as natively
 import std.path_style as style // `WINDOWS`: the separator of the machine the interpreter runs on
 from .parser import fused_compound
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -110,8 +111,13 @@ pub enum TailCall {
 }
 
 // A scope's variables, and its deferred blocks (D135) in the order they were
-// met.
-pub struct RtFrame { names: [str], vals: [Value], defers: [Deferral] }
+// met. A function's outermost scope also holds the frame's named slots, -1
+// for none (in a block's scope always): `env`, the environment its type
+// parameters are bound in (an index into `envs`, D172), and `caller`, the
+// node of the call whose position it reports (`#track_caller`, MYLA-435).
+// Slots, not variables: two hidden variables both wanted the first place
+// (the 2026-11-17 review's H6).
+pub struct RtFrame { names: [str], vals: [Value], defers: [Deferral], env: int32, caller: int32 }
 
 // A deferred block, and how many of its scope's names were declared before
 // it: the ones it sees when it runs.
@@ -244,8 +250,13 @@ pub struct Interp {
     own_eq: [str: bool],
     own_hash: [str: bool],
     typed_keys: bool,
-    const_names: [str],
+    // each constant's initializer and value, `const_state` 0 before it is
+    // evaluated, 1 while, 2 after: evaluated when first named, so one may
+    // name a constant declared after it or in a module loaded after it
+    // (MYLA-715: such a name read as unit, `C + 1` was 1)
+    const_exprs: [Expr],
     const_vals: [Value],
+    const_state: [uint8],
     const_ix: [str: int32],
     enum_names: [str],
     enum_ix: [str: bool],
@@ -344,6 +355,13 @@ pub struct Interp {
     // root (`std.test.temp_dir`), made on the first call and removed when
     // the case ends; the project's program under test (`std.test.program`)
     testing: bool,
+    // a case's time limit in seconds (D259, 0 for none), and while one
+    // runs its end, a clock's time (0 for none), whether the case passed
+    // it, and the blocks run since the clock was last looked at (`tick`)
+    test_timeout: int32,
+    case_deadline: int64,
+    timed_out: bool,
+    case_ticks: int32,
     defer_errs: [str],
     captured: [str],
     captured_io: bool,
@@ -419,12 +437,17 @@ pub struct TestRun { report: [str], passed: int32, total: int32 }
 // What `myla test` was asked (D162): `only`, a text the cases run must have
 // in their function's name ("" for all); `list`, to name the cases
 // without running them; `program`, the path of the project's program for
-// `std.test.program()` ("" outside a project with one).
-pub struct TestOptions { only: str, list: bool, program: str }
+// `std.test.program()` ("" outside a project with one); `timeout`, a
+// case's time limit in seconds, 0 for none (`--timeout`, D259).
+pub struct TestOptions { only: str, list: bool, program: str, timeout: int32 }
+
+// A case's time limit when `myla test` names none (D259), in seconds.
+pub const DEFAULT_TIMEOUT: int32 = 60
 
 pub fun all_tests() -> TestOptions {
-    return TestOptions { only: "", list: false, program: "" }
+    return TestOptions { only: "", list: false, program: "", timeout: DEFAULT_TIMEOUT }
 }
+
 
 // Whether the case of the function `name` is selected by `only`: its text
 // in the name (a method's `T.m`).
@@ -620,7 +643,7 @@ pub fun time_from_env() -> str {
 
 // Whether the awaited `op` calls a function value (a local, or any callee
 // but a name or a method), which goes on at once natively (MYLA-228).
-#test(expr_of("f(1)"), [RtFrame { names: ["f"], vals: [Value.VUnit], defers: [] }])[true]
+#test(expr_of("f(1)"), [RtFrame { names: ["f"], vals: [Value.VUnit], defers: [], env: -1, caller: -1 }])[true]
 #test(expr_of("f(1)"), [])[false]
 #test(expr_of("a.m()"), [])[false]
 #test(expr_of("fs[0]()"), [])[true]
@@ -646,7 +669,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         decls: c.decls,
         resolved: c.resolved,
         func_names: [], func_ix: [:], func_decls: [], tracks: [], caller_next: -1, caller_fi: -1, call_sites: [:], own_eq: [:], own_hash: [:], typed_keys: false,
-        const_names: [], const_vals: [], const_ix: [:],
+        const_exprs: [], const_vals: [], const_state: [], const_ix: [:],
         enum_names: [], enum_ix: [:], variant_ix: [:], nullary_ix: [:],
         scopes: [],
         ctrl: Ctrl.CNone,
@@ -669,7 +692,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
         sleepers: [], deadlines: [], fired: [], fd_waits: [], fds_seen: 0, fds_gap: LOOK_GAP_MIN, notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], lots: [], sock_tags: [:], parked_socks: 0, lots_seen: 0, lots_gap: LOOK_GAP_MIN, fi_find_from: -1, fi_extend: -1, bcodes: builtin_codes(), sleep_seq: 0, virtual_time: false, vclock: 0,
-        testing: false, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
+        testing: false, test_timeout: 0, case_deadline: 0, timed_out: false, case_ticks: 0, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
         static_calls: c.static_calls, op_sites: c.op_sites, op_sets: c.op_sets, op_impls: c.op_impls, impl_selfs: c.static_selfs, call_types: c.call_types,
         tparams: [], envs: [], env_memo: [:], type_env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
         writes: 0, fused: -1, fused_val: Value.VUnit, leaf_wanted: false, leaf: Value.VUnit,
@@ -819,7 +842,7 @@ impl Interp {
 
     // -- scopes -----------------------------------------------------------
 
-    fun push_scope(var self) { self.scopes.push(RtFrame { names: [], vals: [], defers: [] }) }
+    fun push_scope(var self) { self.scopes.push(RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }) }
     fun pop_scope(var self) { self.scopes = drop_last_frame(self.scopes) }
 
     fun define(var self, name: str, v: Value) {
@@ -936,11 +959,12 @@ impl Interp {
     // of a file, MYLA-187, and in a project, MYLA-94: the entry's names are
     // the ones the loader doesn't qualify with a module id), and collect a
     // PASS/FAIL line for each.
-    #test(interp_on("[int]"), TestOptions { only: "", list: false, program: "" })[TestRun { report: [], passed: 0, total: 0 }]
+    #test(interp_on("[int]"), TestOptions { only: "", list: false, program: "", timeout: 0 })[TestRun { report: [], passed: 0, total: 0 }]
     fun run_test_cases(var self, sel: TestOptions) -> TestRun {
         self.collect()
         self.eval_consts()
         self.test_program = sel.program
+        self.test_timeout = sel.timeout
         var report: [str] = []
         var total = 0
         var passed = 0
@@ -1013,6 +1037,7 @@ impl Interp {
         self.testing = true
         self.defer_errs = []
         self.captured = []
+        if self.test_timeout > 0 { self.case_deadline = __clock_ns() + (self.test_timeout as int64) * 1000000000 }
         var actual = Value.VUnit
         match fd.receiver {
             // a method's receiver is its first argument (D116)
@@ -1038,7 +1063,21 @@ impl Interp {
             },
         }
         self.testing = false
+        self.case_deadline = 0
         var outcome = Outcome.Returned(actual)
+        if self.timed_out {
+            // past its time limit, whatever it expected (D259): it stopped
+            // as a failure does, without its deferred blocks
+            self.timed_out = false
+            self.ctrl = Ctrl.CNone
+            self.rt_err = None
+            self.exit_code = 0
+            if self.test_root != "" {
+                let gone = remove_dir_all(self.test_root)
+                self.test_root = ""
+            }
+            return Some(timed_out(self.test_timeout))
+        }
         match self.ctrl {
             Ctrl.CExit => {
                 // a runtime error or `exit` ends this case only
@@ -1107,20 +1146,54 @@ impl Interp {
         return Some(join_parts(parts))
     }
 
+    // Every constant, the first declared of a name: each evaluated when
+    // first named (`const_value`), so a program pays for the constants it
+    // uses (a float's literal costs the conversion of its digits: those of
+    // the modules every program loads took 8.3 M of an empty program's
+    // 35.4 M instructions under `myla run`, 2026-11-17 on fe30af6, the
+    // 2026-11-17 review's start-up follow-up).
     fun eval_consts(var self) {
         for d in self.decls {
             match d.kind {
                 DeclKind.ConstDecl(n, ty, value, attrs, isp) => {
-                    self.push_scope()
-                    let v = self.eval(value)
-                    self.pop_scope()
-                    if !self.const_ix.contains(n) { self.const_ix[n] = self.const_names.len() }
-                    self.const_names.push(n)
-                    self.const_vals.push(v)
+                    if !self.const_ix.contains(n) {
+                        self.const_ix[n] = self.const_exprs.len()
+                        self.const_exprs.push(value)
+                        self.const_vals.push(Value.VUnit)
+                        self.const_state.push(0)
+                    }
                 },
                 _ => {},
             }
         }
+    }
+
+    // How many constants have been evaluated: none before one is named.
+    #test(interp_on("const X: float = 1.5; const Y: int = 2"))[0]
+    fun consts_evaluated(self) -> int32 {
+        var n = 0
+        for st in self.const_state {
+            if st == 2 { n += 1 }
+        }
+        return n
+    }
+
+    // The value of constant `ci`, its initializer evaluated the first time,
+    // in a frame of its own: what it names are other constants (the loader
+    // qualifies another module's names), never a variable in scope. The
+    // checker refuses a cycle; one would read unit here.
+    #test(interp_on("const B: int = A + 1; const A: int = 5"), 0)[Value.VInt(6)]
+    fun const_value(var self, ci: int32) -> Value {
+        if self.const_state[ci] != 0 { return self.const_vals[ci] }
+        self.const_state[ci] = 1
+        let saved = self.scopes
+        self.scopes = []
+        self.push_scope()
+        let v = self.eval(self.const_exprs[ci])
+        self.scopes = saved
+        self.const_vals[ci] = v
+        self.const_state[ci] = 2
+        return v
     }
 
     // Whether `fd` is a running case's standard input, which is empty, as
@@ -1528,6 +1601,7 @@ impl Interp {
     // -- statements -------------------------------------------------------
 
     fun exec_block(var self, b: Block) {
+        if self.case_deadline > 0 { self.tick() }
         self.push_scope()
         var i = 0
         while i < b.stmts.len() {
@@ -1546,19 +1620,21 @@ impl Interp {
     // the arguments of a `become`, which wait for them; not on a failure or
     // `exit`, which end the program (D97), except under a `#test` case,
     // which they end instead: the case unwinds through them, and one that
-    // fails itself is noted for the report (D162). Each sees the names
-    // declared before it.
+    // fails itself is noted for the report (D162). A deferred block that
+    // fails as a case returns is the case's failure, as it is a program's
+    // (natively too, the 2026-11-17 review's M12), and the case unwinds from
+    // there. Each sees the names declared before it.
     fun run_defers(var self) {
         let top = self.scopes.len() - 1
         if self.scopes[top].defers.len() == 0 { return }
         let ds = self.scopes[top].defers
         self.scopes[top].defers = []
-        match self.ctrl { Ctrl.CExit => { if !self.testing { return } }, _ => {} }
-        let saved_ctrl = self.ctrl
+        match self.ctrl { Ctrl.CExit => { if !self.testing || self.timed_out { return } }, _ => {} }
+        var saved_ctrl = self.ctrl
         let saved_val = self.ctrl_val
         let saved_tail = self.tail
-        let saved_err = self.rt_err
-        let saved_code = self.exit_code
+        var saved_err = self.rt_err
+        var saved_code = self.exit_code
         self.ctrl = Ctrl.CNone
         self.rt_err = None
         self.exit_code = 0
@@ -1589,7 +1665,18 @@ impl Interp {
             match self.ctrl {
                 Ctrl.CExit => {
                     if !self.testing { return }
-                    self.note_defer_failure()
+                    let unwinding = match saved_ctrl { Ctrl.CExit => true, _ => false }
+                    if unwinding { self.note_defer_failure() }
+                    else {
+                        // the case's own failure, which the later blocks
+                        // unwind from
+                        saved_ctrl = Ctrl.CExit
+                        saved_err = self.rt_err
+                        saved_code = self.exit_code
+                        self.ctrl = Ctrl.CNone
+                        self.rt_err = None
+                        self.exit_code = 0
+                    }
                 },
                 _ => {},
             }
@@ -1600,6 +1687,47 @@ impl Interp {
         self.tail = saved_tail
         self.rt_err = saved_err
         self.exit_code = saved_code
+    }
+
+    // A running case's time limit (D259), looked at every 1024 blocks: past
+    // it, the case stops as a failure does (`case_timed_out`).
+    fun tick(var self) {
+        if self.timed_out {
+            self.case_timed_out()
+            return
+        }
+        self.case_ticks += 1
+        if self.case_ticks < 1024 { return }
+        self.case_ticks = 0
+        if __clock_ns() >= self.case_deadline { self.case_timed_out() }
+    }
+
+    // The running case passed its time limit: it stops, as a runtime error
+    // stops it, but runs no deferred block (natively the runner kills it);
+    // every task of it stops at its next block (a task spinning beside the
+    // one that noticed too). `run_case` reports it.
+    fun case_timed_out(var self) {
+        self.timed_out = true
+        if self.stop() { return }
+        self.rt_err = Some(RtError { msg: "timed out", line: 0, col: 0, sp: no_span(), node: -1 })
+        self.ctrl = Ctrl.CExit
+        self.exit_code = 1
+    }
+
+    // `__sleep_ns(n)`, but no longer than a running case may still run
+    // (D259), which it is past then.
+    fun nap(var self, n: int64) {
+        if self.case_deadline == 0 {
+            if n > 0 { __sleep_ns(n) }
+            return
+        }
+        let left = self.case_deadline - __clock_ns()
+        if left < n {
+            if left > 0 { __sleep_ns(left) }
+            self.case_timed_out()
+            return
+        }
+        if n > 0 { __sleep_ns(n) }
     }
 
     // A deferred block of a `#test` case failed: noted for the report, and
@@ -1678,7 +1806,12 @@ impl Interp {
             None => { return Value.VUnit },
         }
         self.scopes = []
-        while true {
+        while !self.timed_out {
+            // a case's time limit (D259), looked at each turn
+            if self.case_deadline > 0 && __clock_ns() >= self.case_deadline {
+                self.timed_out = true
+                break
+            }
             self.wake_sleepers()
             if self.qlen == 0 {
                 if self.wait_for_sleeper() { continue }
@@ -1718,6 +1851,11 @@ impl Interp {
             self.frames = []
             self.scopes = []
         }
+        // a case past its time limit (D259) stops with its tasks as they are
+        if self.timed_out {
+            self.case_timed_out()
+            return Value.VUnit
+        }
         // no task ready, none asleep or waiting for input, and the first
         // not done: every task waits on a notifier nobody can wake
         // (MYLA-387), as native code's `exec_stuck` reports it
@@ -1738,10 +1876,10 @@ impl Interp {
     }
 
     // A task running `body` with the variables `scopes`, ready to run.
-    #test(interp_on("fun main() { print(1 + 2) }"), [RtFrame { names: [], vals: [], defers: [] }], block_of("{ }"))[0]
+    #test(interp_on("fun main() { print(1 + 2) }"), [RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }], block_of("{ }"))[0]
     fun new_task(var self, scopes: [RtFrame], body: Block) -> int32 {
         var sc = scopes
-        sc.push(RtFrame { names: [], vals: [], defers: [] })
+        sc.push(RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 })
         let f = AFrame { scopes: sc, conts: [Cont.KScope, Cont.KStmts(body.stmts, 0)], place: None, pend: Ctrl.CNone, pval: Value.VUnit, perr: None, pcode: 0 }
         self.tasks.push(Task { frames: [f], state: 0, value: Value.VUnit, failed: false, err: None, code: 0, awaited: false, waiters: [], cancelled: false, kids: [], requested: false })
         let id = self.tasks.len() - 1
@@ -2007,6 +2145,7 @@ impl Interp {
                 }
                 if due { return true }
                 self.idle_wait()
+                if self.timed_out { return true }
             }
         }
         if self.sleepers.len() == 0 && self.deadlines.len() == 0 { return false }
@@ -2020,8 +2159,7 @@ impl Interp {
         if self.virtual_time {
             if at > self.vclock { self.vclock = at }
         } else {
-            let left = at - __clock_ns()
-            if left > 0 { __sleep_ns(left) }
+            self.nap(at - __clock_ns())
         }
         return true
     }
@@ -2052,13 +2190,20 @@ impl Interp {
                 if d.at < until { until = d.at }
             }
         }
+        if self.case_deadline > 0 && self.case_deadline < until {
+            if self.case_deadline <= now {
+                self.case_timed_out()
+                return
+            }
+            until = self.case_deadline
+        }
         let ms = (until - now) / 1000000
         if one && ms > 0 {
             // (the parked socket looked at again at once when ready)
             if fd_wait_within(w, ms as int32) && self.parked_socks == 1 { self.lots_seen = 0 }
             return
         }
-        if until > now { __sleep_ns(until - now) }
+        if until > now { self.nap(until - now) }
     }
 
     // The one socket parked on a lot (`parked_socks` is 1), -1 for none.
@@ -2174,6 +2319,9 @@ impl Interp {
             },
             Cont.KScope => { self.close_scope() },
             Cont.KWhile(c, b) => {
+                // (a loop of an async function that suspends in a branch it
+                // doesn't take runs here: its time is looked at, D259)
+                if self.case_deadline > 0 { self.tick() }
                 let cv = self.eval(c)
                 if self.stop() {
                     self.take_ctrl()
@@ -2182,6 +2330,13 @@ impl Interp {
                 if as_bool(cv) { self.push_block(b) } else { self.frames[top].conts.pop() }
             },
             Cont.KFor(v, items, i, hi, body) => {
+                if self.case_deadline > 0 {
+                    self.tick()
+                    if self.stop() {
+                        self.take_ctrl()
+                        return
+                    }
+                }
                 if i >= hi {
                     self.frames[top].conts.pop()
                     return
@@ -2522,7 +2677,7 @@ impl Interp {
                     self.exit_code = 1
                     return
                 }
-                if self.virtual_time { self.vclock = self.vclock + ms * 1000000 } else { __sleep_ns(ms * 1000000) }
+                if self.virtual_time { self.vclock = self.vclock + ms * 1000000 } else { self.nap(ms * 1000000) }
                 st = 3
             }
             self.pwaits[wi].state = st
@@ -3389,7 +3544,7 @@ impl Interp {
             None => {},
         }
         let ci = self.const_idx(n)
-        if ci >= 0 { return self.const_vals[ci] }
+        if ci >= 0 { return self.const_value(ci) }
         // a bare no-payload enum variant, e.g. `None` or `North`
         match self.nullary_variant_enum(n) {
             Some(en) => { return Value.VEnum(en, n, []) },
@@ -4023,15 +4178,16 @@ impl Interp {
                 let spec = as_str(self.eval(args[0]))
                 if self.stop() { return Value.VUnit }
                 let t = self.full_type_of(recv.id)
-                return match parse_spec(spec) {
-                    Ok(sp) => Value.VStr(self.format_spec_value(rv, t, spec)),
-                    // a spec that isn't one is the caller's mistake: at the
-                    // call, on every runner (D183, MYLA-565)
-                    Err(why) => {
-                        self.fail(e, why)
-                        Value.VUnit
-                    },
+                // a spec that isn't one, or doesn't fit the type, is the
+                // caller's mistake: at the call, on every runner (D183,
+                // MYLA-565)
+                let class = match t { Some(Type.TInt(w, sg)) => 0, Some(Type.TFloat(w)) => 1, _ => 2 }
+                let why = spec_misfit(spec, class, match t { Some(ty) => type_name(ty), None => "" })
+                if why != "" {
+                    self.fail(e, why)
+                    return Value.VUnit
                 }
+                return Value.VStr(self.format_spec_value(rv, t, spec))
             }
         }
         // not a method: a field holding a function, called (an actor's
@@ -4129,11 +4285,19 @@ impl Interp {
     }
 
     // The environment the running function's frame binds (an index into
-    // `envs`), -1 for none: its first variable, `%env`.
+    // `envs`), -1 for none: its slot `env`.
     #test(interp_on("[int]"))[-1]
     fun frame_env(self) -> int32 {
-        if self.scopes.len() == 0 || self.scopes[0].names.len() == 0 || self.scopes[0].names[0] != "%env" { return -1 }
-        return as_int(self.scopes[0].vals[0]) as int32
+        if self.scopes.len() == 0 { return -1 }
+        return self.scopes[0].env
+    }
+
+    // The node of the call whose position the running function reports
+    // (`#track_caller`), -1 for none: its frame's slot `caller`.
+    #test(interp_on("[int]"))[-1]
+    fun frame_caller(self) -> int32 {
+        if self.scopes.len() == 0 { return -1 }
+        return self.scopes[0].caller
     }
 
     // The checked type of node `id`, a type parameter's the type the
@@ -4248,13 +4412,13 @@ impl Interp {
     }
 
     // Bind the type parameters `env_next` gives in the frame of function
-    // `fi` just made, as its first variable.
+    // `fi` just made, in its slot `env`.
     fun bind_types(var self, fi: int32) {
         self.bind_caller(fi)
         let k = self.env_next
         self.env_next = -1
         if k < 0 || self.env_fi != fi { return }
-        self.define("%env", Value.VInt(k as int64))
+        self.scopes[0].env = k
     }
 
     // The call `e` of function `fi` is about to enter it: when `fi`
@@ -4263,37 +4427,30 @@ impl Interp {
     // one too, which `bind_caller` binds in its frame.
     fun note_caller(var self, fi: int32, e: Expr) {
         if fi < 0 || !self.tracks[fi] { return }
-        var at = e.id
-        match self.lookup("%caller") {
-            Some(v) => { at = as_int(v) as int32 },
-            None => { self.call_sites[e.id] = e },
+        var at = self.frame_caller()
+        if at < 0 {
+            at = e.id
+            self.call_sites[e.id] = e
         }
         self.caller_next = at
         self.caller_fi = fi
     }
 
-    // The caller's position `note_caller` found, as the variable `%caller`
-    // of function `fi`'s frame just made.
+    // The caller's position `note_caller` found, in the slot `caller` of
+    // function `fi`'s frame just made.
     fun bind_caller(var self, fi: int32) {
         let at = self.caller_next
         self.caller_next = -1
         if at < 0 || self.caller_fi != fi { return }
-        self.define("%caller", Value.VInt(at as int64))
+        self.scopes[0].caller = at
     }
 
     // Where a `panic`, `assert` or `unreachable` at `e` fails: in a function
     // that reports its caller's position, at its call (MYLA-435).
     fun failure_at(self, e: Expr) -> Expr {
-        match self.lookup("%caller") {
-            Some(v) => {
-                match self.call_sites.get(as_int(v) as int32) {
-                    Some(c) => { return c },
-                    None => {},
-                }
-            },
-            None => {},
-        }
-        return e
+        let at = self.frame_caller()
+        if at < 0 { return e }
+        return self.call_sites.get(at).unwrap_or(e)
     }
 
     // The runtime method-dispatch key for a receiver: its checker-resolved type
@@ -5168,7 +5325,7 @@ impl Interp {
             let ms = as_int(self.eval(args[0]))
             if self.stop() { return Value.VUnit }
             if self.cur < 0 || self.cur >= self.tasks.len() {
-                if ms > 0 && !self.virtual_time { __sleep_ns(ms * 1000000) }
+                if ms > 0 && !self.virtual_time { self.nap(ms * 1000000) }
                 if ms > 0 && self.virtual_time { self.vclock = self.vclock + ms * 1000000 }
                 return Value.VUnit
             }
@@ -5249,7 +5406,7 @@ impl Interp {
         if c == B_SLEEP_NS {
             let n = as_int(self.eval(args[0]))
             if self.stop() { return Value.VUnit }
-            if self.virtual_time { self.vclock = self.vclock + n } else if n > 0 { __sleep_ns(n) }
+            if self.virtual_time { self.vclock = self.vclock + n } else if n > 0 { self.nap(n) }
             return Value.VUnit
         }
         if c == B_PRINT {
@@ -5674,14 +5831,19 @@ impl Interp {
         for n in reads { wanted[n] = true }
         var cnames: [str] = []
         var cvals: [Value] = []
+        // and the type parameters bound in scope (D172), first, which
+        // `call_closure` puts in the lambda's frame's slot (`frame_env`)
+        let k = self.frame_env()
+        if k >= 0 {
+            cnames.push("%env")
+            cvals.push(Value.VInt(k as int64))
+        }
         var i = 0
         while i < self.scopes.len() {
             var j = 0
             while j < self.scopes[i].names.len() {
                 let n = self.scopes[i].names[j]
-                // and the type parameters bound in scope (D172), first, as
-                // in a function's frame (`frame_env`)
-                if wanted.contains(n) || (i == 0 && j == 0 && n == "%env") {
+                if wanted.contains(n) {
                     cnames.push(self.scopes[i].names[j])
                     cvals.push(self.scopes[i].vals[j])
                 }
@@ -5716,7 +5878,11 @@ impl Interp {
         self.push_scope()
         var i = 0
         while i < cnames.len() {
-            self.define(cnames[i], cvals[i])
+            if i == 0 && cnames[0] == "%env" {
+                self.scopes[0].env = as_int(cvals[0]) as int32
+            } else {
+                self.define(cnames[i], cvals[i])
+            }
             i = i + 1
         }
         var k = 0
@@ -7290,14 +7456,16 @@ fun value_eq(a: Value, b: Value) -> bool {
 
 // A value as the Python interpreter's repr shows it, for a failed #test:
 // chars as code points, `True`, `None`, strings quoted as Python quotes them,
-// `P { x: 1 }`, `E.B(1)`, `(a, b)`, `[a]`, `[k: v]`.
+// `P { x: 1 }`, `E.B(1)`, `(a, b)`, `[a]`, `[k: v]`; a value with no form of
+// its own as natively, inside another too (`[<StringBuilder>]`, the
+// 2026-11-17 review's Low item).
 #test(Value.VBool(true))["True"]
 #test(Value.VList([Value.VInt(1), Value.VChar(97)]))["[1, 97]"]
 #test(Value.VMap(new_mapv()))["[]"]
 #test(Value.VEnum("E", "B", [Value.VStr("it's")]))["E.B(\"it's\")"]
 // (Also the key in a "map key … not found" message.)
 #test(Value.VStr("a b"))["'a\\xa0b'"]
-#test(sb_holding("a'b"))["StringBuilder(b\"a'b\")"]
+#test(sb_holding("a'b"))["<StringBuilder>"]
 pub fun py_repr(v: Value) -> str {
     return match v {
         Value.VInt(i) => format("{}", i),
@@ -7312,8 +7480,7 @@ pub fun py_repr(v: Value) -> str {
         Value.VList(xs) => "[" + reprs(xs) + "]",
         Value.VBytes(s) => "[" + reprs(byte_values(s)) + "]",
         Value.VMap(m) => map_repr(map_keys_of(m), map_vals_of(m)),
-        Value.VSB(b) => "StringBuilder(" + bytes_repr(b.build()) + ")",
-        Value.VClosure(ps, body, cn, cv, fname, is_func) => format("<closure {} param(s), {} capture(s)>", ps.len(), cn.len()),
+        Value.VSB(b) => "<StringBuilder>",
         _ => "<function>",
     }
 }
@@ -7505,44 +7672,6 @@ fun map_repr(ks: [Value], vs: [Value]) -> str {
     return sb.build()
 }
 
-// Python's repr of bytes: b'…' with printable ASCII as is.
-#test("")["b''"]
-#test("\0\u{1}")["b'\\x00\\x01'"]
-fun bytes_repr(bs: str) -> str {
-    var has_single = false
-    var has_double = false
-    var i = 0
-    while i < bs.len() {
-        if bs[i] == 39 { has_single = true }
-        if bs[i] == 34 { has_double = true }
-        i += 1
-    }
-    var quote: int64 = 39
-    if has_single && !has_double { quote = 34 }
-    var sb = StringBuilder()
-    sb.append("b" + cp_utf8(quote as int32))
-    i = 0
-    while i < bs.len() {
-        let b = bs[i] as int64
-        i += 1
-        if b == quote || b == 92 {
-            sb.append("\\" + cp_utf8(b as int32))
-        } else if b == 9 {
-            sb.append("\\t")
-        } else if b == 10 {
-            sb.append("\\n")
-        } else if b == 13 {
-            sb.append("\\r")
-        } else if b < 32 || b >= 127 {
-            sb.append("\\x" + hex2(b as int32))
-        } else {
-            sb.append(cp_utf8(b as int32))
-        }
-    }
-    sb.append(cp_utf8(quote as int32))
-    return sb.build()
-}
-
 // Two maps hold the same entries, in whatever order (a #test's expected map
 // against the actual one, as the Python interpreter compares dicts).
 #test(mapv_of([Value.VChar(53)], [Value.VChar(53)]), mapv_of([Value.VChar(53)], [Value.VChar(53)]))[true]
@@ -7643,9 +7772,9 @@ fun key_at(c: Value, j: int32, k: Value) -> Value {
     }
 }
 
-#test([RtFrame { names: [], vals: [], defers: [] }])[[]]
-#test([RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [] }, RtFrame { names: ["c"], vals: [Value.VInt(72)], defers: [] }])[[RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [] }]]
-#test([RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [] }, RtFrame { names: [], vals: [], defers: [] }, RtFrame { names: [], vals: [], defers: [] }])[[RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [] }, RtFrame { names: [], vals: [], defers: [] }]]
+#test([RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }])[[]]
+#test([RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [], env: -1, caller: -1 }, RtFrame { names: ["c"], vals: [Value.VInt(72)], defers: [], env: -1, caller: -1 }])[[RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [], env: -1, caller: -1 }]]
+#test([RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [], env: -1, caller: -1 }, RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }, RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }])[[RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [], env: -1, caller: -1 }, RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }]]
 fun drop_last_frame(xs: [RtFrame]) -> [RtFrame] {
     var out: [RtFrame] = []
     var i = 0

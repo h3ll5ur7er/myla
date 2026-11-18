@@ -2,7 +2,7 @@
 id: MYLA-435
 title: "A failing expect points at its caller"
 type: improvement
-status: todo
+status: review
 priority: low
 labels: [std, diagnostics]
 ---
@@ -77,3 +77,11 @@ Follow-up: [[MYLA-628]], the other library panics that are the caller's mistake 
 - **Staging.** The bootstrap can't build the library's `#track_caller` with the seed of `aef0b21` (`unknown attribute '#track_caller'`), so the compiler is its own commit, then a `Stage:` commit with the seeds, then the library's use (D156's exception).
 
 Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7 ([[MYLA-792]], H6)
+
+- [x] A generic function or a generic type's method under `#track_caller` keeps its type binding in the interpreter
+
+The interpreter kept the caller's position as the frame's hidden variable `%caller`, which took the first place where `frame_env` looked for `%env`, so a generic tracked function's operators were untyped: `lt(18446744073709551615u64, 2u64)` was `true` and a `uint64` printed `-1` ([[Project/Review-2026-11-17]], H6). A function's outermost scope (`RtFrame`) now has two named slots, `env` and `caller` ([[selfhost/interp.my]]: `frame_env`, `frame_caller`, `bind_types`, `bind_caller`, `note_caller`, `failure_at`, a lambda's capture in `eval_lambda` and `call_closure`).
+
+**Evidence.** The review's `track_caller_generic.my` interpreted `true -1 true -1 0.3 0.3 200` before (the last line natively `integer overflow`), now as natively; the parity program `track_caller_generic` ([[tests/burn/test_compiler_parity.py]], pinned: a lambda inside a tracked generic function, one calling another, a generic type's methods) failed interpreted before and passes; `test_track_caller_reports_the_callers_position` and the error corpus's `#track_caller` files pass. The suites are [[MYLA-792]]'s.
