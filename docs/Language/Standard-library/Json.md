@@ -25,7 +25,7 @@ fun main() {
 | Item | Meaning |
 | --- | --- |
 | `enum Json { Null, Bool(bool), Int(int64), Float(float64), Str(str), Array([Json]), Object([(str, Json)]) }` | A number without fraction or exponent that fits in int64 is an `Int`, any other a `Float`; an object keeps its members in order, duplicates included |
-| `parse(text: str) -> Result<Json, JsonError>` | One value, with whitespace around it allowed |
+| `parse(text: str) -> Result<Json, JsonError>` | One value, with whitespace around it allowed. A number of any length reads in time linear in its length: past 800 significant digits the rest only count as whether one isn't 0, which rounds to the same float64 ([[MYLA-795]]; a number of 64,000 digits took 11 s, now under 1 ms, 2026-11-18 at e659342) |
 | `struct JsonError { kind: JsonErrorKind, msg: str, line: int32, col: int32, path: str }` | A `Syntax` error of `parse` has Python 3.13's message and position (the column counts characters) and an empty `path`; the others come from decoding ([below](#typed-values)). `e.message()` is `msg`; `{e}` writes `line:col: msg` for an error in the text, `path: msg` for the others |
 | `to_string(j: Json) -> str` | Compact text, as `json.dumps(j, ensure_ascii=False, separators=(",", ":"))` writes it: floats in their shortest form, control characters escaped, other characters as they are; but NaN and the infinities, which JSON has no form for, are `null` |
 | `field(j: Json, key: str) -> Option<Json>` | An object's member (the last one with that key, as Python keeps it) |
