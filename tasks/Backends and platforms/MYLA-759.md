@@ -2,7 +2,7 @@
 id: MYLA-759
 title: "The x86_64-windows suites once hung in CI: test_selfhost_codegen still running after 64 minutes under Wine"
 type: bug
-status: todo
+status: review
 priority: medium
 labels: [windows, wine, ci, round-7]
 ---
@@ -28,5 +28,26 @@ Two runs on one Wine prefix kill each other's programs. Each run's `prepare_wine
 
 - [x] The hung test: `scopes_wait_for_children` in `test_tasks_on_any_number_of_workers` (master's `e6e1b9e`)
 - [x] The setup's fault: the persistent server started before a new prefix existed (fixed, with `WinePrefix`)
-- [ ] Why `scopes_wait_for_children` doesn't end under Wine (on 1 to 16 workers, until it hangs), and whether the setup's fault caused it: a program that doesn't end under Wine, or a `subprocess.run` whose timeout waits for a pipe a Wine process holds
-- [ ] A fix, and the program's run bounded under Wine (kill the process group or the Wine prefix's processes at the timeout)
+- [x] Why `scopes_wait_for_children` doesn't end under Wine (on 1 to 16 workers, until it hangs), and whether the setup's fault caused it: a program that doesn't end under Wine, or a `subprocess.run` whose timeout waits for a pipe a Wine process holds
+- [x] A fix, and the program's run bounded under Wine (kill the process group or the Wine prefix's processes at the timeout)
+
+## Evidence
+
+**The program ends; its output doesn't.** `scopes_wait_for_children` built for x86_64-windows, run under Wine 9.0 here (2026-11-18, BASE `3add216`) on 1, 2, 4, 8 and 16 workers, 4 copies at once, each with a prefix of its own (load average 60 to 100 from the other lanes and these runs):
+
+- with each prefix's server and services started first, as BASE's `wine_env` does (`wineserver -p`, then a quiet `wineboot`): 2,000 of 2,000 runs printed `0 1 2 after` and ended, none in more than a second;
+- with the server started and nothing else (the services not yet there): in each copy the first run's program ended at once (`[swc.exe] <defunct>`) and its `communicate` waited past its 60 s; killing the run's process group didn't end it either (`pipes still held after killing the group`). `/proc/<pid>/fd` of `services.exe`, `winedevice.exe`, `plugplay.exe`, `svchost.exe` and `rpcss.exe`: fd 2 a pipe, the program's standard error, each in a session of its own (`setsid`), started by that program, the first of its server. The other 49 runs of each copy ended.
+
+So it isn't where its workers stop: the first program of a Wine server starts the prefix's services, which hold its standard error for as long as the server lives. On CI's runners the setup's fault (BASE's fix) left no persistent server, so the server was the short-lived one of whichever program started it: after a pause it stopped, the next program started it again and the services with it, and they held that program's standard error while the other suites' programs kept the server alive. A run with a `timeout` then raised at 60 s, as on `e6e1b9e`; one without waited for good, as on `4c91ba2` (`subprocess.run` kills and waits for the process only, then for its pipes); and on `dd57b05` a `--checked` program "printed its error and was still running at its 20 s". BASE's fix alone keeps the services started quietly while `scripts/test-target.py`'s server runs (`-p`, for good). It doesn't cover a server started again during a run: `wine_env`'s `-p60` after a pause of a minute in a plain `unittest` run, or a second run on the same prefix stopping it (`wineserver -k` at its exit).
+
+**The fix:** a Windows program runs behind `tests/burn/_wine_run.py` (`_native.wine_run`, used by `run_argv` and, through `MYLA_EMULATOR`, by `myla test --target x86_64-windows` in `scripts/test-target.py`). It `exec`s Wine, so the caller's pid, signals and time limits are the program's (`test_http`'s socket counts read `/proc/<pid>`). Before that it forks a copier, and the program's standard output and error, where they are pipes, are the copier's pipes (one pipe when the caller's two are one, so their order is kept; non-blocking when the caller's are; a terminal, a file or a device stays the program's own, and a pipe whose reader has gone is closed, so the program's next write fails as it would have: the first version copied those too, and `test-target.py x86_64-windows` caught it in test_term, test_stdio and test_reactor_scaling). The copier copies them to the caller's as they come, and once its parent, the program, has ended, copies what they still hold and ends, whoever else holds them. A time limit's kill is the program's own, and the caller's pipes end with the copier.
+
+- `test_windows.WinePrefix.test_a_run_ends_with_its_program_whatever_the_services_hold` (a fresh prefix, its server kept 30 s with no services, a hello world run with a 60 s limit): with `wine()` alone, BASE's command, it failed, `32.8 not less than 20 : the run waited for the server's 30 s`; with `wine_run()` it passes, the class's two tests in 36.9 s.
+- `scripts/test-target.py x86_64-windows test_selfhost_codegen` behind the relay: `ok (93 s) OK (skipped=26)`, `test_tasks_on_any_number_of_workers` among its tests.
+- The rate, staged as on CI (each copy's first run the first program of its server): 4 of 4 waited past 60 s before. After: the program ends, so does the run (the test above).
+
+**Suites** (2026-11-18, this branch): `scripts/test.sh` 1,859 tests OK; `scripts/test-target.py` x86_64-windows 39 of 39 suites, aarch64-linux 38 of 39 then 39 (test_children_run_in_parallel, [[MYLA-745]]), wasm32-wasi 39 of 39; `tests.burn.test_windows` and `test_windows_runner` 73 tests OK under Wine; `scripts/windows-runner.py run --wine --runs 3`: 153 passed, 0 failed, 17 skipped of 170 cases (round 7's integration: 152 of 170, t15 failing); the bootstrap's fixed point, `scripts/check-seed.sh` and its Windows run.
+
+## Proposals
+
+- Built: every test run of a Windows program goes behind `_wine_run.py` (a Python process `exec`ing Wine, its output copied where it is a pipe). Alternatives: (a) only the setup's fix (BASE): enough while a run's server never stops, which nothing enforces; (b) check before each run that the prefix's services are up and start them quietly if not: racy, and a run per program more; (c) temporary files for the output instead of pipes: breaks the tests that read a program's output as it comes.
