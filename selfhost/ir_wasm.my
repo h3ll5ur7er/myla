@@ -23,7 +23,7 @@
 from .checker import Type, subst_type
 from .codegen import CodeGen, is_aggregate, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, tls_offset
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec, inst_uses, inst_defs, term_uses
-from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
+from .ir_x86 import slots_at, cell_positions, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
 from .ir_util import int_in, is_char_type, is_float_type, reachable_blocks, wrapped
 
 // A function being emitted: its argument words, the local of each
@@ -42,7 +42,7 @@ struct WFn { nparams: int32, la: int32, lb: int32, bb: int32, fp: int32, size: i
 // function of more than 50,000 locals, which a list literal of 52,000
 // elements made when every temporary had one.
 #test(IrFunc { name: "f", ret: None, slots: [], temps: [Type.TBool, Type.TBool, Type.TBool], blocks: [IrBlock { insts: [Inst.Const(0, Type.TBool, 1), Inst.Exit(0), Inst.Const(1, Type.TBool, 1), Inst.Exit(1)], term: Term.Ret(-1) }], order: [0], instances: [], frame: false, scope_parent: [] })[([0, 0, 1], 2)]
-fun wasm_locals(f: IrFunc) -> ([int32], int32) {
+pub fun wasm_locals(f: IrFunc) -> ([int32], int32) {
     let n = f.temps.len()
     // the one block a temporary is in (-2: none yet, -1: more than one, or
     // read before it is written), and where its block reads it last
@@ -168,11 +168,11 @@ impl CodeGen {
         if f.frame {
             soff = slots_at(f, 0, [])
         } else {
-            for s in f.slots {
-                soff.push(cur)
-                cur = cur + (s.size + 7) / 8 * 8
-                if s.size == 0 { cur = cur + 8 }
-            }
+            // the locals of two scopes never open at once share cells, as
+            // on x86-64 (MYLA-183, MYLA-826)
+            let (pos, extent) = cell_positions(f, false, [], true)
+            soff = pos
+            cur = extent
         }
         let scratch = cur
         cur = cur + 8
