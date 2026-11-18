@@ -1265,9 +1265,9 @@ class TimeLimits(unittest.TestCase):
         # M8 (MYLA-794): each piece of a body waiting parked took it out of
         # the server's `Pending` actor and put it back, two copies of the
         # body so far: a byte dribbled after 15 MB cost two copies of
-        # 15 MB, an upload of 16 MB in pieces of 1,460 bytes ten times the
-        # CPU of one that came at once. It is read on where it is kept: a
-        # piece costs about the same after 4 MB as after 4 KB.
+        # 15 MB, and an upload of 16 MB in pieces of 1,460 bytes ten times
+        # the CPU it costs now. It is read on where it is kept: a piece
+        # costs about the same after 4 MB as after 4 KB.
         def cpu_seconds(pid: int) -> float:
             with open(f"/proc/{pid}/stat") as f:
                 fields = f.read().rsplit(")", 1)[1].split()
