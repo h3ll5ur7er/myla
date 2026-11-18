@@ -2153,7 +2153,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
                         self.assertEqual(got, want, f"{workers} workers")
 
     def test_children_run_in_parallel(self) -> None:
-        """Eight CPU-bound children on as many workers as CPUs end well
+        """Eight CPU-bound children on as many workers as CPUs: several of
+        the process's threads did a share of the work, and they ended well
         before they do on one worker (D89 (3))."""
         if (os.cpu_count() or 1) < 2:
             self.skipTest("one CPU")
@@ -2168,6 +2169,32 @@ class SelfHostedCodegenParity(unittest.TestCase):
             many = dict(os.environ)
             many.pop("MYLA_THREADS", None)
             one = dict(os.environ, MYLA_THREADS="1")
+            # a count, whatever the load: the CPU time of each of the
+            # process's threads once the work is done (the program waits
+            # for a line then); a tenth of it at least on two of them
+            argv, bin_exe = run_argv(exe, exe, ["hold"])
+            held = subprocess.Popen(argv, executable=bin_exe, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    text=True, env=many)
+            try:
+                self.assertEqual(held.stdout.readline(), "1\n")
+                ticks = []
+                for tid in os.listdir(f"/proc/{held.pid}/task"):
+                    try:
+                        with open(f"/proc/{held.pid}/task/{tid}/stat", encoding="ascii") as fh:
+                            fields = fh.read().rsplit(")", 1)[1].split()
+                    except OSError:
+                        continue
+                    ticks.append(int(fields[11]) + int(fields[12]))
+            finally:
+                held.stdin.close()
+                held.wait(timeout=120)
+            busy = [t for t in ticks if t * 10 >= sum(ticks)]
+            self.assertGreaterEqual(len(busy), 2, f"the threads' CPU ticks: {sorted(ticks, reverse=True)}")
+            if TEST_TARGET == "aarch64-linux":
+                # (under qemu the times say little: its threads gave 1.3
+                # CPUs to the 8 children where one worker took 3.6 s,
+                # 2026-11-18 under load)
+                return
             # its twin on one worker, the two run in turn, the best of three
             # each, less the time of each with no work (its start: under
             # Wine most of a run): a share of the CPU time beside the wall
@@ -2351,6 +2378,7 @@ async fun main() {
 PARALLEL_WORK = """\
 import std.task as task
 from std.process import args
+from std.io import stdin
 
 fun crunch(seed: int64, n: int) -> int64 {
     var x: int64 = seed
@@ -2366,8 +2394,10 @@ fun crunch(seed: int64, n: int) -> int64 {
 
 #main
 async fun main() {
-    // (with an argument, no work: the start and the tasks alone)
-    let n = if args().len() > 1 { 0 } else { 15000000 }
+    // (`0`: no work, the start and the tasks alone; `hold`: the work, then
+    // a line of the input waited for, while the test looks at the threads)
+    let a = args()
+    let n = if a.len() > 1 && a[1] == "0" { 0 } else { 15000000 }
     var fs: [async () -> int64] = []
     for k in 0..8 {
         let seed: int64 = (k + 1) as int64
@@ -2378,6 +2408,10 @@ async fun main() {
         ones = ones + r
     }
     print(ones / 8)
+    if a.len() > 1 && a[1] == "hold" {
+        var r = stdin()
+        let line = r.read_line()
+    }
 }
 """
 
