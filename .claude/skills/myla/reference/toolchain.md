@@ -245,7 +245,7 @@ A literal format spec in `format`/an f-string is checked at compile time (`type 
 | `scripts/check-seed.sh [BUILD]` | exit 0 when the machine's seed bootstraps the sources (it reports whether each seed is also the current compiler); 1 when `selfhost/embedded_std.my` differs from HEAD; 2 when the seed can't bootstrap the sources (D207). CI and the pre-push hook run it |
 | `scripts/host.sh` | sourced: host OS and target (`uname -s`/`-m`), seed, `EXE` (`.exe` on Windows), `asm_to_bin`, `run_tool`, `seed_compile` |
 | `scripts/test.sh [fast\|all]` | burn tests via `python3 -m unittest`; `fast` drops `test_selfhost_*` and ~25 slow modules |
-| `scripts/test-target.py T [MODULE…] [-j N]` | burn suites for `aarch64-linux` (qemu), `wasm32-wasi` (Node) or `x86_64-windows` (Wine: `/usr/lib/wine/wine64` found, `MYLA_EMULATOR` set, a prefix in `build/wineprefix`), exceptions in `tests/burn/_targets.py` |
+| `scripts/test-target.py T [MODULE…] [-j N] [--limit S]` | burn suites (each stopped after S seconds, 1,500 by default) for `aarch64-linux` (qemu), `wasm32-wasi` (Node) or `x86_64-windows` (Wine: `/usr/lib/wine/wine64` found, `MYLA_EMULATOR` set, a prefix in `build/wineprefix`), exceptions in `tests/burn/_targets.py` |
 | `scripts/stress-native.py [--runs N] [--workers 1,4,16] [--only t…]` | concurrency stress programs natively |
 | `scripts/windows-runner.py build OUT` / `run OUT [--wine] [--runs N] [--only t…]` | Windows programs built on Linux with what each must print (`OUT/cases.json`), run on Windows (CI's `windows` job) or under Wine (MYLA-708) |
 | `scripts/build.sh f.my [out]` | `build/stage3 f.my lib` piped to `as`/`ld` (stage3 directly) |

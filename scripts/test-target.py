@@ -6,8 +6,11 @@ MYLA-702), and the tests that target is excused from are skipped with their
 reason. Which suites run, and the exceptions, are in tests/burn/_targets.py.
 
 Each suite runs in its own process, as many at once as there are CPUs
-(`-j N` to change); the summary lists every suite's result and the skipped
-tests' reasons. Exits 1 if any suite failed."""
+(`-j N` to change), and is stopped after `--limit` seconds (a program hung
+under an emulator then fails its suite, with the test it was in, instead of
+holding the run until CI cancels it with nothing said); each suite's result
+is printed as it ends, failures' logs and the summary at the end. Exits 1 if
+any suite failed."""
 from __future__ import annotations
 
 import argparse
@@ -15,8 +18,10 @@ import atexit
 import concurrent.futures
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
@@ -82,7 +87,8 @@ def prepare_wine() -> None:
 def run_one(module: str) -> int:
     """Run one suite in this process (the target is in MYLA_TEST_TARGET)."""
     suite = _excused(unittest.defaultTestLoader.loadTestsFromName(module))
-    result = unittest.TextTestRunner(verbosity=1).run(suite)
+    # each test named as it starts: a suite stopped at its limit says which
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() else 1
 
 
@@ -91,6 +97,10 @@ def main() -> int:
     ap.add_argument("target", choices=_targets.TARGETS)
     ap.add_argument("modules", nargs="*", help="suites (default: all of tests/burn/_targets.py SUITES)")
     ap.add_argument("-j", type=int, default=os.cpu_count() or 1, help="suites run at once")
+    # The longest suite, test_selfhost_codegen on x86_64-windows, took 609 s
+    # in CI (2026-11-18, 04d8956); once, on 4c91ba2, it was still running at
+    # the job's 75 minutes.
+    ap.add_argument("--limit", type=int, default=1500, help="seconds a suite may run (default 1500)")
     ap.add_argument("--one", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
     os.environ["MYLA_TEST_TARGET"] = args.target
@@ -110,13 +120,25 @@ def main() -> int:
 
     def run(module: str) -> tuple[str, int, float, str]:
         start = time.monotonic()
-        proc = subprocess.run([sys.executable, os.path.abspath(__file__), args.target, module, "--one"],
-                              capture_output=True, text=True)
-        return module, proc.returncode, time.monotonic() - start, proc.stderr
+        with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as log:
+            # its own process group, so that its programs stop with it
+            proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), args.target, module, "--one"],
+                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                code = proc.wait(timeout=args.limit)
+                note = ""
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                code = 1
+                note = f"\nSTOPPED after its {args.limit} s (--limit): the test above it was still running"
+            log.seek(0)
+            return module, code, time.monotonic() - start, log.read() + note
 
     failed = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.j)) as pool:
-        for module, code, secs, log in pool.map(run, modules):
+        for future in concurrent.futures.as_completed([pool.submit(run, m) for m in modules]):
+            module, code, secs, log = future.result()
             tail = log.strip().splitlines()[-1] if log.strip() else ""
             print(f"{'ok  ' if code == 0 else 'FAIL'} {module} ({secs:.0f} s) {tail}", flush=True)
             if code:
