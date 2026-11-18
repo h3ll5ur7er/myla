@@ -2169,23 +2169,30 @@ class SelfHostedCodegenParity(unittest.TestCase):
             many.pop("MYLA_THREADS", None)
             one = dict(os.environ, MYLA_THREADS="1")
             # its twin on one worker, the two run in turn, the best of three
-            # each: a share of the CPU time beside the wall time failed when
-            # a full run's other processes took the CPUs (MYLA-745), while
-            # the children still ran on many workers at once
-            walls: dict[str, list[float]] = {"one": [], "many": []}
+            # each, less the time of each with no work (its start: under
+            # Wine most of a run): a share of the CPU time beside the wall
+            # time failed when a full run's other processes took the CPUs
+            # (MYLA-745), while the children still ran on many workers
+            runs = {"one": (one, []), "many": (many, []), "one0": (one, ["0"]), "many0": (many, ["0"])}
+            walls: dict[str, list[float]] = {name: [] for name in runs}
+
+            def work(name: str) -> float:
+                return min(walls[name]) - min(walls[name + "0"])
+
             for _ in range(3):
-                for name, env in [("one", one), ("many", many)]:
+                for name, (env, args) in runs.items():
                     proc = subprocess.run(
-                        [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, *run_argv(exe, exe)[0]],
+                        [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, *run_argv(exe, exe, args)[0]],
                         capture_output=True, text=True, env=env,
                     )
                     self.assertEqual(proc.stdout, "1\n")
                     walls[name].append(float(proc.stderr.split()[-1]))
-                if min(walls["one"]) > 1.5 * min(walls["many"]):
+                if work("one") > 1.5 * work("many"):
                     break
-            alone, together = min(walls["one"]), min(walls["many"])
-            self.assertGreater(alone, 1.5 * together,
-                               f"{together:.2f} s on every worker, {alone:.2f} s on one (best of {len(walls['one'])})")
+            self.assertGreater(work("one"), 1.5 * work("many"),
+                               f"{work('many'):.2f} s on every worker, {work('one'):.2f} s on one, each less its "
+                               f"start ({min(walls['many0']):.2f} s, {min(walls['one0']):.2f} s; best of "
+                               f"{len(walls['one'])})")
 
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PINNED, PROGRAMS
@@ -2343,12 +2350,13 @@ async fun main() {
 # agree with one another.
 PARALLEL_WORK = """\
 import std.task as task
+from std.process import args
 
-fun crunch(seed: int64) -> int64 {
+fun crunch(seed: int64, n: int) -> int64 {
     var x: int64 = seed
     var acc: int64 = 0
     var i = 0
-    while i < 15000000 {
+    while i < n {
         x = (x * 48271) % 2147483647
         acc = (acc + x % 7) % 1000000007
         i = i + 1
@@ -2358,10 +2366,12 @@ fun crunch(seed: int64) -> int64 {
 
 #main
 async fun main() {
+    // (with an argument, no work: the start and the tasks alone)
+    let n = if args().len() > 1 { 0 } else { 15000000 }
     var fs: [async () -> int64] = []
     for k in 0..8 {
         let seed: int64 = (k + 1) as int64
-        fs.push(async () => crunch(seed))
+        fs.push(async () => crunch(seed, n))
     }
     var ones: int64 = 0
     for r in await task.all(fs) {
