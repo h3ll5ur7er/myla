@@ -64,3 +64,5 @@ The fix, in `std.rt` only: a frame taken that empties its queue sets both counte
 - Suites at the end: `scripts/test.sh fast` (886 tests) and `scripts/test.sh` (1,626 tests, 342 skipped): the one failure `test_embedded_std`, as expected until the integrator's seed; `scripts/test-target.py aarch64-linux` and `wasm32-wasi` for `test_stdio`, `test_net` and `test_term`; the platform modules' own cases on their targets (23, 23, 19), which first found `__on_raw_signal` named wrongly when std.platform is the entry (fixed, `platform_fn`).
 
 Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).
+
+Follow-up done by [[MYLA-791]] (round 7): three callers at once kept the queue from draining, so it drifted along its ring all the same (8,280 kB resident after a million calls on one worker); `queue_took` now copies a short queue that drifted back to its ring's start, and the burn test above runs three callers too (7,804 kB more before, under 1 MiB after, natively, on aarch64 and on wasm32).
