@@ -137,7 +137,9 @@ def _describe(arg, dirs: list[str]):
         if path.startswith(RECORDED_CORPUS + os.sep):
             # a corpus file as it was recorded, before a rewrite (MYLA-240)
             where = os.path.relpath(path, RECORDED_CORPUS)
-        elif path.startswith(_REPO + os.sep) and "/build/" not in path:
+        elif path.startswith(_REPO + os.sep) and "/build/" not in "/" + os.path.relpath(path, _REPO):
+            # (the path below the repository: a checkout inside a directory
+            # named build is still the repository, MYLA-800)
             where = os.path.relpath(path, _REPO)
         else:
             where = os.path.basename(path)

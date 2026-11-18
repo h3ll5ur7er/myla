@@ -15,7 +15,7 @@
 from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
-from .loader import load_program_opts, LoadOptions, for_target, for_host, file_of, Loaded, type_errors, warning_reports, in_stdlib, normalize, is_std_module, std_tree_root
+from .loader import load_program_opts, LoadOptions, for_target, for_host, file_of, Loaded, type_errors, warning_reports, in_stdlib, normalize, is_std_module, std_tree_root, same_dir
 from .stdroot import EMBEDDED_ROOT
 from .target import Target, Os, parse_target, host, toolchain, with_files, with_libs, missing_tool, unsupported
 from .diag import render, Report
@@ -117,7 +117,18 @@ fun own_library(file: str, opts: LoadOptions) -> (str, LoadOptions) {
     if opts.stdlib_root != EMBEDDED_ROOT {
         // a module of the root named, written another way (`lib/std/x.my`
         // with `--stdlib $PWD/lib`): both absolute, for the same reason
-        if opts.stdlib_root == "" || !is_std_module(file, opts.stdlib_root) { return (file, opts) }
+        if opts.stdlib_root == "" { return (file, opts) }
+        if !is_std_module(file, opts.stdlib_root) {
+            // the root reached another way, through a symbolic link: the
+            // file's spelling of it, so that the module is the root's, not
+            // a second copy of it beside it (the review of 2026-11-17)
+            let tree = std_tree_root(file)
+            if tree != "" && same_dir(tree, opts.stdlib_root) {
+                o.stdlib_root = tree
+                return (file, o)
+            }
+            return (file, opts)
+        }
         if written_under(file, opts.stdlib_root) { return (file, opts) }
         o.stdlib_root = absolute(opts.stdlib_root)
         return (absolute(file), o)

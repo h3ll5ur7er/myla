@@ -2,7 +2,7 @@
 id: MYLA-613
 title: std.http Router for typed web APIs
 type: feature
-status: todo
+status: review
 priority: high
 labels: [stdlib, http]
 ---
@@ -52,3 +52,7 @@ A router in `std.http` for easy, typed web APIs in the spirit of Python's FastAP
 - The `#route(…)` sugar once custom attributes exist (last step above).
 
 Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7 ([[MYLA-795]])
+
+The review's blockers are fixed in [[MYLA-795]], whose `## Evidence` has the tests before and after: `static_files` serves regular files under its resolved root only and streams them (D260; `..%5c`, `app.css.`, `nul` and `.env` were served on Windows, dot files and links out of the root on Linux, and a FIFO held a worker); malformed patterns are a runtime error naming them (`{p:path}` before another segment, `{id:integer}`); a JSON body's long number no longer takes quadratic time. The step left open, the `#route(…)` sugar, waits for custom attributes, as before: no round 7 item.

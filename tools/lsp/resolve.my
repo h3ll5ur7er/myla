@@ -20,9 +20,9 @@ from ...selfhost.parser import parse_source
 from ...selfhost.tokens import Token, TokenKind, no_span
 from ...selfhost.loader import normalize, LoadOptions, load_options, source_text, implicit_modules, is_std_module
 from ...selfhost.ast import Program, Decl, DeclKind, FunData, TypeExpr, TypeKind, Expr, ExprKind, ExprOrBlock, Stmt, StmtKind, Block, ElseTail, Pattern, PatternKind, MatchArm, Param, BindElem, TypeParam, Attribute, ImportPath, ImportItem, FieldInit, FieldPat
-from .symbols import Symbol, SymKind, Range, outline, outline_parsed, type_str
+from .symbols import Symbol, SymKind, Range, module_outline, outline_parsed, type_str
 from .text import LineIndex, line_index, code_points, Pos
-from .types import base_of, method_key, type_args, index_of, iter_of, success_of, result_of, header_params, subst, is_builtin_type, tuple_elems, sig_type_params, sig_param_types, unify
+from .types import base_of, method_key, type_args, index_of, suffix_type, iter_of, success_of, result_of, header_params, subst, is_builtin_type, tuple_elems, sig_type_params, sig_param_types, unify
 
 pub enum DefKind {
     Global(SymKind),       // a declaration of some file
@@ -1062,8 +1062,15 @@ impl Resolver {
             ExprKind.IntLit(v, suffix, is_char, big) => {
                 if is_char { return "char" }
                 return match suffix {
-                    Some(sfx) => sfx,
+                    Some(sfx) => suffix_type(sfx),
                     None => "int",
+                }
+            },
+            // a float literal (MYLA-710's follow-up): `2.5.floor()`
+            ExprKind.FloatLit(text, suffix) => {
+                return match suffix {
+                    Some(sfx) => suffix_type(sfx),
+                    None => "float",
                 }
             },
             ExprKind.Cast(x, t) => { return type_str(t) },
@@ -1084,7 +1091,11 @@ impl Resolver {
                 // a slice (`a:b`, `a:b:step`, D142) keeps the list's or string's type
                 let sliced = match i.kind { ExprKind.Binary(op, l, r) => op == ":", _ => false }
                 if sliced { return self.type_of(a) }
-                return index_of(self.unalias(self.type_of(a)))
+                let t = self.unalias(self.type_of(a))
+                let elem = index_of(t)
+                if elem != "" { return elem }
+                // a type's `Index` impl (D200, MYLA-710's follow-up)
+                return self.method_result(t, "index")
             },
             ExprKind.TupleIndex(x, i) => {
                 let elems = tuple_elems(self.unalias(self.type_of(x)))
@@ -1229,7 +1240,8 @@ impl Resolver {
         return ""
     }
 
-    // The symbols of the module file `file` (none when it doesn't parse),
+    // The symbols of the module file `file` (none when its declarations
+    // don't parse; a body that doesn't is skipped, `module_outline`),
     // outlined once per text.
     fun module_symbols(var self, file: str) -> [Symbol] {
         let text = match self.text_of(file) {
@@ -1243,7 +1255,7 @@ impl Resolver {
             None => {},
         }
         var symbols: [Symbol] = []
-        match outline(text) {
+        match module_outline(text) {
             Some(s) => { symbols = s },
             None => {},
         }

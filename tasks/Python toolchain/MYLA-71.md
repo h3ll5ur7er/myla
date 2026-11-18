@@ -19,9 +19,11 @@ Every AST node already carries its line and column, and labels are already `myla
 
 ## Done when
 
-- [x] `myla build -g` emits `.file` per module and `.loc` at each function, statement and expression-bodied match arm in [[src/myla/compiler/codegen_x86.py]]; lambdas use the file they are created in; the loader records each function's `source_path`
+- [x] `myla build -g` emits `.file` per module and `.loc` at each function, statement and expression-bodied match arm in `src/myla/compiler/codegen_x86.py`; lambdas use the file they are created in; the loader records each function's `source_path`
 - [x] Runtime helpers carry no source line (`.loc <file> 0 0` after each function)
 - [x] Without `-g` the output is unchanged
 - [x] Tests first: `tests/unit/test_compiler.py::TestLineTables` (directives, files of imported modules, lambdas, line 0 after functions) and `tests/burn/test_debug_info.py` (readelf sees the lines; `-g` doesn't change behaviour; gdb stops on `prog.my:2` and shows the Myla backtrace)
 - [x] Documented with a real gdb session on [[Development/Debugging]]
 - [x] The same in [[selfhost/codegen.my]]: `gen_main … -g` and the self-hosted `myla build -g`. Positions are per file since [[MYLA-30]], and the loader's `Loaded.spans` maps each node id to its file ([[MYLA-28]]), so `.loc` takes the file of the function's declaration (a method's impl, a lambda's own node) and the prelude gets none. Tests: `TestSelfHostedLineTables` in `tests/burn/test_debug_info.py` (readelf sees the lines of the entry module and of an imported one, lambdas included; `-g` doesn't change behaviour; no directives without `-g`; gdb stops on a line of the imported module with the caller's line in the backtrace). Bonus: the stage 3 compiler built with `-g` can be debugged in its own source ([[Development/Debugging]]).
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

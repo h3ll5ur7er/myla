@@ -395,44 +395,54 @@ class SelfHostedParserParity(unittest.TestCase):
 
     def test_a_long_chain_of_operators_is_a_parse_error(self) -> None:
         # MYLA-545: `x < y && x < y && …` 16,000 long overflowed the
-        # checker's stack (its tree is as deep as the chain); 8,192
-        # operators in an expression parse, one more is a parse error there
+        # checker's stack (its tree is as deep as the chain); M10 of the
+        # review of 2026-11-17: 6,000 `|> id` and 20,000 `else if` arms did
+        # too, under the old limit of 8,192. 2,048 operators, fields and
+        # `else if` arms, a call counted twice and a `|>` three times, parse,
+        # are checked and run; one more is a parse error there
         myla = selfhost_tool("main")
+        head = "fun id(x: int) -> int { return x }\nfun main() {\n    let x = 1\n    let y = 2\n    let c = x < y\n"
+        cases = (
+            # (name, the expression after `let t = `, its output, the line of the error or 0)
+            ("and_ok", " &&\n        ".join(["x < y"] * 1024), "true", 0),    # two operators an operand
+            ("and_long", " &&\n        ".join(["x < y"] * 16000), "", 1029),    # the `&&` after the 1,024th
+            ("plus_ok", " +\n        ".join(["x"] * 2049), "2049", 0),
+            ("plus_long", " +\n        ".join(["x"] * 16000), "", 2054),    # the `+` after the 2,049th
+            ("method_ok", "x" + ".abs()" * 682, "1", 0),    # a field and a call each
+            ("method_long", "x" + ".abs()" * 683, "", 6),
+            ("pipe_ok", "x" + " |> id" * 682, "1", 0),
+            ("pipe_long", "x" + " |> id" * 6000, "", 6),
+            ("else_if_ok", "if c { 0 }" + "".join(f"\n        else if c {{ {i} }}" for i in range(1, 2049)) + "\n        else { 1 }", "0", 0),
+            ("else_if_long", "if c { 0 }" + "".join(f"\n        else if c {{ {i} }}" for i in range(1, 20000)) + "\n        else { 1 }", "", 2055),
+        )
         with tempfile.TemporaryDirectory() as tmp:
-            for operands, op in ((4096, "&&"), (16000, "&&"), (8193, "+"), (16000, "+"), (8193, ".abs()")):
-                if op == "&&":
-                    text = " &&\n        ".join(["x < y"] * operands)    # two operators an operand
-                elif op == "+":
-                    text = " +\n        ".join(["x"] * operands)
-                else:
-                    text = "x" + ".abs()" * ((operands - 1) // 2)    # a field and a call each
-                path = os.path.join(tmp, f"chain_{operands}_{len(op)}.my")
+            for name, text, out, line in cases:
+                path = os.path.join(tmp, f"{name}.my")
                 with open(path, "w", encoding="utf-8") as fh:
-                    fh.write("fun main() {\n    let x = 1\n    let y = 2\n    let t = " + text + "\n    print(t)\n}\n")
-                ok = operands <= 8193
+                    fh.write(head + "    let t = " + text + "\n    print(t)\n}\n")
                 for cmd in ("check", "run"):
-                    with self.subTest(operands=operands, op=op, cmd=cmd):
+                    with self.subTest(name=name, cmd=cmd):
                         proc = subprocess.run([myla, cmd, path], capture_output=True, text=True, timeout=300)
-                        if ok:
-                            want = {"&&": "true\n", "+": f"{operands}\n", ".abs()": "1\n"}[op]
-                            self.assertEqual((proc.stdout, proc.stderr), ("ok\n" if cmd == "check" else want, ""))
+                        if not line:
+                            self.assertEqual((proc.stdout, proc.stderr), ("ok\n" if cmd == "check" else out + "\n", ""))
                         else:
-                            # the 8,193rd: with `&&`, the `&&` after the 4,096th
-                            # operand (its two operators counted), with `+` the
-                            # `+` after the 8,193rd
-                            line = 4099 if op == "&&" else 8196
                             self.assertEqual(proc.returncode, 1)
                             self.assertTrue(proc.stderr.startswith(
-                                "parse error: more than 8192 operators, calls and fields in one expression: split it with a 'let'\n"
+                                "parse error: more than 2048 operators, calls, fields and 'else if' arms in one expression"
+                                " (a call counts two, a '|>' three): split it with a 'let' or a 'match'\n"
                                 f"  --> {path}:{line}:"), proc.stderr[:300])
-        # one more of each is the error
-        with tempfile.TemporaryDirectory() as tmp:
-            for text in (" +\n        ".join(["x"] * 8194), "x" + ".abs()" * 4097):
-                path = os.path.join(tmp, "over.my")
+            # an `if` statement's `else if` arms: 2,048 parse
+            for arms, ok in ((2048, True), (2049, False), (20000, False)):
+                path = os.path.join(tmp, f"else_if_stmt_{arms}.my")
                 with open(path, "w", encoding="utf-8") as fh:
-                    fh.write("fun main() {\n    let x = 1\n    print(" + text + ")\n}\n")
-                proc = subprocess.run([myla, "check", path], capture_output=True, text=True, timeout=300)
-                self.assertTrue(proc.stderr.startswith("parse error: more than 8192 operators"), proc.stderr[:300])
+                    fh.write("fun main() {\n    let c = 1 < 2\n    if !c { print(0) }"
+                             + " else if !c { }" * arms + " else { }\n    print(1)\n}\n")
+                with self.subTest(arms=arms):
+                    proc = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=300)
+                    if ok:
+                        self.assertEqual((proc.stdout, proc.stderr), ("1\n", ""))
+                    else:
+                        self.assertTrue(proc.stderr.startswith("parse error: more than 2048 operators"), proc.stderr[:300])
 
     def test_a_std_file_with_an_error_fails_the_comparison(self) -> None:
         # MYLA-416: `parse_main --lazy` tells a file that fails both ways

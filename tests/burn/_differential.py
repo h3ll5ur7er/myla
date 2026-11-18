@@ -19,7 +19,8 @@ entry), and every other case must pass.
 The size: each test runs a sample of its generator's cases, drawn from a
 fixed seed and always holding the known failures, small enough for the
 suite. `MYLA_GENERATED=full` runs every case, and `MYLA_GENERATED_SEED`
-draws another sample.
+draws another sample; a failure names both. CI runs them at full size on
+each push to master, with the run's number as the seed (D262).
 
 The runners: the self-hosted interpreter (`myla run`), the native build and
 the `--checked` one. With MYLA_TEST_TARGET set the native builds are for that
@@ -245,4 +246,9 @@ def check(test, names: list[str], results: dict[str, list[str]], known: dict, va
         msgs.append(f"{len(fixed)} known failures pass now; remove them from the test's known list: "
                     + " ".join(f"{n} ({known[n]})" for n in fixed))
     if msgs:
+        # how to run these cases again (D262): CI's full run draws its seed
+        # from the run number
+        again = (f"MYLA_GENERATED=full MYLA_GENERATED_SEED={SEED}" if FULL
+                 else f"MYLA_GENERATED_SEED={SEED}")
+        msgs.append(f"(run with {again} to draw these cases again)")
         test.fail("\n".join(msgs))

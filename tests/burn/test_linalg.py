@@ -315,6 +315,111 @@ class Json(unittest.TestCase):
     def test_as_arrays_in_the_interpreter_and_natively(self) -> None:
         self.assertEqual(run_source_both_now(JSON_PROGRAM), (JSON_WANT, "", 0))
 
+# D184 (MYLA-796, the review's H11): a shape past what a list holds, from
+# JSON or a constructor, and a row, column or component out of range, are
+# the same named error on every runner, a plain build's included, where the
+# shape's int32 product overflowed and lied
+SHAPES = """import std.json as json
+import std.process as process
+from std.vector import vector
+from std.matrix import Matrix, matrix, zero_matrix, identity, from_rows
+
+fun main() {
+    let c = process.args()[1]
+    if c == "json" {
+        match json.decode<Matrix>("{\\"rows\\":65536,\\"cols\\":65536,\\"data\\":[]}") {
+            Ok(m) => print(f"decoded a {m.rows}x{m.cols} matrix with {m.data.len()} elements")
+            Err(e) => print(f"error {e}")
+        }
+    }
+    let a = from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    if c == "matrix" { print(matrix(65536, 65536, []).rows) }
+    if c == "zero" { print(zero_matrix(65536, 65536).rows) }
+    if c == "identity" { print(identity(46341).rows) }
+    if c == "col" { print(a.col(3)) }
+    if c == "row" { print(a.row(2)) }
+    if c == "vec" { print(vector([1.0, 2.0])[5]) }
+}
+"""
+
+SHAPE_WANT = {
+    "json": ("error $.data: a 65536x65536 matrix takes 4294967296 elements, got 0\n", ""),
+    "matrix": ("", "runtime error: a 65536x65536 matrix takes 4294967296 elements, got 0"),
+    "zero": ("", "runtime error: a 65536x65536 matrix takes 4294967296 elements, more than a list holds"),
+    "identity": ("", "runtime error: a 46341x46341 matrix takes 2147488281 elements, more than a list holds"),
+    "col": ("", "runtime error: column 3 out of range for a 2x3 matrix"),
+    "row": ("", "runtime error: row 2 out of range for a 2x3 matrix"),
+    "vec": ("", "runtime error: index 5 out of range for a vector of 2"),
+}
+
+# M7: `inverse` is None for an exactly singular matrix (its determinant is
+# exactly 0), and Some for a well-conditioned one of tiny elements
+INVERSES = """from std.vector import vec2, vec3, vec4
+from std.matrix import Mat4, mat2, mat3, mat4
+
+fun close(x: float, want: float) -> bool {
+    return ((x - want) / want).abs() < 1e-15
+}
+
+fun main() {
+    let s = mat4(vec4(1.0, -1.0, 3.0, 3.0), vec4(-2.0, -2.0, -2.0, 3.0), vec4(1.0, -1.0, 3.0, 1.0), vec4(-1.0, -3.0, 1.0, 6.0))
+    print(s.determinant())
+    print(s.inverse() == None)
+    // `Matrix` says None only for a pivot of 0, as LAPACK does
+    match s.to_matrix().inverse() {
+        Some(m) => print(m.data[0])
+        None => print("None")
+    }
+    match mat2(vec2(1e-200, 0.0), vec2(0.0, 1e-200)).inverse() {
+        Some(m) => print(close(m[(0, 0)], 1e200) && m[(1, 0)] == 0.0)
+        None => print("None")
+    }
+    match mat3(vec3(1e-120, 0.0, 0.0), vec3(0.0, 1e-120, 0.0), vec3(0.0, 0.0, 1e-120)).inverse() {
+        Some(m) => print(close(m[(2, 2)], 1e120))
+        None => print("None")
+    }
+    match mat4(vec4(1e300, 0.0, 0.0, 0.0), vec4(0.0, 1e300, 0.0, 0.0), vec4(0.0, 0.0, 1e300, 0.0), vec4(0.0, 0.0, 0.0, 1e300)).inverse() {
+        Some(m) => print(close(m[(3, 3)], 1e-300))
+        None => print("None")
+    }
+    // a determinant past float64's range, an inverse within it
+    let wide = mat4(vec4(1e200, 0.0, 0.0, 0.0), vec4(0.0, 1e-200, 0.0, 0.0), vec4(0.0, 0.0, 1.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0))
+    match wide.inverse() {
+        Some(m) => print(close(m[(0, 0)], 1e-200) && close(m[(1, 1)], 1e200))
+        None => print("None")
+    }
+}
+"""
+
+INVERSES_WANT = """0
+true
+-4503599627370496
+true
+true
+true
+true
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class Shapes(unittest.TestCase):
+    def test_a_shape_or_index_out_of_range_is_named_on_every_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, SHAPES)
+            for case, (out, err) in SHAPE_WANT.items():
+                runs = {"interpreted": selfhost_run(path, [case]),
+                        "plain": build_and_run_full(Program(path), [case], argv0=path),
+                        "checked": build_and_run_full(Program(path), [case], argv0=path, checked=True)}
+                for how, (got_out, got_err, code) in runs.items():
+                    with self.subTest(case=case, how=how):
+                        self.assertEqual(got_out, out)
+                        self.assertEqual(code, 0 if err == "" else 1, got_err)
+                        self.assertEqual(got_err.split("\n")[0], err)
+
+    def test_an_inverse_by_the_determinant(self) -> None:
+        self.assertEqual(run_source_both_now(INVERSES), (INVERSES_WANT, "", 0))
+
+
 class Generated(unittest.TestCase):
     def test_the_modules_are_the_generators(self) -> None:
         proc = subprocess.run([sys.executable, os.path.join(_REPO, "scripts", "gen_std_linalg.py"), "--check"],

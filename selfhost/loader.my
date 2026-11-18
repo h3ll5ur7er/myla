@@ -162,6 +162,9 @@ fun lexed_file(path: str, overrides: [str: str]) -> (str, [Token]) {
 #test("fun main() {\n    print(both(a < p.x, c > (d)))\n}", 2, 20, SrcSpan { sline: 2, scol: 20, eline: 2, ecol: 23 })[Some(Note { label: "note", msg: "in a call's arguments `a < p.x, c > (d)` is a call of 'a' with the type arguments `p.x, c` (D186); for two comparisons, write `(a < p.x), c > (d)`", line: 2, col: 16, sp: SrcSpan { sline: 2, scol: 16, eline: 2, ecol: 32 } })]
 #test("fun main() {\n    let v = [pair<P, Q>(p, q)]\n}", 2, 14, SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 18 })[Some(Note { label: "note", msg: "in a list, map or tuple literal `pair<P, Q>(p, q)` is two comparisons, `pair < P` and `Q > (p, q)` (D186); for a call with type arguments, give it a `let` of its own: `let v = pair<P, Q>(p, q)`", line: 2, col: 14, sp: SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 30 } })]
 #test("fun main() {\n    let v = (idt<int, str>(7))\n}", 2, 23, SrcSpan { sline: 2, scol: 23, eline: 2, ecol: 26 })[Some(Note { label: "note", msg: "in a list, map or tuple literal `idt<int, str>(7)` is two comparisons, `idt < int` and `str > (7)` (D186); for a call with type arguments, give it a `let` of its own: `let v = idt<int, str>(7)`", line: 2, col: 14, sp: SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 30 } })]
+// a call's error in its arguments alone (a plain type error): none
+#test("fun main() {\n    print(first(pair<int, str>(1, 2)))\n}", 2, 35, SrcSpan { sline: 2, scol: 35, eline: 2, ecol: 36 })[None]
+#test("fun main() {\n    print(first(pair<int, str>(1, 2)))\n}", 2, 26, SrcSpan { sline: 2, scol: 26, eline: 2, ecol: 29 })[Some(Note { label: "note", msg: "in a call's arguments `pair<int, str>(1, 2)` is a call of 'pair' with the type arguments `int, str` (D186); for two comparisons, write `(pair < int), str > (1, 2)`", line: 2, col: 17, sp: SrcSpan { sline: 2, scol: 17, eline: 2, ecol: 37 } })]
 // one type argument, an index, a block, or elsewhere on the line: none
 #test("fun main() {\n    let v = [mk<int>(1)]\n}", 2, 14, SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 16 })[None]
 #test("fun main() {\n    let v = xs[pair<P, Q>(p, q)]\n}", 2, 16, SrcSpan { sline: 2, scol: 16, eline: 2, ecol: 20 })[None]
@@ -197,7 +200,11 @@ fun note_at(src: str, toks: [Token], line: int32, col: int32, sp: SrcSpan) -> Op
                     let last = toks[end]
                     let overlaps = place_before(first.line, first.column, el, ec) && place_before(sl, sc, last.eline, last.ecol)
                     let how = if overlaps { reading_of(toks, k) } else { "" }
-                    if how != "" {
+                    // read as a call, its arguments are its own either way:
+                    // an error in them alone is no misreading (the review
+                    // of 2026-11-17)
+                    let read = how == "literal" || (how == "call" && place_before(sl, sc, toks[close].eline, toks[close].ecol))
+                    if read {
                         let lines = src.split("\n")
                         let whole = text_between(lines, toks, k, end)
                         let callee = toks[k].lexeme
@@ -513,6 +520,35 @@ fun override_text(path: str, overrides: [str: str]) -> Option<str> {
     return None
 }
 
+// The normalized `path`, absolute where it is a file on disk that is
+// written as the library the tools carry names its own (`<myla>/…`, a
+// program in a directory of that name): else its modules were taken for
+// the library's, read lazily, and its own `std/` wasn't refused (D255; the
+// review of 2026-11-17, path identity).
+#test("<myla>/std/nowhere_at_all.my")["<myla>/std/nowhere_at_all.my"]
+#test("examples/hello.my")["examples/hello.my"]
+fun on_disk(path: str) -> str {
+    if !starts_with_text(path, EMBEDDED_ROOT + "/") || !exists(path) { return path }
+    return match current_dir() {
+        Ok(here) => normalize(here + "/" + path),
+        Err(e) => path,
+    }
+}
+
+// Whether the directories `a` and `b` are one, however they are written:
+// through a symbolic link, or relative and absolute (the review of
+// 2026-11-17, path identity). Their device and file number, as std.glob's
+// `dir_id` compares them; false where either is none.
+#test("lib", "./lib/")[true]
+#test("lib", "lib/std")[false]
+#test("lib", "nowhere/at/all")[false]
+#allow(primitive)
+pub fun same_dir(a: str, b: str) -> bool {
+    let x = __path_stat(a, true)
+    let y = __path_stat(b, true)
+    return x.len() == 6 && y.len() == 6 && x[4] == y[4] && x[5] == y[5]
+}
+
 // With the library the tools carry, the root of the copy of the standard
 // library on disk that `path` is a module of (`in_std_tree`: under a
 // directory `std` that holds `rt.my`), written as `path` is, relative or
@@ -572,6 +608,70 @@ fun is_builtin_type_word(n: str) -> bool {
 #test()[["str", "char", "int", "float", "list", "option", "map", "hash"]]
 pub fun implicit_modules() -> [str] {
     return ["str", "char", "int", "float", "list", "option", "map", "hash"]
+}
+
+// The names of std.float's methods (D199), the same at both widths
+// (`test_float_methods` holds the list to lib/std/float.my): a program that
+// calls none of them as a method, and has no impl on a float type, is
+// loaded without std.float and the std.math it imports, which would cost
+// its check 4.2 M instructions (D258, `Loader.without_unused_float`).
+pub fun float_method_names() -> [str] {
+    return ["abs", "acos", "approx_eq", "asin", "atan", "atan2", "cbrt", "ceil", "clamp", "copysign", "cos", "cosh", "exp", "floor", "fract", "hypot", "is_finite", "is_infinite", "is_nan", "lerp", "ln", "log", "log10", "log2", "max", "min", "pow", "powi", "round", "signum", "sin", "sinh", "sqrt", "tan", "tanh", "to_bits", "to_degrees", "to_radians", "total_cmp", "trunc"]
+}
+
+// Whether `b` may be in an identifier: an ASCII letter, a digit, `_`, or a
+// byte of a character past ASCII.
+#test('a')[true]
+#test('_')[true]
+#test('(')[false]
+fun ident_byte(b: uint8) -> bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b >= 0x80
+}
+
+// Whether the text `src` may call a method named in `names` (a set), `.name(` or
+// `.name<…>(` with any spaces between, or has an impl on a float type
+// (`impl float64`, whose methods' names a duplicate of std.float's needs
+// it for, D199). Read as bytes, comments and strings included (an f-string's
+// holes hold calls), so it errs on the side of loading (D258).
+#test("fun main() {\n    print(\"hello\")\n}\n", ["sqrt": true])[false]
+#test("let y = x.sqrt()", ["sqrt": true])[true]
+#test("let y = x . sqrt ()", ["sqrt": true])[true]
+#test("let y = x.sqrtx() + x.sqrt", ["sqrt": true])[false]
+#test("print(f\"{x.abs()}\")", ["abs": true])[true]
+#test("import std.float as float\nlet n = float.PI", ["float": true])[false]
+#test("impl float64 {", ["sqrt": true])[true]
+#test("impl   float {", ["sqrt": true])[true]
+#test("impl floaty {", ["sqrt": true])[false]
+#test("x.", ["sqrt": true])[false]
+fun may_call_method(src: str, names: [str: bool]) -> bool {
+    let n = src.len()
+    var i = 0
+    while i < n {
+        let b = src[i]
+        if b == '.' {
+            var j = i + 1
+            while j < n && (src[j] == ' ' || src[j] == '\t') { j += 1 }
+            let start = j
+            while j < n && ident_byte(src[j]) { j += 1 }
+            let end = j
+            while j < n && (src[j] == ' ' || src[j] == '\t') { j += 1 }
+            if end > start && j < n && (src[j] == '(' || src[j] == '<') && names.contains(src[start:end]) { return true }
+            i = if end > i + 1 { end } else { i + 1 }
+            continue
+        }
+        if b == 'i' && i + 4 <= n && src[i + 1] == 'm' && src[i + 2] == 'p' && src[i + 3] == 'l' && (i == 0 || !ident_byte(src[i - 1])) {
+            var j = i + 4
+            while j < n && (src[j] == ' ' || src[j] == '\t') { j += 1 }
+            let start = j
+            while j < n && ident_byte(src[j]) { j += 1 }
+            let w = src[start:j]
+            if w == "float" || w == "float64" || w == "float32" { return true }
+            i = if j > i + 4 { j } else { i + 4 }
+            continue
+        }
+        i += 1
+    }
+    return false
 }
 
 #test([0, 2], 2)[true]
@@ -1146,6 +1246,24 @@ impl Loader {
         return Ok(out)
     }
 
+    // `files`, the implicit modules', without std.float's where no module
+    // of the program may call one of its methods (`may_call_method`): its
+    // methods and the std.math it imports cost nothing until they are used
+    // (D258). The program's modules are loaded by now; the library's own
+    // import what they use.
+    fun without_unused_float(self, files: [str]) -> [str] {
+        var names: [str: bool] = [:]
+        for name in float_method_names() { names[name] = true }
+        for m in self.modules {
+            if !self.in_std_root(m.path) && may_call_method(m.src, names) { return files }
+        }
+        var out: [str] = []
+        for f in files {
+            if self.module_id(f) != "std$float" { out.push(f) }
+        }
+        return out
+    }
+
     // The files of the implicit modules the standard library in use has.
     fun implicit_files(self) -> Result<[str], Report> {
         var out: [str] = []
@@ -1177,7 +1295,14 @@ impl Loader {
             }
             return match parse_source_lazy(src, self.next_id) {
                 Ok(lp) => Ok(Cached { parsed: lp, bytes: [], bodies: no_bodies() }),
-                Err(ds) => Err(reports(ds, path)),
+                // a body skipped short or long by a brace missing or one
+                // too many leaves text that reads as declarations: the
+                // errors are those of the module read whole, where `myla
+                // check` of it puts them (MYLA-413's follow-up)
+                Err(ds) => match parse_source_with(src, self.next_id, true) {
+                    Err(whole) => Err(reports(whole, path)),
+                    Ok(x) => Err(reports(ds, path)),
+                },
             }
         }
         return match parse_source_with(src, self.next_id, path != self.entry) {
@@ -2269,7 +2394,7 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
 }
 
 fun load_linked(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
-    let e = normalize(entry)
+    let e = on_disk(normalize(entry))
     var stdlib = ""
     if opts.stdlib_root != "" { stdlib = normalize(opts.stdlib_root) }
     var project_root = dirname(e)
@@ -2285,6 +2410,7 @@ fun load_linked(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
     if stdlib != "" && !is_std_module(e, stdlib) { files = ld.implicit_files()? }
     for f in files { ld.lazy[f] = true }
     ld.load(e)?
+    files = ld.without_unused_float(files)
     let implicit = ld.load_implicit(files)?
     // the runtime's functions in Myla (MYLA-162), compiled where a program
     // uses them: the standard library's, else the copy the tools carry

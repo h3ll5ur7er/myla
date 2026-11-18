@@ -37,7 +37,7 @@ Two more bugs in the same code: `xs[i] = xs[i]` with a struct holding a list rel
 
 Every store into a container now stages the value first ([[Architecture/Native-backend]], "Stores into containers"): `_stage_value` evaluates it into a frame slot that owns one reference, then the container is found, unshared and grown, the old value released and the staged one moved in (`_commit_staged`). Until the commit an early return (a `?` in the key, the index or the container expression) releases the staged value and its temporaries. The self-hosted code generator had the same order bug (it was ported from the Python one) and got the same change.
 
-- [x] Root cause found and fixed in [[src/myla/compiler/codegen_x86.py]] (and [[selfhost/codegen.my]])
+- [x] Root cause found and fixed in `src/myla/compiler/codegen_x86.py` (and [[selfhost/codegen.my]])
 - [x] Tests first, each seen failing: `try_inside_push_leaves_the_list_intact`, `try_inside_map_insert_leaves_the_map_intact`, `try_inside_append_byte_leaves_the_builder_intact`, `push_evaluates_its_value_before_the_list`, `assign_replaces_map_and_builder_elements` in `tests/burn/test_compiler_parity.py`; the stress test `test_try_after_a_staged_value_releases_it` (the arena ran out without the early-return release); the same programs through the self-hosted compiler in `test_selfhost_codegen.py` (3 failed before)
 - [x] `test_selfhost_checker.py` is green; the whole burn suite passes (330 tests)
 - [x] Bootstrap fixed point holds (4,465,925 bytes)
@@ -45,3 +45,5 @@ Every store into a container now stages the value first ([[Architecture/Native-b
 Not covered: a `?` inside a list or map literal leaks the half-built literal (the cell isn't visible to anyone, so nothing breaks); the self-hosted `?` releases nothing at all ([[MYLA-22]]).
 
 The leak noted above is tracked as [[MYLA-157]].
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

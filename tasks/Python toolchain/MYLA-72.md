@@ -31,8 +31,10 @@ Accepted: the lambda returns an `Option`, so `?` on an `Option` is fine inside i
 
 ## Fix
 
-Block-bodied lambdas already checked `?` and `return` against the lambda's expected result type; expression-bodied ones forgot to set it, so `?` saw the enclosing function's ([[src/myla/types.py]] `_infer_lambda`, [[selfhost/checker.my]] `infer_lambda`). When the lambda's result type isn't known (nothing expected, no annotation), `?` now says so instead of blaming the enclosing function, and the messages name the enclosing lambda when inside one. A `?` can't infer the lambda's type on its own: the carrier is only known from the context.
+Block-bodied lambdas already checked `?` and `return` against the lambda's expected result type; expression-bodied ones forgot to set it, so `?` saw the enclosing function's (`src/myla/types.py` `_infer_lambda`, [[selfhost/checker.my]] `infer_lambda`). When the lambda's result type isn't known (nothing expected, no annotation), `?` now says so instead of blaming the enclosing function, and the messages name the enclosing lambda when inside one. A `?` can't infer the lambda's type on its own: the carrier is only known from the context.
 
 - [x] The checker checks `?` inside a lambda against the lambda's result type (the expected one; an unknown one is reported as such)
 - [x] The example above runs in the interpreter and natively: unit tests `TestTryInLambdas` (all four failed before), the parity program `try_in_lambdas_checks_against_the_lambda`, the error-corpus case `examples/errors/type_try_in_untyped_lambda.my`
 - [x] The self-hosted checker agrees: the parity program runs through the self-hosted compiler (failed before), and the error case gives the same position
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

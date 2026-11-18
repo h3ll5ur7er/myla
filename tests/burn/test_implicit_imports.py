@@ -382,7 +382,9 @@ class ImplicitModules(Fixture):
         # where an attribute may stand, at the start of a line: one in the
         # middle of a statement is lexed, its error the eager one, imported
         # as when checked itself. A body read late is lexed as the module
-        # read whole, its cases at the start of a line left out as there
+        # read whole: a `#test` in a function's body is lexed there too, and
+        # an error (M9 of the review of 2026-11-17, MYLA-825: it was left
+        # out, with whatever its brackets held)
         self.write("attr/m.my", "pub fun f() -> int {\n    let x = 1 #test(\"anything\", @ $)[1 2 3]\n    return x\n}\n")
         main = self.write("attr/main.my", "from .m import f\n\nfun main() {\n    print(f())\n}\n")
         m_my = os.path.join(self.work, "attr", "m.my")
@@ -393,7 +395,9 @@ class ImplicitModules(Fixture):
         lib = self.lib_with("case_lib", "int", "impl int {\n    fun with_case(self) -> int {\n        #test(1)[2]\n        return 5\n    }\n}\n")
         path = self.write("with_case.my", "fun main() {\n    print(1.with_case())\n}\n")
         proc = self.myla_cmd("run", path, lib=lib)
-        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("5\n", "", 0))
+        self.assertEqual((proc.stdout, proc.returncode), ("", 1))
+        self.assertTrue(proc.stderr.startswith("parse error: expected an expression, found '#'\n  --> "), proc.stderr)
+        self.assertIn("int.my:", proc.stderr.split("\n")[1])
 
     def test_the_repl(self) -> None:
         proc = self.myla_cmd("repl", stdin="\"ab\".shout()\n3.doubled()\n")

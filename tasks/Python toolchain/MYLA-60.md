@@ -6,7 +6,7 @@ status: done
 priority: high
 labels: [native-backend, performance, bootstrap]
 ---
-Building the self-hosted compiler with the Python toolchain (bootstrap stage 1) takes about 60 s, and about 98% of it is `_collect_list_types` ([[src/myla/compiler/codegen_x86.py#L250-L314]]). For every AST node it calls `_gather_list_types` on the node's type, which recursively walks every field of every struct and enum reachable from it, without remembering what it has already seen. The self-hosted compiler's big state structs are walked tens of thousands of times (85 million calls).
+Building the self-hosted compiler with the Python toolchain (bootstrap stage 1) takes about 60 s, and about 98% of it is `_collect_list_types` (`src/myla/compiler/codegen_x86.py#L250-L314`). For every AST node it calls `_gather_list_types` on the node's type, which recursively walks every field of every struct and enum reachable from it, without remembering what it has already seen. The self-hosted compiler's big state structs are walked tens of thousands of times (85 million calls).
 
 Loading, checking and monomorphizing take under 2 s; generating the functions themselves about 3 s.
 
@@ -20,3 +20,5 @@ Loading, checking and monomorphizing take under 2 s; generating the functions th
 - [x] `tests/burn` passes (apart from the known [[MYLA-4]]); the bootstrap fixed point holds
 - [x] Stage 1: code generation 55.7 s → 0.6 s, `myla build selfhost/gen_main.my` 57 s → 3.4 s; recorded on [[Development/Bootstrap]]
 - [x] [[selfhost/codegen.my]] doesn't show the problem: stage 3 compiles the compiler in 2.9 s
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

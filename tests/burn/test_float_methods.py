@@ -109,6 +109,50 @@ class FloatMethods(unittest.TestCase):
         proc = self.check("fun main() {\n    print(float.PI)\n}\n")
         self.assertEqual(proc.returncode, 1, proc.stderr)
 
+    def test_loaded_only_where_a_float_method_may_be_called(self) -> None:
+        # D258: a library whose std/float.my doesn't parse shows whether a
+        # program loads it. One that calls no method of its names, and has
+        # no impl on a float type, doesn't, nor the std.math it imports.
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "lib", "std"))
+            with open(os.path.join(tmp, "lib", "std", "float.my"), "w", encoding="utf-8") as fh:
+                fh.write("this is not myla\n")
+            cases = [
+                ("fun main() {\n    print(1.5)\n    let xs = [1]\n    print(xs.len())\n}\n", False),
+                ("fun main() {\n    print(2.0.sqrt())\n}\n", True),
+                ("fun main() {\n    let x = 2.0\n    print(f\"{x . abs ()}\")\n}\n", True),
+                ("fun main() {\n    print(3.max(4))\n}\n", True),     # a name of both, read as a float's
+                ("impl float32 {\n    fun twice(self) -> float32 {\n        return self * 2.0\n    }\n}\n\nfun main() {}\n", True),
+            ]
+            for i, (src, loads) in enumerate(cases):
+                with self.subTest(src=src):
+                    path = os.path.join(tmp, f"p{i}.my")
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(src)
+                    proc = subprocess.run([self.myla, "check", path, "--stdlib", os.path.join(tmp, "lib")],
+                                          capture_output=True, text=True)
+                    if loads:
+                        self.assertIn("float.my", proc.stderr)
+                    else:
+                        self.assertEqual((proc.returncode, proc.stdout.strip()), (0, "ok"), proc.stderr)
+
+    def test_the_loaders_names_are_std_floats_methods(self) -> None:
+        # the loader's list of the names that load std.float (D258) is the
+        # module's methods, at both widths
+        import re
+        with open(os.path.join(STDLIB_ROOT, "std", "float.my"), encoding="utf-8") as fh:
+            text = fh.read()
+        widths = re.split(r"^impl float32 \{$", text, flags=re.M)
+        self.assertEqual(len(widths), 2)
+        f64 = set(re.findall(r"^    fun (\w+)\(", widths[0], flags=re.M))
+        f32 = set(re.findall(r"^    fun (\w+)\(", widths[1], flags=re.M))
+        self.assertEqual(f64, f32)
+        with open(os.path.join(os.path.dirname(STDLIB_ROOT), "selfhost", "loader.my"), encoding="utf-8") as fh:
+            loader = fh.read()
+        m = re.search(r"pub fun float_method_names\(\) -> \[str\] \{\n    return \[([^\]]*)\]", loader)
+        self.assertIsNotNone(m, "selfhost/loader.my has float_method_names")
+        self.assertEqual(set(re.findall(r'"(\w+)"', m.group(1))), f64)
+
 
 if __name__ == "__main__":
     unittest.main()

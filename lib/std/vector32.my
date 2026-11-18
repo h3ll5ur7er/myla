@@ -19,6 +19,12 @@ from std.json import Json, JsonError
 from std.algebra import Zero, One
 from std.vector import Vec2 as Vec2F64, Vec3 as Vec3F64, Vec4 as Vec4F64, Vector as VectorF64
 
+// `x` formatted by `spec`, a spec given at run time: a vector's or matrix's
+// applies to each element (`f"{v:.2}"` is `(1.00, 2.50)`).
+fun with_spec<T: Format>(x: T, spec: str) -> str {
+    return x.format(spec)
+}
+
 #derive(Eq, Hash)
 pub struct Vec2 {
     x: float32,
@@ -38,48 +44,58 @@ pub fun splat2(s: float32) -> Vec2 {
 }
 
 impl Zero for Vec2 {
+    #test()[vec2(0.0, 0.0)]
     fun zero() -> Vec2 {
         return splat2(0.0)
     }
 }
 
 impl One for Vec2 {
+    #test()[vec2(1.0, 1.0)]
     fun one() -> Vec2 {
         return splat2(1.0)
     }
 }
 
+// `(x, y)`, the spec applied to each component.
 impl Format for Vec2 {
+    #test(vec2(1.5, -2.0), "")["(1.5, -2)"]
+    #test(vec2(1.5, -2.0), ".1")["(1.5, -2.0)"]
     fun format(self, spec: str) -> str {
-        return f"({self.x}, {self.y})"
+        return "(" + with_spec(self.x, spec) + ", " + with_spec(self.y, spec) + ")"
     }
 }
 
 impl Add for Vec2 {
+    #test(vec2(1.0, 2.0), vec2(2.0, 4.0))[vec2(3.0, 6.0)]
     fun add(self, o: Vec2) -> Vec2 {
         return Vec2 { x: self.x + o.x, y: self.y + o.y }
     }
 }
 
 impl Sub for Vec2 {
+    #test(vec2(1.0, 2.0), vec2(2.0, 4.0))[vec2(-1.0, -2.0)]
     fun sub(self, o: Vec2) -> Vec2 {
         return Vec2 { x: self.x - o.x, y: self.y - o.y }
     }
 }
 
 impl Mul for Vec2 {
+    #test(vec2(1.0, 2.0), vec2(2.0, 4.0))[vec2(2.0, 8.0)]
     fun mul(self, o: Vec2) -> Vec2 {
         return Vec2 { x: self.x * o.x, y: self.y * o.y }
     }
 }
 
 impl Div for Vec2 {
+    #test(vec2(1.0, 2.0), vec2(2.0, 4.0))[vec2(0.5, 0.5)]
     fun div(self, o: Vec2) -> Vec2 {
         return Vec2 { x: self.x / o.x, y: self.y / o.y }
     }
 }
 
 impl Neg for Vec2 {
+    #test(vec2(1.0, 2.0))[vec2(-1.0, -2.0)]
     fun neg(self) -> Vec2 {
         return Vec2 { x: -self.x, y: -self.y }
     }
@@ -93,18 +109,22 @@ impl Mul<float32> for Vec2 {
 }
 
 impl Div<float32> for Vec2 {
+    #test(vec2(1.0, 2.0), 2.0)[vec2(0.5, 1.0)]
     fun div(self, k: float32) -> Vec2 {
         return Vec2 { x: self.x / k, y: self.y / k }
     }
 }
 
 impl Mul<Vec2, Vec2> for float32 {
+    #test(2.0, vec2(1.0, 2.0))[vec2(2.0, 4.0)]
     fun mul(self, v: Vec2) -> Vec2 {
         return v * self
     }
 }
 
 impl Index<int, float32> for Vec2 {
+    #test(vec2(1.0, 2.0), 1)[2.0]
+    #test(vec2(1.0, 2.0), 2)[panic("index 2 out of range for a Vec2")]
     fun index(self, i: int) -> float32 {
         if i == 0 { return self.x }
         if i == 1 { return self.y }
@@ -124,95 +144,130 @@ impl Vec2 {
         return self.x * o.x + self.y * o.y
     }
 
+    #test(vec2(1.0, 2.0))[5.0]
     fun length_squared(self) -> float32 {
         return self.dot(self)
     }
 
+    // The length, also of a vector whose squares would over- or underflow
+    // (MYLA-796): then of the vector scaled by its largest component.
+    #test(vec2(3.0, 4.0))[5.0]
+    #test(vec2(3.541774862152234e21, 4.722366482869645e21))[5.902958103587057e21]
+    #test(vec2(2.541098841762901e-21, 3.3881317890172014e-21))[4.235164736271502e-21]
+    #test(vec2(0.0, 0.0))[0.0]
     fun length(self) -> float32 {
-        return self.dot(self).sqrt()
+        let l = self.dot(self).sqrt()
+        if l > 1e-18 && l < 1e18 { return l }
+        let m = self.abs().max_element()
+        if m == 0.0 || !m.is_finite() { return l }
+        let u = self / m
+        return u.dot(u).sqrt() * m
     }
 
     // The vector of length 1 in its direction; a zero vector's components
     // are NaN (`try_normalized` says None there).
+    #test(vec2(3.0, 4.0))[vec2(0.6, 0.8)]
+    #test(vec2(3.541774862152234e21, 4.722366482869645e21))[vec2(0.6, 0.8)]
+    #test(vec2(2.541098841762901e-21, 3.3881317890172014e-21))[vec2(0.6, 0.8)]
     fun normalized(self) -> Vec2 {
         return self / self.length()
     }
 
+    #test(vec2(3.0, 4.0))[Some(vec2(0.6, 0.8))]
+    #test(vec2(0.0, 0.0))[None]
     fun try_normalized(self) -> Option<Vec2> {
         let l = self.length()
         if l == 0.0 || !l.is_finite() { return None }
         return Some(self / l)
     }
 
+    #test(vec2(1.0, 1.0), vec2(4.0, 5.0))[5.0]
     fun distance(self, o: Vec2) -> float32 {
         return (self - o).length()
     }
 
+    #test(vec2(1.0, 1.0), vec2(4.0, 5.0))[25.0]
     fun distance_squared(self, o: Vec2) -> float32 {
         return (self - o).length_squared()
     }
 
     // The point `t` of the way from `self` to `o`.
+    #test(vec2(0.0, 0.0), vec2(4.0, 8.0), 0.25)[vec2(1.0, 2.0)]
     fun lerp(self, o: Vec2, t: float32) -> Vec2 {
         return self + (o - self) * t
     }
 
     // The smaller of each component.
+    #test(vec2(1.0, 5.0), vec2(4.0, 2.0))[vec2(1.0, 2.0)]
     fun min(self, o: Vec2) -> Vec2 {
         return Vec2 { x: self.x.min(o.x), y: self.y.min(o.y) }
     }
 
+    #test(vec2(1.0, 5.0), vec2(4.0, 2.0))[vec2(4.0, 5.0)]
     fun max(self, o: Vec2) -> Vec2 {
         return Vec2 { x: self.x.max(o.x), y: self.y.max(o.y) }
     }
 
+    #test(vec2(-1.0, 2.0))[vec2(1.0, 2.0)]
     fun abs(self) -> Vec2 {
         return Vec2 { x: self.x.abs(), y: self.y.abs() }
     }
 
+    #test(vec2(3.0, -1.0))[-1.0]
     fun min_element(self) -> float32 {
         return self.x.min(self.y)
     }
 
+    #test(vec2(3.0, -1.0))[3.0]
     fun max_element(self) -> float32 {
         return self.x.max(self.y)
     }
 
     // `self` mirrored at the plane (line) of the unit normal `normal`.
+    #test(vec2(1.0, -1.0), vec2(0.0, 1.0))[vec2(1.0, 1.0)]
     fun reflect(self, normal: Vec2) -> Vec2 {
         return self - normal * (2.0 * self.dot(normal))
     }
 
     // The part of `self` along `o`.
+    #test(vec2(1.0, 2.0), vec2(2.0, 0.0))[vec2(1.0, 0.0)]
     fun project_onto(self, o: Vec2) -> Vec2 {
         return o * (self.dot(o) / o.dot(o))
     }
 
-    // The angle between `self` and `o`, in radians.
+    // The angle between `self` and `o`, in radians, also of vectors whose
+    // lengths' product would overflow.
+    #test(vec2(1.0, 0.0), vec2(0.0, 3.0))[1.5707964]
+    #test(vec2(0.0, 1.0), vec2(0.0, -2.0))[3.1415927]
     fun angle_between(self, o: Vec2) -> float32 {
-        let c = self.dot(o) / (self.length() * o.length())
+        let c = (self / self.length()).dot(o / o.length())
         return c.clamp(-1.0, 1.0).acos()
     }
 
+    #test(vec2(1.0, 2.0))[[1.0, 2.0]]
     fun to_list(self) -> [float32] {
         return [self.x, self.y]
     }
 
     // The same vector in float64 (std.vector).
+    #test(vec2(1.5, -2.0))[Vec2F64 { x: 1.5, y: -2.0 }]
     fun to_f64(self) -> Vec2F64 {
         return Vec2F64 { x: self.x as float64, y: self.y as float64 }
     }
 
     // `self` turned a quarter left: `(-y, x)`.
+    #test(vec2(1.0, 2.0))[vec2(-2.0, 1.0)]
     fun perp(self) -> Vec2 {
         return Vec2 { x: -self.y, y: self.x }
     }
 
     // The z of the cross product of `self` and `o` as 3D vectors.
+    #test(vec2(1.0, 2.0), vec2(3.0, 4.0))[-2.0]
     fun perp_dot(self, o: Vec2) -> float32 {
         return self.x * o.y - self.y * o.x
     }
 
+    #test(vec2(1.0, 2.0), 3.0)[vec3(1.0, 2.0, 3.0)]
     fun extend(self, z: float32) -> Vec3 {
         return Vec3 { x: self.x, y: self.y, z: z }
     }
@@ -238,48 +293,58 @@ pub fun splat3(s: float32) -> Vec3 {
 }
 
 impl Zero for Vec3 {
+    #test()[vec3(0.0, 0.0, 0.0)]
     fun zero() -> Vec3 {
         return splat3(0.0)
     }
 }
 
 impl One for Vec3 {
+    #test()[vec3(1.0, 1.0, 1.0)]
     fun one() -> Vec3 {
         return splat3(1.0)
     }
 }
 
+// `(x, y, z)`, the spec applied to each component.
 impl Format for Vec3 {
+    #test(vec3(1.5, -2.0, 0.125), "")["(1.5, -2, 0.125)"]
+    #test(vec3(1.5, -2.0, 0.125), ".1")["(1.5, -2.0, 0.1)"]
     fun format(self, spec: str) -> str {
-        return f"({self.x}, {self.y}, {self.z})"
+        return "(" + with_spec(self.x, spec) + ", " + with_spec(self.y, spec) + ", " + with_spec(self.z, spec) + ")"
     }
 }
 
 impl Add for Vec3 {
+    #test(vec3(1.0, 2.0, 3.0), vec3(2.0, 4.0, 8.0))[vec3(3.0, 6.0, 11.0)]
     fun add(self, o: Vec3) -> Vec3 {
         return Vec3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z }
     }
 }
 
 impl Sub for Vec3 {
+    #test(vec3(1.0, 2.0, 3.0), vec3(2.0, 4.0, 8.0))[vec3(-1.0, -2.0, -5.0)]
     fun sub(self, o: Vec3) -> Vec3 {
         return Vec3 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z }
     }
 }
 
 impl Mul for Vec3 {
+    #test(vec3(1.0, 2.0, 3.0), vec3(2.0, 4.0, 8.0))[vec3(2.0, 8.0, 24.0)]
     fun mul(self, o: Vec3) -> Vec3 {
         return Vec3 { x: self.x * o.x, y: self.y * o.y, z: self.z * o.z }
     }
 }
 
 impl Div for Vec3 {
+    #test(vec3(1.0, 2.0, 3.0), vec3(2.0, 4.0, 8.0))[vec3(0.5, 0.5, 0.375)]
     fun div(self, o: Vec3) -> Vec3 {
         return Vec3 { x: self.x / o.x, y: self.y / o.y, z: self.z / o.z }
     }
 }
 
 impl Neg for Vec3 {
+    #test(vec3(1.0, 2.0, 3.0))[vec3(-1.0, -2.0, -3.0)]
     fun neg(self) -> Vec3 {
         return Vec3 { x: -self.x, y: -self.y, z: -self.z }
     }
@@ -293,18 +358,22 @@ impl Mul<float32> for Vec3 {
 }
 
 impl Div<float32> for Vec3 {
+    #test(vec3(1.0, 2.0, 3.0), 2.0)[vec3(0.5, 1.0, 1.5)]
     fun div(self, k: float32) -> Vec3 {
         return Vec3 { x: self.x / k, y: self.y / k, z: self.z / k }
     }
 }
 
 impl Mul<Vec3, Vec3> for float32 {
+    #test(2.0, vec3(1.0, 2.0, 3.0))[vec3(2.0, 4.0, 6.0)]
     fun mul(self, v: Vec3) -> Vec3 {
         return v * self
     }
 }
 
 impl Index<int, float32> for Vec3 {
+    #test(vec3(1.0, 2.0, 3.0), 2)[3.0]
+    #test(vec3(1.0, 2.0, 3.0), 3)[panic("index 3 out of range for a Vec3")]
     fun index(self, i: int) -> float32 {
         if i == 0 { return self.x }
         if i == 1 { return self.y }
@@ -325,94 +394,129 @@ impl Vec3 {
         return self.x * o.x + self.y * o.y + self.z * o.z
     }
 
+    #test(vec3(1.0, 2.0, 3.0))[14.0]
     fun length_squared(self) -> float32 {
         return self.dot(self)
     }
 
+    // The length, also of a vector whose squares would over- or underflow
+    // (MYLA-796): then of the vector scaled by its largest component.
+    #test(vec3(2.0, 4.0, 4.0))[6.0]
+    #test(vec3(2.3611832414348226e21, 4.722366482869645e21, 4.722366482869645e21))[7.083549724304468e21]
+    #test(vec3(1.6940658945086007e-21, 3.3881317890172014e-21, 3.3881317890172014e-21))[5.082197683525802e-21]
+    #test(vec3(0.0, 0.0, 0.0))[0.0]
     fun length(self) -> float32 {
-        return self.dot(self).sqrt()
+        let l = self.dot(self).sqrt()
+        if l > 1e-18 && l < 1e18 { return l }
+        let m = self.abs().max_element()
+        if m == 0.0 || !m.is_finite() { return l }
+        let u = self / m
+        return u.dot(u).sqrt() * m
     }
 
     // The vector of length 1 in its direction; a zero vector's components
     // are NaN (`try_normalized` says None there).
+    #test(vec3(0.0, 3.0, 4.0))[vec3(0.0, 0.6, 0.8)]
+    #test(vec3(0.0, 3.541774862152234e21, 4.722366482869645e21))[vec3(0.0, 0.6, 0.8)]
+    #test(vec3(0.0, 2.541098841762901e-21, 3.3881317890172014e-21))[vec3(0.0, 0.6, 0.8)]
     fun normalized(self) -> Vec3 {
         return self / self.length()
     }
 
+    #test(vec3(0.0, 3.0, 4.0))[Some(vec3(0.0, 0.6, 0.8))]
+    #test(vec3(0.0, 0.0, 0.0))[None]
     fun try_normalized(self) -> Option<Vec3> {
         let l = self.length()
         if l == 0.0 || !l.is_finite() { return None }
         return Some(self / l)
     }
 
+    #test(vec3(1.0, 1.0, 1.0), vec3(3.0, 5.0, 5.0))[6.0]
     fun distance(self, o: Vec3) -> float32 {
         return (self - o).length()
     }
 
+    #test(vec3(1.0, 1.0, 1.0), vec3(3.0, 5.0, 5.0))[36.0]
     fun distance_squared(self, o: Vec3) -> float32 {
         return (self - o).length_squared()
     }
 
     // The point `t` of the way from `self` to `o`.
+    #test(vec3(0.0, 0.0, 0.0), vec3(4.0, 8.0, 12.0), 0.25)[vec3(1.0, 2.0, 3.0)]
     fun lerp(self, o: Vec3, t: float32) -> Vec3 {
         return self + (o - self) * t
     }
 
     // The smaller of each component.
+    #test(vec3(1.0, 5.0, 3.0), vec3(4.0, 2.0, 6.0))[vec3(1.0, 2.0, 3.0)]
     fun min(self, o: Vec3) -> Vec3 {
         return Vec3 { x: self.x.min(o.x), y: self.y.min(o.y), z: self.z.min(o.z) }
     }
 
+    #test(vec3(1.0, 5.0, 3.0), vec3(4.0, 2.0, 6.0))[vec3(4.0, 5.0, 6.0)]
     fun max(self, o: Vec3) -> Vec3 {
         return Vec3 { x: self.x.max(o.x), y: self.y.max(o.y), z: self.z.max(o.z) }
     }
 
+    #test(vec3(-1.0, 2.0, -3.0))[vec3(1.0, 2.0, 3.0)]
     fun abs(self) -> Vec3 {
         return Vec3 { x: self.x.abs(), y: self.y.abs(), z: self.z.abs() }
     }
 
+    #test(vec3(3.0, -1.0, 4.0))[-1.0]
     fun min_element(self) -> float32 {
         return self.x.min(self.y).min(self.z)
     }
 
+    #test(vec3(3.0, -1.0, 4.0))[4.0]
     fun max_element(self) -> float32 {
         return self.x.max(self.y).max(self.z)
     }
 
     // `self` mirrored at the plane (line) of the unit normal `normal`.
+    #test(vec3(1.0, -1.0, 0.0), vec3(0.0, 1.0, 0.0))[vec3(1.0, 1.0, 0.0)]
     fun reflect(self, normal: Vec3) -> Vec3 {
         return self - normal * (2.0 * self.dot(normal))
     }
 
     // The part of `self` along `o`.
+    #test(vec3(1.0, 2.0, 3.0), vec3(2.0, 0.0, 0.0))[vec3(1.0, 0.0, 0.0)]
     fun project_onto(self, o: Vec3) -> Vec3 {
         return o * (self.dot(o) / o.dot(o))
     }
 
-    // The angle between `self` and `o`, in radians.
+    // The angle between `self` and `o`, in radians, also of vectors whose
+    // lengths' product would overflow.
+    #test(vec3(1.0, 0.0, 0.0), vec3(0.0, 3.0, 0.0))[1.5707964]
+    #test(vec3(0.0, 1.0, 0.0), vec3(0.0, -2.0, 0.0))[3.1415927]
     fun angle_between(self, o: Vec3) -> float32 {
-        let c = self.dot(o) / (self.length() * o.length())
+        let c = (self / self.length()).dot(o / o.length())
         return c.clamp(-1.0, 1.0).acos()
     }
 
+    #test(vec3(1.0, 2.0, 3.0))[[1.0, 2.0, 3.0]]
     fun to_list(self) -> [float32] {
         return [self.x, self.y, self.z]
     }
 
     // The same vector in float64 (std.vector).
+    #test(vec3(1.5, -2.0, 0.125))[Vec3F64 { x: 1.5, y: -2.0, z: 0.125 }]
     fun to_f64(self) -> Vec3F64 {
         return Vec3F64 { x: self.x as float64, y: self.y as float64, z: self.z as float64 }
     }
 
     #test(Vec3 { x: 1.0, y: 0.0, z: 0.0 }, Vec3 { x: 0.0, y: 1.0, z: 0.0 })[Vec3 { x: 0.0, y: 0.0, z: 1.0 }]
+    #test(vec3(1.0, 2.0, 3.0), vec3(4.0, 5.0, 6.0))[vec3(-3.0, 6.0, -3.0)]
     fun cross(self, o: Vec3) -> Vec3 {
         return Vec3 { x: self.y * o.z - self.z * o.y, y: self.z * o.x - self.x * o.z, z: self.x * o.y - self.y * o.x }
     }
 
+    #test(vec3(1.0, 2.0, 3.0), 4.0)[vec4(1.0, 2.0, 3.0, 4.0)]
     fun extend(self, w: float32) -> Vec4 {
         return Vec4 { x: self.x, y: self.y, z: self.z, w: w }
     }
 
+    #test(vec3(1.0, 2.0, 3.0))[vec2(1.0, 2.0)]
     fun truncate(self) -> Vec2 {
         return Vec2 { x: self.x, y: self.y }
     }
@@ -439,48 +543,58 @@ pub fun splat4(s: float32) -> Vec4 {
 }
 
 impl Zero for Vec4 {
+    #test()[vec4(0.0, 0.0, 0.0, 0.0)]
     fun zero() -> Vec4 {
         return splat4(0.0)
     }
 }
 
 impl One for Vec4 {
+    #test()[vec4(1.0, 1.0, 1.0, 1.0)]
     fun one() -> Vec4 {
         return splat4(1.0)
     }
 }
 
+// `(x, y, z, w)`, the spec applied to each component.
 impl Format for Vec4 {
+    #test(vec4(1.5, -2.0, 0.125, 8.0), "")["(1.5, -2, 0.125, 8)"]
+    #test(vec4(1.5, -2.0, 0.125, 8.0), ".1")["(1.5, -2.0, 0.1, 8.0)"]
     fun format(self, spec: str) -> str {
-        return f"({self.x}, {self.y}, {self.z}, {self.w})"
+        return "(" + with_spec(self.x, spec) + ", " + with_spec(self.y, spec) + ", " + with_spec(self.z, spec) + ", " + with_spec(self.w, spec) + ")"
     }
 }
 
 impl Add for Vec4 {
+    #test(vec4(1.0, 2.0, 3.0, 4.0), vec4(2.0, 4.0, 8.0, 16.0))[vec4(3.0, 6.0, 11.0, 20.0)]
     fun add(self, o: Vec4) -> Vec4 {
         return Vec4 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z, w: self.w + o.w }
     }
 }
 
 impl Sub for Vec4 {
+    #test(vec4(1.0, 2.0, 3.0, 4.0), vec4(2.0, 4.0, 8.0, 16.0))[vec4(-1.0, -2.0, -5.0, -12.0)]
     fun sub(self, o: Vec4) -> Vec4 {
         return Vec4 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z, w: self.w - o.w }
     }
 }
 
 impl Mul for Vec4 {
+    #test(vec4(1.0, 2.0, 3.0, 4.0), vec4(2.0, 4.0, 8.0, 16.0))[vec4(2.0, 8.0, 24.0, 64.0)]
     fun mul(self, o: Vec4) -> Vec4 {
         return Vec4 { x: self.x * o.x, y: self.y * o.y, z: self.z * o.z, w: self.w * o.w }
     }
 }
 
 impl Div for Vec4 {
+    #test(vec4(1.0, 2.0, 3.0, 4.0), vec4(2.0, 4.0, 8.0, 16.0))[vec4(0.5, 0.5, 0.375, 0.25)]
     fun div(self, o: Vec4) -> Vec4 {
         return Vec4 { x: self.x / o.x, y: self.y / o.y, z: self.z / o.z, w: self.w / o.w }
     }
 }
 
 impl Neg for Vec4 {
+    #test(vec4(1.0, 2.0, 3.0, 4.0))[vec4(-1.0, -2.0, -3.0, -4.0)]
     fun neg(self) -> Vec4 {
         return Vec4 { x: -self.x, y: -self.y, z: -self.z, w: -self.w }
     }
@@ -494,18 +608,22 @@ impl Mul<float32> for Vec4 {
 }
 
 impl Div<float32> for Vec4 {
+    #test(vec4(1.0, 2.0, 3.0, 4.0), 2.0)[vec4(0.5, 1.0, 1.5, 2.0)]
     fun div(self, k: float32) -> Vec4 {
         return Vec4 { x: self.x / k, y: self.y / k, z: self.z / k, w: self.w / k }
     }
 }
 
 impl Mul<Vec4, Vec4> for float32 {
+    #test(2.0, vec4(1.0, 2.0, 3.0, 4.0))[vec4(2.0, 4.0, 6.0, 8.0)]
     fun mul(self, v: Vec4) -> Vec4 {
         return v * self
     }
 }
 
 impl Index<int, float32> for Vec4 {
+    #test(vec4(1.0, 2.0, 3.0, 4.0), 3)[4.0]
+    #test(vec4(1.0, 2.0, 3.0, 4.0), 4)[panic("index 4 out of range for a Vec4")]
     fun index(self, i: int) -> float32 {
         if i == 0 { return self.x }
         if i == 1 { return self.y }
@@ -527,85 +645,118 @@ impl Vec4 {
         return self.x * o.x + self.y * o.y + self.z * o.z + self.w * o.w
     }
 
+    #test(vec4(1.0, 2.0, 3.0, 4.0))[30.0]
     fun length_squared(self) -> float32 {
         return self.dot(self)
     }
 
+    // The length, also of a vector whose squares would over- or underflow
+    // (MYLA-796): then of the vector scaled by its largest component.
+    #test(vec4(1.0, 2.0, 2.0, 4.0))[5.0]
+    #test(vec4(1.1805916207174113e21, 2.3611832414348226e21, 2.3611832414348226e21, 4.722366482869645e21))[5.902958103587057e21]
+    #test(vec4(8.470329472543003e-22, 1.6940658945086007e-21, 1.6940658945086007e-21, 3.3881317890172014e-21))[4.235164736271502e-21]
+    #test(vec4(0.0, 0.0, 0.0, 0.0))[0.0]
     fun length(self) -> float32 {
-        return self.dot(self).sqrt()
+        let l = self.dot(self).sqrt()
+        if l > 1e-18 && l < 1e18 { return l }
+        let m = self.abs().max_element()
+        if m == 0.0 || !m.is_finite() { return l }
+        let u = self / m
+        return u.dot(u).sqrt() * m
     }
 
     // The vector of length 1 in its direction; a zero vector's components
     // are NaN (`try_normalized` says None there).
+    #test(vec4(1.0, 1.0, 1.0, 1.0))[vec4(0.5, 0.5, 0.5, 0.5)]
+    #test(vec4(1.1805916207174113e21, 1.1805916207174113e21, 1.1805916207174113e21, 1.1805916207174113e21))[vec4(0.5, 0.5, 0.5, 0.5)]
+    #test(vec4(8.470329472543003e-22, 8.470329472543003e-22, 8.470329472543003e-22, 8.470329472543003e-22))[vec4(0.5, 0.5, 0.5, 0.5)]
     fun normalized(self) -> Vec4 {
         return self / self.length()
     }
 
+    #test(vec4(1.0, 1.0, 1.0, 1.0))[Some(vec4(0.5, 0.5, 0.5, 0.5))]
+    #test(vec4(0.0, 0.0, 0.0, 0.0))[None]
     fun try_normalized(self) -> Option<Vec4> {
         let l = self.length()
         if l == 0.0 || !l.is_finite() { return None }
         return Some(self / l)
     }
 
+    #test(vec4(1.0, 1.0, 1.0, 1.0), vec4(2.0, 3.0, 3.0, 5.0))[5.0]
     fun distance(self, o: Vec4) -> float32 {
         return (self - o).length()
     }
 
+    #test(vec4(1.0, 1.0, 1.0, 1.0), vec4(2.0, 3.0, 3.0, 5.0))[25.0]
     fun distance_squared(self, o: Vec4) -> float32 {
         return (self - o).length_squared()
     }
 
     // The point `t` of the way from `self` to `o`.
+    #test(vec4(0.0, 0.0, 0.0, 0.0), vec4(4.0, 8.0, 12.0, 16.0), 0.25)[vec4(1.0, 2.0, 3.0, 4.0)]
     fun lerp(self, o: Vec4, t: float32) -> Vec4 {
         return self + (o - self) * t
     }
 
     // The smaller of each component.
+    #test(vec4(1.0, 5.0, 3.0, 7.0), vec4(4.0, 2.0, 6.0, 0.0))[vec4(1.0, 2.0, 3.0, 0.0)]
     fun min(self, o: Vec4) -> Vec4 {
         return Vec4 { x: self.x.min(o.x), y: self.y.min(o.y), z: self.z.min(o.z), w: self.w.min(o.w) }
     }
 
+    #test(vec4(1.0, 5.0, 3.0, 7.0), vec4(4.0, 2.0, 6.0, 0.0))[vec4(4.0, 5.0, 6.0, 7.0)]
     fun max(self, o: Vec4) -> Vec4 {
         return Vec4 { x: self.x.max(o.x), y: self.y.max(o.y), z: self.z.max(o.z), w: self.w.max(o.w) }
     }
 
+    #test(vec4(-1.0, 2.0, -3.0, 4.0))[vec4(1.0, 2.0, 3.0, 4.0)]
     fun abs(self) -> Vec4 {
         return Vec4 { x: self.x.abs(), y: self.y.abs(), z: self.z.abs(), w: self.w.abs() }
     }
 
+    #test(vec4(3.0, -1.0, 4.0, 2.0))[-1.0]
     fun min_element(self) -> float32 {
         return self.x.min(self.y).min(self.z).min(self.w)
     }
 
+    #test(vec4(3.0, -1.0, 4.0, 2.0))[4.0]
     fun max_element(self) -> float32 {
         return self.x.max(self.y).max(self.z).max(self.w)
     }
 
     // `self` mirrored at the plane (line) of the unit normal `normal`.
+    #test(vec4(1.0, -1.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0))[vec4(1.0, 1.0, 0.0, 0.0)]
     fun reflect(self, normal: Vec4) -> Vec4 {
         return self - normal * (2.0 * self.dot(normal))
     }
 
     // The part of `self` along `o`.
+    #test(vec4(1.0, 2.0, 3.0, 4.0), vec4(2.0, 0.0, 0.0, 0.0))[vec4(1.0, 0.0, 0.0, 0.0)]
     fun project_onto(self, o: Vec4) -> Vec4 {
         return o * (self.dot(o) / o.dot(o))
     }
 
-    // The angle between `self` and `o`, in radians.
+    // The angle between `self` and `o`, in radians, also of vectors whose
+    // lengths' product would overflow.
+    #test(vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 3.0, 0.0, 0.0))[1.5707964]
+    #test(vec4(0.0, 1.0, 0.0, 0.0), vec4(0.0, -2.0, 0.0, 0.0))[3.1415927]
     fun angle_between(self, o: Vec4) -> float32 {
-        let c = self.dot(o) / (self.length() * o.length())
+        let c = (self / self.length()).dot(o / o.length())
         return c.clamp(-1.0, 1.0).acos()
     }
 
+    #test(vec4(1.0, 2.0, 3.0, 4.0))[[1.0, 2.0, 3.0, 4.0]]
     fun to_list(self) -> [float32] {
         return [self.x, self.y, self.z, self.w]
     }
 
     // The same vector in float64 (std.vector).
+    #test(vec4(1.5, -2.0, 0.125, 8.0))[Vec4F64 { x: 1.5, y: -2.0, z: 0.125, w: 8.0 }]
     fun to_f64(self) -> Vec4F64 {
         return Vec4F64 { x: self.x as float64, y: self.y as float64, z: self.z as float64, w: self.w as float64 }
     }
 
+    #test(vec4(1.0, 2.0, 3.0, 4.0))[vec3(1.0, 2.0, 3.0)]
     fun truncate(self) -> Vec3 {
         return Vec3 { x: self.x, y: self.y, z: self.z }
     }
@@ -618,17 +769,24 @@ pub struct Vector {
     data: [float32],
 }
 
+#test([1.0, 2.0])[Vector { data: [1.0, 2.0] }]
 pub fun vector(xs: [float32]) -> Vector {
     return Vector { data: xs }
 }
 
 // `n` zeros.
+#test(2)[vector([0.0, 0.0])]
+#test(-1)[panic("a vector of -1 elements: the length can't be negative")]
 pub fun zeros(n: int) -> Vector {
     return filled(n, 0.0)
 }
 
 // `n` times `v`.
+#test(3, 1.5)[vector([1.5, 1.5, 1.5])]
+#test(0, 1.5)[vector([])]
+#test(-2, 1.5)[panic("a vector of -2 elements: the length can't be negative")]
 pub fun filled(n: int, v: float32) -> Vector {
+    if n < 0 { panic(f"a vector of {n} elements: the length can't be negative") }
     var d: [float32] = []
     var i = 0
     while i < n {
@@ -642,15 +800,18 @@ fun same_len(a: Vector, b: Vector) {
     if a.data.len() != b.data.len() { panic(f"vector lengths differ: {a.data.len()} and {b.data.len()}") }
 }
 
-
+// `[1, 2, 3]`, the spec applied to each component.
 impl Format for Vector {
+    #test(vector([1.5, -2.0]), "")["[1.5, -2]"]
+    #test(vector([1.5, -2.0]), ".2")["[1.50, -2.00]"]
+    #test(vector([]), "")["[]"]
     fun format(self, spec: str) -> str {
         var sb = StringBuilder()
         sb.append("[")
         var i = 0
         while i < self.data.len() {
             if i > 0 { sb.append(", ") }
-            sb.append(f"{self.data[i]}")
+            sb.append(with_spec(self.data[i], spec))
             i += 1
         }
         sb.append("]")
@@ -659,6 +820,8 @@ impl Format for Vector {
 }
 
 impl Add for Vector {
+    #test(vector([1.0, 2.0]), vector([3.0, 5.0]))[vector([4.0, 7.0])]
+    #test(vector([1.0, 2.0]), vector([3.0]))[panic("vector lengths differ: 2 and 1")]
     fun add(self, o: Vector) -> Vector {
         same_len(self, o)
         var d: [float32] = []
@@ -672,6 +835,7 @@ impl Add for Vector {
 }
 
 impl Sub for Vector {
+    #test(vector([1.0, 2.0]), vector([3.0, 5.0]))[vector([-2.0, -3.0])]
     fun sub(self, o: Vector) -> Vector {
         same_len(self, o)
         var d: [float32] = []
@@ -685,6 +849,7 @@ impl Sub for Vector {
 }
 
 impl Mul for Vector {
+    #test(vector([1.0, 2.0]), vector([3.0, 5.0]))[vector([3.0, 10.0])]
     fun mul(self, o: Vector) -> Vector {
         same_len(self, o)
         var d: [float32] = []
@@ -698,6 +863,7 @@ impl Mul for Vector {
 }
 
 impl Neg for Vector {
+    #test(vector([1.0, -2.0]))[vector([-1.0, 2.0])]
     fun neg(self) -> Vector {
         var d: [float32] = []
         var i = 0
@@ -710,6 +876,7 @@ impl Neg for Vector {
 }
 
 impl Mul<float32> for Vector {
+    #test(vector([1.0, -2.0]), 3.0)[vector([3.0, -6.0])]
     fun mul(self, k: float32) -> Vector {
         var d: [float32] = []
         var i = 0
@@ -722,6 +889,7 @@ impl Mul<float32> for Vector {
 }
 
 impl Div<float32> for Vector {
+    #test(vector([1.0, -2.0]), 4.0)[vector([0.25, -0.5])]
     fun div(self, k: float32) -> Vector {
         var d: [float32] = []
         var i = 0
@@ -734,24 +902,32 @@ impl Div<float32> for Vector {
 }
 
 impl Mul<Vector, Vector> for float32 {
+    #test(3.0, vector([1.0, -2.0]))[vector([3.0, -6.0])]
     fun mul(self, v: Vector) -> Vector {
         return v * self
     }
 }
 
+// `v[i]`; an `i` outside the vector is a runtime error that names both.
 impl Index<int, float32> for Vector {
+    #test(vector([1.0, 2.0]), 1)[2.0]
+    #test(vector([1.0, 2.0]), 2)[panic("index 2 out of range for a vector of 2")]
+    #test(vector([1.0, 2.0]), -1)[panic("index -1 out of range for a vector of 2")]
     fun index(self, i: int) -> float32 {
+        if i < 0 || i >= self.data.len() { panic(f"index {i} out of range for a vector of {self.data.len()}") }
         return self.data[i]
     }
 }
 
 impl IndexSet<int, float32> for Vector {
     fun set_index(var self, i: int, v: float32) {
+        if i < 0 || i >= self.data.len() { panic(f"index {i} out of range for a vector of {self.data.len()}") }
         self.data[i] = v
     }
 }
 
 impl Vector {
+    #test(vector([1.0, 2.0, 3.0]))[3]
     fun len(self) -> int {
         return self.data.len()
     }
@@ -768,14 +944,29 @@ impl Vector {
         return acc
     }
 
+    // The length, also of a vector whose squares would over- or underflow
+    // (MYLA-796): then of the vector scaled by its largest component.
+    #test(vector([3.0, 4.0]))[5.0]
+    #test(vector([3.541774862152234e21, 4.722366482869645e21]))[5.902958103587057e21]
+    #test(vector([2.541098841762901e-21, 3.3881317890172014e-21]))[4.235164736271502e-21]
+    #test(vector([]))[0.0]
     fun length(self) -> float32 {
-        return self.dot(self).sqrt()
+        let l = self.dot(self).sqrt()
+        if l > 1e-18 && l < 1e18 { return l }
+        var m: float32 = 0.0
+        for x in self.data { m = m.max(x.abs()) }
+        if m == 0.0 || !m.is_finite() { return l }
+        let u = self / m
+        return u.dot(u).sqrt() * m
     }
 
+    #test(vector([3.0, 4.0]))[vector([0.6, 0.8])]
+    #test(vector([3.541774862152234e21, 4.722366482869645e21]))[vector([0.6, 0.8])]
     fun normalized(self) -> Vector {
         return self / self.length()
     }
 
+    #test(vector([1.0, 1.0]), vector([4.0, 5.0]))[5.0]
     fun distance(self, o: Vector) -> float32 {
         return (self - o).length()
     }
@@ -793,15 +984,24 @@ impl Vector {
         return Vector { data: d }
     }
 
+    #test(vector([1.0, 2.0]))[[1.0, 2.0]]
     fun to_list(self) -> [float32] {
         return self.data
     }
 
+    #test(vector([1.5, 2.0]))[VectorF64 { data: [1.5, 2.0] }]
     fun to_f64(self) -> VectorF64 {
         var d: [float64] = []
         for x in self.data { d.push(x as float64) }
         return VectorF64 { data: d }
     }
+}
+
+// `map`'s function on each component (a case can't pass a function).
+#test
+fun vector_map() {
+    let v = vector([1.0, -2.0]).map((x: float32) => x * 2.0)
+    assert(v == vector([2.0, -4.0]), "map doubles")
 }
 
 // --- JSON -------------------------------------------------------------------
@@ -811,7 +1011,9 @@ impl Vector {
 // them, so a document's `"translation": [1, 2, 3]` reads as a `Vec3`.
 
 // The numbers of the JSON array `j`, `n` of them (any number when `n` is
-// negative), for the `FromJson` impl of the type `what`.
+// negative), for the `FromJson` impl of the type `what`. A `null` is NaN,
+// which std.json writes as `null` (as JavaScript does), so a NaN reads back
+// (MYLA-796; `json_nan` tests it, as a NaN equals nothing).
 #test(Json.Array([Json.Int(1i64), Json.Float(2.5)]), 2, "Vec2")[Ok([1.0, 2.5])]
 #test(Json.Array([Json.Int(1i64)]), 2, "Vec2")[Err(json_m.wrong_type("an array of 2 numbers for 'Vec2'", Json.Array([Json.Int(1i64)])))]
 fun json_numbers(j: Json, n: int, what: str) -> Result<[float32], JsonError> {
@@ -822,7 +1024,10 @@ fun json_numbers(j: Json, n: int, what: str) -> Result<[float32], JsonError> {
             var out: [float32] = []
             var i = 0
             for item in items {
-                out.push(json_m.within(float32.from_json(item), f"[{i}]")?)
+                match item {
+                    Json.Null => { out.push(fl.nan() as float32) },
+                    _ => { out.push(json_m.within(float32.from_json(item), f"[{i}]")?) },
+                }
                 i += 1
             }
             return Ok(out)
@@ -839,6 +1044,7 @@ impl json_m.ToJson for Vec2 {
 }
 
 impl json_m.FromJson for Vec2 {
+    #test(Json.Array([Json.Float(1.0), Json.Float(2.0)]))[Ok(vec2(1.0, 2.0))]
     fun from_json(j: Json) -> Result<Vec2, JsonError> {
         let c = json_numbers(j, 2, "Vec2")?
         return Ok(Vec2 { x: c[0], y: c[1] })
@@ -853,6 +1059,7 @@ impl json_m.ToJson for Vec3 {
 }
 
 impl json_m.FromJson for Vec3 {
+    #test(Json.Array([Json.Float(1.0), Json.Float(2.0), Json.Float(3.0)]))[Ok(vec3(1.0, 2.0, 3.0))]
     fun from_json(j: Json) -> Result<Vec3, JsonError> {
         let c = json_numbers(j, 3, "Vec3")?
         return Ok(Vec3 { x: c[0], y: c[1], z: c[2] })
@@ -867,6 +1074,7 @@ impl json_m.ToJson for Vec4 {
 }
 
 impl json_m.FromJson for Vec4 {
+    #test(Json.Array([Json.Float(1.0), Json.Float(2.0), Json.Float(3.0), Json.Float(4.0)]))[Ok(vec4(1.0, 2.0, 3.0, 4.0))]
     fun from_json(j: Json) -> Result<Vec4, JsonError> {
         let c = json_numbers(j, 4, "Vec4")?
         return Ok(Vec4 { x: c[0], y: c[1], z: c[2], w: c[3] })
@@ -883,7 +1091,24 @@ impl json_m.ToJson for Vector {
 }
 
 impl json_m.FromJson for Vector {
+    #test(Json.Array([Json.Float(1.0), Json.Int(2i64)]))[Ok(vector([1.0, 2.0]))]
+    #test(Json.Object([]))[Err(json_m.wrong_type("an array of numbers for 'Vector'", Json.Object([])))]
     fun from_json(j: Json) -> Result<Vector, JsonError> {
         return Ok(Vector { data: json_numbers(j, -1, "Vector")? })
+    }
+}
+
+// A NaN component is written `null` and reads back as NaN (MYLA-796).
+#test
+fun json_nan() {
+    let text = json_m.encode(vec2(fl.nan() as float32, 1.0))
+    assert(text == "[null,1.0]", text)
+    match json_m.decode<Vec2>(text) {
+        Ok(v) => { assert(v.x.is_nan() && v.y == 1.0, "a Vec2 with a NaN") },
+        Err(e) => { panic(f"{e}") },
+    }
+    match json_m.decode<Vector>("[null]") {
+        Ok(v) => { assert(v.len() == 1 && v[0].is_nan(), "a Vector with a NaN") },
+        Err(e) => { panic(f"{e}") },
     }
 }

@@ -28,7 +28,7 @@ Narrower types are fine, because their operands are sign-extended to 64 bits bef
 
 ## Done when
 
-- [x] Signed 64-bit `/` and `%` special-case a divisor of `-1` (`neg` for `/`, `0` for `%`) before `idivq` ([[src/myla/compiler/codegen_x86.py#L3378-L3397]])
+- [x] Signed 64-bit `/` and `%` special-case a divisor of `-1` (`neg` for `/`, `0` for `%`) before `idivq` (`src/myla/compiler/codegen_x86.py#L3378-L3397`)
 - [x] Parity test, also for consts (the folder already wraps)
 - [x] The same fix in [[selfhost/codegen.my]]
 
@@ -40,3 +40,5 @@ Both backends compare the divisor with `-1` before a signed division and take `n
 
 - New parity program `int64_min_divided_by_minus_one` (variables, function arguments, `int32`, consts) in [[tests/burn/test_compiler_parity.py]] and the self-hosted `PARITY_PROGRAMS`. Before: the Python native binary died with SIGFPE (exit -8), the self-hosted compile and the self-hosted interpreter crashed with -8. After: all three match the interpreter.
 - Bootstrap fixed point holds (5,919,838 bytes); unit, integration and burn suites pass.
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

@@ -31,7 +31,9 @@ Decision D66 on [[Project/Decisions]]; the API is on [[Language/Standard-library
 
 The review ([[Project/Review-2026-10]]) found the nesting limit of 500 true only for compiled programs: 500 nested arrays made the self-hosted interpreter segfault (its stack is gone at about 300 levels) and the Python interpreter die with a raw `RecursionError` (at 50 levels: Python's default limit of 1,000 frames is a few dozen Myla calls deep). Two changes:
 
-- `MAX_DEPTH` is 200, with the reason in [[src/myla/std/json.my]] and on [[Language/Standard-library]]; `test_nesting_limit` in `tests/burn/test_json.py` now parses 200 levels and rejects 201 (`err 1 201 Too deeply nested`). It can go back up with [[MYLA-182]].
-- The Python interpreter raises Python's recursion limit to 100,000 when it runs a program or its tests (`_deep_stack` in [[src/myla/interpreter.py]]; pure-Python recursion lives on the heap since 3.12) and reports a program that still exhausts it as `runtime error: stack overflow` instead of a traceback. 200 nested arrays parse in both interpreters; a recursion 5,000 deep runs, also inside a task's thread; unbounded recursion prints the runtime error and exits 1.
+- `MAX_DEPTH` is 200, with the reason in [[lib/std/json.my]] and on [[Language/Standard-library]]; `test_nesting_limit` in `tests/burn/test_json.py` now parses 200 levels and rejects 201 (`err 1 201 Too deeply nested`). It can go back up with [[MYLA-182]].
+- The Python interpreter raises Python's recursion limit to 100,000 when it runs a program or its tests (`_deep_stack` in `src/myla/interpreter.py`; pure-Python recursion lives on the heap since 3.12) and reports a program that still exhausts it as `runtime error: stack overflow` instead of a traceback. 200 nested arrays parse in both interpreters; a recursion 5,000 deep runs, also inside a task's thread; unbounded recursion prints the runtime error and exits 1.
 
 The unit suite (621 tests), `test_json.py`, the CLI parity test and the codegen gate pass.
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

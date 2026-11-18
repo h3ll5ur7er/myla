@@ -172,7 +172,7 @@ Three questions for the owner are worth deciding before the first module is writ
 
 - **Library lanes:** modules in Myla under `lib/std/`, one task each. Each task owns its files, so many of them run at once.
 - **The compiler track:** tasks that change `selfhost/`. They run one at a time, because they share the checker and the lowering. MYLA-310 is the exception: it changes only the map routines (`std.rt`, the lowering's `map_remove`, the interpreter's maps), so it can run beside MYLA-320.
-- **The platform track:** tasks that add primitives. Each changes the three platform modules, the primitive tables, the three backends and the interpreter, and needs a seed staging commit (D156). They run one at a time.
+- **The platform track:** tasks that add primitives. Each changes the three platform modules, the primitive tables, the three backends and the interpreter, and needs a seed staging commit (a `Stage:` commit, D207). They run one at a time.
 
 | Wave | Library lanes, in parallel | Compiler track | Platform track |
 | --- | --- | --- | --- |

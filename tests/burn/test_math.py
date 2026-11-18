@@ -64,7 +64,23 @@ _UNARY = {
     "log2": (math.log2, 1, [rng.uniform(0, 1e300) for _ in range(50)] + [rng.uniform(0.5, 4) for _ in range(150)]
              + [2.0 ** k for k in range(-60, 60)]),
     "log10": (math.log10, 1, [rng.uniform(0, 1e300) for _ in range(50)] + [rng.uniform(0.1, 10) for _ in range(150)]
-              + [10.0 ** k for k in range(-5, 23)]),
+              + [10.0 ** k for k in range(-5, 23)]
+              # near 1, where adding k·log10(2) cancelled (MYLA-796)
+              + [rng.uniform(0.999999, 1.000001) for _ in range(50)] + [0.999999, 0.9999999999999999]),
+    # MYLA-796: from expm1 near 0, in two halves near the overflow (sinh(710)
+    # is finite), the sign of a zero kept
+    "expm1": (math.expm1, 1, [rng.uniform(-1e-5, 1e-5) for _ in range(50)] + [rng.uniform(-2, 2) for _ in range(100)]
+              + [rng.uniform(-50, 709.7) for _ in range(100)] + [1e-300, -1e-300]),
+    "sinh": (math.sinh, 2, [rng.uniform(-1e-5, 1e-5) for _ in range(50)] + [rng.uniform(-2, 2) for _ in range(100)]
+             + [rng.uniform(-30, 30) for _ in range(50)] + [rng.uniform(-710.47, 710.47) for _ in range(100)]
+             + [710.0, -710.0, 711.0, 1.16e-05, 0.001]),
+    "cosh": (math.cosh, 2, [rng.uniform(-0.4, 0.4) for _ in range(50)] + [rng.uniform(-30, 30) for _ in range(100)]
+             + [rng.uniform(-710.47, 710.47) for _ in range(100)] + [710.0, -711.0]),
+    "tanh": (math.tanh, 2, [rng.uniform(-1e-5, 1e-5) for _ in range(50)] + [rng.uniform(-2, 2) for _ in range(150)]
+             + [rng.uniform(-25, 25) for _ in range(50)] + [1.0035695199723702e-05]),
+    # glibc's cbrt is up to 3 units from the exact cube root, std.math's within 1
+    "cbrt": (math.cbrt, 4, [rng.uniform(-10, 10) for _ in range(100)] + [rng.uniform(-1e300, 1e300) for _ in range(50)]
+             + [rng.uniform(0, 1e-308) for _ in range(30)] + [27.0, -8.0, 1e-320]),
     # small, medium (three-part π/2) and large (Payne-Hanek) arguments
     "sin": (math.sin, 1, [rng.uniform(-10, 10) for _ in range(150)] + [rng.uniform(-1e5, 1e5) for _ in range(100)]
             + [rng.uniform(-1, 1) * 10 ** rng.uniform(6.3, 300) for _ in range(100)]),
@@ -116,7 +132,7 @@ def _expected(name: str, args: tuple[float, ...]) -> float:
     except ValueError:
         return float("nan")
     except OverflowError:
-        return math.copysign(float("inf"), 1.0)
+        return math.copysign(float("inf"), args[0] if name == "sinh" else 1.0)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
