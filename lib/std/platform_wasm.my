@@ -81,6 +81,9 @@ pub const RETURNS_MEMORY: bool = false
 // Whether `advise_huge_pages` can back memory with huge pages (the linear
 // memory's pages are the engine's).
 pub const HUGE_PAGES: bool = false
+// How much of a chunk of the heap std.rt commits at a time: 0, as mapped
+// memory is usable at once (MYLA-861).
+pub const HEAP_COMMIT: int64 = 0
 
 const W_FD_WRITE: int64 = 1
 const W_FD_READ: int64 = 2
@@ -964,6 +967,23 @@ pub fun map_memory(n: int64) -> int64 {
 
 // The linear memory doesn't shrink: nothing given back.
 pub fun unmap_memory(p: int64, n: int64) {
+}
+
+// `n` bytes of address space for the heap's chunks (MYLA-861): mapped, as
+// `map_memory` does, usable at once (HEAP_COMMIT is 0).
+pub fun reserve_memory(n: int64) -> int64 {
+    return map_memory(n)
+}
+
+// Nothing to commit: what is mapped is usable (HEAP_COMMIT is 0).
+pub fun commit_memory(p: int64, n: int64) -> bool {
+    return true
+}
+
+// A job of its own for this process (MYLA-819): none here, where no process
+// starts another: false.
+pub fun own_job() -> bool {
+    return false
 }
 
 // No huge pages to ask for: nothing changes.

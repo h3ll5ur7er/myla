@@ -145,7 +145,7 @@ import std.fs as fs
 import std.path_style as style
 from std.process import args, exit, command, Command, ExitStatus, Stdio, SpawnError, env
 from std.io import write, eprint
-from std.platform import TARGET
+from std.platform import TARGET, own_job
 from std.time import now_ns
 from std.num import format_float
 
@@ -240,8 +240,15 @@ fun dies_with_parent() {
 }
 
 // This process leads a process group of its own, which its children join
-// (Linux's setpgid), for the runner to kill whole (`end_group`).
+// (Linux's setpgid), for the runner to kill whole (`end_group`). On Windows
+// it is in a job object of its own instead, which kills its children when
+// it ends, killed past its time limit too (MYLA-819, std.platform's
+// `own_job`).
 fun own_group() {
+    if TARGET == "x86_64-windows" {
+        let j = own_job()
+        return
+    }
     let (prctl, setpgid) = linux_calls()
     if setpgid == 0 { return }
     let r = __syscall(setpgid, 0, 0, 0)

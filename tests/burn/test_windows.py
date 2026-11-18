@@ -1685,6 +1685,57 @@ class PlatformFollowUps(unittest.TestCase):
             proc.wait()
         self.assertGreaterEqual(biggest, 120 << 20, f"the largest reserved mapping: {biggest >> 20} MiB")
 
+    def test_the_heap_is_committed_as_it_is_used(self):
+        # MYLA-861: each worker that allocated at all (every one that read
+        # the clock while a timer waited) committed a 16 MiB chunk of the
+        # heap; a chunk is reserved now and committed 256 KiB at a time as
+        # cells reach it (Wine maps what is committed `rw-p`). At BASE 8 to
+        # 13 such mappings of 16 MiB, 2026-11-18
+        self.build("prog", HELPER)
+        proc = subprocess.Popen([*wine(), os.path.join(self.tmp, "prog.exe"), "sleep", "3000"], cwd=self.tmp,
+                                env=dict(os.environ, MYLA_THREADS="16"))
+        try:
+            time.sleep(2)
+            chunks = 0
+            with open(f"/proc/{proc.pid}/maps", encoding="ascii") as fh:
+                for line in fh:
+                    span, perms = line.split()[:2]
+                    lo, hi = (int(x, 16) for x in span.split("-"))
+                    if perms == "rw-p" and hi - lo == 16 << 20:
+                        chunks += 1
+            self.assertEqual(proc.wait(timeout=60), 0)
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertEqual(chunks, 0, "chunks of the heap committed whole")
+
+    def test_a_job_of_its_own_takes_its_children_along(self):
+        # MYLA-819: std.test's test child is in a job of its own on Windows
+        # (`own_job`, killing what is in it once its one handle closes), as
+        # it leads a process group on Linux: a case killed past its time
+        # limit left its children running. Under Wine `myla test` kills the
+        # case's Unix process group, children included, so the case itself
+        # can't show it here: a program in a job of its own ends, and the
+        # child it started, which outlives a program without one, is gone
+        # with it (only CI's Windows job runs a timed-out case's)
+        self.build("helper", HELPER)
+        self.build("prog", 'import std.process as process\nimport std.platform as os\nfrom std.process import Stdio\n\n'
+                           'fun main() {\n    print(os.own_job())\n'
+                           '    let c = process.command("./helper.exe").arg("sleep").arg("60123")\n'
+                           '    match c.stdout_from(Stdio.Null).stderr_from(Stdio.Null).spawn() {\n'
+                           '        Ok(child) => print("started")\n        Err(e) => print(f"{e}")\n    }\n}\n')
+        ran = self.run_exe()
+        self.assertEqual((ran.stdout.decode(), ran.stderr.decode(), ran.returncode), ("true\nstarted\n", "", 0))
+        left = ""
+        for _ in range(50):
+            left = subprocess.run(["pgrep", "-f", "helper.exe sleep 60123"], capture_output=True, text=True).stdout
+            if not left:
+                break
+            time.sleep(0.1)
+        if left:
+            subprocess.run(["pkill", "-f", "helper.exe sleep 60123"])
+        self.assertEqual(left, "", "the child outlived its parent's job")
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
