@@ -30,17 +30,21 @@ fun main() {
 | Group | |
 | --- | --- |
 | Operators | `a * b`, `m * v`, `m * s`, `s * m`, `+`, `-`, `-m`, `m[(r, c)]`, `m[(r, c)] = s`, `m[i]`, `m[i] = col` |
-| Methods | `col(i)`, `row(i)`, `transpose`, `determinant`, `inverse` (an `Option`; a `Mat4`'s by elimination with partial pivoting), `trace`, `to_list` (column by column, as a GPU takes them), `to_matrix`, `to_f32` |
+| Methods | `col(i)`, `row(i)` (outside the matrix a runtime error that names both: `row 2 out of range for a Mat2`), `transpose`, `determinant`, `inverse` (an `Option`, below), `trace`, `to_list` (column by column, as a GPU takes them), `to_matrix`, `to_f32`, `is_finite` |
 | `Mat3` | `to_mat4`; as a 2D affine transform, `transform_point2`, `transform_vector2` |
 | `Mat4` | `upper_left` (the 3x3 part), `transform_point3` (with the translation, no divide), `transform_vector3`, `project_point3` (divided by `w`) |
 | 2D | `rotation2(angle) -> Mat2`; `translation2d(v)`, `rotation2d(angle)`, `scaling2d(v)` give affine `Mat3`s |
 | 3D | `translation(v)`, `scaling(v)`, `rotation_x/y/z(angle)`, `rotation_axis(axis, angle)`, `look_at_rh(eye, center, up)` |
 | Projections | `perspective_rh_gl(fov_y, aspect, near, far)` and `orthographic_rh_gl(l, r, b, t, n, f)` (depth to OpenGL's -1..1), `perspective_rh` and `orthographic_rh` (0..1: Vulkan, Metal, Direct3D, WebGPU) |
-| `Matrix` | `matrix(rows, cols, data)`, `from_rows([[…]])`, `zero_matrix(r, c)`, `identity(n)`; `*` by a `Matrix`, a `Vector` or a scalar, `+`, `-`, `m[(r, c)]`, `row`, `col`, `transpose`, `determinant`, `inverse` (Gauss-Jordan with partial pivoting) |
+| `Matrix` | `matrix(rows, cols, data)`, `from_rows([[…]])`, `zero_matrix(r, c)`, `identity(n)`; `*` by a `Matrix`, a `Vector` or a scalar, `+`, `-`, `m[(r, c)]`, `row`, `col`, `transpose`, `determinant`, `inverse` (Gauss-Jordan with partial pivoting, None only for a pivot of 0, as LAPACK's `getrf` says a matrix is singular) |
 
 Angles are in radians, rotations counterclockwise looking at the origin from the axis' positive side. Matrices are `Eq` and `Hash`, and print by rows: `[(1, 0), (0, 1)]` (a `Matrix`, `[[1, 0], [0, 1]]`).
 
 ## JSON
+
+`MatN.inverse` is the adjugate over the determinant, `None` when the determinant is 0 or the inverse isn't finite ([[MYLA-796]]): an exactly singular matrix of small integers has a determinant of exactly 0, which elimination, whose pivots round, didn't see (a `Mat4` of rank 3 got elements of -4.5e15). Where the determinant under- or overflows, the matrix is first scaled by a power of two that brings its largest element near 1, so the identity times 1e-200 has its inverse; a `std.matrix32` matrix is inverted in float64. A matrix singular only by its elements' rounding may still get one of huge elements, as in every library that inverts by the determinant (glam) or by its pivots (LAPACK).
+
+A `Matrix`'s shape is counted in int64: `matrix`, `zero_matrix`, `identity` and `*` give a runtime error for a shape past what a list holds (`a 65536x65536 matrix takes 4294967296 elements, more than a list holds`), and JSON's an error at `$.data` (D184). Matrices print by rows, a spec applied to each element (`f"{m:.1}"`).
 
 A matrix is the JSON array of its elements column by column, as glTF writes a node's `"matrix"` (D206): a `Mat4` is 16 numbers, the translation in the 13th to 15th. A `Matrix` is `{"rows": 2, "cols": 3, "data": […]}`, its data column by column too; data that doesn't fit the shape is an error at `$.data`.
 

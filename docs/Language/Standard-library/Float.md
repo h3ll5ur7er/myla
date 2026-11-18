@@ -33,10 +33,10 @@ fun main() {
 | Group | Methods |
 | --- | --- |
 | Sign and rounding | `abs`, `signum` (`1.0` or `-1.0` by the sign, a zero's too; NaN for NaN), `copysign(s)`, `trunc`, `floor`, `ceil`, `round` (halves away from zero), `fract` (`x - x.trunc()`) |
-| Comparing | `min(o)`, `max(o)` (a NaN gives way to the other), `clamp(lo, hi)`, `total_cmp(o)` (IEEE 754's total order as `-1`, `0`, `1`: `-0.0` before `0.0`, NaN last; for sorting), `approx_eq(o, eps)` |
-| Powers and roots | `sqrt`, `cbrt` (exact for a perfect cube), `hypot(o)`, `pow(y)`, `powi(n: int)` (by repeated squaring), `exp`, `ln`, `log2`, `log10`, `log(base)` (`ln(x) / ln(base)`, an ulp or two off where that quotient isn't exact) |
-| Trigonometry | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `y.atan2(x)`, `sinh`, `cosh`, `tanh` (from `exp`, within a few units in the last place), `to_degrees`, `to_radians` |
+| Comparing | `min(o)`, `max(o)` (a NaN gives way to the other), `clamp(lo, hi)` (a NaN stays NaN, as in Rust; a NaN bound is no bound), `total_cmp(o)` (IEEE 754's total order as `-1`, `0`, `1`: `-0.0` before `0.0`, NaN last; for sorting), `approx_eq(o, eps)` |
+| Powers and roots | `sqrt`, `cbrt` (within 1 ulp, exact for a perfect cube), `hypot(o)`, `pow(y)`, `powi(n: int)` (by repeated squaring), `exp`, `ln`, `log2`, `log10`, `log(base)` (`ln(x) / ln(base)`, an ulp or two off where that quotient isn't exact) |
+| Trigonometry | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `y.atan2(x)`, `sinh`, `cosh`, `tanh` (std.math's fdlibm ports, within 2 ulp; `sinh` and `cosh` finite up to 710.4758600739439, `(-0.0).tanh()` is `-0.0`), `to_degrees`, `to_radians` |
 | Other | `lerp(b, t)` (`self + (b - self) * t`), `is_nan`, `is_infinite`, `is_finite`, `to_bits` (`uint64`, a `float32`'s `uint32`; every NaN's are the one quiet NaN's, D128) |
 | Module | `PI`, `TAU`, `E`, `LN2`, `LN10`, `SQRT2`, `EPSILON`, `MAX`, `MIN_POSITIVE`; `nan()`, `infinity()`, `from_bits(b: uint64) -> float64`, `from_bits32(b: uint32) -> float32` |
 
-A `float32` method computes in `float64` and rounds its result: exact for `sqrt` and the rounding methods, within the `float64` function's error for the rest. A program's own method of one of these names on a float is a duplicate naming this module; another name is fine (`impl float64 { fun half(self) -> float64 { … } }`).
+A `float32` method computes in `float64` and rounds its result: exact for `sqrt` and the rounding methods, within the `float64` function's error for the rest. Every program sees these methods, but only one that calls a method of one of their names (or has an impl on a float type) loads the module and std.math, so it costs the others nothing (D258). A program's own method of one of these names on a float is a duplicate naming this module; another name is fine (`impl float64 { fun half(self) -> float64 { … } }`).

@@ -23,6 +23,6 @@ fun main() {
 // 1 true
 ```
 
-Methods: `dot`, `length`, `length_squared`, `normalized`, `conjugate`, `inverse`, `slerp(end, t)` (the shorter arc, at a constant angular speed), `to_mat3`, `to_mat4`, `to_axis_angle`, `to_f32`; operators `*` (by a quaternion, a `Vec3`, a scalar), `s * q`, `+`, `-`, `-q`. The rotation methods expect a unit quaternion, which every constructor but `quat` gives.
+Methods: `dot`, `length`, `length_squared`, `normalized`, `conjugate`, `inverse`, `slerp(end, t)` (the shorter arc, at a constant angular speed), `to_mat3`, `to_mat4`, `to_axis_angle`, `to_f32`; operators `*` (by a quaternion, a `Vec3`, a scalar), `s * q`, `+`, `-`, `-q`. The rotation methods expect a unit quaternion, which every constructor but `quat` gives. `length` and `normalized` scale a quaternion whose squares would over- or underflow first, and a quaternion prints as `(x, y, z, w)`, a spec applied to each component.
 
 A quaternion is the JSON array `[x, y, z, w]`, as glTF writes a node's `"rotation"` (D206, [[Language/Standard-library/Matrix#json]]); a decoded one isn't normalized.

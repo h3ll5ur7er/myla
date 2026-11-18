@@ -19,6 +19,12 @@ from std.vector32 import Vec3, vec3
 from std.matrix32 import Mat3, Mat4, mat3
 from std.quaternion import Quat as QuatF64
 
+// `x` formatted by `spec`, a spec given at run time: a vector's or matrix's
+// applies to each element (`f"{v:.2}"` is `(1.00, 2.50)`).
+fun with_spec<T: Format>(x: T, spec: str) -> str {
+    return x.format(spec)
+}
+
 #derive(Eq, Hash)
 pub struct Quat {
     x: float32,
@@ -27,11 +33,14 @@ pub struct Quat {
     w: float32,
 }
 
+#test(1.0, 2.0, 3.0, 4.0)[Quat { x: 1.0, y: 2.0, z: 3.0, w: 4.0 }]
 pub fun quat(x: float32, y: float32, z: float32, w: float32) -> Quat {
     return Quat { x: x, y: y, z: z, w: w }
 }
 
 // The rotation by `angle` about `axis` (normalized here).
+#test(vec3(0.0, 0.0, 2.0), 3.141592653589793)[quat(0.0, 0.0, 1.0, -4.371139e-8)]
+#test(vec3(1.0, 0.0, 0.0), 0.0)[Quat.identity()]
 pub fun from_axis_angle(axis: Vec3, angle: float32) -> Quat {
     let a = axis.normalized()
     let h = angle * 0.5
@@ -39,37 +48,48 @@ pub fun from_axis_angle(axis: Vec3, angle: float32) -> Quat {
     return Quat { x: a.x * s, y: a.y * s, z: a.z * s, w: h.cos() }
 }
 
+#test(3.141592653589793)[quat(1.0, 0.0, 0.0, -4.371139e-8)]
 pub fun from_rotation_x(angle: float32) -> Quat {
     return from_axis_angle(vec3(1.0, 0.0, 0.0), angle)
 }
 
+#test(3.141592653589793)[quat(0.0, 1.0, 0.0, -4.371139e-8)]
 pub fun from_rotation_y(angle: float32) -> Quat {
     return from_axis_angle(vec3(0.0, 1.0, 0.0), angle)
 }
 
+#test(3.141592653589793)[quat(0.0, 0.0, 1.0, -4.371139e-8)]
 pub fun from_rotation_z(angle: float32) -> Quat {
     return from_axis_angle(vec3(0.0, 0.0, 1.0), angle)
 }
 
 // The rotation by `x` about the x axis, then `y` about y, then `z` about z.
+#test(0.0, 0.0, 3.141592653589793)[from_rotation_z(3.141592653589793)]
+#test(0.0, 0.0, 0.0)[Quat.identity()]
 pub fun from_euler_xyz(x: float32, y: float32, z: float32) -> Quat {
     return from_rotation_z(z) * from_rotation_y(y) * from_rotation_x(x)
 }
 
 impl Identity for Quat {
+    #test()[quat(0.0, 0.0, 0.0, 1.0)]
     fun identity() -> Quat {
         return Quat { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
     }
 }
 
+// `(x, y, z, w)`, the spec applied to each component.
 impl Format for Quat {
+    #test(quat(0.0, 0.5, -1.0, 2.0), "")["(0, 0.5, -1, 2)"]
+    #test(quat(0.0, 0.5, -1.0, 2.0), ".2")["(0.00, 0.50, -1.00, 2.00)"]
     fun format(self, spec: str) -> str {
-        return f"({self.x}, {self.y}, {self.z}, {self.w})"
+        return "(" + with_spec(self.x, spec) + ", " + with_spec(self.y, spec) + ", " + with_spec(self.z, spec) + ", " + with_spec(self.w, spec) + ")"
     }
 }
 
 // The rotation by `o` first, then by `self` (Hamilton's product).
 impl Mul for Quat {
+    #test(quat(1.0, 0.0, 0.0, 0.0), quat(0.0, 1.0, 0.0, 0.0))[quat(0.0, 0.0, 1.0, 0.0)] // i * j = k
+    #test(quat(1.0, 2.0, 3.0, 4.0), Quat.identity())[quat(1.0, 2.0, 3.0, 4.0)]
     fun mul(self, o: Quat) -> Quat {
         return Quat {
             x: self.w * o.x + self.x * o.w + self.y * o.z - self.z * o.y,
@@ -82,6 +102,7 @@ impl Mul for Quat {
 
 // The vector `v` rotated.
 impl Mul<Vec3, Vec3> for Quat {
+    #test(quat(0.0, 0.0, 1.0, 0.0), vec3(1.0, 2.0, 3.0))[vec3(-1.0, -2.0, 3.0)] // a half turn about z
     fun mul(self, v: Vec3) -> Vec3 {
         let u = vec3(self.x, self.y, self.z)
         let t = u.cross(v) * 2.0
@@ -90,48 +111,67 @@ impl Mul<Vec3, Vec3> for Quat {
 }
 
 impl Mul<float32> for Quat {
+    #test(quat(1.0, 2.0, 3.0, 4.0), 0.5)[quat(0.5, 1.0, 1.5, 2.0)]
     fun mul(self, k: float32) -> Quat {
         return Quat { x: self.x * k, y: self.y * k, z: self.z * k, w: self.w * k }
     }
 }
 
 impl Mul<Quat, Quat> for float32 {
+    #test(2.0, quat(1.0, 2.0, 3.0, 4.0))[quat(2.0, 4.0, 6.0, 8.0)]
     fun mul(self, q: Quat) -> Quat {
         return q * self
     }
 }
 
 impl Add for Quat {
+    #test(quat(1.0, 2.0, 3.0, 4.0), quat(4.0, 3.0, 2.0, 1.0))[quat(5.0, 5.0, 5.0, 5.0)]
     fun add(self, o: Quat) -> Quat {
         return Quat { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z, w: self.w + o.w }
     }
 }
 
 impl Sub for Quat {
+    #test(quat(1.0, 2.0, 3.0, 4.0), quat(4.0, 3.0, 2.0, 1.0))[quat(-3.0, -1.0, 1.0, 3.0)]
     fun sub(self, o: Quat) -> Quat {
         return Quat { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z, w: self.w - o.w }
     }
 }
 
 impl Neg for Quat {
+    #test(quat(1.0, -2.0, 3.0, -4.0))[quat(-1.0, 2.0, -3.0, 4.0)]
     fun neg(self) -> Quat {
         return Quat { x: -self.x, y: -self.y, z: -self.z, w: -self.w }
     }
 }
 
 impl Quat {
+    #test(quat(1.0, 2.0, 3.0, 4.0), quat(1.0, 1.0, 1.0, -1.0))[2.0]
     fun dot(self, o: Quat) -> float32 {
         return self.x * o.x + self.y * o.y + self.z * o.z + self.w * o.w
     }
 
+    #test(quat(1.0, 2.0, 3.0, 4.0))[30.0]
     fun length_squared(self) -> float32 {
         return self.dot(self)
     }
 
+    // The length, also of a quaternion whose squares would over- or
+    // underflow (MYLA-796): then of it scaled by its largest component.
+    #test(quat(1.0, 1.0, 1.0, 1.0))[2.0]
+    #test(quat(1.1805916207174113e21, 1.1805916207174113e21, 1.1805916207174113e21, 1.1805916207174113e21))[2.3611832414348226e21]
+    #test(quat(0.0, 0.0, 0.0, 0.0))[0.0]
     fun length(self) -> float32 {
-        return self.dot(self).sqrt()
+        let l = self.dot(self).sqrt()
+        if l > 1e-18 && l < 1e18 { return l }
+        let m = self.x.abs().max(self.y.abs()).max(self.z.abs().max(self.w.abs()))
+        if m == 0.0 || !m.is_finite() { return l }
+        let u = self * (1.0 / m)
+        return u.dot(u).sqrt() * m
     }
 
+    #test(quat(1.0, 1.0, 1.0, 1.0))[quat(0.5, 0.5, 0.5, 0.5)]
+    #test(quat(1.1805916207174113e21, 1.1805916207174113e21, 1.1805916207174113e21, 1.1805916207174113e21))[quat(0.5, 0.5, 0.5, 0.5)]
     fun normalized(self) -> Quat {
         return self * (1.0 / self.length())
     }
@@ -142,6 +182,8 @@ impl Quat {
     }
 
     // The inverse rotation (the conjugate over the squared length).
+    #test(quat(0.0, 0.0, 0.0, 2.0))[quat(0.0, 0.0, 0.0, 0.5)]
+    #test(quat(0.0, 0.0, 1.0, 0.0))[quat(0.0, 0.0, -1.0, 0.0)]
     fun inverse(self) -> Quat {
         return self.conjugate() * (1.0 / self.length_squared())
     }
@@ -149,6 +191,10 @@ impl Quat {
     // The rotation `t` of the way from `self` to `end` along the shorter
     // arc, at a constant angular speed (a normalized blend when they are
     // nearly the same).
+    #test(Quat.identity(), quat(0.0, 0.0, 1.0, 0.0), 0.0)[Quat.identity()]
+    #test(Quat.identity(), quat(0.0, 0.0, 1.0, 0.0), 1.0)[quat(0.0, 0.0, 1.0, 0.0)]
+    #test(Quat.identity(), Quat.identity(), 0.5)[Quat.identity()]
+    #test(Quat.identity(), quat(0.0, 0.0, 0.0, -1.0), 0.5)[Quat.identity()] // the shorter arc: -q is q
     fun slerp(self, end: Quat, t: float32) -> Quat {
         var e = end
         var d = self.dot(end)
@@ -163,6 +209,8 @@ impl Quat {
     }
 
     // The rotation as a matrix (of a unit quaternion).
+    #test(quat(0.0, 0.0, 1.0, 0.0))[mat3(vec3(-1.0, 0.0, 0.0), vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, 1.0))]
+    #test(Quat.identity())[Mat3.identity()]
     fun to_mat3(self) -> Mat3 {
         let x2 = self.x + self.x
         let y2 = self.y + self.y
@@ -179,12 +227,15 @@ impl Quat {
         return mat3(vec3(1.0 - (yy + zz), xy + wz, xz - wy), vec3(xy - wz, 1.0 - (xx + zz), yz + wx), vec3(xz + wy, yz - wx, 1.0 - (xx + yy)))
     }
 
+    #test(quat(1.0, 0.0, 0.0, 0.0))[mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, -1.0)).to_mat4()]
     fun to_mat4(self) -> Mat4 {
         return self.to_mat3().to_mat4()
     }
 
     // The axis and the angle of the rotation (of a unit quaternion); the x
     // axis and 0 for none.
+    #test(quat(0.0, 0.0, 1.0, 0.0))[(vec3(0.0, 0.0, 1.0), 3.1415927)]
+    #test(Quat.identity())[(vec3(1.0, 0.0, 0.0), 0.0)]
     fun to_axis_angle(self) -> (Vec3, float32) {
         let w = self.w.clamp(-1.0, 1.0)
         let s = (1.0 - w * w).sqrt()
@@ -192,6 +243,7 @@ impl Quat {
         return (vec3(self.x / s, self.y / s, self.z / s), 2.0 * w.acos())
     }
 
+    #test(quat(1.5, 2.0, 3.0, 4.0))[QuatF64 { x: 1.5, y: 2.0, z: 3.0, w: 4.0 }]
     fun to_f64(self) -> QuatF64 {
         return QuatF64 { x: self.x as float64, y: self.y as float64, z: self.z as float64, w: self.w as float64 }
     }
@@ -204,7 +256,9 @@ impl Quat {
 // them, so a document's `"translation": [1, 2, 3]` reads as a `Vec3`.
 
 // The numbers of the JSON array `j`, `n` of them (any number when `n` is
-// negative), for the `FromJson` impl of the type `what`.
+// negative), for the `FromJson` impl of the type `what`. A `null` is NaN,
+// which std.json writes as `null` (as JavaScript does), so a NaN reads back
+// (MYLA-796; `json_nan` tests it, as a NaN equals nothing).
 #test(Json.Array([Json.Int(1i64), Json.Float(2.5)]), 2, "Vec2")[Ok([1.0, 2.5])]
 #test(Json.Array([Json.Int(1i64)]), 2, "Vec2")[Err(json_m.wrong_type("an array of 2 numbers for 'Vec2'", Json.Array([Json.Int(1i64)])))]
 fun json_numbers(j: Json, n: int, what: str) -> Result<[float32], JsonError> {
@@ -215,7 +269,10 @@ fun json_numbers(j: Json, n: int, what: str) -> Result<[float32], JsonError> {
             var out: [float32] = []
             var i = 0
             for item in items {
-                out.push(json_m.within(float32.from_json(item), f"[{i}]")?)
+                match item {
+                    Json.Null => { out.push(fl.nan() as float32) },
+                    _ => { out.push(json_m.within(float32.from_json(item), f"[{i}]")?) },
+                }
                 i += 1
             }
             return Ok(out)
@@ -232,6 +289,7 @@ impl json_m.ToJson for Quat {
 }
 
 impl json_m.FromJson for Quat {
+    #test(Json.Array([Json.Float(1.0), Json.Float(2.0), Json.Float(3.0), Json.Float(4.0)]))[Ok(quat(1.0, 2.0, 3.0, 4.0))]
     fun from_json(j: Json) -> Result<Quat, JsonError> {
         let c = json_numbers(j, 4, "Quat")?
         return Ok(Quat { x: c[0], y: c[1], z: c[2], w: c[3] })

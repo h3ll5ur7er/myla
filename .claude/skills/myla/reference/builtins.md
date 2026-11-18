@@ -224,7 +224,7 @@ Loops never count, `while true { return x }` included: add `unreachable()` after
 - **Duplicates.** Two top-level declarations with one name in a file: `duplicate top-level declaration 'x'`.
 - **Mangled names.** Names from other modules are mangled to `std$io$println`. Messages show them unmangled, as `io.println`, by the module's last segment (`unmangled_in`).
 - **Implicit modules** (`implicit_modules`, `merge_order`, `parse_module`):
-  - The implicit modules are `std.str`, `std.char`, `std.int`, `std.float`, `std.list`, `std.option`, `std.map` and `std.hash`. They are loaded for every entry file that isn't under a `std` directory, bind no name, and are merged first, so that the program's method is the duplicate.
+  - The implicit modules are `std.str`, `std.char`, `std.int`, `std.float`, `std.list`, `std.option`, `std.map` and `std.hash`. They are loaded for every entry file that isn't under a `std` directory, bind no name, and are merged first, so that the program's method is the duplicate. std.float only where a module of the program calls a method of one of its names or has an impl on a float type (D258, `without_unused_float`, `may_call_method`).
   - Their function bodies, and those of every other `std` module but `std.rt`, are parsed and checked only when something calls them. A type error inside an uncalled std function never shows.
   - Only the entry file's `#test` cases are parsed.
 

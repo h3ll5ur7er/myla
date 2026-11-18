@@ -13,7 +13,9 @@ import each other.
 """
 from __future__ import annotations
 
+import math
 import os
+import struct
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -23,18 +25,23 @@ AXES = ["x_axis", "y_axis", "z_axis", "w_axis"]
 
 
 class Precision:
-    def __init__(self, suffix: str, scalar: str, other_suffix: str, other_scalar: str, conv: str, tag: str) -> None:
+    def __init__(self, suffix: str, scalar: str, other_suffix: str, other_scalar: str, conv: str, tag: str,
+                 length_lo: str, length_hi: str) -> None:
         self.suffix = suffix              # "" or "32": the module's name ends with it
         self.scalar = scalar              # float64 or float32
         self.other_suffix = other_suffix  # the twin's
         self.other_scalar = other_scalar
         self.conv = conv                  # to_f32 or to_f64
         self.tag = tag                    # F32 or F64: the twin's types are imported as Vec3F32
+        # a length between them is the square root of the squares' sum: no
+        # square under- or overflowed enough to matter
+        self.length_lo = length_lo
+        self.length_hi = length_hi
 
 
 PRECISIONS = [
-    Precision("", "float64", "32", "float32", "to_f32", "F32"),
-    Precision("32", "float32", "", "float64", "to_f64", "F64"),
+    Precision("", "float64", "32", "float32", "to_f32", "F32", "1e-150", "1e150"),
+    Precision("32", "float32", "", "float64", "to_f64", "F64", "1e-18", "1e18"),
 ]
 
 HEADER = """// std.{module}{suffix}: {what} of {scalar} (D201, MYLA-587).
@@ -49,6 +56,78 @@ def comps(n: int) -> list[str]:
     return ["x", "y", "z", "w"][:n]
 
 
+# --------------------------------------------------------------------------
+# the `#test` cases' values (MYLA-796): written here from Python's numbers,
+# so a case's expected value is computed, not copied
+# --------------------------------------------------------------------------
+
+def num(x: float) -> str:
+    """`x` as a Myla float literal: the shortest text that reads back as it."""
+    if x == int(x) and abs(x) < 1e16:
+        return f"{float(x):.1f}"
+    return repr(float(x)).replace("e+", "e")
+
+
+def num32(x: float) -> str:
+    """`x` rounded to float32, as the shortest literal that reads back as it."""
+    f = struct.unpack("<f", struct.pack("<f", x))[0]
+    if f == int(f) and abs(f) < 1e7:
+        return f"{f:.1f}"
+    for digits in range(1, 10):
+        text = f"{f:.{digits}g}"
+        if struct.unpack("<f", struct.pack("<f", float(text)))[0] == f:
+            return text.replace("e+", "e").replace("e-0", "e-")
+    raise AssertionError(x)
+
+
+def lit(p: "Precision", x: float) -> str:
+    """A literal of the scalar `x` in the precision `p`."""
+    return num(x) if p.scalar == "float64" else num32(x)
+
+
+def vec(n: int, xs) -> str:
+    return f"vec{n}(" + ", ".join(num(x) for x in xs) + ")"
+
+
+def cols_of(rows: list[list[float]]) -> list[list[float]]:
+    return [[rows[r][c] for r in range(len(rows))] for c in range(len(rows[0]))]
+
+
+def mat(n: int, rows: list[list[float]]) -> str:
+    """`matN(…)` of the matrix whose rows are `rows`."""
+    return f"mat{n}(" + ", ".join(vec(n, c) for c in cols_of(rows)) + ")"
+
+
+def matmul(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:
+    return [[sum(a[i][k] * b[k][j] for k in range(len(b))) for j in range(len(b[0]))] for i in range(len(a))]
+
+
+def int_inverse(a: list[list[int]]) -> list[list[float]]:
+    """The inverse of an integer matrix of determinant 1 (Gauss-Jordan in fractions)."""
+    from fractions import Fraction
+    n = len(a)
+    m = [[Fraction(x) for x in row] + [Fraction(int(i == j)) for j in range(n)] for i, row in enumerate(a)]
+    for c in range(n):
+        p = next(r for r in range(c, n) if m[r][c] != 0)
+        m[c], m[p] = m[p], m[c]
+        m[c] = [x / m[c][c] for x in m[c]]
+        for r in range(n):
+            if r != c:
+                m[r] = [x - m[r][c] * y for x, y in zip(m[r], m[c])]
+    return [[float(x) for x in row[n:]] for row in m]
+
+
+# a matrix of each size with integer elements and determinant 1, so its
+# inverse's elements are integers too, computed exactly
+UNIMODULAR = {
+    2: [[2, 3], [1, 2]],
+    3: [[1, 2, 0], [0, 1, 3], [2, 4, 1]],
+    4: [[1, 2, 0, 1], [0, 1, 3, 0], [2, 4, 1, 2], [0, 0, 1, 1]],
+}
+# the review's exactly singular Mat4 (rank 3: its determinant is exactly 0)
+SINGULAR4 = [[1.0, -2.0, 1.0, -1.0], [-1.0, -2.0, -1.0, -3.0], [3.0, -2.0, 3.0, 1.0], [3.0, 3.0, 1.0, 6.0]]
+
+
 def fill(text: str, p: Precision, **kw: str) -> str:
     """`text` with `@S@` the scalar type and the other tokens in `kw`."""
     text = text.replace("@S@", p.scalar).replace("@OS@", p.other_scalar).replace("@CONV@", p.conv)
@@ -61,6 +140,15 @@ def fill(text: str, p: Precision, **kw: str) -> str:
 # --------------------------------------------------------------------------
 # std.vector
 # --------------------------------------------------------------------------
+
+WITH_SPEC = """
+// `x` formatted by `spec`, a spec given at run time: a vector's or matrix's
+// applies to each element (`f"{v:.2}"` is `(1.00, 2.50)`).
+fun with_spec<T: Format>(x: T, spec: str) -> str {
+    return x.format(spec)
+}
+"""
+
 
 VECTOR_DOC = """// `Vec2`, `Vec3` and `Vec4` (fields `x`, `y`, `z`, `w`), made by `vec3(x, y, z)`,
 // `splat3(s)` or `Vec3.zero()` / `Vec3.one()` (std.algebra's traits), and
@@ -77,7 +165,7 @@ import std.json as json_m
 from std.json import Json, JsonError
 from std.algebra import Zero, One
 from std.vector@OSFX@ import Vec2 as Vec2@O@, Vec3 as Vec3@O@, Vec4 as Vec4@O@, Vector as Vector@O@
-"""
+""" + WITH_SPEC
 
 
 def vec_block(p: Precision, n: int) -> str:
@@ -86,11 +174,10 @@ def vec_block(p: Precision, n: int) -> str:
     S = p.scalar
     params = ", ".join(f"{c}: {S}" for c in cs)
     lit_of = lambda f: f"{V} {{ " + ", ".join(f"{c}: {f(c)}" for c in cs) + " }"
-    ones = ", ".join("1.0" for _ in cs)
     nums = ", ".join(f"{i + 1}.0" for i in range(n))
     nums_lit = f"{V} {{ " + ", ".join(f"{c}: {i + 1}.0" for i, c in enumerate(cs)) + " }"
     fields = "".join(f"    {c}: {S},\n" for c in cs)
-    fmt = ", ".join("{self." + c + "}" for c in cs)
+    fmt = " + \", \" + ".join(f"with_spec(self.{c}, spec)" for c in cs)
     dot = " + ".join(f"self.{c} * o.{c}" for c in cs)
     idx = "".join(f"        if i == {k} {{ return self.{c} }}\n" for k, c in enumerate(cs))
     sets = " else ".join(f"if i == {k} {{ self.{c} = v }}" for k, c in enumerate(cs))
@@ -98,6 +185,26 @@ def vec_block(p: Precision, n: int) -> str:
     maxel = f"self.{cs[0]}" + "".join(f".max(self.{c})" for c in cs[1:])
     to_list = "[" + ", ".join(f"self.{c}" for c in cs) + "]"
     conv = f"{V}{p.tag} {{ " + ", ".join(f"{c}: self.{c} as {p.other_scalar}" for c in cs) + " }"
+    # the cases' vectors
+    a = [1.0, 2.0, 3.0, 4.0][:n]
+    b = [2.0, 4.0, 8.0, 16.0][:n]
+    v = lambda xs: vec(n, xs)
+    zero = [0.0] * n
+    unit = lambda k: [1.0 if j == k else 0.0 for j in range(n)]
+    # a vector of an integer length, and its direction, exact in both precisions
+    whole = {2: ([3.0, 4.0], 5.0), 3: ([2.0, 4.0, 4.0], 6.0), 4: ([1.0, 2.0, 2.0, 4.0], 5.0)}[n]
+    # far from 1: the squares overflow (`big`) or underflow (`tiny`)
+    big = 2.0 ** (600 if p.scalar == "float64" else 70)
+    tiny = 1.0 / big
+    dirn = {2: ([3.0, 4.0], [0.6, 0.8]), 3: ([0.0, 3.0, 4.0], [0.0, 0.6, 0.8]), 4: ([1.0, 1.0, 1.0, 1.0], [0.5, 0.5, 0.5, 0.5])}[n]
+    mixed = [1.0, 5.0, 3.0, 7.0][:n]
+    other = [4.0, 2.0, 6.0, 0.0][:n]
+    signs = [-1.0, 2.0, -3.0, 4.0][:n]
+    spread = [3.0, -1.0, 4.0, 2.0][:n]
+    fmt_in = [1.5, -2.0, 0.125, 8.0][:n]
+    fmt_out = ", ".join({1.5: "1.5", -2.0: "-2", 0.125: "0.125", 8.0: "8"}[x] for x in fmt_in)
+    fmt_out1 = ", ".join({1.5: "1.5", -2.0: "-2.0", 0.125: "0.1", 8.0: "8.0"}[x] for x in fmt_in)
+    other_lit = f"{V}{p.tag} {{ " + ", ".join(f"{c}: {num(x)}" for c, x in zip(cs, fmt_in)) + " }"
     out = f"""
 #derive(Eq, Hash)
 pub struct {V} {{
@@ -116,27 +223,34 @@ pub fun splat{n}(s: {S}) -> {V} {{
 }}
 
 impl Zero for {V} {{
+    #test()[{v(zero)}]
     fun zero() -> {V} {{
         return splat{n}(0.0)
     }}
 }}
 
 impl One for {V} {{
+    #test()[{v([1.0] * n)}]
     fun one() -> {V} {{
         return splat{n}(1.0)
     }}
 }}
 
+// `({", ".join(cs)})`, the spec applied to each component.
 impl Format for {V} {{
+    #test({v(fmt_in)}, "")["({fmt_out})"]
+    #test({v(fmt_in)}, ".1")["({fmt_out1})"]
     fun format(self, spec: str) -> str {{
-        return f"({fmt})"
+        return "(" + {fmt} + ")"
     }}
 }}
 """
-    for tr, op in [("Add", "+"), ("Sub", "-"), ("Mul", "*"), ("Div", "/")]:
+    for tr, op, want in [("Add", "+", [x + y for x, y in zip(a, b)]), ("Sub", "-", [x - y for x, y in zip(a, b)]),
+                         ("Mul", "*", [x * y for x, y in zip(a, b)]), ("Div", "/", [x / y for x, y in zip(a, b)])]:
         m = tr.lower()
         out += f"""
 impl {tr} for {V} {{
+    #test({v(a)}, {v(b)})[{v(want)}]
     fun {m}(self, o: {V}) -> {V} {{
         return {lit_of(lambda c: f"self.{c} {op} o.{c}")}
     }}
@@ -144,6 +258,7 @@ impl {tr} for {V} {{
 """
     out += f"""
 impl Neg for {V} {{
+    #test({v(a)})[{v([-x for x in a])}]
     fun neg(self) -> {V} {{
         return {lit_of(lambda c: f"-self.{c}")}
     }}
@@ -157,18 +272,22 @@ impl Mul<{S}> for {V} {{
 }}
 
 impl Div<{S}> for {V} {{
+    #test({v(a)}, 2.0)[{v([x / 2 for x in a])}]
     fun div(self, k: {S}) -> {V} {{
         return {lit_of(lambda c: f"self.{c} / k")}
     }}
 }}
 
 impl Mul<{V}, {V}> for {S} {{
+    #test(2.0, {v(a)})[{v([2 * x for x in a])}]
     fun mul(self, v: {V}) -> {V} {{
         return v * self
     }}
 }}
 
 impl Index<int, {S}> for {V} {{
+    #test({v(a)}, {n - 1})[{num(a[-1])}]
+    #test({v(a)}, {n})[panic("index {n} out of range for a {V}")]
     fun index(self, i: int) -> {S} {{
 {idx}        panic(f"index {{i}} out of range for a {V}")
     }}
@@ -186,81 +305,113 @@ impl {V} {{
         return {dot}
     }}
 
+    #test({v(a)})[{num(sum(x * x for x in a))}]
     fun length_squared(self) -> {S} {{
         return self.dot(self)
     }}
 
+    // The length, also of a vector whose squares would over- or underflow
+    // (MYLA-796): then of the vector scaled by its largest component.
+    #test({v(whole[0])})[{num(whole[1])}]
+    #test({v([x * big for x in whole[0]])})[{num(whole[1] * big)}]
+    #test({v([x * tiny for x in whole[0]])})[{num(whole[1] * tiny)}]
+    #test({v(zero)})[0.0]
     fun length(self) -> {S} {{
-        return self.dot(self).sqrt()
+        let l = self.dot(self).sqrt()
+        if l > {p.length_lo} && l < {p.length_hi} {{ return l }}
+        let m = self.abs().max_element()
+        if m == 0.0 || !m.is_finite() {{ return l }}
+        let u = self / m
+        return u.dot(u).sqrt() * m
     }}
 
     // The vector of length 1 in its direction; a zero vector's components
     // are NaN (`try_normalized` says None there).
+    #test({v(dirn[0])})[{v(dirn[1])}]
+    #test({v([x * big for x in dirn[0]])})[{v(dirn[1])}]
+    #test({v([x * tiny for x in dirn[0]])})[{v(dirn[1])}]
     fun normalized(self) -> {V} {{
         return self / self.length()
     }}
 
+    #test({v(dirn[0])})[Some({v(dirn[1])})]
+    #test({v(zero)})[None]
     fun try_normalized(self) -> Option<{V}> {{
         let l = self.length()
         if l == 0.0 || !l.is_finite() {{ return None }}
         return Some(self / l)
     }}
 
+    #test({v([1.0] * n)}, {v([1.0 + x for x in whole[0]])})[{num(whole[1])}]
     fun distance(self, o: {V}) -> {S} {{
         return (self - o).length()
     }}
 
+    #test({v([1.0] * n)}, {v([1.0 + x for x in whole[0]])})[{num(whole[1] ** 2)}]
     fun distance_squared(self, o: {V}) -> {S} {{
         return (self - o).length_squared()
     }}
 
     // The point `t` of the way from `self` to `o`.
+    #test({v(zero)}, {v([4 * x for x in a])}, 0.25)[{v(a)}]
     fun lerp(self, o: {V}, t: {S}) -> {V} {{
         return self + (o - self) * t
     }}
 
     // The smaller of each component.
+    #test({v(mixed)}, {v(other)})[{v([min(x, y) for x, y in zip(mixed, other)])}]
     fun min(self, o: {V}) -> {V} {{
         return {lit_of(lambda c: f"self.{c}.min(o.{c})")}
     }}
 
+    #test({v(mixed)}, {v(other)})[{v([max(x, y) for x, y in zip(mixed, other)])}]
     fun max(self, o: {V}) -> {V} {{
         return {lit_of(lambda c: f"self.{c}.max(o.{c})")}
     }}
 
+    #test({v(signs)})[{v([abs(x) for x in signs])}]
     fun abs(self) -> {V} {{
         return {lit_of(lambda c: f"self.{c}.abs()")}
     }}
 
+    #test({v(spread)})[{num(min(spread))}]
     fun min_element(self) -> {S} {{
         return {minel}
     }}
 
+    #test({v(spread)})[{num(max(spread))}]
     fun max_element(self) -> {S} {{
         return {maxel}
     }}
 
     // `self` mirrored at the plane (line) of the unit normal `normal`.
+    #test({v([1.0, -1.0] + [0.0] * (n - 2))}, {v(unit(1))})[{v([1.0, 1.0] + [0.0] * (n - 2))}]
     fun reflect(self, normal: {V}) -> {V} {{
         return self - normal * (2.0 * self.dot(normal))
     }}
 
     // The part of `self` along `o`.
+    #test({v(a)}, {v([2.0] + [0.0] * (n - 1))})[{v([1.0] + [0.0] * (n - 1))}]
     fun project_onto(self, o: {V}) -> {V} {{
         return o * (self.dot(o) / o.dot(o))
     }}
 
-    // The angle between `self` and `o`, in radians.
+    // The angle between `self` and `o`, in radians, also of vectors whose
+    // lengths' product would overflow.
+    #test({v(unit(0))}, {v([0.0, 3.0] + [0.0] * (n - 2))})[{lit(p, math.pi / 2)}]
+    #test({v(unit(1))}, {v([0.0, -2.0] + [0.0] * (n - 2))})[{lit(p, math.pi)}]
     fun angle_between(self, o: {V}) -> {S} {{
-        let c = self.dot(o) / (self.length() * o.length())
+        let c = (self / self.length()).dot(o / o.length())
         return c.clamp(-1.0, 1.0).acos()
     }}
 
+    #test({v(a)})[[{", ".join(num(x) for x in a)}]]
     fun to_list(self) -> [{S}] {{
         return {to_list}
     }}
 
     // The same vector in {p.other_scalar} (std.vector{p.other_suffix}).
+    #test({v(fmt_in)})[{other_lit}]
     fun {p.conv}(self) -> {V}{p.tag} {{
         return {conv}
     }}
@@ -268,15 +419,18 @@ impl {V} {{
     if n == 2:
         out += f"""
     // `self` turned a quarter left: `(-y, x)`.
+    #test(vec2(1.0, 2.0))[vec2(-2.0, 1.0)]
     fun perp(self) -> Vec2 {{
         return Vec2 {{ x: -self.y, y: self.x }}
     }}
 
     // The z of the cross product of `self` and `o` as 3D vectors.
+    #test(vec2(1.0, 2.0), vec2(3.0, 4.0))[-2.0]
     fun perp_dot(self, o: Vec2) -> {S} {{
         return self.x * o.y - self.y * o.x
     }}
 
+    #test(vec2(1.0, 2.0), 3.0)[vec3(1.0, 2.0, 3.0)]
     fun extend(self, z: {S}) -> Vec3 {{
         return Vec3 {{ x: self.x, y: self.y, z: z }}
     }}
@@ -284,20 +438,24 @@ impl {V} {{
     if n == 3:
         out += f"""
     #test(Vec3 {{ x: 1.0, y: 0.0, z: 0.0 }}, Vec3 {{ x: 0.0, y: 1.0, z: 0.0 }})[Vec3 {{ x: 0.0, y: 0.0, z: 1.0 }}]
+    #test(vec3(1.0, 2.0, 3.0), vec3(4.0, 5.0, 6.0))[vec3(-3.0, 6.0, -3.0)]
     fun cross(self, o: Vec3) -> Vec3 {{
         return Vec3 {{ x: self.y * o.z - self.z * o.y, y: self.z * o.x - self.x * o.z, z: self.x * o.y - self.y * o.x }}
     }}
 
+    #test(vec3(1.0, 2.0, 3.0), 4.0)[vec4(1.0, 2.0, 3.0, 4.0)]
     fun extend(self, w: {S}) -> Vec4 {{
         return Vec4 {{ x: self.x, y: self.y, z: self.z, w: w }}
     }}
 
+    #test(vec3(1.0, 2.0, 3.0))[vec2(1.0, 2.0)]
     fun truncate(self) -> Vec2 {{
         return Vec2 {{ x: self.x, y: self.y }}
     }}
 """
     if n == 4:
         out += """
+    #test(vec4(1.0, 2.0, 3.0, 4.0))[vec3(1.0, 2.0, 3.0)]
     fun truncate(self) -> Vec3 {
         return Vec3 { x: self.x, y: self.y, z: self.z }
     }
@@ -314,17 +472,24 @@ pub struct Vector {
     data: [@S@],
 }
 
+#test([1.0, 2.0])[Vector { data: [1.0, 2.0] }]
 pub fun vector(xs: [@S@]) -> Vector {
     return Vector { data: xs }
 }
 
 // `n` zeros.
+#test(2)[vector([0.0, 0.0])]
+#test(-1)[panic("a vector of -1 elements: the length can't be negative")]
 pub fun zeros(n: int) -> Vector {
     return filled(n, 0.0)
 }
 
 // `n` times `v`.
+#test(3, 1.5)[vector([1.5, 1.5, 1.5])]
+#test(0, 1.5)[vector([])]
+#test(-2, 1.5)[panic("a vector of -2 elements: the length can't be negative")]
 pub fun filled(n: int, v: @S@) -> Vector {
+    if n < 0 { panic(f"a vector of {n} elements: the length can't be negative") }
     var d: [@S@] = []
     var i = 0
     while i < n {
@@ -338,15 +503,18 @@ fun same_len(a: Vector, b: Vector) {
     if a.data.len() != b.data.len() { panic(f"vector lengths differ: {a.data.len()} and {b.data.len()}") }
 }
 
-
+// `[1, 2, 3]`, the spec applied to each component.
 impl Format for Vector {
+    #test(vector([1.5, -2.0]), "")["[1.5, -2]"]
+    #test(vector([1.5, -2.0]), ".2")["[1.50, -2.00]"]
+    #test(vector([]), "")["[]"]
     fun format(self, spec: str) -> str {
         var sb = StringBuilder()
         sb.append("[")
         var i = 0
         while i < self.data.len() {
             if i > 0 { sb.append(", ") }
-            sb.append(f"{self.data[i]}")
+            sb.append(with_spec(self.data[i], spec))
             i += 1
         }
         sb.append("]")
@@ -355,6 +523,8 @@ impl Format for Vector {
 }
 
 impl Add for Vector {
+    #test(vector([1.0, 2.0]), vector([3.0, 5.0]))[vector([4.0, 7.0])]
+    #test(vector([1.0, 2.0]), vector([3.0]))[panic("vector lengths differ: 2 and 1")]
     fun add(self, o: Vector) -> Vector {
         same_len(self, o)
         var d: [@S@] = []
@@ -368,6 +538,7 @@ impl Add for Vector {
 }
 
 impl Sub for Vector {
+    #test(vector([1.0, 2.0]), vector([3.0, 5.0]))[vector([-2.0, -3.0])]
     fun sub(self, o: Vector) -> Vector {
         same_len(self, o)
         var d: [@S@] = []
@@ -381,6 +552,7 @@ impl Sub for Vector {
 }
 
 impl Mul for Vector {
+    #test(vector([1.0, 2.0]), vector([3.0, 5.0]))[vector([3.0, 10.0])]
     fun mul(self, o: Vector) -> Vector {
         same_len(self, o)
         var d: [@S@] = []
@@ -394,6 +566,7 @@ impl Mul for Vector {
 }
 
 impl Neg for Vector {
+    #test(vector([1.0, -2.0]))[vector([-1.0, 2.0])]
     fun neg(self) -> Vector {
         var d: [@S@] = []
         var i = 0
@@ -406,6 +579,7 @@ impl Neg for Vector {
 }
 
 impl Mul<@S@> for Vector {
+    #test(vector([1.0, -2.0]), 3.0)[vector([3.0, -6.0])]
     fun mul(self, k: @S@) -> Vector {
         var d: [@S@] = []
         var i = 0
@@ -418,6 +592,7 @@ impl Mul<@S@> for Vector {
 }
 
 impl Div<@S@> for Vector {
+    #test(vector([1.0, -2.0]), 4.0)[vector([0.25, -0.5])]
     fun div(self, k: @S@) -> Vector {
         var d: [@S@] = []
         var i = 0
@@ -430,24 +605,32 @@ impl Div<@S@> for Vector {
 }
 
 impl Mul<Vector, Vector> for @S@ {
+    #test(3.0, vector([1.0, -2.0]))[vector([3.0, -6.0])]
     fun mul(self, v: Vector) -> Vector {
         return v * self
     }
 }
 
+// `v[i]`; an `i` outside the vector is a runtime error that names both.
 impl Index<int, @S@> for Vector {
+    #test(vector([1.0, 2.0]), 1)[2.0]
+    #test(vector([1.0, 2.0]), 2)[panic("index 2 out of range for a vector of 2")]
+    #test(vector([1.0, 2.0]), -1)[panic("index -1 out of range for a vector of 2")]
     fun index(self, i: int) -> @S@ {
+        if i < 0 || i >= self.data.len() { panic(f"index {i} out of range for a vector of {self.data.len()}") }
         return self.data[i]
     }
 }
 
 impl IndexSet<int, @S@> for Vector {
     fun set_index(var self, i: int, v: @S@) {
+        if i < 0 || i >= self.data.len() { panic(f"index {i} out of range for a vector of {self.data.len()}") }
         self.data[i] = v
     }
 }
 
 impl Vector {
+    #test(vector([1.0, 2.0, 3.0]))[3]
     fun len(self) -> int {
         return self.data.len()
     }
@@ -464,14 +647,29 @@ impl Vector {
         return acc
     }
 
+    // The length, also of a vector whose squares would over- or underflow
+    // (MYLA-796): then of the vector scaled by its largest component.
+    #test(vector([3.0, 4.0]))[5.0]
+    #test(vector([@BIG3@, @BIG4@]))[@BIG5@]
+    #test(vector([@TINY3@, @TINY4@]))[@TINY5@]
+    #test(vector([]))[0.0]
     fun length(self) -> @S@ {
-        return self.dot(self).sqrt()
+        let l = self.dot(self).sqrt()
+        if l > @LO@ && l < @HI@ { return l }
+        var m: @S@ = 0.0
+        for x in self.data { m = m.max(x.abs()) }
+        if m == 0.0 || !m.is_finite() { return l }
+        let u = self / m
+        return u.dot(u).sqrt() * m
     }
 
+    #test(vector([3.0, 4.0]))[vector([0.6, 0.8])]
+    #test(vector([@BIG3@, @BIG4@]))[vector([0.6, 0.8])]
     fun normalized(self) -> Vector {
         return self / self.length()
     }
 
+    #test(vector([1.0, 1.0]), vector([4.0, 5.0]))[5.0]
     fun distance(self, o: Vector) -> @S@ {
         return (self - o).length()
     }
@@ -489,15 +687,24 @@ impl Vector {
         return Vector { data: d }
     }
 
+    #test(vector([1.0, 2.0]))[[1.0, 2.0]]
     fun to_list(self) -> [@S@] {
         return self.data
     }
 
+    #test(vector([1.5, 2.0]))[Vector@O@ { data: [1.5, 2.0] }]
     fun @CONV@(self) -> Vector@O@ {
         var d: [@OS@] = []
         for x in self.data { d.push(x as @OS@) }
         return Vector@O@ { data: d }
     }
+}
+
+// `map`'s function on each component (a case can't pass a function).
+#test
+fun vector_map() {
+    let v = vector([1.0, -2.0]).map((x: @S@) => x * 2.0)
+    assert(v == vector([2.0, -4.0]), "map doubles")
 }
 """
 
@@ -508,7 +715,9 @@ def vector_module(p: Precision) -> str:
     out += fill(VECTOR_DOC, p)
     for n in (2, 3, 4):
         out += vec_block(p, n)
-    out += fill(DYN_VECTOR, p)
+    big = 2.0 ** (600 if p.scalar == "float64" else 70)
+    out += fill(DYN_VECTOR, p, BIG3=num(3 * big), BIG4=num(4 * big), BIG5=num(5 * big), TINY3=num(3 / big),
+                TINY4=num(4 / big), TINY5=num(5 / big), LO=p.length_lo, HI=p.length_hi)
     out += vector_json(p)
     return out
 
@@ -531,9 +740,9 @@ import std.float as fl
 import std.json as json_m
 from std.json import Json, JsonError
 from std.algebra import Zero, Identity
-from std.vector@SFX@ import Vec2, Vec3, Vec4, Vector, vec2, vec3, vec4
+from std.vector@SFX@ import Vec2, Vec3, Vec4, Vector, vec2, vec3, vec4, vector
 from std.matrix@OSFX@ import Mat2 as Mat2@O@, Mat3 as Mat3@O@, Mat4 as Mat4@O@, Matrix as Matrix@O@
-"""
+""" + WITH_SPEC
 
 
 def mat_block(p: Precision, n: int) -> str:
@@ -542,6 +751,7 @@ def mat_block(p: Precision, n: int) -> str:
     V = f"Vec{n}"
     axes = AXES[:n]
     cs = comps(n)
+    f64 = S == "float64"
     fields = "".join(f"    {a}: {V},\n" for a in axes)
     cols_params = ", ".join(f"c{i}: {V}" for i in range(n))
     rows_params = ", ".join(f"r{i}: {V}" for i in range(n))
@@ -551,41 +761,76 @@ def mat_block(p: Precision, n: int) -> str:
     set_col = " else ".join(f"if i == {i} {{ self.{a} = v }}" for i, a in enumerate(axes))
     set_el = " else ".join(f"if c == {i} {{ self.{a}[r] = v }}" for i, a in enumerate(axes))
     row = f"vec{n}(" + ", ".join(f"self.{a}[i]" for a in axes) + ")"
-    rows_fmt = " + \", \" + ".join(f"f\"{{self.row({i})}}\"" for i in range(n))
+    rows_fmt = " + \", \" + ".join(f"with_spec(self.row({i}), spec)" for i in range(n))
     trace = " + ".join(f"self.{a}.{cs[i]}" for i, a in enumerate(axes))
     to_list = "[" + ", ".join(f"self.{a}.{c}" for a in axes for c in cs) + "]"
+    finite = " && ".join(f"self.{a}.{c}.is_finite()" for a in axes for c in cs)
+    largest = ".max(".join(f"self.{a}.abs().max_element()" for a in axes) + ")" * (n - 1)
     # by component, not as a sum of scaled columns: no temporary vectors
     # (25 % faster for Mat4 * Vec4 natively, benchmarks/linalg_std.my)
     mulv = f"{V} {{\n" + "".join(f"            {c}: " + " + ".join(f"self.{a}.{c} * v.{cs[i]}" for i, a in enumerate(axes)) + ",\n" for c in cs) + "        }"
-    ident_test = ", ".join(f"{V} {{ " + ", ".join(f"{c}: {'1.0' if j == i else '0.0'}" for j, c in enumerate(cs)) + " }" for i in range(n))
+    # the cases' matrices, by rows
+    A = [[float(n * r + c + 1) for c in range(n)] for r in range(n)]
+    A[n - 1][n - 1] += 1.0                    # not singular
+    B = [[float(x) for x in row] for row in UNIMODULAR[n]]
+    I = [[1.0 if r == c else 0.0 for c in range(n)] for r in range(n)]
+    Z = [[0.0] * n for _ in range(n)]
+    x = [1.0, -1.0, 2.0, 0.5][:n]
+    m = lambda rows: mat(n, rows)
+    v = lambda xs: vec(n, xs)
+    ax = lambda rows: [[rows[r][c] for r in range(n)] for c in range(n)]      # the columns
+    rows_text = lambda rows, show: "[" + ", ".join("(" + ", ".join(show(e) for e in row) + ")" for row in rows) + "]"
+    short = lambda e: str(int(e)) if e == int(e) else repr(e)
+    singular = {2: [[1.0, 2.0], [2.0, 4.0]], 3: [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], 4: SINGULAR4}[n]
+    big = 2.0 ** (600 if f64 else 100)
+    if f64:
+        inv_doc = """    // The inverse; None for a matrix with no inverse: one whose determinant
+    // is 0, or whose inverse isn't finite. Where its determinant under- or
+    // overflows, of the matrix scaled by a power of two that brings its
+    // largest element near 1, so a well-conditioned matrix of tiny or huge
+    // elements has one (`identity * 2^-600`, MYLA-796).
+"""
+    else:
+        inv_doc = """    // The inverse; None for a matrix with no inverse: one whose determinant
+    // is 0, or whose inverse isn't finite in float32. Computed in float64, so
+    // the determinant of a well-conditioned matrix neither under- nor
+    // overflows (MYLA-796).
+"""
     out = f"""
 #derive(Eq, Hash)
 pub struct {M} {{
 {fields}}}
 
 // A {M} of its columns.
+#test({", ".join(v(c) for c in ax(A))})[{lit(lambda i, a: v(ax(A)[i]))}]
 pub fun mat{n}({cols_params}) -> {M} {{
     return {lit(lambda i, a: f"c{i}")}
 }}
 
 // A {M} of its rows.
+#test({", ".join(v(r) for r in A)})[{m(A)}]
 pub fun mat{n}_from_rows({rows_params}) -> {M} {{
     return mat{n}({", ".join(f"r{i}" for i in range(n))}).transpose()
 }}
 
 impl Identity for {M} {{
+    #test()[{m(I)}]
     fun identity() -> {M} {{
         return {lit(lambda i, a: unit(i))}
     }}
 }}
 
 impl Zero for {M} {{
+    #test()[{m(Z)}]
     fun zero() -> {M} {{
         return {lit(lambda i, a: f"{V}.zero()")}
     }}
 }}
 
+// By rows, `[(1, 2), (3, 4)]`, the spec applied to each element.
 impl Format for {M} {{
+    #test({m(A)}, "")["{rows_text(A, short)}"]
+    #test({m(A)}, ".1")["{rows_text(A, lambda e: f'{e:.1f}')}"]
     fun format(self, spec: str) -> str {{
         return "[" + {rows_fmt} + "]"
     }}
@@ -593,51 +838,63 @@ impl Format for {M} {{
 
 // `a * b`: `b` first, then `a`, on a column vector.
 impl Mul for {M} {{
+    #test({m(A)}, {m(B)})[{m(matmul(A, B))}]
     fun mul(self, o: {M}) -> {M} {{
         return {lit(lambda i, a: f"self * o.{a}")}
     }}
 }}
 
 impl Mul<{V}, {V}> for {M} {{
+    #test({m(A)}, {v(x)})[{v([sum(A[r][k] * x[k] for k in range(n)) for r in range(n)])}]
     fun mul(self, v: {V}) -> {V} {{
         return {mulv}
     }}
 }}
 
 impl Mul<{S}> for {M} {{
+    #test({m(A)}, 0.5)[{m([[e * 0.5 for e in row] for row in A])}]
     fun mul(self, k: {S}) -> {M} {{
         return {lit(lambda i, a: f"self.{a} * k")}
     }}
 }}
 
 impl Mul<{M}, {M}> for {S} {{
+    #test(2.0, {m(A)})[{m([[e * 2.0 for e in row] for row in A])}]
     fun mul(self, m: {M}) -> {M} {{
         return m * self
     }}
 }}
 
 impl Add for {M} {{
+    #test({m(A)}, {m(B)})[{m([[a + b for a, b in zip(ra, rb)] for ra, rb in zip(A, B)])}]
     fun add(self, o: {M}) -> {M} {{
         return {lit(lambda i, a: f"self.{a} + o.{a}")}
     }}
 }}
 
 impl Sub for {M} {{
+    #test({m(A)}, {m(B)})[{m([[a - b for a, b in zip(ra, rb)] for ra, rb in zip(A, B)])}]
     fun sub(self, o: {M}) -> {M} {{
         return {lit(lambda i, a: f"self.{a} - o.{a}")}
     }}
 }}
 
 impl Neg for {M} {{
+    #test({m(A)})[{m([[-e for e in row] for row in A])}]
     fun neg(self) -> {M} {{
         return {lit(lambda i, a: f"-self.{a}")}
     }}
 }}
 
-// `m[(row, col)]`.
+// `m[(row, col)]`; a row or column outside the matrix is a runtime error
+// that names both.
 impl Index<(int, int), {S}> for {M} {{
+    #test({m(A)}, (0, {n - 1}))[{num(A[0][n - 1])}]
+    #test({m(A)}, ({n}, 0))[panic("index ({n}, 0) out of range for a {M}")]
+    #test({m(A)}, (0, -1))[panic("index (0, -1) out of range for a {M}")]
     fun index(self, rc: (int, int)) -> {S} {{
         let (r, c) = rc
+        if r < 0 || r >= {n} || c < 0 || c >= {n} {{ panic(f"index ({{r}}, {{c}}) out of range for a {M}") }}
         return self.col(c)[r]
     }}
 }}
@@ -645,12 +902,15 @@ impl Index<(int, int), {S}> for {M} {{
 impl IndexSet<(int, int), {S}> for {M} {{
     fun set_index(var self, rc: (int, int), v: {S}) {{
         let (r, c) = rc
+        if r < 0 || r >= {n} || c < 0 || c >= {n} {{ panic(f"index ({{r}}, {{c}}) out of range for a {M}") }}
         {set_el} else {{ panic(f"column {{c}} out of range for a {M}") }}
     }}
 }}
 
 // `m[i]`: the column `i`.
 impl Index<int, {V}> for {M} {{
+    #test({m(A)}, 1)[{v(ax(A)[1])}]
+    #test({m(A)}, {n})[panic("column {n} out of range for a {M}")]
     fun index(self, i: int) -> {V} {{
         return self.col(i)
     }}
@@ -663,78 +923,114 @@ impl IndexSet<int, {V}> for {M} {{
 }}
 
 impl {M} {{
+    #test({m(A)}, 0)[{v(ax(A)[0])}]
+    #test({m(A)}, -1)[panic("column -1 out of range for a {M}")]
     fun col(self, i: int) -> {V} {{
 {col_cases}        panic(f"column {{i}} out of range for a {M}")
     }}
 
+    #test({m(A)}, 1)[{v(A[1])}]
+    #test({m(A)}, {n})[panic("row {n} out of range for a {M}")]
     fun row(self, i: int) -> {V} {{
+        if i < 0 || i >= {n} {{ panic(f"row {{i}} out of range for a {M}") }}
         return {row}
     }}
 
+    #test({m(A)})[{m(ax(A))}]
     fun transpose(self) -> {M} {{
         return mat{n}({", ".join(f"self.row({i})" for i in range(n))})
     }}
 
+    #test({m(A)})[{num(sum(A[i][i] for i in range(n)))}]
     fun trace(self) -> {S} {{
         return {trace}
     }}
 
     // The elements column by column, as a GPU takes them.
+    #test({m(A)})[[{", ".join(num(e) for c in ax(A) for e in c)}]]
     fun to_list(self) -> [{S}] {{
         return {to_list}
     }}
 
+    #test({m(A)})[Matrix {{ rows: {n}, cols: {n}, data: [{", ".join(num(e) for c in ax(A) for e in c)}] }}]
     fun to_matrix(self) -> Matrix {{
         return Matrix {{ rows: {n}, cols: {n}, data: self.to_list() }}
     }}
 
+    #test({M}.identity())[{M}{p.tag}.identity()]
     fun {p.conv}(self) -> {M}{p.tag} {{
         return {M}{p.tag} {{ {", ".join(f"{a}: self.{a}.{p.conv}()" for a in axes)} }}
+    }}
+
+    // Whether every element is finite.
+    #test({M}.identity())[true]
+    #test({M}.identity() * {"(1.0 / 0.0)" if f64 else "(1.0f32 / 0.0f32)"})[false]
+    fun is_finite(self) -> bool {{
+        return {finite}
+    }}
+
+{inv_doc}    #test({m(B)})[Some({m(int_inverse(UNIMODULAR[n]))})]
+    #test({m(singular)})[None]
+    #test({M}.zero())[None]
+    #test({M}.identity() * {num(1 / big)})[Some({M}.identity() * {num(big)})]
+    fun inverse(self) -> Option<{M}> {{
+"""
+    if f64:
+        out += f"""        match invert{n}(self) {{
+            Some(m) => {{ if m.is_finite() {{ return Some(m) }} }},
+            None => {{}},
+        }}
+        let (f1, f2) = pow2_scale({largest})
+        if f1 == 1.0 {{ return None }}
+        return match invert{n}(self * f1 * f2) {{
+            Some(m) => {{
+                let r = m * f1 * f2
+                if r.is_finite() {{ Some(r) }} else {{ None }}
+            }},
+            None => None,
+        }}
+    }}
+"""
+    else:
+        out += f"""        return match self.to_f64().inverse() {{
+            Some(m) => {{
+                let r = m.to_f32()
+                if r.is_finite() {{ Some(r) }} else {{ None }}
+            }},
+            None => None,
+        }}
     }}
 """
     if n == 2:
         out += f"""
     #test(Mat2 {{ x_axis: Vec2 {{ x: 1.0, y: 3.0 }}, y_axis: Vec2 {{ x: 2.0, y: 4.0 }} }})[-2.0]
+    #test({m(B)})[1.0]
     fun determinant(self) -> {S} {{
         return self.x_axis.x * self.y_axis.y - self.y_axis.x * self.x_axis.y
-    }}
-
-    // The inverse; None for a matrix with no inverse (a determinant of 0 or
-    // not finite).
-    fun inverse(self) -> Option<Mat2> {{
-        let d = self.determinant()
-        if d == 0.0 || !d.is_finite() {{ return None }}
-        let adj = mat2(vec2(self.y_axis.y, -self.x_axis.y), vec2(-self.y_axis.x, self.x_axis.x))
-        return Some(adj * (1.0 / d))
     }}
 """
     if n == 3:
         out += f"""
     #test(Mat3 {{ x_axis: Vec3 {{ x: 2.0, y: 0.0, z: 0.0 }}, y_axis: Vec3 {{ x: 0.0, y: 3.0, z: 0.0 }}, z_axis: Vec3 {{ x: 1.0, y: 1.0, z: 4.0 }} }})[24.0]
+    #test({m(B)})[1.0]
     fun determinant(self) -> {S} {{
         return self.z_axis.dot(self.x_axis.cross(self.y_axis))
     }}
 
-    fun inverse(self) -> Option<Mat3> {{
-        let t0 = self.y_axis.cross(self.z_axis)
-        let t1 = self.z_axis.cross(self.x_axis)
-        let t2 = self.x_axis.cross(self.y_axis)
-        let d = self.z_axis.dot(t2)
-        if d == 0.0 || !d.is_finite() {{ return None }}
-        return Some(mat3(t0, t1, t2).transpose() * (1.0 / d))
-    }}
-
     // As a Mat4, a 2D affine transform's 3D one: `w` the unit column.
+    #test({m(A)})[{mat(4, [row + [0.0] for row in A] + [[0.0, 0.0, 0.0, 1.0]])}]
     fun to_mat4(self) -> Mat4 {{
         return mat4(self.x_axis.extend(0.0), self.y_axis.extend(0.0), self.z_axis.extend(0.0), vec4(0.0, 0.0, 0.0, 1.0))
     }}
 
     // The 2D point `p` transformed by an affine Mat3 (translation included).
+    #test(translation2d(vec2(1.0, 2.0)), vec2(3.0, 4.0))[vec2(4.0, 6.0)]
     fun transform_point2(self, p: Vec2) -> Vec2 {{
         return (self * p.extend(1.0)).truncate()
     }}
 
     // The 2D vector `v` transformed by an affine Mat3 (no translation).
+    #test(translation2d(vec2(1.0, 2.0)), vec2(3.0, 4.0))[vec2(3.0, 4.0)]
     fun transform_vector2(self, v: Vec2) -> Vec2 {{
         return (self * v.extend(0.0)).truncate()
     }}
@@ -742,6 +1038,8 @@ impl {M} {{
     if n == 4:
         out += f"""
     #test(Mat4 {{ x_axis: Vec4 {{ x: 2.0, y: 0.0, z: 0.0, w: 0.0 }}, y_axis: Vec4 {{ x: 0.0, y: 3.0, z: 0.0, w: 0.0 }}, z_axis: Vec4 {{ x: 0.0, y: 0.0, z: 4.0, w: 0.0 }}, w_axis: Vec4 {{ x: 1.0, y: 2.0, z: 3.0, w: 1.0 }} }})[24.0]
+    #test({m(B)})[1.0]
+    #test({m(SINGULAR4)})[0.0]
     fun determinant(self) -> {S} {{
         let a = self.x_axis
         let b = self.y_axis
@@ -756,45 +1054,124 @@ impl {M} {{
         return a.x * (b.y * s2323 - b.z * s1323 + b.w * s1223) - a.y * (b.x * s2323 - b.z * s0323 + b.w * s0223) + a.z * (b.x * s1323 - b.y * s0323 + b.w * s0123) - a.w * (b.x * s1223 - b.y * s0223 + b.z * s0123)
     }}
 
-    // The inverse (by `Matrix`'s elimination with partial pivoting); None for
-    // a matrix with no inverse.
-    fun inverse(self) -> Option<Mat4> {{
-        return match self.to_matrix().inverse() {{
-            Some(m) => Some(mat4(vec4(m.data[0], m.data[1], m.data[2], m.data[3]), vec4(m.data[4], m.data[5], m.data[6], m.data[7]), vec4(m.data[8], m.data[9], m.data[10], m.data[11]), vec4(m.data[12], m.data[13], m.data[14], m.data[15]))),
-            None => None,
-        }}
-    }}
-
     // The upper-left 3x3 part: the rotation and scale of an affine transform.
+    #test({m(A)})[{mat(3, [row[:3] for row in A[:3]])}]
     fun upper_left(self) -> Mat3 {{
         return mat3(self.x_axis.truncate(), self.y_axis.truncate(), self.z_axis.truncate())
     }}
 
     // The point `p` transformed by an affine Mat4 (translation included, no
     // perspective divide).
+    #test(translation(vec3(1.0, 2.0, 3.0)), vec3(1.0, 1.0, 1.0))[vec3(2.0, 3.0, 4.0)]
     fun transform_point3(self, p: Vec3) -> Vec3 {{
         return (self * p.extend(1.0)).truncate()
     }}
 
     // The vector `v` transformed (no translation).
+    #test(translation(vec3(1.0, 2.0, 3.0)), vec3(1.0, 1.0, 1.0))[vec3(1.0, 1.0, 1.0)]
     fun transform_vector3(self, v: Vec3) -> Vec3 {{
         return (self * v.extend(0.0)).truncate()
     }}
 
     // The point `p` transformed and divided by its `w`: a projection's.
+    #test({mat(4, [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 2.0]])}, vec3(2.0, 4.0, 6.0))[vec3(1.0, 2.0, 3.0)]
     fun project_point3(self, p: Vec3) -> Vec3 {{
         let r = self * p.extend(1.0)
         return r.truncate() / r.w
     }}
 """
     out += "}\n"
+    if f64:
+        out += invert_fun(n, B, singular)
     return out
+
+
+def invert_fun(n: int, B: list[list[float]], singular: list[list[float]]) -> str:
+    """The float64 module's inverse of a MatN as it is, its determinant tested
+    against 0: the cofactors over the determinant."""
+    m = lambda rows: mat(n, rows)
+    head = f"""
+// The inverse of `m` as it is (`Mat{n}.inverse` scales it first): the
+// adjugate over the determinant, None where that is 0 or not finite.
+#test({m(B)})[Some({m(int_inverse(UNIMODULAR[n]))})]
+#test({m(singular)})[None]
+fun invert{n}(m: Mat{n}) -> Option<Mat{n}> {{
+"""
+    if n == 2:
+        return head + """    let d = m.determinant()
+    if d == 0.0 || !d.is_finite() { return None }
+    let adj = mat2(vec2(m.y_axis.y, -m.x_axis.y), vec2(-m.y_axis.x, m.x_axis.x))
+    return Some(adj * (1.0 / d))
+}
+"""
+    if n == 3:
+        return head + """    let t0 = m.y_axis.cross(m.z_axis)
+    let t1 = m.z_axis.cross(m.x_axis)
+    let t2 = m.x_axis.cross(m.y_axis)
+    let d = m.z_axis.dot(t2)
+    if d == 0.0 || !d.is_finite() { return None }
+    return Some(mat3(t0, t1, t2).transpose() * (1.0 / d))
+}
+"""
+    return head + """    let a = m.x_axis
+    let b = m.y_axis
+    let c = m.z_axis
+    let d = m.w_axis
+    // the 2x2 minors of the first two columns and of the last two
+    let s0 = a.x * b.y - b.x * a.y
+    let s1 = a.x * b.z - b.x * a.z
+    let s2 = a.x * b.w - b.x * a.w
+    let s3 = a.y * b.z - b.y * a.z
+    let s4 = a.y * b.w - b.y * a.w
+    let s5 = a.z * b.w - b.z * a.w
+    let c5 = c.z * d.w - d.z * c.w
+    let c4 = c.y * d.w - d.y * c.w
+    let c3 = c.y * d.z - d.y * c.z
+    let c2 = c.x * d.w - d.x * c.w
+    let c1 = c.x * d.z - d.x * c.z
+    let c0 = c.x * d.y - d.x * c.y
+    let det = s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0
+    if det == 0.0 || !det.is_finite() { return None }
+    let k = 1.0 / det
+    return Some(mat4(
+        vec4((b.y * c5 - b.z * c4 + b.w * c3) * k, (-a.y * c5 + a.z * c4 - a.w * c3) * k, (d.y * s5 - d.z * s4 + d.w * s3) * k, (-c.y * s5 + c.z * s4 - c.w * s3) * k),
+        vec4((-b.x * c5 + b.z * c2 - b.w * c1) * k, (a.x * c5 - a.z * c2 + a.w * c1) * k, (-d.x * s5 + d.z * s2 - d.w * s1) * k, (c.x * s5 - c.z * s2 + c.w * s1) * k),
+        vec4((b.x * c4 - b.y * c2 + b.w * c0) * k, (-a.x * c4 + a.y * c2 - a.w * c0) * k, (d.x * s4 - d.y * s2 + d.w * s0) * k, (-c.x * s4 + c.y * s2 - c.w * s0) * k),
+        vec4((-b.x * c3 + b.y * c1 - b.z * c0) * k, (a.x * c3 - a.y * c1 + a.z * c0) * k, (-d.x * s3 + d.y * s1 - d.z * s0) * k, (c.x * s3 - c.y * s1 + c.z * s0) * k)))
+}
+"""
+
+
+POW2_SCALE = """
+// Two powers of two whose product brings `m`, a matrix's largest element's
+// size, into [1, 2) where it is far from 1 (outside 2^-120 .. 2^120), so a
+// determinant neither under- nor overflows; (1, 1) where it is near 1, zero
+// or not finite (MYLA-796).
+#test(1.5)[(1.0, 1.0)]
+#test(0.0)[(1.0, 1.0)]
+#test(2.409919865102884e-181)[(2.037035976334486e90, 2.037035976334486e90)] // 2^-600: 2^300 twice
+#test(5e-324)[(4.4989137945431964e161, 4.4989137945431964e161)] // 2^-1074: 2^537 twice
+#test(1.2448546706642979e181)[(4.909093465297727e-91, 2.4545467326488633e-91)] // 3 * 2^600 = 1.5 * 2^601: 2^-300 and 2^-301
+fun pow2_scale(m: float64) -> (float64, float64) {
+    if m == 0.0 || !m.is_finite() || (m >= 7.52316384526264e-37 && m < 1.329227995784916e36) { return (1.0, 1.0) }
+    var e = ((m.to_bits() >> 52) & 0x7FF) as int - 1023
+    if e == -1023 {
+        // a subnormal: m * 2^54 is normal
+        e = (((m * 18014398509481984.0).to_bits() >> 52) & 0x7FF) as int - 1023 - 54
+    }
+    let k = -e
+    let h = k / 2
+    return (fl.from_bits(((h + 1023) as uint64) << 52), fl.from_bits(((k - h + 1023) as uint64) << 52))
+}
+"""
 
 
 TRANSFORMS = """
 // --- transforms (column vectors, right-handed) ------------------------------
 
 // A Mat2 rotating by `angle` radians, counterclockwise.
+#test(@PI2@)[mat2(vec2(@C90@, 1.0), vec2(-1.0, @C90@))]
+#test(0.0)[mat2(vec2(1.0, 0.0), vec2(0.0, 1.0))]
 pub fun rotation2(angle: @S@) -> Mat2 {
     let c = angle.cos()
     let s = angle.sin()
@@ -802,44 +1179,52 @@ pub fun rotation2(angle: @S@) -> Mat2 {
 }
 
 // The affine Mat3 moving a 2D point by `v`.
+#test(vec2(1.0, 2.0))[mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(1.0, 2.0, 1.0))]
 pub fun translation2d(v: Vec2) -> Mat3 {
     return mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(v.x, v.y, 1.0))
 }
 
 // The affine Mat3 rotating a 2D point by `angle` radians, counterclockwise.
+#test(@PI2@)[mat3(vec3(@C90@, 1.0, 0.0), vec3(-1.0, @C90@, 0.0), vec3(0.0, 0.0, 1.0))]
 pub fun rotation2d(angle: @S@) -> Mat3 {
     let c = angle.cos()
     let s = angle.sin()
     return mat3(vec3(c, s, 0.0), vec3(-s, c, 0.0), vec3(0.0, 0.0, 1.0))
 }
 
+#test(vec2(2.0, 3.0))[mat3(vec3(2.0, 0.0, 0.0), vec3(0.0, 3.0, 0.0), vec3(0.0, 0.0, 1.0))]
 pub fun scaling2d(v: Vec2) -> Mat3 {
     return mat3(vec3(v.x, 0.0, 0.0), vec3(0.0, v.y, 0.0), vec3(0.0, 0.0, 1.0))
 }
 
 // The Mat4 moving a point by `v`.
+#test(vec3(1.0, 2.0, 3.0))[mat4(vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(0.0, 0.0, 1.0, 0.0), vec4(1.0, 2.0, 3.0, 1.0))]
 pub fun translation(v: Vec3) -> Mat4 {
     return mat4(vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(0.0, 0.0, 1.0, 0.0), vec4(v.x, v.y, v.z, 1.0))
 }
 
+#test(vec3(2.0, 3.0, 4.0))[mat4(vec4(2.0, 0.0, 0.0, 0.0), vec4(0.0, 3.0, 0.0, 0.0), vec4(0.0, 0.0, 4.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0))]
 pub fun scaling(v: Vec3) -> Mat4 {
     return mat4(vec4(v.x, 0.0, 0.0, 0.0), vec4(0.0, v.y, 0.0, 0.0), vec4(0.0, 0.0, v.z, 0.0), vec4(0.0, 0.0, 0.0, 1.0))
 }
 
 // Rotations by `angle` radians about an axis, counterclockwise looking at
 // the origin from the axis' positive side.
+#test(@PI2@)[mat4(vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, @C90@, 1.0, 0.0), vec4(0.0, -1.0, @C90@, 0.0), vec4(0.0, 0.0, 0.0, 1.0))]
 pub fun rotation_x(angle: @S@) -> Mat4 {
     let c = angle.cos()
     let s = angle.sin()
     return mat4(vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, c, s, 0.0), vec4(0.0, -s, c, 0.0), vec4(0.0, 0.0, 0.0, 1.0))
 }
 
+#test(@PI2@)[mat4(vec4(@C90@, 0.0, -1.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(1.0, 0.0, @C90@, 0.0), vec4(0.0, 0.0, 0.0, 1.0))]
 pub fun rotation_y(angle: @S@) -> Mat4 {
     let c = angle.cos()
     let s = angle.sin()
     return mat4(vec4(c, 0.0, -s, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(s, 0.0, c, 0.0), vec4(0.0, 0.0, 0.0, 1.0))
 }
 
+#test(@PI2@)[mat4(vec4(@C90@, 1.0, 0.0, 0.0), vec4(-1.0, @C90@, 0.0, 0.0), vec4(0.0, 0.0, 1.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0))]
 pub fun rotation_z(angle: @S@) -> Mat4 {
     let c = angle.cos()
     let s = angle.sin()
@@ -847,6 +1232,8 @@ pub fun rotation_z(angle: @S@) -> Mat4 {
 }
 
 // The rotation by `angle` radians about `axis` (normalized here).
+#test(vec3(0.0, 0.0, 2.0), 3.141592653589793)[rotation_z(3.141592653589793)]
+#test(vec3(1.0, 0.0, 0.0), 0.0)[Mat4.identity()]
 pub fun rotation_axis(axis: Vec3, angle: @S@) -> Mat4 {
     let a = axis.normalized()
     let c = angle.cos()
@@ -861,6 +1248,7 @@ pub fun rotation_axis(axis: Vec3, angle: @S@) -> Mat4 {
 
 // The view matrix of a camera at `eye` looking at `center`, `up` its up:
 // right-handed, the camera looking down its -z.
+#test(vec3(0.0, 0.0, 5.0), vec3(0.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0))[translation(vec3(0.0, 0.0, -5.0))]
 pub fun look_at_rh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
     let f = (center - eye).normalized()
     let s = f.cross(up).normalized()
@@ -870,6 +1258,7 @@ pub fun look_at_rh(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
 
 // A right-handed perspective projection, `fov_y` radians high, depth to
 // OpenGL's -1..1.
+#test(1.0, 2.0, 1.0, 3.0)[mat4(vec4(@F2@, 0.0, 0.0, 0.0), vec4(0.0, @F@, 0.0, 0.0), vec4(0.0, 0.0, -2.0, -1.0), vec4(0.0, 0.0, -3.0, 0.0))] // f = 1 / tan(0.5)
 pub fun perspective_rh_gl(fov_y: @S@, aspect: @S@, near: @S@, far: @S@) -> Mat4 {
     let f = 1.0 / (fov_y * 0.5).tan()
     let r = 1.0 / (near - far)
@@ -878,6 +1267,7 @@ pub fun perspective_rh_gl(fov_y: @S@, aspect: @S@, near: @S@, far: @S@) -> Mat4 
 
 // A right-handed perspective projection, depth to 0..1 (Vulkan, Metal,
 // Direct3D, WebGPU).
+#test(1.0, 2.0, 1.0, 3.0)[mat4(vec4(@F2@, 0.0, 0.0, 0.0), vec4(0.0, @F@, 0.0, 0.0), vec4(0.0, 0.0, -1.5, -1.0), vec4(0.0, 0.0, -1.5, 0.0))]
 pub fun perspective_rh(fov_y: @S@, aspect: @S@, near: @S@, far: @S@) -> Mat4 {
     let f = 1.0 / (fov_y * 0.5).tan()
     let r = far / (near - far)
@@ -886,6 +1276,7 @@ pub fun perspective_rh(fov_y: @S@, aspect: @S@, near: @S@, far: @S@) -> Mat4 {
 
 // A right-handed orthographic projection of the box `left`..`right`,
 // `bottom`..`top`, `near`..`far`, depth to OpenGL's -1..1.
+#test(-2.0, 2.0, -1.0, 1.0, 1.0, 3.0)[mat4(vec4(0.5, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(0.0, 0.0, -1.0, 0.0), vec4(0.0, 0.0, -2.0, 1.0))]
 pub fun orthographic_rh_gl(left: @S@, right: @S@, bottom: @S@, top: @S@, near: @S@, far: @S@) -> Mat4 {
     let w = 1.0 / (right - left)
     let h = 1.0 / (top - bottom)
@@ -894,6 +1285,7 @@ pub fun orthographic_rh_gl(left: @S@, right: @S@, bottom: @S@, top: @S@, near: @
 }
 
 // The same, depth to 0..1.
+#test(-2.0, 2.0, -1.0, 1.0, 1.0, 3.0)[mat4(vec4(0.5, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(0.0, 0.0, -0.5, 0.0), vec4(0.0, 0.0, -0.5, 1.0))]
 pub fun orthographic_rh(left: @S@, right: @S@, bottom: @S@, top: @S@, near: @S@, far: @S@) -> Mat4 {
     let w = 1.0 / (right - left)
     let h = 1.0 / (top - bottom)
@@ -914,14 +1306,36 @@ pub struct Matrix {
     data: [@S@],
 }
 
+// The number of elements of a `rows` x `cols` matrix, counted in int64:
+// a negative side, or more elements than a list holds, is a runtime error
+// that names the shape (D184, MYLA-796).
+#test(2, 3)[6]
+#test(0, 5)[0]
+#test(-1, 2)[panic("a -1x2 matrix: rows and columns can't be negative")]
+#test(65536, 65536)[panic("a 65536x65536 matrix takes 4294967296 elements, more than a list holds")]
+#test(46341, 46341)[panic("a 46341x46341 matrix takes 2147488281 elements, more than a list holds")]
+fun shape_len(rows: int, cols: int) -> int {
+    if rows < 0 || cols < 0 { panic(f"a {rows}x{cols} matrix: rows and columns can't be negative") }
+    let n = (rows as int64) * (cols as int64)
+    if n > 2147483647 { panic(f"a {rows}x{cols} matrix takes {n} elements, more than a list holds") }
+    return n as int
+}
+
 // The matrix of `data`, column by column.
+#test(2, 1, [5.0, 6.0])[Matrix { rows: 2, cols: 1, data: [5.0, 6.0] }]
+#test(2, 2, [5.0, 6.0])[panic("a 2x2 matrix takes 4 elements, got 2")]
+#test(65536, 65536, [])[panic("a 65536x65536 matrix takes 4294967296 elements, got 0")]
+#test(-1, 0, [])[panic("a -1x0 matrix: rows and columns can't be negative")]
 pub fun matrix(rows: int, cols: int, data: [@S@]) -> Matrix {
-    if rows < 0 || cols < 0 || data.len() != rows * cols { panic(f"a {rows}x{cols} matrix takes {rows * cols} elements, got {data.len()}") }
+    if rows < 0 || cols < 0 { panic(f"a {rows}x{cols} matrix: rows and columns can't be negative") }
+    let n = (rows as int64) * (cols as int64)
+    if (data.len() as int64) != n { panic(f"a {rows}x{cols} matrix takes {n} elements, got {data.len()}") }
     return Matrix { rows: rows, cols: cols, data: data }
 }
 
 // The matrix of `rows`, each a list of one length.
 #test([[1.0, 2.0], [3.0, 4.0]])[Matrix { rows: 2, cols: 2, data: [1.0, 3.0, 2.0, 4.0] }]
+#test([[1.0, 2.0], [3.0]])[panic("the rows of a matrix differ in length: 2 and 1")]
 pub fun from_rows(rows: [[@S@]]) -> Matrix {
     let r = rows.len()
     let c = if r == 0 { 0 } else { rows[0].len() }
@@ -937,10 +1351,13 @@ pub fun from_rows(rows: [[@S@]]) -> Matrix {
     return Matrix { rows: r, cols: c, data: data }
 }
 
+#test(1, 2)[matrix(1, 2, [0.0, 0.0])]
+#test(65536, 65536)[panic("a 65536x65536 matrix takes 4294967296 elements, more than a list holds")]
 pub fun zero_matrix(rows: int, cols: int) -> Matrix {
+    let n = shape_len(rows, cols)
     var data: [@S@] = []
     var i = 0
-    while i < rows * cols {
+    while i < n {
         data.push(0.0)
         i += 1
     }
@@ -948,6 +1365,8 @@ pub fun zero_matrix(rows: int, cols: int) -> Matrix {
 }
 
 // The `n` x `n` identity.
+#test(2)[matrix(2, 2, [1.0, 0.0, 0.0, 1.0])]
+#test(46341)[panic("a 46341x46341 matrix takes 2147488281 elements, more than a list holds")]
 pub fun identity(n: int) -> Matrix {
     var m = zero_matrix(n, n)
     var i = 0
@@ -962,14 +1381,17 @@ fun same_shape(a: Matrix, b: Matrix) {
     if a.rows != b.rows || a.cols != b.cols { panic(f"matrix shapes differ: {a.rows}x{a.cols} and {b.rows}x{b.cols}") }
 }
 
+// By rows, `[[1, 2], [3, 4]]`, the spec applied to each element.
 impl Format for Matrix {
+    #test(from_rows([[1.0, 2.0], [3.0, 4.5]]), "")["[[1, 2], [3, 4.5]]"]
+    #test(from_rows([[1.0, 2.0], [3.0, 4.5]]), ".1")["[[1.0, 2.0], [3.0, 4.5]]"]
     fun format(self, spec: str) -> str {
         var sb = StringBuilder()
         sb.append("[")
         var i = 0
         while i < self.rows {
             if i > 0 { sb.append(", ") }
-            sb.append(f"{self.row(i)}")
+            sb.append(with_spec(self.row(i), spec))
             i += 1
         }
         sb.append("]")
@@ -978,6 +1400,8 @@ impl Format for Matrix {
 }
 
 impl Index<(int, int), @S@> for Matrix {
+    #test(from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), (1, 2))[6.0]
+    #test(from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), (2, 0))[panic("index (2, 0) out of range for a 2x3 matrix")]
     fun index(self, rc: (int, int)) -> @S@ {
         let (r, c) = rc
         if r < 0 || r >= self.rows || c < 0 || c >= self.cols { panic(f"index ({r}, {c}) out of range for a {self.rows}x{self.cols} matrix") }
@@ -994,8 +1418,12 @@ impl IndexSet<(int, int), @S@> for Matrix {
 }
 
 impl Mul for Matrix {
+    #test(from_rows([[1.0, 2.0], [3.0, 4.0]]), from_rows([[0.0, 1.0], [1.0, 0.0]]))[from_rows([[2.0, 1.0], [4.0, 3.0]])]
+    #test(from_rows([[1.0, 2.0, 3.0]]), from_rows([[1.0], [1.0], [2.0]]))[from_rows([[9.0]])]
+    #test(from_rows([[1.0, 2.0, 3.0]]), from_rows([[1.0, 2.0, 3.0]]))[panic("matrix shapes don't fit: 1x3 * 1x3")]
     fun mul(self, o: Matrix) -> Matrix {
         if self.cols != o.rows { panic(f"matrix shapes don't fit: {self.rows}x{self.cols} * {o.rows}x{o.cols}") }
+        shape_len(self.rows, o.cols)    // a product past what a list holds, named before it is built
         var data: [@S@] = []
         var j = 0
         while j < o.cols {
@@ -1017,6 +1445,8 @@ impl Mul for Matrix {
 }
 
 impl Mul<Vector, Vector> for Matrix {
+    #test(from_rows([[1.0, 2.0], [3.0, 4.0]]), vector([1.0, -1.0]))[vector([-1.0, -1.0])]
+    #test(from_rows([[1.0, 2.0], [3.0, 4.0]]), vector([1.0]))[panic("matrix shapes don't fit: 2x2 * a vector of 1")]
     fun mul(self, v: Vector) -> Vector {
         if self.cols != v.data.len() { panic(f"matrix shapes don't fit: {self.rows}x{self.cols} * a vector of {v.data.len()}") }
         var data: [@S@] = []
@@ -1036,6 +1466,7 @@ impl Mul<Vector, Vector> for Matrix {
 }
 
 impl Mul<@S@> for Matrix {
+    #test(matrix(1, 2, [1.0, -2.0]), 0.5)[matrix(1, 2, [0.5, -1.0])]
     fun mul(self, k: @S@) -> Matrix {
         var data: [@S@] = []
         for x in self.data { data.push(x * k) }
@@ -1044,12 +1475,15 @@ impl Mul<@S@> for Matrix {
 }
 
 impl Mul<Matrix, Matrix> for @S@ {
+    #test(2.0, matrix(1, 2, [1.0, -2.0]))[matrix(1, 2, [2.0, -4.0])]
     fun mul(self, m: Matrix) -> Matrix {
         return m * self
     }
 }
 
 impl Add for Matrix {
+    #test(matrix(1, 2, [1.0, 2.0]), matrix(1, 2, [3.0, 5.0]))[matrix(1, 2, [4.0, 7.0])]
+    #test(matrix(1, 2, [1.0, 2.0]), matrix(2, 1, [3.0, 5.0]))[panic("matrix shapes differ: 1x2 and 2x1")]
     fun add(self, o: Matrix) -> Matrix {
         same_shape(self, o)
         var data: [@S@] = []
@@ -1063,19 +1497,26 @@ impl Add for Matrix {
 }
 
 impl Sub for Matrix {
+    #test(matrix(1, 2, [1.0, 2.0]), matrix(1, 2, [3.0, 5.0]))[matrix(1, 2, [-2.0, -3.0])]
     fun sub(self, o: Matrix) -> Matrix {
         return self + o * -1.0
     }
 }
 
 impl Neg for Matrix {
+    #test(matrix(1, 2, [1.0, -2.0]))[matrix(1, 2, [-1.0, 2.0])]
     fun neg(self) -> Matrix {
         return self * -1.0
     }
 }
 
 impl Matrix {
+    // The row `i`; an `i` outside the matrix is a runtime error that names
+    // both (MYLA-796).
+    #test(from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), 1)[vector([4.0, 5.0, 6.0])]
+    #test(from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), 2)[panic("row 2 out of range for a 2x3 matrix")]
     fun row(self, i: int) -> Vector {
+        if i < 0 || i >= self.rows { panic(f"row {i} out of range for a {self.rows}x{self.cols} matrix") }
         var d: [@S@] = []
         var j = 0
         while j < self.cols {
@@ -1085,10 +1526,16 @@ impl Matrix {
         return Vector { data: d }
     }
 
+    // The column `j`, likewise.
+    #test(from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), 2)[vector([3.0, 6.0])]
+    #test(from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), 3)[panic("column 3 out of range for a 2x3 matrix")]
+    #test(from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), -1)[panic("column -1 out of range for a 2x3 matrix")]
     fun col(self, j: int) -> Vector {
+        if j < 0 || j >= self.cols { panic(f"column {j} out of range for a {self.rows}x{self.cols} matrix") }
         return Vector { data: self.data[j * self.rows:(j + 1) * self.rows] }
     }
 
+    #test(from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))[from_rows([[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]])]
     fun transpose(self) -> Matrix {
         var data: [@S@] = []
         var i = 0
@@ -1106,6 +1553,8 @@ impl Matrix {
     // The determinant of a square matrix, by elimination with partial
     // pivoting.
     #test(Matrix { rows: 2, cols: 2, data: [4.0, 2.0, 2.0, 3.0] })[8.0]
+    #test(from_rows([[1.0, 2.0], [2.0, 4.0]]))[0.0]
+    #test(matrix(2, 3, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))[panic("a 2x3 matrix has no determinant")]
     fun determinant(self) -> @S@ {
         if self.rows != self.cols { panic(f"a {self.rows}x{self.cols} matrix has no determinant") }
         let n = self.rows
@@ -1148,7 +1597,13 @@ impl Matrix {
     }
 
     // The inverse of a square matrix, by Gauss-Jordan elimination with
-    // partial pivoting; None when it has none.
+    // partial pivoting; None when a pivot is 0 (as LAPACK's `getrf` says a
+    // matrix is singular), so a matrix singular only by its elements'
+    // rounding may give one of huge elements: `Mat4.inverse` of its
+    // `to_mat4` tells by the determinant.
+    #test(from_rows([[4.0, 2.0], [2.0, 2.0]]))[Some(from_rows([[0.5, -0.5], [-0.5, 1.0]]))]
+    #test(from_rows([[1.0, 2.0], [2.0, 4.0]]))[None]
+    #test(matrix(1, 2, [1.0, 2.0]))[panic("a 1x2 matrix has no inverse")]
     fun inverse(self) -> Option<Matrix> {
         if self.rows != self.cols { panic(f"a {self.rows}x{self.cols} matrix has no inverse") }
         let n = self.rows
@@ -1222,10 +1677,12 @@ impl Matrix {
         return Some(Matrix { rows: n, cols: n, data: data })
     }
 
+    #test(matrix(2, 1, [1.0, 2.0]))[[1.0, 2.0]]
     fun to_list(self) -> [@S@] {
         return self.data
     }
 
+    #test(matrix(2, 1, [1.5, 2.0]))[Matrix@O@ { rows: 2, cols: 1, data: [1.5, 2.0] }]
     fun @CONV@(self) -> Matrix@O@ {
         var d: [@OS@] = []
         for x in self.data { d.push(x as @OS@) }
@@ -1241,7 +1698,18 @@ def matrix_module(p: Precision) -> str:
     out += fill(MATRIX_DOC, p)
     for n in (2, 3, 4):
         out += mat_block(p, n)
-    out += fill(TRANSFORMS, p)
+    if p.scalar == "float64":
+        out += POW2_SCALE
+    # the cases' quarter turn: its angle, cos and the 1 / tan of half a radian
+    # in the module's precision (its float32 methods compute in float64)
+    if p.scalar == "float64":
+        kw = {"PI2": num(math.pi / 2), "C90": num(math.cos(math.pi / 2)), "F": num(1.0 / math.tan(0.5)),
+              "F2": num(1.0 / math.tan(0.5) / 2.0)}
+    else:
+        r32 = lambda x: struct.unpack("<f", struct.pack("<f", x))[0]
+        f = r32(1.0 / r32(math.tan(0.5)))
+        kw = {"PI2": num(math.pi / 2), "C90": num32(math.cos(r32(math.pi / 2))), "F": num32(f), "F2": num32(f / 2.0)}
+    out += fill(TRANSFORMS, p, **kw)
     out += fill(DYN_MATRIX, p)
     out += matrix_json(p)
     return out
@@ -1266,7 +1734,7 @@ from std.algebra import Identity
 from std.vector@SFX@ import Vec3, vec3
 from std.matrix@SFX@ import Mat3, Mat4, mat3
 from std.quaternion@OSFX@ import Quat as Quat@O@
-
+""" + WITH_SPEC + """
 #derive(Eq, Hash)
 pub struct Quat {
     x: @S@,
@@ -1275,11 +1743,14 @@ pub struct Quat {
     w: @S@,
 }
 
+#test(1.0, 2.0, 3.0, 4.0)[Quat { x: 1.0, y: 2.0, z: 3.0, w: 4.0 }]
 pub fun quat(x: @S@, y: @S@, z: @S@, w: @S@) -> Quat {
     return Quat { x: x, y: y, z: z, w: w }
 }
 
 // The rotation by `angle` about `axis` (normalized here).
+#test(vec3(0.0, 0.0, 2.0), 3.141592653589793)[quat(0.0, 0.0, 1.0, @C90@)]
+#test(vec3(1.0, 0.0, 0.0), 0.0)[Quat.identity()]
 pub fun from_axis_angle(axis: Vec3, angle: @S@) -> Quat {
     let a = axis.normalized()
     let h = angle * 0.5
@@ -1287,37 +1758,48 @@ pub fun from_axis_angle(axis: Vec3, angle: @S@) -> Quat {
     return Quat { x: a.x * s, y: a.y * s, z: a.z * s, w: h.cos() }
 }
 
+#test(3.141592653589793)[quat(1.0, 0.0, 0.0, @C90@)]
 pub fun from_rotation_x(angle: @S@) -> Quat {
     return from_axis_angle(vec3(1.0, 0.0, 0.0), angle)
 }
 
+#test(3.141592653589793)[quat(0.0, 1.0, 0.0, @C90@)]
 pub fun from_rotation_y(angle: @S@) -> Quat {
     return from_axis_angle(vec3(0.0, 1.0, 0.0), angle)
 }
 
+#test(3.141592653589793)[quat(0.0, 0.0, 1.0, @C90@)]
 pub fun from_rotation_z(angle: @S@) -> Quat {
     return from_axis_angle(vec3(0.0, 0.0, 1.0), angle)
 }
 
 // The rotation by `x` about the x axis, then `y` about y, then `z` about z.
+#test(0.0, 0.0, 3.141592653589793)[from_rotation_z(3.141592653589793)]
+#test(0.0, 0.0, 0.0)[Quat.identity()]
 pub fun from_euler_xyz(x: @S@, y: @S@, z: @S@) -> Quat {
     return from_rotation_z(z) * from_rotation_y(y) * from_rotation_x(x)
 }
 
 impl Identity for Quat {
+    #test()[quat(0.0, 0.0, 0.0, 1.0)]
     fun identity() -> Quat {
         return Quat { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
     }
 }
 
+// `(x, y, z, w)`, the spec applied to each component.
 impl Format for Quat {
+    #test(quat(0.0, 0.5, -1.0, 2.0), "")["(0, 0.5, -1, 2)"]
+    #test(quat(0.0, 0.5, -1.0, 2.0), ".2")["(0.00, 0.50, -1.00, 2.00)"]
     fun format(self, spec: str) -> str {
-        return f"({self.x}, {self.y}, {self.z}, {self.w})"
+        return "(" + with_spec(self.x, spec) + ", " + with_spec(self.y, spec) + ", " + with_spec(self.z, spec) + ", " + with_spec(self.w, spec) + ")"
     }
 }
 
 // The rotation by `o` first, then by `self` (Hamilton's product).
 impl Mul for Quat {
+    #test(quat(1.0, 0.0, 0.0, 0.0), quat(0.0, 1.0, 0.0, 0.0))[quat(0.0, 0.0, 1.0, 0.0)] // i * j = k
+    #test(quat(1.0, 2.0, 3.0, 4.0), Quat.identity())[quat(1.0, 2.0, 3.0, 4.0)]
     fun mul(self, o: Quat) -> Quat {
         return Quat {
             x: self.w * o.x + self.x * o.w + self.y * o.z - self.z * o.y,
@@ -1330,6 +1812,7 @@ impl Mul for Quat {
 
 // The vector `v` rotated.
 impl Mul<Vec3, Vec3> for Quat {
+    #test(quat(0.0, 0.0, 1.0, 0.0), vec3(1.0, 2.0, 3.0))[vec3(-1.0, -2.0, 3.0)] // a half turn about z
     fun mul(self, v: Vec3) -> Vec3 {
         let u = vec3(self.x, self.y, self.z)
         let t = u.cross(v) * 2.0
@@ -1338,48 +1821,67 @@ impl Mul<Vec3, Vec3> for Quat {
 }
 
 impl Mul<@S@> for Quat {
+    #test(quat(1.0, 2.0, 3.0, 4.0), 0.5)[quat(0.5, 1.0, 1.5, 2.0)]
     fun mul(self, k: @S@) -> Quat {
         return Quat { x: self.x * k, y: self.y * k, z: self.z * k, w: self.w * k }
     }
 }
 
 impl Mul<Quat, Quat> for @S@ {
+    #test(2.0, quat(1.0, 2.0, 3.0, 4.0))[quat(2.0, 4.0, 6.0, 8.0)]
     fun mul(self, q: Quat) -> Quat {
         return q * self
     }
 }
 
 impl Add for Quat {
+    #test(quat(1.0, 2.0, 3.0, 4.0), quat(4.0, 3.0, 2.0, 1.0))[quat(5.0, 5.0, 5.0, 5.0)]
     fun add(self, o: Quat) -> Quat {
         return Quat { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z, w: self.w + o.w }
     }
 }
 
 impl Sub for Quat {
+    #test(quat(1.0, 2.0, 3.0, 4.0), quat(4.0, 3.0, 2.0, 1.0))[quat(-3.0, -1.0, 1.0, 3.0)]
     fun sub(self, o: Quat) -> Quat {
         return Quat { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z, w: self.w - o.w }
     }
 }
 
 impl Neg for Quat {
+    #test(quat(1.0, -2.0, 3.0, -4.0))[quat(-1.0, 2.0, -3.0, 4.0)]
     fun neg(self) -> Quat {
         return Quat { x: -self.x, y: -self.y, z: -self.z, w: -self.w }
     }
 }
 
 impl Quat {
+    #test(quat(1.0, 2.0, 3.0, 4.0), quat(1.0, 1.0, 1.0, -1.0))[2.0]
     fun dot(self, o: Quat) -> @S@ {
         return self.x * o.x + self.y * o.y + self.z * o.z + self.w * o.w
     }
 
+    #test(quat(1.0, 2.0, 3.0, 4.0))[30.0]
     fun length_squared(self) -> @S@ {
         return self.dot(self)
     }
 
+    // The length, also of a quaternion whose squares would over- or
+    // underflow (MYLA-796): then of it scaled by its largest component.
+    #test(quat(1.0, 1.0, 1.0, 1.0))[2.0]
+    #test(quat(@BIG@, @BIG@, @BIG@, @BIG@))[@BIG2@]
+    #test(quat(0.0, 0.0, 0.0, 0.0))[0.0]
     fun length(self) -> @S@ {
-        return self.dot(self).sqrt()
+        let l = self.dot(self).sqrt()
+        if l > @LO@ && l < @HI@ { return l }
+        let m = self.x.abs().max(self.y.abs()).max(self.z.abs().max(self.w.abs()))
+        if m == 0.0 || !m.is_finite() { return l }
+        let u = self * (1.0 / m)
+        return u.dot(u).sqrt() * m
     }
 
+    #test(quat(1.0, 1.0, 1.0, 1.0))[quat(0.5, 0.5, 0.5, 0.5)]
+    #test(quat(@BIG@, @BIG@, @BIG@, @BIG@))[quat(0.5, 0.5, 0.5, 0.5)]
     fun normalized(self) -> Quat {
         return self * (1.0 / self.length())
     }
@@ -1390,6 +1892,8 @@ impl Quat {
     }
 
     // The inverse rotation (the conjugate over the squared length).
+    #test(quat(0.0, 0.0, 0.0, 2.0))[quat(0.0, 0.0, 0.0, 0.5)]
+    #test(quat(0.0, 0.0, 1.0, 0.0))[quat(0.0, 0.0, -1.0, 0.0)]
     fun inverse(self) -> Quat {
         return self.conjugate() * (1.0 / self.length_squared())
     }
@@ -1397,6 +1901,10 @@ impl Quat {
     // The rotation `t` of the way from `self` to `end` along the shorter
     // arc, at a constant angular speed (a normalized blend when they are
     // nearly the same).
+    #test(Quat.identity(), quat(0.0, 0.0, 1.0, 0.0), 0.0)[Quat.identity()]
+    #test(Quat.identity(), quat(0.0, 0.0, 1.0, 0.0), 1.0)[quat(0.0, 0.0, 1.0, 0.0)]
+    #test(Quat.identity(), Quat.identity(), 0.5)[Quat.identity()]
+    #test(Quat.identity(), quat(0.0, 0.0, 0.0, -1.0), 0.5)[Quat.identity()] // the shorter arc: -q is q
     fun slerp(self, end: Quat, t: @S@) -> Quat {
         var e = end
         var d = self.dot(end)
@@ -1411,6 +1919,8 @@ impl Quat {
     }
 
     // The rotation as a matrix (of a unit quaternion).
+    #test(quat(0.0, 0.0, 1.0, 0.0))[mat3(vec3(-1.0, 0.0, 0.0), vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, 1.0))]
+    #test(Quat.identity())[Mat3.identity()]
     fun to_mat3(self) -> Mat3 {
         let x2 = self.x + self.x
         let y2 = self.y + self.y
@@ -1427,12 +1937,15 @@ impl Quat {
         return mat3(vec3(1.0 - (yy + zz), xy + wz, xz - wy), vec3(xy - wz, 1.0 - (xx + zz), yz + wx), vec3(xz + wy, yz - wx, 1.0 - (xx + yy)))
     }
 
+    #test(quat(1.0, 0.0, 0.0, 0.0))[mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, -1.0)).to_mat4()]
     fun to_mat4(self) -> Mat4 {
         return self.to_mat3().to_mat4()
     }
 
     // The axis and the angle of the rotation (of a unit quaternion); the x
     // axis and 0 for none.
+    #test(quat(0.0, 0.0, 1.0, 0.0))[(vec3(0.0, 0.0, 1.0), @PI@)]
+    #test(Quat.identity())[(vec3(1.0, 0.0, 0.0), 0.0)]
     fun to_axis_angle(self) -> (Vec3, @S@) {
         let w = self.w.clamp(-1.0, 1.0)
         let s = (1.0 - w * w).sqrt()
@@ -1440,6 +1953,7 @@ impl Quat {
         return (vec3(self.x / s, self.y / s, self.z / s), 2.0 * w.acos())
     }
 
+    #test(quat(1.5, 2.0, 3.0, 4.0))[Quat@O@ { x: 1.5, y: 2.0, z: 3.0, w: 4.0 }]
     fun @CONV@(self) -> Quat@O@ {
         return Quat@O@ { x: self.x as @OS@, y: self.y as @OS@, z: self.z as @OS@, w: self.w as @OS@ }
     }
@@ -1450,7 +1964,13 @@ impl Quat {
 def quaternion_module(p: Precision) -> str:
     out = HEADER.format(module="quaternion", suffix=p.suffix, what="quaternions", scalar=p.scalar,
                         other_scalar=p.other_scalar, other_suffix=p.other_suffix)
-    return out + fill(QUATERNION, p) + quaternion_json(p)
+    big = 2.0 ** (600 if p.scalar == "float64" else 70)
+    if p.scalar == "float64":
+        c90 = num(math.cos(math.pi / 2))
+    else:
+        c90 = num32(math.cos(struct.unpack("<f", struct.pack("<f", math.pi))[0] / 2))
+    return out + fill(QUATERNION, p, C90=c90, BIG=num(big), BIG2=num(2 * big), LO=p.length_lo, HI=p.length_hi,
+                      PI=lit(p, math.pi)) + quaternion_json(p)
 
 
 # --------------------------------------------------------------------------
@@ -1465,7 +1985,9 @@ JSON_HELPER = """
 // them, so a document's `"translation": [1, 2, 3]` reads as a `Vec3`.
 
 // The numbers of the JSON array `j`, `n` of them (any number when `n` is
-// negative), for the `FromJson` impl of the type `what`.
+// negative), for the `FromJson` impl of the type `what`. A `null` is NaN,
+// which std.json writes as `null` (as JavaScript does), so a NaN reads back
+// (MYLA-796; `json_nan` tests it, as a NaN equals nothing).
 #test(Json.Array([Json.Int(1i64), Json.Float(2.5)]), 2, "Vec2")[Ok([1.0, 2.5])]
 #test(Json.Array([Json.Int(1i64)]), 2, "Vec2")[Err(json_m.wrong_type("an array of 2 numbers for 'Vec2'", Json.Array([Json.Int(1i64)])))]
 fun json_numbers(j: Json, n: int, what: str) -> Result<[@S@], JsonError> {
@@ -1476,7 +1998,10 @@ fun json_numbers(j: Json, n: int, what: str) -> Result<[@S@], JsonError> {
             var out: [@S@] = []
             var i = 0
             for item in items {
-                out.push(json_m.within(@S@.from_json(item), f"[{i}]")?)
+                match item {
+                    Json.Null => { out.push(fl.nan() as @S@) },
+                    _ => { out.push(json_m.within(@S@.from_json(item), f"[{i}]")?) },
+                }
                 i += 1
             }
             return Ok(out)
@@ -1500,6 +2025,7 @@ impl json_m.ToJson for {t} {{
 }}
 
 impl json_m.FromJson for {t} {{
+    #test({test_json})[Ok({test_value})]
     fun from_json(j: Json) -> Result<{t}, JsonError> {{
         let c = json_numbers(j, {len(elems)}, "{t}")?
         return Ok({build})
@@ -1530,8 +2056,25 @@ impl json_m.ToJson for Vector {
 }
 
 impl json_m.FromJson for Vector {
+    #test(Json.Array([Json.Float(1.0), Json.Int(2i64)]))[Ok(vector([1.0, 2.0]))]
+    #test(Json.Object([]))[Err(json_m.wrong_type("an array of numbers for 'Vector'", Json.Object([])))]
     fun from_json(j: Json) -> Result<Vector, JsonError> {
         return Ok(Vector { data: json_numbers(j, -1, "Vector")? })
+    }
+}
+
+// A NaN component is written `null` and reads back as NaN (MYLA-796).
+#test
+fun json_nan() {
+    let text = json_m.encode(vec2(fl.nan() as @S@, 1.0))
+    assert(text == "[null,1.0]", text)
+    match json_m.decode<Vec2>(text) {
+        Ok(v) => { assert(v.x.is_nan() && v.y == 1.0, "a Vec2 with a NaN") },
+        Err(e) => { panic(f"{e}") },
+    }
+    match json_m.decode<Vector>("[null]") {
+        Ok(v) => { assert(v.len() == 1 && v[0].is_nan(), "a Vector with a NaN") },
+        Err(e) => { panic(f"{e}") },
     }
 }
 """, p)
@@ -1559,14 +2102,23 @@ impl json_m.ToJson for Matrix {
     }
 }
 
+// Its shape is counted in int64, so a document's can't overflow it into a
+// matrix whose shape lies (D184, MYLA-796).
 impl json_m.FromJson for Matrix {
+    #test(Json.Object([("rows", Json.Int(1i64)), ("cols", Json.Int(2i64)), ("data", Json.Array([Json.Int(1i64), Json.Float(2.5)]))]))[Ok(matrix(1, 2, [1.0, 2.5]))]
+    #test(Json.Object([("rows", Json.Int(65536i64)), ("cols", Json.Int(65536i64)), ("data", Json.Array([]))]))[Err(JsonError { kind: json_m.JsonErrorKind.WrongType, msg: "a 65536x65536 matrix takes 4294967296 elements, got 0", line: 0, col: 0, path: "$.data" })]
+    #test(Json.Object([("rows", Json.Int(-1i64)), ("cols", Json.Int(0i64)), ("data", Json.Array([]))]))[Err(JsonError { kind: json_m.JsonErrorKind.WrongType, msg: "a -1x0 matrix: rows and columns can't be negative", line: 0, col: 0, path: "$.rows" })]
     fun from_json(j: Json) -> Result<Matrix, JsonError> {
         let ms = json_m.members(j, "Matrix")?
         let rows = json_m.member<int>(ms, "rows")?
         let cols = json_m.member<int>(ms, "cols")?
         let data = json_m.member<[@S@]>(ms, "data")?
-        if rows < 0 || cols < 0 || data.len() != rows * cols {
-            return Err(JsonError { kind: json_m.JsonErrorKind.WrongType, msg: f"a {rows}x{cols} matrix takes {rows * cols} elements, got {data.len()}", line: 0, col: 0, path: "$.data" })
+        if rows < 0 || cols < 0 {
+            return Err(JsonError { kind: json_m.JsonErrorKind.WrongType, msg: f"a {rows}x{cols} matrix: rows and columns can't be negative", line: 0, col: 0, path: if rows < 0 { "$.rows" } else { "$.cols" } })
+        }
+        let n = (rows as int64) * (cols as int64)
+        if (data.len() as int64) != n {
+            return Err(JsonError { kind: json_m.JsonErrorKind.WrongType, msg: f"a {rows}x{cols} matrix takes {n} elements, got {data.len()}", line: 0, col: 0, path: "$.data" })
         }
         return Ok(Matrix { rows: rows, cols: cols, data: data })
     }
