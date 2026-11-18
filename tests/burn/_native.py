@@ -47,11 +47,16 @@ _RUN_MJS = os.path.join(_ROOT, "tools", "wasm", "run.mjs")
 # where Ubuntu's `wine64` package puts it (that package alone puts nothing
 # on PATH).
 _WINE_PATHS = ["/usr/lib/wine/wine64"]
+_WINE_RUN = os.path.join(_ROOT, "tests", "burn", "_wine_run.py")
 
 
 def wine() -> list[str]:
-    """The command a Windows program runs under here; [] for none."""
+    """The command a Windows program runs under here; [] for none. (Wine's
+    own: MYLA_EMULATOR's words after `_wine_run.py` when they start with
+    it, as `wine_run` gives them.)"""
     words = os.environ.get("MYLA_EMULATOR", "").split() if TEST_TARGET == "x86_64-windows" else []
+    if _WINE_RUN in words:
+        words = words[words.index(_WINE_RUN) + 1:]
     if words:
         return words
     for name in ("wine", "wine64"):
@@ -59,6 +64,18 @@ def wine() -> list[str]:
         if found:
             return [found]
     return [p for p in _WINE_PATHS if os.access(p, os.X_OK)][:1]
+
+
+def wine_run() -> list[str]:
+    """`wine()` behind `_wine_run.py`, which becomes the program (its pid,
+    signals and time limits are the program's) with its output copied, so
+    that the output ends when the program does (MYLA-759: Wine's services,
+    started by the first program of a server, held its standard error, and
+    a test reading it waited for them); [] for no Wine. The command for a
+    test's runs of a Windows program, and MYLA_EMULATOR's for `myla test
+    --target x86_64-windows`."""
+    words = wine()
+    return [sys.executable, "-I", "-S", _WINE_RUN, *words] if words else []
 
 
 def wine_server() -> str:
@@ -79,7 +96,9 @@ def wine_env(persist: str = "60") -> None:
     starts them from the first program of a new server, which they outlive
     holding its standard streams: a test reading a program's output would wait
     for them, while the server lives, never seeing the end. The server is
-    started first, kept `persist` seconds after its last program (`-p60`;
+    started once the prefix is there (a new prefix is made and its setup
+    waited for first, MYLA-759), kept `persist` seconds after its last
+    program (`-p60`;
     scripts/test-target.py starts its own for the whole run, `-p`, which this
     finds running), so the services aren't started again between tests."""
     os.environ.setdefault("WINEDEBUG", "-all")
@@ -92,10 +111,18 @@ def wine_env(persist: str = "60") -> None:
         return
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     server = wine_server()
+    if not os.path.isdir(os.environ["WINEPREFIX"]):
+        # the prefix made first, and its setup waited for to its end (its
+        # server stopped): a server can't start on a prefix that isn't there
+        # yet, and one started before would have stopped at once, leaving
+        # the suites to a server of the boot's, setting up as they ran
+        # (MYLA-759: CI's runners start with no prefix)
+        subprocess.run([*wine(), "wineboot", "--init"], timeout=300, **quiet)
+        if server:
+            subprocess.run([server, "-w"], timeout=300, **quiet)
     if server:
         subprocess.run([server, "-p" + persist], **quiet)
-    boot = ["wineboot"] if os.path.isdir(os.environ["WINEPREFIX"]) else ["wineboot", "--init"]
-    subprocess.run([*wine(), *boot], timeout=300, **quiet)
+    subprocess.run([*wine(), "wineboot"], timeout=300, **quiet)
 
 
 def windows_imports(asm: str) -> list[tuple[str, list[str]]]:
@@ -126,7 +153,7 @@ def run_argv(binary: str, argv0: str = "prog", args=()) -> tuple[list[str], str 
         return ["node", _RUN_MJS, "--argv0", argv0, binary, *args], None
     if TEST_TARGET == "x86_64-windows":
         # (Wine gives a program its Windows path as `argv[0]`, not `argv0`)
-        return [*wine(), binary, *args], None
+        return [*wine_run(), binary, *args], None
     return [argv0, *args], binary
 
 

@@ -46,6 +46,8 @@ Work package of [[Project/Review-2026-11-17]], lane "Checker" (section 5). Files
 
 ## Proposals
 
+Accepted by the owner on 2026-11-18 as D263 to D267.
+
 Open points the decisions leave, each built as recommended:
 
 1. **D255 and a `std.my` file.** Built: a file `std.my` at the root is refused too, as [[Language/Modules]] said ("a project file or folder named `std` is an error"); its module id `std` collides with nothing today. Alternative: the folder only, as D255's words.

@@ -87,6 +87,9 @@ pub const RETURNS_MEMORY: bool = true
 // Whether `advise_huge_pages` can back memory with huge pages, 2 MiB each
 // (transparent huge pages, with 4 KB pages).
 pub const HUGE_PAGES: bool = true
+// How much of a chunk of the heap std.rt commits at a time: 0, as mapped
+// memory is usable at once (MYLA-861).
+pub const HEAP_COMMIT: int64 = 0
 
 const SYS_READ: int64 = 63
 const SYS_WRITE: int64 = 64
@@ -1890,6 +1893,23 @@ pub fun map_memory(n: int64) -> int64 {
 // The `n` bytes at `p` (a whole number of pages of a mapping) given back.
 pub fun unmap_memory(p: int64, n: int64) {
     sys(SYS_MUNMAP, p, n, 0)
+}
+
+// `n` bytes of address space for the heap's chunks (MYLA-861): mapped, as
+// `map_memory` does, usable at once (HEAP_COMMIT is 0).
+pub fun reserve_memory(n: int64) -> int64 {
+    return map_memory(n)
+}
+
+// Nothing to commit: what is mapped is usable (HEAP_COMMIT is 0).
+pub fun commit_memory(p: int64, n: int64) -> bool {
+    return true
+}
+
+// A job of its own for this process (MYLA-819): none here, where std.test
+// makes a process group instead (`own_group`): false.
+pub fun own_job() -> bool {
+    return false
 }
 
 // The `n` bytes at `p` (whole pages of a mapping) backed by huge pages where

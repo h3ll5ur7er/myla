@@ -121,7 +121,7 @@ What it does with the response:
 | --- | --- | --- |
 | `workers` | 64 | How many requests are served at once, each by a task of its own; a connection waiting for its next request, or for the rest of one begun, holds none |
 | `max_connections` | 1024 | How many connections are kept open between their requests at most (negative: no limit): past it, the kept one that has waited longest since it last got on is closed for the new one |
-| `max_requests` | -1 | The requests answered before it returns (negative: no limit) |
+| `max_requests` | -1 | The requests answered before it returns (negative: no limit); one whose answer couldn't be sent, its connection closed under it, isn't counted, and a request beyond those being answered waits until they are ([[MYLA-863]]) |
 | `max_header_bytes` | 65536 | A request's head (and its trailers) at most: 431 past it |
 | `max_body_bytes` | 16777216 | A request's body at most (16 MiB): 413 past it, and past 2,147,483,647 bytes (a `str`'s most) whatever the limit. The bodies of the requests kept waiting for more of them share `workers` times it: past that, 503 |
 | `keep_alive_ms` | 60000 | How long after it was accepted a connection takes new requests (negative: as long as the client keeps it) |

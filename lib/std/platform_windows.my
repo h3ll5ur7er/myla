@@ -93,12 +93,19 @@ pub const RETURNS_MEMORY: bool = true
 // Whether `advise_huge_pages` can back memory with huge pages (large pages
 // need a privilege a program rarely holds: none asked for).
 pub const HUGE_PAGES: bool = false
+// How much of a chunk of the heap std.rt commits at a time, as its cells
+// reach it (`reserve_memory`, `commit_memory`): Windows counts committed
+// memory against the system's limit, RAM and page file, and a chunk
+// committed whole at its map was 16 MiB for each worker that allocated
+// at all (MYLA-861).
+pub const HEAP_COMMIT: int64 = 262144
 
 const ENOSYS: int64 = -UNSUPPORTED
 const LOW32: int64 = 4294967295i64
 // the code page of UTF-8 (D215)
 const CP_UTF8: int64 = 65001
 // VirtualAlloc's and VirtualFree's
+const MEM_COMMIT: int64 = 4096
 const MEM_COMMIT_RESERVE: int64 = 12288
 const MEM_DECOMMIT: int64 = 16384
 const MEM_RELEASE: int64 = 32768
@@ -4924,6 +4931,27 @@ pub fun map_memory(n: int64) -> int64 {
     return p
 }
 
+// `n` bytes of address space for the heap's chunks, reserved and nothing
+// of it committed (MYLA-861): `commit_memory` makes a part usable, as std.rt
+// reaches it. (Committing on a fault, as the workers' rings are, D275,
+// doesn't do for the heap: a system call writing into reserved memory
+// fails, `ReadFile` into a fresh buffer with ERROR_NOACCESS.) The address,
+// or minus the cause.
+pub fun reserve_memory(n: int64) -> int64 {
+    let p = __syscall5(__rt_get("__imp_VirtualAlloc"), 0, n, MEM_RESERVE, PAGE_READWRITE, 0)
+    if p == 0 {
+        return failed()
+    }
+    return p
+}
+
+// The `n` bytes at `p` (whole pages of a mapping of `reserve_memory`)
+// committed, zeroed, readable and writable: whether they are (not past the
+// system's commit limit).
+pub fun commit_memory(p: int64, n: int64) -> bool {
+    return __syscall5(__rt_get("__imp_VirtualAlloc"), p, n, MEM_COMMIT, PAGE_READWRITE, 0) != 0
+}
+
 // The `n` bytes at `p` (whole pages of a mapping) given back: decommitted,
 // and the mapping they are part of released once none of it is committed
 // (`VirtualFree` releases only a whole one). So a mapping given back in
@@ -4959,14 +4987,16 @@ pub fun advise_huge_pages(p: int64, n: int64) {
 // --- time --------------------------------------------------------------------------
 
 // The monotonic clock, in nanoseconds since some fixed point in the past
-// (`QueryPerformanceCounter` at its frequency).
+// (`QueryPerformanceCounter` at its frequency). Its two words are the
+// thread's own `__win_memory_info`'s, not a cell of the heap: every worker
+// reads the clock while timers wait, and a cell made a worker that ran
+// nothing of the program commit its arena (MYLA-861).
 pub fun clock_ns() -> int64 {
-    let w = __alloc(16)
+    let w = __rt_addr("__win_memory_info")
     let c = __syscall(__rt_get("__imp_QueryPerformanceCounter"), w, 0, 0)
     let f = __syscall(__rt_get("__imp_QueryPerformanceFrequency"), w + 8, 0, 0)
     let ticks = __load64(w)
     var freq = __load64(w + 8)
-    __free(w)
     if freq <= 0 {
         freq = 1
     }
@@ -5562,6 +5592,37 @@ pub fun cpus_allowed() -> int64 {
     }
     __free(masks)
     return n
+}
+
+// This process in a job object of its own, whose one handle it holds, set
+// to kill every process in it when it closes (`JOB_OBJECT_LIMIT_KILL_ON_
+// JOB_CLOSE`, MYLA-819): what it starts from now on is in the job too, so
+// once it ends, killed or not, so does all of that. std.test's test child
+// makes one, as it leads a process group on Linux: Windows has none, and a
+// case killed past its time limit left its children running. (A job within
+// the job this process may be in already: Windows 8 and later.) Whether it
+// is in one.
+pub fun own_job() -> bool {
+    let job = __syscall(__rt_get("__imp_CreateJobObjectW"), 0, 0, 0)
+    if job == 0 {
+        return false
+    }
+    // JOBOBJECT_EXTENDED_LIMIT_INFORMATION, 144 bytes, its LimitFlags at 16
+    let info = __alloc(144)
+    var i: int64 = 0
+    while i < 144 {
+        __store64(info + i, 0)
+        i += 8
+    }
+    __store32(info + 16, 8192u32)
+    // (JobObjectExtendedLimitInformation: 9; this process: its pseudo handle -1)
+    let set = ok(__syscall5(__rt_get("__imp_SetInformationJobObject"), job, 9, info, 144, 0))
+    __free(info)
+    if !set || !ok(__syscall(__rt_get("__imp_AssignProcessToJobObject"), job, -1, 0)) {
+        let c = __syscall(__rt_get("__imp_CloseHandle"), job, 0, 0)
+        return false
+    }
+    return true
 }
 
 // The CPU given up by a thread spinning for a lock (`SwitchToThread`), so
