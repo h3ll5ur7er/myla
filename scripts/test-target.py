@@ -79,7 +79,9 @@ def prepare_wine() -> None:
         atexit.register(subprocess.run, [server, "-k"], capture_output=True)
     else:
         _native.wine_env()
-    wine = _native.wine()
+    # (behind `_wine_run.py`, which ends with the program, whatever
+    # Wine's services still hold, MYLA-759)
+    wine = _native.wine_run()
     if wine and not os.environ.get("MYLA_EMULATOR"):
         os.environ["MYLA_EMULATOR"] = " ".join(wine)
 

@@ -47,11 +47,16 @@ _RUN_MJS = os.path.join(_ROOT, "tools", "wasm", "run.mjs")
 # where Ubuntu's `wine64` package puts it (that package alone puts nothing
 # on PATH).
 _WINE_PATHS = ["/usr/lib/wine/wine64"]
+_WINE_RUN = os.path.join(_ROOT, "tests", "burn", "_wine_run.py")
 
 
 def wine() -> list[str]:
-    """The command a Windows program runs under here; [] for none."""
+    """The command a Windows program runs under here; [] for none. (Wine's
+    own: MYLA_EMULATOR's words after `_wine_run.py` when they start with
+    it, as `wine_run` gives them.)"""
     words = os.environ.get("MYLA_EMULATOR", "").split() if TEST_TARGET == "x86_64-windows" else []
+    if _WINE_RUN in words:
+        words = words[words.index(_WINE_RUN) + 1:]
     if words:
         return words
     for name in ("wine", "wine64"):
@@ -59,6 +64,18 @@ def wine() -> list[str]:
         if found:
             return [found]
     return [p for p in _WINE_PATHS if os.access(p, os.X_OK)][:1]
+
+
+def wine_run() -> list[str]:
+    """`wine()` behind `_wine_run.py`, which becomes the program (its pid,
+    signals and time limits are the program's) with its output copied, so
+    that the output ends when the program does (MYLA-759: Wine's services,
+    started by the first program of a server, held its standard error, and
+    a test reading it waited for them); [] for no Wine. The command for a
+    test's runs of a Windows program, and MYLA_EMULATOR's for `myla test
+    --target x86_64-windows`."""
+    words = wine()
+    return [sys.executable, "-I", "-S", _WINE_RUN, *words] if words else []
 
 
 def wine_server() -> str:
@@ -136,7 +153,7 @@ def run_argv(binary: str, argv0: str = "prog", args=()) -> tuple[list[str], str 
         return ["node", _RUN_MJS, "--argv0", argv0, binary, *args], None
     if TEST_TARGET == "x86_64-windows":
         # (Wine gives a program its Windows path as `argv[0]`, not `argv0`)
-        return [*wine(), binary, *args], None
+        return [*wine_run(), binary, *args], None
     return [argv0, *args], binary
 
 

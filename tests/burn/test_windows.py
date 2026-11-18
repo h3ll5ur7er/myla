@@ -41,7 +41,7 @@ import tempfile
 import time
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, wine, wine_env
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, wine, wine_env, wine_run
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 TOOLS = ("clang", "llvm-dlltool", "lld-link")
@@ -139,6 +139,38 @@ class WinePrefix(unittest.TestCase):
             server = shutil.which("wineserver") or server
             kill = subprocess.run([server, "-k"], env=env, capture_output=True, text=True, timeout=60)
             self.assertEqual(kill.returncode, 0, "no server for the prefix 6 s after wine_env")
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE and HAVE_WINDOWS, WINDOWS_SKIP)
+    def test_a_run_ends_with_its_program_whatever_the_services_hold(self):
+        """A program that is the first of its Wine server starts the prefix's
+        services, which outlive it holding its standard error as long as the
+        server lives (MYLA-759): `wine_run`'s run ends with the program. The
+        suites ran programs with `wine()` alone, and on 2026-11-18 a run of
+        `scopes_wait_for_children` that ended at once timed out at 60 s
+        (master's e6e1b9e), one without a time limit waited for over an
+        hour (4c91ba2); here such a run took the server's 30 s."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {k: v for k, v in os.environ.items() if k != "TMPDIR"}
+            env.update(WINEPREFIX=os.path.join(tmp, "prefix"), WINEDEBUG="-all")
+            quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+            server = shutil.which("wineserver") or os.path.join(os.path.dirname(wine()[0]), "wineserver")
+            # the prefix made, its boot's server and services stopped
+            subprocess.run([*wine(), "wineboot", "--init"], env=env, timeout=300, **quiet)
+            subprocess.run([server, "-w"], env=env, timeout=300, **quiet)
+            self.addCleanup(subprocess.run, [server, "-k"], env=env, timeout=60, **quiet)
+            with open(os.path.join(tmp, "main.my"), "w", encoding="utf-8") as fh:
+                fh.write('fun main() {\n    print("hello")\n}\n')
+            built = subprocess.run([selfhost_tool("main"), "build", "main.my", "--target", "x86_64-windows",
+                                    "--stdlib", STDLIB_ROOT, "-o", "prog.exe"], capture_output=True, text=True,
+                                   cwd=tmp, timeout=300)
+            self.assertEqual((built.stderr, built.returncode), ("", 0))
+            # a server kept 30 s, with no services yet: the program starts them
+            subprocess.run([server, "-p30"], env=env, timeout=60, **quiet)
+            start = time.monotonic()
+            ran = subprocess.run([*wine_run(), os.path.join(tmp, "prog.exe")], capture_output=True, cwd=tmp,
+                                 env=env, timeout=60)
+            self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"hello\n", b"", 0))
+            self.assertLess(time.monotonic() - start, 20, "the run waited for the server's 30 s")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
