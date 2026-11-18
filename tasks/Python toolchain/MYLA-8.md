@@ -28,7 +28,7 @@ fun main() {
 
 ## Actual
 
-`2 1 4 3` natively. Both [[src/myla/compiler/codegen_x86.py#L3316-L3320]] and the call path ([[src/myla/compiler/codegen_x86.py#L3773-L3782]]) evaluate in reverse; [[selfhost/codegen.my]] copied the same order.
+`2 1 4 3` natively. Both `src/myla/compiler/codegen_x86.py#L3316-L3320` and the call path (`src/myla/compiler/codegen_x86.py#L3773-L3782`) evaluate in reverse; [[selfhost/codegen.my]] copied the same order.
 
 ## Done when
 
@@ -54,3 +54,5 @@ A side finding, partial application evaluating its filled arguments at every cal
 - Bootstrap fixed point holds: 6,078,345 bytes of assembly (5,936,708 before, +2.4%; 6,204,738 without the literal shortcuts).
 - Speed: fib(40) 1.22–1.40 s against 1.12–1.59 s before (noise); self-compilation 2.07–2.37 s against 2.13–2.42 s. Without the shortcuts fib(40) was about 25% slower.
 - Unit, integration and burn suites pass.
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

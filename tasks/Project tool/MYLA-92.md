@@ -8,7 +8,7 @@ labels: [loader, selfhost, tooling]
 ---
 Step 3 of the project tool ([[MYLA-64]]): the loaders find dependencies through a list of packages, so the compilers never read a manifest (D73 (6)). The rules are on [[Architecture/Project-tool]] (section "The loaders"); its questions 2 and 3 were settled as proposed.
 
-- [x] Python loader ([[src/myla/loader.py]]): `link(…, packages=…)`; resolution project, packages, standard library; a package's path looked up as if its directory were `<name>/` in the project root
+- [x] Python loader (`src/myla/loader.py`): `link(…, packages=…)`; resolution project, packages, standard library; a package's path looked up as if its directory were `<name>/` in the project root
 - [x] The shadowing error: `'geo' is a dependency and cannot be shadowed by a project file or directory`; errors for a package named `std`, a name given twice, a malformed flag
 - [x] Package module ids as for a `<name>/` directory in the project root (no fetch paths or commits in symbols)
 - [x] A project root parameter that defaults to the entry's directory (for `myla test`/`check` on nested files)
@@ -47,3 +47,5 @@ The project tool ([[MYLA-94]]) turns each `Package { name, dir }` of [[MYLA-93]]
 - Burn suite: 573 → 578, all pass. Integration: 2, pass.
 - Bootstrap: byte-identical fixed point, 8,543,155 bytes (8,471,478 before: +0.8% for the package code and the CLI parser).
 - By hand with the bootstrapped `build/myla`: `printf 'import geo\ngeo.f() + 1\n' | myla repl --package geo=ws/geo/src` prints `2`; `myla run main.my --package geo` prints `module error: malformed --package 'geo': expected name=dir` and exits 1.
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

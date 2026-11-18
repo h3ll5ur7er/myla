@@ -492,7 +492,24 @@ Import: `from std.ioerror import IoError` (or the same from `std.fs`).
   - `InvalidData`, `Other(int32)` (the platform's own code; `Other(9)` a handle that isn't open)
 - `e.message() -> str` (`"not found (NotFound)"`), `impl Format` (so `f"{e}"` works)
 - `pub fun from_cause(code: int32) -> IoError` (a cause code, what `__io_errno()` gives, D209), `pub fun code_number(code: int32) -> int32`, `pub fun from_errno(code: int32) -> IoError` (a Linux errno), `pub fun io_error_name(e: IoError) -> str`; the cause codes `NOT_FOUND` (1) … `INVALID_DATA` (21), `WOULD_BLOCK`, `IN_PROGRESS`, `BAD_HANDLE`, `NOT_A_TERMINAL`, `TOO_MANY_OPEN` (EMFILE's `Other(24)`), `TOO_MANY_OPEN_SYSTEM` (ENFILE's `Other(23)`), `OTHER` (256: plus a system's own code, Windows' own on Windows: `Other(112)` a full disk). `IoError` is `Eq`. `std.system_error.error_text(n: int64) -> str`: a system code's words, per target (std/system_error_windows.my on Windows)
-- Gotcha: **`IoError` is not `Eq`**. `r == Err(IoError.NotFound)` doesn't type-check, so match it instead (`Err(IoError.NotFound) => …`).
+- `IoError` derives `Eq` (MYLA-716): `e == IoError.NotFound`, `r == Err(IoError.NotFound)` (with an `Eq` `Ok` type), `Other(n)` equal by its code; it isn't `Hash`, so it is no map key.
+
+```myla
+import std.fs as fs
+from std.fs import IoError
+
+fun main() {
+    let r = fs.read_to_string("/nonexistent/x")
+    print(r == Err(IoError.NotFound))
+    match r {
+        Ok(_) => print("read")
+        Err(e) => print(f"{e}")
+    }
+}
+// output:
+// true
+// not found (NotFound)
+```
 - Prose: `docs/Language/Standard-library/Ioerror.md`
 
 ## std.iter: lazy adapters over the prelude's `Iterator<T>`
@@ -533,7 +550,7 @@ JSON values, parse/print (Python-compatible messages), typed encode/decode with 
 - Impls exist for all int widths (range-checked; a whole float like `2.0` accepted), `float32/64`, `bool`, `str`, `char` (1-char string), `Json`, `[T]`, `[str: V]`, `Option<T>` (`null`).
 - For hand-written `FromJson`: `fun wrong_type(expected: str, found: Json) -> JsonError` · `fun members(j: Json, name: str) -> Result<[(str, Json)], JsonError>` · `fun member<T: FromJson>(fields: [(str, Json)], name: str) -> Result<T, JsonError>` · `fun optional_member<T: FromJson>(fields, name) -> Result<Option<T>, JsonError>` · `fun within<T>(r: Result<T, JsonError>, step: str) -> Result<T, JsonError>` (adds a path step: `json.within(float64.from_json(item), "[2]")`)
 - `#derive(Json)`: struct → object of fields as named (unknown members ignored; an `Option` field omitted when `None`, absent or `null` reads `None`); enum → `"Red"`, `{"Dot": x}`, `{"Line": [a, b]}`. No renames/attributes. Combine freely: `#derive(Json, Eq)`.
-- Gotchas: a tuple field has no JSON form (`derive` error: make it a struct); a map needs `str` keys; `decode` refuses an integer beyond int64 that a float64 doesn't hold exactly (`OutOfRange` at line:col); nesting deeper than 200 is an error.
+- Gotchas: a tuple field has no JSON form (`derive` error: make it a struct); a map needs `str` keys; `decode` refuses an integer beyond int64 that a float64 doesn't hold exactly (`OutOfRange` at line:col); nesting deeper than 200 is an error; a number of any length parses, its digits past the 800th significant one only rounding it (MYLA-795).
 
 ```myla
 import std.json as json

@@ -3,8 +3,9 @@
 # standard-library unittests. The Ubuntu runners have both; the burn job also
 # installs Node, for the
 # tree-sitter CLI of the editor-grammar tests and the VS Code extension's
-# server choice, gdb for the debug-information tests, and Go for the oracle
-# of test_regex. The runners are
+# server choice, gdb and lldb for the debug-information tests, and Go for the oracle
+# of test_regex. On a push to master the generated job runs the generated
+# tests at full size (D262). The runners are
 # pinned (ubuntu-24.04: its python3 is 3.12, which gdb embeds). The vscode-extension job typechecks, lints and tests the VS
 # Code extension and uploads its .vsix. On a push to master the bootstrap
 # jobs upload the commit's seeds and each machine's myla and myla-lsp (D207),
@@ -20,9 +21,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A pull request's newer push cancels its older run. A push to master never
+# does: each master commit's run is a group of its own, so it keeps its seeds
+# and tools (D207), which a cancelled run wouldn't upload (MYLA-800)
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   burn:
@@ -47,11 +51,12 @@ jobs:
         with:
           go-version: "1.24"
           cache: false
-      - name: gdb for the debug-information tests (MYLA-156); clang, lld and qemu-user for the aarch64 ones (MYLA-163); llvm-dlltool and Wine for the Windows ones (MYLA-702)
+      - name: gdb for the debug-information tests (MYLA-156), lldb for their Windows one (MYLA-757); clang, lld and qemu-user for the aarch64 ones (MYLA-163); llvm-dlltool and Wine for the Windows ones (MYLA-702)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gdb clang lld llvm qemu-user wine64
+          sudo apt-get install -y -qq gdb lldb clang lld llvm qemu-user wine64
           gdb --version | head -1
+          lldb --version | head -1
           clang --version | head -1
           ld.lld --version | head -1
           qemu-aarch64 --version | head -1
@@ -78,6 +83,34 @@ jobs:
         env:
           MYLA_REQUIRE_TARGETS: "1"
         run: python3 -m unittest discover -s tests/burn -t . -v
+
+  generated:
+    # the generated tests (MYLA-555) at full size on every push to master
+    # (D262): every case of each generator, where a pull request's burn job
+    # runs a sample drawn from the fixed seed 555. The seed is the run's
+    # number, named in the step and in a failure (MYLA_GENERATED_SEED=<n>
+    # with MYLA_GENERATED=full reproduces it)
+    name: The generated tests at full size (master only)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    # the five modules took 24 minutes at full size on a 4-core machine
+    # shared with another suite (21.5 of them extremes'; 2026-11-18,
+    # 1f0ddd8), the sample 74 seconds: 60 leaves room for a slower runner
+    # and a bootstrap of build/test-tools on a cache miss
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: build/test-tools
+          key: test-tools-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed.s') }}
+      - name: The generated tests, every case (seed ${{ github.run_number }})
+        env:
+          MYLA_GENERATED: full
+          MYLA_GENERATED_SEED: ${{ github.run_number }}
+        run: >-
+          python3 -m unittest -v tests.burn.test_generated_reads tests.burn.test_generated_writes
+          tests.burn.test_generated_widths tests.burn.test_generated_deep_copies tests.burn.test_generated_extremes
 
   targets:
     # the parity, runtime-error, error-corpus, I/O and feature suites built
@@ -488,6 +521,10 @@ jobs:
     needs: [website, bootstrap, bootstrap-arm64, vscode-extension]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # master's runs aren't cancelled (above): one deploy at a time
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     permissions:
       contents: read
       pages: write

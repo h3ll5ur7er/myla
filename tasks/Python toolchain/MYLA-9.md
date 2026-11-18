@@ -28,7 +28,7 @@ fun main() {
 
 ## Cause
 
-`_mangle` joins type tokens with `_`, which also appears in names ([[src/myla/compiler/monomorphize.py#L393-L417]]).
+`_mangle` joins type tokens with `_`, which also appears in names (`src/myla/compiler/monomorphize.py#L393-L417`).
 
 ## Done when
 
@@ -44,3 +44,5 @@ Every type-argument token is prefixed with its length, and every built-in token 
 
 - Parity program `generic_instantiations_get_distinct_names` (the repro with different layouts behind the colliding names, generic functions over two function types and over tuples) in [[tests/burn/test_compiler_parity.py]] and the self-hosted `PARITY_PROGRAMS`. Before: the Python backend failed with `duplicate top-level declaration 'Pair__A_B_C'`, and the self-hosted binary silently reused one instantiation and printed `1` instead of `4`. After: both print `4 42 4 int to int str to str 11`, like the interpreter.
 - gdb still breaks on a generic instance by its label: `break 'myla_first__6.int32'` ([[Development/Debugging]]).
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

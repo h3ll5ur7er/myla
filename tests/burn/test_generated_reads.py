@@ -14,6 +14,7 @@ import tempfile
 import unittest
 
 from . import _gen_reads as gen
+from . import _differential
 from ._differential import THREE, check, driver, run_all
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON, write_program
 
@@ -29,6 +30,26 @@ class ReadsBesideAMutation(unittest.TestCase):
             path = write_program(tmp, driver(gen.PRE, cases), "reads.my")
             results = run_all(path, len(names), THREE)
         check(self, names, results, KNOWN)
+
+
+class AFailureNamesItsSample(unittest.TestCase):
+    """A failing generated case says how to draw its run again (D262): the
+    seed, or that every case ran."""
+
+    def failure(self) -> str:
+        with self.assertRaises(AssertionError) as caught:
+            check(self, ["a", "b"], {"interpreted": ["1", "2"], "native": ["1", "3"]}, {})
+        return str(caught.exception)
+
+    def test_the_seed_of_a_sample(self):
+        old = _differential.FULL, _differential.SEED
+        try:
+            _differential.FULL, _differential.SEED = False, 4711
+            self.assertIn("MYLA_GENERATED_SEED=4711", self.failure())
+            _differential.FULL = True
+            self.assertIn("MYLA_GENERATED=full MYLA_GENERATED_SEED=4711", self.failure())
+        finally:
+            _differential.FULL, _differential.SEED = old
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 
 ## Self-hosted compiler
 
-- `#test` coverage of `selfhost/` is 61 percent (1,504 of 2,451 value-returning functions, 2026-11-17, `e153ee08`, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
+- `#test` coverage of `selfhost/` is 61 percent (1,523 of 2,486 value-returning functions, 2026-11-18, `1f0ddd8`, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
 - The interpreter is about 500 times slower than native code (`fib(30)`: 3.7 s against 7 ms on `d5d80bc`, [[MYLA-317]]).
 - `--checked` int64 arithmetic is twice as slow by time in hot loops on x86-64 (`s += i * 3 - (i >> 1)`: 0.22 s against 0.11 s plain, 0.25 s with the trap inline on the same machine, where the review measured 0.62 s against 0.12 s): each check is now a `jo` to its trap after the function's return, one not-taken branch per operation ([[MYLA-551]]).
 - **Build, polymorphic recursion:** a finite program that wraps a type already 64 deep once more (`wrap([x])` of a 64-deep `x`) checks and runs, but `myla build` refuses it as 65 types deep ([[MYLA-624]]).
@@ -48,6 +48,5 @@ The targets are x86-64 and aarch64 Linux, wasm32 on WASI and x86-64 Windows; mac
 ## Documentation and repository
 
 - Seventeen burn modules still ask the recorded Python answers about the 32 examples of the retirement, so the gates keyed by an example's text freeze it (`examples/floats.my`'s stale comments stay); token and AST expectation files would replace the recordings ([[MYLA-288]]).
-- The generated tests run a fixed sample (1,500 of 17,497 extreme calls) and CI never the rest; the `myla` skill has two false claims after later merges; README and Roadmap still plan Windows and the website ([[MYLA-800]]).
 - **Website:** the skip link leaves the page and `/quickstart` scrolls sideways on a phone ([[MYLA-630]]); the playground loses output printed before a stop, a wrong-shaped progress value breaks the learn area, 26 reference signatures drop their defaults ([[MYLA-799]]).
 - The tutorial and the "Why Myla" page aren't written yet (D114, [[MYLA-234]]).

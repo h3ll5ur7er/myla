@@ -6,7 +6,7 @@ status: done
 priority: medium
 labels: [checker, stdlib]
 ---
-Found by the October 2026 review of the whole project ([[Project/Review-2026-10]]). `fun main() { print(__getcwd()); __exit(3) }` runs under both CLIs (and exits 3). The 22 `__` primitives (`__write`, `__exit`, `__read`, `__run`, `__getcwd`, `__unlink`, `__task_cancelled`, …) are meant for `std/` (D29, D64); `_BUILTIN_FUNCS` in [[src/myla/types.py]] and the self-hosted checker only forbid *redeclaring* them.
+Found by the October 2026 review of the whole project ([[Project/Review-2026-10]]). `fun main() { print(__getcwd()); __exit(3) }` runs under both CLIs (and exits 3). The 22 `__` primitives (`__write`, `__exit`, `__read`, `__run`, `__getcwd`, `__unlink`, `__task_cancelled`, …) are meant for `std/` (D29, D64); `_BUILTIN_FUNCS` in `src/myla/types.py` and the self-hosted checker only forbid *redeclaring* them.
 
 - [x] Both checkers reject a call of a `__` name outside the standard library root (`type error: '__getcwd' is a primitive of the standard library`), with an error-corpus file
 - [x] `get(m, k)`, "a prelude function, not a builtin", named on [[Language/Standard-library]] as the one exception a user can see
@@ -21,3 +21,5 @@ The rejection needs a decision: the self-hosted interpreter ([[selfhost/interp.m
 - Checker gate: `warn_primitive_called` (a call in `main`, one in a lambda) gives the same warnings from both checkers.
 - In the repository only `selfhost/interp.my` calls primitives from outside the standard library (17 places: it implements them for the programs it runs); `python3 myla.py check selfhost/main.my` shows those 17 warnings, the compiler, the language server and the other tools none.
 - Unit 622, integration 2, burn 828 (5 skipped) and the extension's 54 tests pass on commit 1ddece4; the bootstrap reaches its byte-identical fixed point (6,185,088 bytes).
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*
