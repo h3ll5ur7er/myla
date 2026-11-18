@@ -32,7 +32,7 @@ fun main() {
 | Group | |
 | --- | --- |
 | Operators (D200) | `+ - * /` between two vectors by component, `v * s`, `s * v`, `v / s`, `-v`, `v[i]`, `v[i] = s`, and the compound forms |
-| Measures | `dot`, `length`, `length_squared`, `distance`, `distance_squared`, `angle_between` (radians), `min_element`, `max_element` |
+| Measures | `dot`, `length` (of a vector whose squares would over- or underflow, the vector scaled by its largest component first: `(1e200, 1e200, 0)` has one), `length_squared`, `distance`, `distance_squared`, `angle_between` (radians), `min_element`, `max_element` |
 | New vectors | `normalized` (NaN for a zero vector), `try_normalized` (an `Option`), `lerp(o, t)`, `min`, `max`, `abs`, `reflect(normal)`, `project_onto(o)` |
 | By size | `Vec2`: `perp` (a quarter turn left), `perp_dot`, `extend(z)`; `Vec3`: `cross`, `extend(w)`, `truncate`; `Vec4`: `truncate` |
 | Other | `to_list()`, `to_f32()` (`to_f64()` in std.vector32); `Vector`: `len`, `sum`, `map(f)`, `dot`, `length`, `normalized`, `distance` |
@@ -41,7 +41,7 @@ Vectors are `Eq` and `Hash` (map keys, D198) and print as `(1, 2, 3)`, a `Vector
 
 ## JSON
 
-Vectors are JSON arrays, as glTF writes them (D206): a `Vec3` is `[1.0, 2.0, 3.0]`, a `Vector` the array of its elements. So a `#derive(Json)` struct with a `Vec3` field reads a document's `"translation": [1, 2, 3]`. An array of another length, or an element that isn't a number, is an error with its path ([[Language/Standard-library/Json]]).
+Vectors are JSON arrays, as glTF writes them (D206): a `Vec3` is `[1.0, 2.0, 3.0]`, a `Vector` the array of its elements. So a `#derive(Json)` struct with a `Vec3` field reads a document's `"translation": [1, 2, 3]`. An array of another length, or an element that isn't a number, is an error with its path ([[Language/Standard-library/Json]]); a `null` reads as NaN, which std.json writes as `null`, as JavaScript does ([[MYLA-796]]). A vector prints as `(1, 2, 3)`, a spec applied to each component (`f"{v:.2}"` is `(1.00, 2.00, 3.00)`); a `Vector`'s index outside it is a runtime error that names both (`index 5 out of range for a vector of 2`).
 
 ```myla
 import std.json as json
