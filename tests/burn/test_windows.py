@@ -1000,6 +1000,56 @@ fun handle(r: Request) -> Response {
     return http.response(200, f"hello {r.method} {r.path()}")
 }
 
+// What the HTTP server saw, for a run whose count is wrong (MYLA-863): the
+// paths of the requests it handled with the client's port for each (one
+// port a connection), and `serve_n`'s count once it came (-1: it failed or
+// ran out of time; -2 until then).
+actor Served {
+    paths: [str],
+    ports: [int],
+    count: int,
+}
+
+impl Served {
+    fun saw(var self, path: str, port: int) {
+        self.paths.push(path)
+        self.ports.push(port)
+    }
+
+    fun ended(var self, n: int) {
+        self.count = n
+    }
+
+    fun report(self) -> str {
+        var sb = StringBuilder()
+        sb.append(f"the HTTP server: {self.paths.len()} handled,")
+        var i = 0
+        var last = -1
+        var conns = 0
+        for p in self.paths {
+            if self.ports[i] != last {
+                conns += 1
+                last = self.ports[i]
+            }
+            sb.append(f" {p}@{self.ports[i]}")
+            i += 1
+        }
+        sb.append(f", {conns} connections in turn, ")
+        sb.append(if self.count != -2 { f"serve_n gave {self.count}" } else { "serve_n still serving" })
+        return sb.build()
+    }
+}
+
+// `handle`, the request noted in `seen` first.
+async fun handle_seen(seen: Served, r: Request) -> Response {
+    let port = match r.peer {
+        Some(a) => a.port
+        None => -1
+    }
+    await seen.saw(r.path(), port)
+    return handle(r)
+}
+
 // Its own HTTP server asked `n` times: the answers that were right. Each
 // request has 30 s: one the server never answers is `timed out` then, with
 // how long it took and how many came back before, and the run ends with
@@ -1070,13 +1120,19 @@ async fun serve_within(l: TcpListener, n: int) -> int {
     }
 }
 
-// `http.serve_n`, at most 200 s: how many requests it answered, or -1.
-async fun http_within(l: TcpListener, n: int) -> int {
-    return match await task.timeout(200000, async () => await http.serve_n(l, n, handle)) {
+// `http.serve_n` (`serve_with` and a limit of `n`, its handler noting each
+// request in `seen`), at most 200 s: how many requests it answered, or -1.
+async fun http_within(l: TcpListener, n: int, seen: Served) -> int {
+    var o = http.server_options()
+    o.max_requests = n
+    let serve = async () => await http.serve_with(l, o, async (r: Request) => await handle_seen(seen, r))
+    let k = match await task.timeout(200000, serve) {
         Some(Ok(k)) => k
         Some(Err(e)) => failed(f"the HTTP server: {e}") - 1
         None => failed("the HTTP server: still serving after 200 s") - 1
     }
+    await seen.ended(k)
+    return k
 }
 
 fun number(s: str) -> int {
@@ -1109,7 +1165,8 @@ async fun main() {
         Err(e) => { panic("addr") }
     }
     async let served = serve_within(l, clients)
-    async let answered = http_within(hl, 20)
+    let seen = Served { paths: [], ports: [], count: -2 }
+    async let answered = http_within(hl, 20, seen)
     // tasks 0 to clients - 1 the clients, then the children, then `ask`
     var ended: [bool] = []
     for k in 0..clients + kids + 1 {
@@ -1135,6 +1192,7 @@ async fun main() {
         Some(xs) => { results = xs }
         None => {
             eprintln(f"still running after 200 s, tasks:{await progress.pending()}")
+            eprintln(await seen.report())
             exit(2)
         }
     }
@@ -1145,6 +1203,7 @@ async fun main() {
     if ok != clients + kids + 20 {
         // (a server whose client gave up would wait for it for ever)
         eprintln(f"{ok} of {clients + kids + 20} right")
+        eprintln(await seen.report())
         exit(1)
     }
     let echoed = await served

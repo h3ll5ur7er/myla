@@ -1528,6 +1528,120 @@ class OneProgram(unittest.TestCase):
         self.assertEqual(run_both(ONE_PROGRAM), (ONE_PROGRAM_OUT, "", 0))
 
 
+# MYLA-863: `serve_n`'s server counts what its client got. A connection
+# closed under its answer (a client that asks for 8 MiB and closes without
+# reading) is no answer: the server's count reached its limit one request
+# early, and the kept-alive client's last request, sent again on a new
+# connection (the old one closed with the server), waited in the
+# listener's backlog until its time ran out. Then the client sends exactly
+# the server's limit over one kept connection: both counts must agree.
+TO_THE_LIMIT = PRELUDE + r"""import std.task as task
+import std.bytes as bytes
+
+actor Seen {
+    big: bool,
+}
+
+impl Seen {
+    fun saw_big(var self) {
+        self.big = true
+    }
+
+    fun big_seen(self) -> bool {
+        return self.big
+    }
+}
+
+async fun handle(seen: Seen, r: Request) -> Response {
+    if r.path() == "/big" {
+        await seen.saw_big()
+        var piece = StringBuilder()
+        for i in 0..64 {
+            piece.append("0123456789abcdef")
+        }
+        let k = piece.build()
+        var sb = StringBuilder(8388608)
+        for i in 0..8192 {
+            sb.append(k)
+        }
+        return http.response(200, sb.build())
+    }
+    return http.response(200, f"hello {r.path()}")
+}
+
+// a request for 8 MiB on a connection of its own, closed unread once the
+// server has the request
+async fun gone(port: int, seen: Seen) -> str {
+    var s = match await net.connect_async(net.addr(net.loopback(), port)) {
+        Ok(s) => s
+        Err(e) => { return f"connect: {e}" }
+    }
+    match await s.write_async(bytes.from_str("GET /big HTTP/1.1\r\nHost: x\r\n\r\n")) {
+        Ok(_) => {}
+        Err(e) => { return f"write: {e}" }
+    }
+    while !(await seen.big_seen()) {
+        await task.sleep(1)
+    }
+    let c = s.close()
+    return "gone"
+}
+
+// `n` requests over one kept connection: those answered right
+async fun ask(port: int, n: int) -> int {
+    var c = http.client()
+    var right = 0
+    for i in 0..n {
+        match await c.send_async(http.request("GET", f"http://127.0.0.1:{port}/p{i}").with_timeout(10000)) {
+            Ok(r) => {
+                if r.status == 200 && r.text() == f"hello /p{i}" {
+                    right += 1
+                }
+            }
+            Err(e) => { print(f"ask {i}: {e}, {right} answered before") }
+        }
+    }
+    c.close()
+    return right
+}
+
+#main
+async fun main() {
+    let n = 20
+    var l = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic("listen") }
+    }
+    let port = match l.local_addr() {
+        Ok(a) => a.port
+        Err(e) => { panic("addr") }
+    }
+    let seen = Seen { big: false }
+    var o = http.server_options()
+    o.max_requests = n
+    let serve = async () => await http.serve_with(l, o, async (r: Request) => await handle(seen, r))
+    async let served = task.timeout(20000, serve)
+    print(await gone(port, seen))
+    let right = await ask(port, n)
+    let count = match await served {
+        Some(Ok(k)) => f"{k}"
+        Some(Err(e)) => f"{e}"
+        None => "still serving after 20 s"
+    }
+    print(f"client {right} of {n}, server {count}")
+    let c = l.close()
+}
+"""
+TO_THE_LIMIT_OUT = "gone\nclient 20 of 20, server 20\n"
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipIf(NO_SOCKETS, NO_SOCKETS_WHY)
+class ToTheLimit(unittest.TestCase):
+    def test_the_servers_count_is_what_its_clients_got(self):
+        self.assertEqual(run_both(TO_THE_LIMIT), (TO_THE_LIMIT_OUT, "", 0))
+
+
 # --- wasm32: no sockets ------------------------------------------------------------
 
 ON_WASM = PRELUDE + r"""
