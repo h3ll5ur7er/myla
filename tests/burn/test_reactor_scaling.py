@@ -535,8 +535,12 @@ class BusyWorkers(_Built):
         for workers in [1, 2]:
             with self.subTest(workers=workers):
                 trips = int(self.run_text("ping-busy", workers, workers=workers))
-                # in 500 ms: 2,500 is 5,000 a second, ten times the cliff
-                self.assertGreater(trips, 2500, f"{trips} round trips in 500 ms beside {workers} yielding tasks")
+                # in 500 ms: the cliff is bound by the millisecond, about
+                # 250 on any machine (BASE: 250 and 445); 1,000 is four
+                # times that, which an emulator's slower turns still pass
+                # (2,136 to 2,260 under CI's qemu-aarch64, about 46,000
+                # natively, 2026-11-18 at e659342)
+                self.assertGreater(trips, 1000, f"{trips} round trips in 500 ms beside {workers} yielding tasks")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
