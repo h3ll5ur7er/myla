@@ -19,12 +19,14 @@ from ._tools import selfhost_tool
 
 HELLO = 'fun main() {\n    print("hello")\n}\n'
 
-# The counts of 2026-11-18 at e659342 (round 7's wave A), with the library
-# the tools carry: `check` 25,494,608 and `run` 28,859,804 by callgrind,
-# MYLA_THREADS=1. The bounds are 10 percent over them (an implicit module of
-# std.float's size is about 18 percent); lower them when a change makes the
-# start cheaper (std.float made lazy, D258), so that they keep guarding.
-BOUNDS = {"check": 28_000_000, "run": 31_700_000}
+# The counts of 2026-11-18 on round 7's wave B (d1bf3f2: std.float loaded
+# only where a float method may be called, D258), with the library the tools
+# carry: `check` 21,358,782 and `run` 24,277,229 by callgrind,
+# MYLA_THREADS=1 (25,494,608 and 28,859,804 at e659342, before). The bounds
+# are 10 percent over them (an implicit module of std.float's size is about
+# 18 percent); lower them when a change makes the start cheaper, so that
+# they keep guarding.
+BOUNDS = {"check": 23_500_000, "run": 26_700_000}
 
 
 def counter() -> str:
