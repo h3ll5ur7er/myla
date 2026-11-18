@@ -139,11 +139,14 @@ pub fun program() -> str {
 // Linux a child leads a process group of its own, which the runner kills as
 // the case ends or passes its limit, so nothing the case started outlives
 // it; and it dies with the runner, as the runner dies with `myla test`
-// (`dies_with_parent`).
+// (`dies_with_parent`). A watcher beside them, `<harness> --watch-groups`
+// (`watch_mode`), which outlives the runner, kills the group of the case
+// that was running when the runner died (MYLA-819: what the case started
+// was left, nobody being there to kill its group).
 
 import std.fs as fs
 import std.path_style as style
-from std.process import args, exit, command, Command, ExitStatus, Stdio, SpawnError, env
+from std.process import args, exit, command, Command, Child, ChildStdin, ExitStatus, Stdio, SpawnError, env
 from std.io import write, eprint
 from std.platform import TARGET
 from std.time import now_ns
@@ -257,6 +260,100 @@ fun end_group(pid: int32) {
     __kill(-pid, 9)
 }
 
+// The watcher of the cases' process groups, when `argv` is `<harness>
+// --watch-groups` (MYLA-819): the runner names on its input the group of
+// the case that runs, a line with its ID (0: none runs); when the input
+// ends, so did the runner, and the group named last is killed (a runner
+// killed, or dying with `myla test`, leaves the group of the case it ran,
+// whose child the case's death didn't end). It leads a group of its own,
+// so a Ctrl-C meant for `myla test` doesn't end it first. Else nothing.
+pub fun watch_mode(argv: [str]) {
+    if argv.len() != 2 || argv[1] != "--watch-groups" { return }
+    own_group()
+    var group: int32 = 0
+    var line = ""
+    while true {
+        let piece = __read(0, 256)
+        if piece.len() == 0 || __io_errno() != 0 { break }
+        let text = line + piece
+        let end = last_at(text, "\n", false)
+        if end >= 0 {
+            group = group_named(last_line(before(text, end)))
+            line = after(text, end + 1)
+        } else {
+            line = text
+        }
+    }
+    if group > 0 { end_group(group) }
+    exit(0)
+}
+
+// The last line of `text` (all of it without a newline).
+#test("12\n0\n7")["7"]
+#test("7")["7"]
+fun last_line(text: str) -> str {
+    let k = last_at(text, "\n", false)
+    return if k < 0 { text } else { after(text, k + 1) }
+}
+
+// The group a watcher's line names: its decimal ID, 0 for none (or for a
+// line that is no number).
+#test("4194304")[4194304]
+#test("0")[0]
+#test("x1")[0]
+#test("")[0]
+fun group_named(line: str) -> int32 {
+    if line.len() == 0 || line.len() > 9 { return 0 }
+    var n = 0
+    for i in 0..line.len() {
+        if line[i] < '0' || line[i] > '9' { return 0 }
+        n = n * 10 + (line[i] - '0') as int32
+    }
+    return n
+}
+
+// The runner's watcher (`watch_mode`) and the write end of its input; on
+// Linux only, where the cases lead groups: elsewhere no child, and -1.
+struct Watcher { child: Option<Child>, input: Option<ChildStdin>, fd: int32 }
+
+// The watcher started as `exe` with the arguments `lead` (the emulator's
+// and the harness's path) and `--watch-groups`, its output nothing; none
+// when it can't be (the cases run all the same).
+fun start_watcher(exe: str, lead: [str]) -> Watcher {
+    let (prctl, setpgid) = linux_calls()
+    let none = Watcher { child: None, input: None, fd: -1 }
+    if setpgid == 0 { return none }
+    var argv = lead
+    argv.push("--watch-groups")
+    return match command(exe).args(argv).stdin_from(Stdio.Piped).stdout_from(Stdio.Null).stderr_from(Stdio.Null).spawn() {
+        Ok(c) => {
+            var child = c
+            match child.take_stdin() {
+                Some(w) => Watcher { child: Some(child), input: Some(w), fd: w.descriptor() },
+                None => Watcher { child: Some(child), input: None, fd: -1 },
+            }
+        },
+        Err(e) => none,
+    }
+}
+
+impl Watcher {
+    // The runner is done: the watcher's input ends, and it with it.
+    fun done(var self) {
+        if let Some(w) = self.input {
+            var i = w
+            let r = i.close()
+        }
+        if let Some(c) = self.child {
+            var k = c
+            let st = k.wait()
+        }
+        self.child = None
+        self.input = None
+        self.fd = -1
+    }
+}
+
 // A case's time limit natively, in seconds (MYLA_TEST_TIMEOUT, which `myla
 // test` sets, D259): 0 for none, as without the variable.
 #test(Some("60"))[60]
@@ -294,9 +391,12 @@ pub struct Timed { stdout: str, stderr: str, status: ExitStatus, late: bool }
 // stderr ("" for none: a run of several cases marks each one's beginning),
 // its output and error read as they come: past the limit it is killed, its
 // process group too where it leads one. Once it has ended, so has its group
-// (a child of its holding its output would keep the reads going).
-pub fun output_within(c: Command, secs: int32, mark: str) -> Result<Timed, SpawnError> {
+// (a child of its holding its output would keep the reads going). The
+// descriptor `watch` (-1: none) is a watcher's input (`watch_mode`), told
+// the child's ID while it runs.
+pub fun output_within(c: Command, secs: int32, mark: str, watch: int32 = -1) -> Result<Timed, SpawnError> {
     var child = c.stdin_from(Stdio.Null).spawn()?
+    if watch >= 0 { let w = write(watch, f"{child.id()}\n") }
     let limit = (secs as int64) * 1000000000
     var deadline = if secs > 0 { now_ns() + limit } else { 0i64 }
     var tail = ""
@@ -362,6 +462,7 @@ pub fun output_within(c: Command, secs: int32, mark: str) -> Result<Timed, Spawn
         Ok(st) => st,
         Err(e) => ExitStatus.Signaled(9),
     }
+    if watch >= 0 { let w = write(watch, "0\n") }
     return Ok(Timed { stdout: out.build(), stderr: err.build(), status: st, late: late })
 }
 
@@ -484,6 +585,7 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
     let head = record_head(nonce)
     let secs = timeout_of(env("MYLA_TEST_TIMEOUT"))
     dies_with_parent()
+    var watcher = start_watcher(exe, lead)
     var lines: [str] = []
     while k < cases.len() {
         let dir = f"{root}{sep}c{k}"
@@ -491,7 +593,7 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
         argv.push("--case")
         argv.push(f"{k}")
         argv.push(nonce)
-        let ran = output_within(command(exe).args(argv).env("MYLA_TEST_DIR", dir).env("MYLA_TEST_TOOL", program), secs, "")
+        let ran = output_within(command(exe).args(argv).env("MYLA_TEST_DIR", dir).env("MYLA_TEST_TOOL", program), secs, "", watcher.fd)
         var started = true
         var out = Timed { stdout: "", stderr: "", status: ExitStatus.Exited(0), late: false }
         match ran {
@@ -500,7 +602,10 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
         }
         if fs.exists(dir) { let gone = fs.remove_dir_all(dir) }
         if !started {
-            if k == 0 { return None }
+            if k == 0 {
+                watcher.done()
+                return None
+            }
             lines.push(f"FAIL  {cases[k].name}: could not start the case's process\n")
         } else if out.late {
             // what it wrote on stderr is passed on, as a case's is
@@ -518,6 +623,7 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
         }
         k = k + 1
     }
+    watcher.done()
     if fs.exists(root) { let gone = fs.remove_dir_all(root) }
     for l in lines { let w = write(1, l) }
     return Some(summary(passed, cases.len()))
