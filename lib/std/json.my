@@ -608,8 +608,10 @@ fun long_numbers() {
 #test("ab", 3)["ababab"]
 fun repeated(s: str, n: int) -> str {
     var sb = StringBuilder()
-    for _ in 0..n {
+    var i = 0
+    while i < n {
         sb.append(s)
+        i += 1
     }
     return sb.build()
 }
