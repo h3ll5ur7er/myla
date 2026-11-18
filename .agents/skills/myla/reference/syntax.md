@@ -238,5 +238,5 @@ A bare name that is a unit variant of the scrutinee's enum matches that variant;
 - `str` and `bool` are keywords, `int`, `float` and `char` are not.
 - Struct fields need commas; enum variants don't.
 - `t.0 = v` isn't assignable (`t.0.1` reads a nested tuple's field).
-- Expressions, types, blocks and patterns nest at most 256 levels; one expression holds at most 2,048 operators, casts, indexes, fields and `else if` arms, a call counting 2 and a `|>` 3 (`MAX_CHAIN`, MYLA-793): past it a parse error, so split a generated chain with `let`s.
+- Expressions, types, blocks and patterns nest at most 256 levels; one expression holds at most 2,048 operators, casts, indexes, fields and `else if` arms, a call counting 2 and a `|>` 3 (`MAX_CHAIN`, MYLA-793; 256 in the tools built for wasm32, the playground's, MYLA-826): past it a parse error, so split a generated chain with `let`s.
 - `x as int < y` needs parentheses.

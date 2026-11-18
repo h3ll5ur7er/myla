@@ -2,8 +2,9 @@
 //
 // The second backend, with `ir_x86.my` as its template, on purpose simple in
 // one respect: register allocation. Every temporary and every slot has a
-// cell in the frame, and each instruction loads its operands into scratch
-// registers (x10 to x15), computes, and stores its result back. D123's
+// cell in the frame (shared by those never live at once, MYLA-826), and
+// each instruction loads its operands into scratch registers (x10 to x15),
+// computes, and stores its result back. D123's
 // allocator (MYLA-257) is to replace this and x86-64's together, so nothing
 // here is worth tuning. What stays is the instruction selection, the calls
 // and frames, and the runtime's entry points.
@@ -18,7 +19,8 @@
 from .checker import Type, subst_type
 from .codegen import CodeGen, is_aggregate, int_signed, int_width_cg, is_tfloat32, is_aggregate_opt, is_cell_t, is_tfunc, is_actor_t, tls_offset, TLS_SIZE
 from .ir import IrFunc, Inst, Term, Slot, ENV_WORD, ends_in_call, Intrinsic, is_xchg, is_rc_dec, is_rc_atomic, Pos, touches, use_counts
-from .ir_x86 import slots_at, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
+from .ir_x86 import slots_at, cell_positions, frame_size, tail_call_at, drops_after_free, passes_frame_address, frame_addresses
+from .ir_wasm import wasm_locals
 from .ir_util import int_in, is_char_type, is_float_type, reachable_blocks, wrapped
 
 // The argument words that come in registers (x0 to x7).
@@ -50,22 +52,25 @@ impl CodeGen {
                 if n > out { out = n }
             }
         }
+        // a cell per temporary, shared by those of one block that aren't
+        // live at once, as wasm32's locals are (MYLA-826)
+        let (cells, ncells) = wasm_locals(f)
         var toff: [int32] = []
         var cur = 8 * out
-        for t in f.temps {
-            toff.push(cur)
-            cur = cur + 8
-        }
+        for c in cells { toff.push(cur + 8 * c) }
+        cur = cur + 8 * ncells
         var soff: [int32] = []
         var words = 0
         if f.frame {
             // as x86-64 lays the heap frame out (`__new` fills it)
             soff = slots_at(f, 0, [])
         } else {
+            // the locals of two scopes never open at once share cells, as
+            // on x86-64 (MYLA-183, MYLA-826)
+            let (pos, extent) = cell_positions(f, false, [], true)
+            for p in pos { soff.push(cur + p) }
+            cur = cur + extent
             for s in f.slots {
-                soff.push(cur)
-                cur = cur + (s.size + 7) / 8 * 8
-                if s.size == 0 { cur = cur + 8 }
                 if s.word >= 0 && s.word + (s.size + 7) / 8 > words { words = s.word + (s.size + 7) / 8 }
             }
         }
