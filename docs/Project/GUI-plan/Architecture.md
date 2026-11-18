@@ -95,9 +95,9 @@ Three models were considered. They can coexist: the first needs nothing new and 
 
 Recommended: the model with messages first, cells as the second step, the actor as the documented way to share a model between windows or with background work.
 
-**How the first works without generics in the tree.** `View` isn't generic ([[Project/GUI-plan/Gaps#l3-inference-through-a-method-chain]]), so a button can't hold a `Msg`. It holds an `Action`, a closure the framework's typed code made: `ui.send(msg)` captures the model and the message and returns a closure that gives the next root. The loop only ever sees `View`, `Action` and `Root`, none of them generic. The program on [[Project/GUI-plan/Syntax-without-grammar-change]] does this in about 40 lines of framework code and runs today.
+**How the first works without generics in the tree.** `View` isn't generic ([[Project/GUI-plan/Gaps#l3-inference-through-a-method-chain]]), so a button can't hold a `Msg`. It holds an `Action`, a closure the framework's typed code made: `ui.send(msg)` captures the message and the handle of the UI task's inbox, a `task.Channel`, and posts the one to the other when fired. The loop is generic in the model and the message; only the tree is erased. [[Project/GUI-plan/Concurrency]] has the probe. (The program on [[Project/GUI-plan/Syntax-without-grammar-change]] shows an earlier form, an action that returns the next root; it has the same surface and no inbox.)
 
-**Effects.** Work that takes time (a request, a file) runs as a child task and comes back as a message: `ui.perform(async () => await fetch(url), (r) => Msg.Loaded(r))`. The UI task owns a typed channel (`task.Channel<Msg>`) and awaits "the next window event or the next message". Cancelling follows the structure: a view that disappears cancels its tasks.
+**Effects.** Work that takes time is a job `update` returns: an async closure the framework runs as a task of its own, which awaits what it needs (an actor, a request, a file) and posts messages to the inbox, where they meet the model as it is then. Actors are the services jobs talk to, not the UI's state. Cancelling, subscriptions, what crosses between tasks and the gaps this shows (a task group, failure isolation) are on [[Project/GUI-plan/Concurrency]].
 
 **Environment.** Values that flow down the tree (theme, font size, locale, the colour scheme) are a modifier, `.environment(theme)`, read during the rebuild. The tree is data, so this needs no global.
 
@@ -160,6 +160,7 @@ pub fun open(title: str, width: int, height: int) -> Result<Window, WindowError>
 | The interpreter is too slow for the core's work per event | `myla run` of a real app stutters | Measure in phase 2; rebuild only what depends on the changed state; [[MYLA-317]] |
 | The software renderer is too slow at 4K | A full-window animation misses frames | Damage rectangles; the hot-loop tasks; primitives for spans; later a GPU renderer behind the display list |
 | Text is a project of its own | Latin text looks right, Arabic and Devanagari don't | Scope: left-to-right scripts without shaping first, said plainly in the docs; the display list allows a system's text later |
-| Erasing actions by closures hides stale state | An action made before an update runs after it | Actions run only from the current tree; effects return messages, not closures |
+| Erasing actions by closures hides stale state | An action made before an update runs after it | Actions post messages to the inbox; every message meets the current model ([[Project/GUI-plan/Concurrency]]) |
+| No task group that can be added to | Jobs run in a fixed number of slots and can't be cancelled one by one | A task group in `std.task` before the core's API settles |
 | A web target that isn't WASI splits the wasm target | Two host interfaces, two test setups | Decide with [[MYLA-241]]: the GUI imports as an optional module beside WASI's |
 | The framework's API is published before named arguments or private fields exist | A breaking change to every call | Decision 5 of [[Project/GUI-plan]]: tier 1 and [[MYLA-433]] first |
