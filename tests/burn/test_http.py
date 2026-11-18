@@ -1324,7 +1324,11 @@ class TimeLimits(unittest.TestCase):
                     time.sleep(0.002)
                 for s in socks:
                     r = recv_response(s)
-                    self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"x" * 200), r[:100])
+                    # what came, should it fail: a short body (the connection closed
+                    # under it) or one of its length whose end isn't the bytes sent
+                    self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"x" * 200),
+                                    f"{len(r)} bytes, {r.count(b'x')} of them x, the first x at {r.find(b'x')}: "
+                                    f"{r[:100]!r} ... {r[-120:]!r}")
                     s.close()
                 used.append(cpu_seconds(self.server_pid) - before)
 
