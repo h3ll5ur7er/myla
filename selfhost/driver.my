@@ -25,7 +25,7 @@ from .dwarf import read_gdb_script
 from .interp import new_interp, RtError, TestRun, TestOptions, sched_from_env, time_from_env
 from .harness import harness_source, Harness, runner_case
 from std.test import cut_run, case_outcome, case_lines, record_head, output_within, timed_out
-from std.process import command, env
+from std.process import command, env, exit
 from std.time import now_ns
 from std.fs import make_dir_all, remove_dir_all, exists, read_to_string, current_dir, temp_root
 import std.path_style as style // `WINDOWS`: the separator of the machine the tools run on
@@ -558,7 +558,12 @@ fun report_lines(text: str) -> [str] {
 }
 
 // `myla run <file> [args]`: interpret the program with argv
-// `[file, args...]`; the exit status.
+// `[file, args...]`, and end the process with its status; 1, the status
+// to end with, when it doesn't load. The interpreter, the checker and the
+// program are left to the exit, which gives their memory back at once:
+// released value by value they cost an empty program's run a tenth of its
+// instructions (MYLA-817). Every caller (the CLI, the playground's
+// `play_main`, an instance per run) ends with the status anyway.
 pub fun cmd_interp(file: str, opts: LoadOptions, prog_args: [str]) -> int32 {
     match load_for_host(file, opts) {
         Ok(ch) => {
@@ -578,7 +583,7 @@ pub fun cmd_interp(file: str, opts: LoadOptions, prog_args: [str]) -> int32 {
                     None => {},
                 }
             }
-            return code
+            exit(code)
         },
         Err(e) => {
             eprintln(e)

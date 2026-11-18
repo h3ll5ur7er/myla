@@ -20,7 +20,7 @@ from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, for
 from std.io import write, eprint, errno_text
 from std.process import exit
 import std.process as process_m  // `args`: the program `myla` was started as (MYLA-727)
-from std.fs import read_to_string, make_dir_all, remove_dir_all, temp_root
+from std.fs import read_to_string, list_dir, make_dir_all, remove_dir_all, temp_root
 from std.test import timed_out  // a case's verdict past its time limit (D259), as natively
 import std.path_style as style // `WINDOWS`: the separator of the machine the interpreter runs on
 from .parser import fused_compound
@@ -362,6 +362,12 @@ pub struct Interp {
     case_deadline: int64,
     timed_out: bool,
     case_ticks: int32,
+    // the children a case started and hasn't reaped, killed when it ends,
+    // as natively its process group is (D272, MYLA-818); what
+    // `__run_stderr` gives after a run a case's time limit bounded
+    // (`case_run`), None after the host's own
+    case_children: [int32],
+    run_stderr: Option<str>,
     defer_errs: [str],
     captured: [str],
     captured_io: bool,
@@ -692,7 +698,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
         sleepers: [], deadlines: [], fired: [], fd_waits: [], fds_seen: 0, fds_gap: LOOK_GAP_MIN, notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], lots: [], sock_tags: [:], parked_socks: 0, lots_seen: 0, lots_gap: LOOK_GAP_MIN, fi_find_from: -1, fi_extend: -1, bcodes: builtin_codes(), sleep_seq: 0, virtual_time: false, vclock: 0,
-        testing: false, test_timeout: 0, case_deadline: 0, timed_out: false, case_ticks: 0, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
+        testing: false, test_timeout: 0, case_deadline: 0, timed_out: false, case_ticks: 0, case_children: [], run_stderr: None, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
         static_calls: c.static_calls, op_sites: c.op_sites, op_sets: c.op_sets, op_impls: c.op_impls, impl_selfs: c.static_selfs, call_types: c.call_types,
         tparams: [], envs: [], env_memo: [:], type_env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
         writes: 0, fused: -1, fused_val: Value.VUnit, leaf_wanted: false, leaf: Value.VUnit,
@@ -1064,6 +1070,7 @@ impl Interp {
         }
         self.testing = false
         self.case_deadline = 0
+        self.end_children()
         var outcome = Outcome.Returned(actual)
         if self.timed_out {
             // past its time limit, whatever it expected (D259): it stopped
@@ -1728,6 +1735,155 @@ impl Interp {
             return
         }
         if n > 0 { __sleep_ns(n) }
+    }
+
+    // `wait(ms)`, a host's wait of at most `ms` milliseconds (negative: no
+    // end) that gives 0 when nothing was ready, but in a running case no
+    // longer than its time limit leaves (D259): a wait it cut short with
+    // nothing ready times the case out (MYLA-818: the interpreter waited in
+    // the system call, past the limit).
+    fun case_wait(var self, ms: int32, wait: (int32) -> int32) -> int32 {
+        if self.case_deadline == 0 { return wait(ms) }
+        let left = (self.case_deadline - __clock_ns() + 999999) / 1000000
+        var cut = ms
+        if left <= 0 { cut = 0 }
+        else if ms < 0 || (ms as int64) > left { cut = if left > 1000000000 { 1000000000 } else { left as int32 } }
+        let r = wait(cut)
+        if r == 0 && cut != ms { self.case_timed_out() }
+        return r
+    }
+
+    // Whether a read of `fd` may go on: at once outside a running case; in
+    // one once `fd` is ready (input, its end, an error), but no later than
+    // the case's time limit (`case_wait`).
+    fun case_readable(var self, fd: int32) -> bool {
+        if self.case_deadline == 0 || fd < 0 { return true }
+        return self.case_wait(-1, (ms: int32) => __poll(fd, ms)) != 0
+    }
+
+    // `s` written to `fd` (`__write`, `__write_bytes`): in a running case a
+    // piece of PIPE_BUF bytes at a time, each once `fd` has room for it,
+    // which a write of that size takes without waiting, but no later than
+    // the case's time limit (`case_wait`: a child that didn't read its
+    // input held the write past it).
+    fun case_write(var self, fd: int32, s: str) {
+        if self.case_deadline == 0 || fd < 0 {
+            let w = write(fd, s)
+            return
+        }
+        var at = 0
+        while true {
+            if self.case_wait(-1, (ms: int32) => __poll_write(fd, ms)) == 0 { return }
+            let end = if s.len() - at > 4096 { at + 4096 } else { s.len() }
+            match write(fd, if at == 0 && end == s.len() { s } else { s[at:end] }) {
+                Ok(()) => {},
+                Err(e) => { return },
+            }
+            at = end
+            if at >= s.len() { return }
+        }
+    }
+
+    // `__run_with(prog, argv, opts)` (`with`; else `__run(prog, argv)`) in a
+    // running case: the child started as theirs is, its output and error
+    // read as they come and its end waited for, but no longer than the
+    // case's time limit leaves (D259); past it the child is killed and
+    // reaped, and the case times out (MYLA-818: the host's run waited in
+    // the system call). Its status is the reap's (`__run_exit_code`,
+    // `__run_signal`), its error output `run_stderr`.
+    fun case_run(var self, prog: str, argv: [str], opts: [str], with: bool) -> Value {
+        let h = if with { __spawn_with(prog, argv, opts) } else { __spawn(prog, argv) }
+        if h[0] != 0 {
+            // not started: the host's run fails as the spawn did, at once
+            self.run_stderr = None
+            if with { return bytes_to_value(__run_with(prog, argv, opts)) }
+            return bytes_to_value(__run(prog, argv))
+        }
+        let pid = h[1] as int32
+        var ofd = h[2] as int32
+        var efd = h[3] as int32
+        var out = StringBuilder()
+        var err = StringBuilder()
+        var turn = 0
+        while (ofd >= 0 || efd >= 0) && !self.timed_out {
+            // the stream with bytes, else a little while on each in turn
+            var fd: int32 = -1
+            if ofd >= 0 && __poll(ofd, 0) != 0 { fd = ofd }
+            else if efd >= 0 && __poll(efd, 0) != 0 { fd = efd }
+            else {
+                let idle = if (turn % 2 == 0 && ofd >= 0) || efd < 0 { ofd } else { efd }
+                turn += 1
+                if self.case_wait(10, (ms: int32) => __poll(idle, ms)) != 0 { fd = idle }
+            }
+            if fd >= 0 {
+                let chunk = __read(fd, 65536)
+                if chunk.len() == 0 {
+                    __close(fd)
+                    if fd == ofd { ofd = -1 } else { efd = -1 }
+                } else if fd == ofd { out.append(chunk) } else { err.append(chunk) }
+            }
+        }
+        let exited = h[4] as int32
+        if !self.timed_out { let r = self.case_wait(-1, (ms: int32) => __poll(exited, ms)) }
+        if self.timed_out { kill_tree(pid) }
+        // reaped before `exited` is closed (on Windows that handle keeps
+        // the process ID the child's, MYLA-705)
+        let code = __reap(pid)
+        if ofd >= 0 { __close(ofd) }
+        if efd >= 0 { __close(efd) }
+        __close(exited)
+        self.run_stderr = Some(err.build())
+        return Value.VBytes(out.build())
+    }
+
+    // `__reap(pid)`: in a running case the child waited for no longer than
+    // the case's time limit leaves (D259), by `__try_reap` between naps
+    // (from 1 ms, doubling to 50; a process ID gives nothing to poll); past
+    // it the child is killed and reaped, and the case times out (MYLA-818).
+    fun case_reap(var self, pid: int32) -> int32 {
+        self.forget_child(pid)
+        if self.case_deadline == 0 { return __reap(pid) }
+        var nap: int64 = 1000000
+        while true {
+            let code = __try_reap(pid)
+            if code != 256 { return code }
+            // (not a child to reap: the host's own failure)
+            if __io_errno() != 0 { return __reap(pid) }
+            let left = self.case_deadline - __clock_ns()
+            if left <= 0 {
+                kill_tree(pid)
+                let killed = __reap(pid)
+                self.case_timed_out()
+                return killed
+            }
+            __sleep_ns(if nap < left { nap } else { left })
+            if nap < 50000000 { nap = nap * 2 }
+        }
+        unreachable()
+    }
+
+    // A case started the child `h` gave (`__spawn`'s and its kin's `[cause,
+    // pid, ...]`): noted, to be killed if the case ends without reaping it.
+    fun note_child(var self, h: [int]) {
+        if self.testing && h.len() > 1 && h[0] == 0 && h[1] > 0 { self.case_children.push(h[1]) }
+    }
+
+    // The child `pid` reaped: no longer the case's to kill.
+    fun forget_child(var self, pid: int32) {
+        if self.case_children.len() == 0 { return }
+        var kept: [int32] = []
+        for c in self.case_children { if c != pid { kept.push(c) } }
+        self.case_children = kept
+    }
+
+    // The case that ended: the children it started and didn't reap killed
+    // and reaped, as natively its process group is (D272, MYLA-818).
+    fun end_children(var self) {
+        for pid in self.case_children {
+            kill_tree(pid)
+            let gone = __reap(pid)
+        }
+        self.case_children = []
     }
 
     // A deferred block of a `#test` case failed: noted for the report, and
@@ -5217,7 +5373,7 @@ impl Interp {
         if nm == "__sock_send_to" { r = __sock_send_to(ints[0], strs[0], strs[1]) }
         if nm == "__sock_shutdown" { r = __sock_shutdown(ints[0], ints[1]) }
         if nm == "__sock_option" { r = __sock_option(ints[0], ints[1], ints[2]) }
-        if nm == "__sock_poll" { r = __sock_poll(ints[0], ints[1], ints[2]) }
+        if nm == "__sock_poll" { r = self.case_wait(ints[2], (ms: int32) => __sock_poll(ints[0], ints[1], ms)) }
         if nm == "__sock_close" {
             r = __sock_close(ints[0])
             let gone = self.sock_tags.remove(ints[0])
@@ -5363,7 +5519,7 @@ impl Interp {
             if self.stop() { return Value.VUnit }
             if fd < 0 { return Value.VUnit }
             if self.cur < 0 || self.cur >= self.tasks.len() {
-                let r = __poll_write(fd, -1)
+                let r = self.case_wait(-1, (ms: int32) => __poll_write(fd, ms))
                 return Value.VUnit
             }
             if self.tasks[self.cur].requested || __poll_write(fd, 0) != 0 { return Value.VUnit }
@@ -5374,7 +5530,8 @@ impl Interp {
         }
         if c == B_POLL_WRITE {
             let fd = as_int(self.eval(args[0])) as int32
-            return Value.VInt(__poll_write(fd, as_int(self.eval(args[1])) as int32) as int64)
+            let ms = as_int(self.eval(args[1])) as int32
+            return Value.VInt(self.case_wait(ms, (t: int32) => __poll_write(fd, t)) as int64)
         }
         // waiting for a socket (MYLA-346): as for input, through the host's
         // `__sock_poll`; outside any task the thread waits in it
@@ -5383,7 +5540,7 @@ impl Interp {
             let ev = as_int(self.eval(args[1])) as int32
             if self.stop() { return Value.VUnit }
             if self.cur < 0 || self.cur >= self.tasks.len() {
-                let r = __sock_poll(h, ev, -1)
+                let r = self.case_wait(-1, (ms: int32) => __sock_poll(h, ev, ms))
                 return Value.VUnit
             }
             if self.tasks[self.cur].requested || h < 0 || __sock_poll(h, ev, 0) != 0 { return Value.VUnit }
@@ -5425,7 +5582,7 @@ impl Interp {
                 self.captured.push(s)
                 self.captured_io = true
             }
-            else { write(fd, s) }
+            else { self.case_write(fd, s) }
             return Value.VUnit
         }
         if c == B_EXIT {
@@ -5441,6 +5598,7 @@ impl Interp {
             let fd = as_int(self.eval(args[0])) as int32
             let n = as_int(self.eval(args[1])) as int32
             if self.empty_stdin(fd) { return Value.VStr("") }
+            if !self.case_readable(fd) { return Value.VStr("") }
             return Value.VStr(__read(fd, n))
         }
         // `__read` and `__write` of bytes (D177): here through a string,
@@ -5449,6 +5607,7 @@ impl Interp {
             let fd = as_int(self.eval(args[0])) as int32
             let n = as_int(self.eval(args[1])) as int32
             if self.empty_stdin(fd) { return Value.VBytes("") }
+            if !self.case_readable(fd) { return Value.VBytes("") }
             return Value.VBytes(__read(fd, n))
         }
         if c == B_WRITE_BYTES {
@@ -5467,14 +5626,14 @@ impl Interp {
                 self.captured.push(s)
                 self.captured_io = true
             }
-            else { write(fd, s) }
+            else { self.case_write(fd, s) }
             return Value.VUnit
         }
         if c == B_POLL {
             let fd = as_int(self.eval(args[0])) as int32
             let ms = as_int(self.eval(args[1])) as int32
             if self.empty_stdin(fd) { return Value.VInt(1) }
-            return Value.VInt(__poll(fd, ms) as int64)
+            return Value.VInt(self.case_wait(ms, (t: int32) => __poll(fd, t)) as int64)
         }
         if c == B_IO_ERRNO {
             if self.captured_io {
@@ -5545,8 +5704,10 @@ impl Interp {
                 Value.VList(xs) => { for x in xs { argv.push(as_str(x)) } },
                 _ => {},
             }
+            let h = __spawn(prog, argv)
+            self.note_child(h)
             var out: [Value] = []
-            for x in __spawn(prog, argv) { out.push(Value.VInt(x as int64)) }
+            for x in h { out.push(Value.VInt(x as int64)) }
             return Value.VList(out)
         }
         // `__run` and `__spawn` with D147's options: the host's own
@@ -5562,12 +5723,18 @@ impl Interp {
                 Value.VList(xs) => { for x in xs { opts.push(as_str(x)) } },
                 _ => {},
             }
-            if c == B_RUN_WITH { return bytes_to_value(__run_with(prog, argv, opts)) }
+            if c == B_RUN_WITH {
+                if self.case_deadline > 0 { return self.case_run(prog, argv, opts, true) }
+                self.run_stderr = None
+                return bytes_to_value(__run_with(prog, argv, opts))
+            }
+            let h = __spawn_with(prog, argv, opts)
+            self.note_child(h)
             var out: [Value] = []
-            for x in __spawn_with(prog, argv, opts) { out.push(Value.VInt(x as int64)) }
+            for x in h { out.push(Value.VInt(x as int64)) }
             return Value.VList(out)
         }
-        if c == B_REAP { return Value.VInt(__reap(as_int(self.eval(args[0])) as int32) as int64) }
+        if c == B_REAP { return Value.VInt(self.case_reap(as_int(self.eval(args[0])) as int32) as int64) }
         // MYLA-336's: entropy, descriptors, a child with pipes; the host's own
         if c == B_RANDOM_BYTES { return bytes_to_value(__random_bytes(as_int(self.eval(args[0])) as int32)) }
         if c == B_OPEN {
@@ -5618,14 +5785,21 @@ impl Interp {
                 Value.VList(xs) => { for x in xs { opts.push(as_str(x)) } },
                 _ => {},
             }
+            let h = __spawn_piped(prog, argv, opts)
+            self.note_child(h)
             var out: [Value] = []
-            for x in __spawn_piped(prog, argv, opts) { out.push(Value.VInt(x as int64)) }
+            for x in h { out.push(Value.VInt(x as int64)) }
             return Value.VList(out)
         }
         if c == G_LOT { return self.lot_primitive(nm, args) }
         if c == G_NET { return self.net_primitive(nm, args) }
         if c == G_TERM { return self.term_primitive(nm, args) }
-        if c == B_TRY_REAP { return Value.VInt(__try_reap(as_int(self.eval(args[0])) as int32) as int64) }
+        if c == B_TRY_REAP {
+            let pid = as_int(self.eval(args[0])) as int32
+            let code = __try_reap(pid)
+            if code != 256 || __io_errno() != 0 { self.forget_child(pid) }
+            return Value.VInt(code as int64)
+        }
         if c == B_CLOSE {
             __close(as_int(self.eval(args[0])) as int32)
             return Value.VUnit
@@ -5642,9 +5816,17 @@ impl Interp {
                 Value.VList(xs) => { for x in xs { argv.push(as_str(x)) } },
                 _ => {},
             }
+            if self.case_deadline > 0 { return self.case_run(prog, argv, [], false) }
+            self.run_stderr = None
             return bytes_to_value(__run(prog, argv))
         }
-        if c == B_RUN_STDERR { return bytes_to_value(__run_stderr()) }
+        if c == B_RUN_STDERR {
+            match self.run_stderr {
+                Some(s) => { return Value.VBytes(s) },
+                None => {},
+            }
+            return bytes_to_value(__run_stderr())
+        }
         if c == B_RUN_EXIT_CODE { return Value.VInt(__run_exit_code() as int64) }
         if c == B_RUN_SIGNAL { return Value.VInt(__run_signal() as int64) }
         if c == B_RUN_ERRNO { return Value.VInt(__run_errno() as int64) }
@@ -6381,6 +6563,43 @@ fun as_str(v: Value) -> str {
 #allow(primitive)
 fun bytes_to_value(bytes: [uint8]) -> Value {
     return Value.VBytes(__bytes_to_str(bytes))
+}
+
+// The child `pid` killed (SIGKILL) with what it started that is still
+// there, as natively a case's process group is (D272): on Linux the
+// children /proc names for each of its threads, and theirs, each stopped
+// (SIGSTOP) as it is found so that none starts another meanwhile
+// (MYLA-818: `sh -c` left its `sleep`); elsewhere the child alone. The
+// child is still to be reaped.
+#allow(primitive)
+fun kill_tree(pid: int32) {
+    var found = [pid]
+    var i = 0
+    while i < found.len() && !style.WINDOWS {
+        let p = found[i]
+        __kill(p, 19)
+        match list_dir(f"/proc/{p}/task") {
+            Ok(threads) => {
+                for t in threads {
+                    match read_to_string(f"/proc/{p}/task/{t}/children") {
+                        Ok(text) => { for w in text.words() { found.push(decimal(w)) } },
+                        Err(e) => {},
+                    }
+                }
+            },
+            Err(e) => {},
+        }
+        i += 1
+    }
+    for p in found { __kill(p, 9) }
+}
+
+// The number the decimal digits `s` make.
+#test("4096")[4096]
+fun decimal(s: str) -> int32 {
+    var n = 0
+    for k in 0..s.len() { n = n * 10 + (s[k] - '0') as int32 }
+    return n
 }
 
 // The bytes of `s` as a list's elements, one `VInt` each: a `VBytes` taken
