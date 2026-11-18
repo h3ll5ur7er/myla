@@ -51,13 +51,13 @@ pub struct Toolchain { assemble: [str], imports: [str], link: [str], debug_link:
 // system, architecture and object format; the suffix of its programs'
 // files ("" on Linux and WASI, ".exe" on Windows); the file of `std/` that
 // is its `std/platform.my` ("" for x86-64 Linux's own, `for_target`;
-// aarch64's until its seed knows `copies`, MYLA-758); how the files of `std/` that are its own copies
-// of other modules end (`copies`: "_aarch64.my", so `linux_calls_aarch64.my`
-// is its `linux_calls.my`, D223; "" for none); the tools that build for it
-// from any machine (`cross`), and on a machine of
-// its own (`native`, None: `cross`'s); the command its programs run under on
-// another machine without MYLA_EMULATOR ([] for none: wasm32 needs
-// MYLA_EMULATOR); whether its programs can start processes (a test
+// aarch64's until its seed knows `copies`, MYLA-758); how the files of
+// `std/` that are its own copies of other modules end (`copies`:
+// "_aarch64.my", so `linux_calls_aarch64.my` is its `linux_calls.my`, D223;
+// "" for none); the tools that build for it from any machine (`cross`), and
+// on a machine of its own (`native`, None: `cross`'s); the command its
+// programs run under on another machine without MYLA_EMULATOR ([] for
+// none: wasm32 needs MYLA_EMULATOR); whether its programs can start processes (a test
 // harness's cases are children where they can, else runs of the harness,
 // MYLA-370); whether `-g` is supported; and whether the compiler builds for
 // it yet (`supported`; every target does since MYLA-702).
