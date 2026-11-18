@@ -87,6 +87,9 @@ type error: unknown function 'nope'
 
 - The runtime in Myla (`std.rt` over `std.platform`, [[MYLA-162]], D117) and backends of Myla's own for Linux on aarch64 ([[MYLA-163]]) and wasm32 on WASI ([[MYLA-158]], D125), with the checker and interpreter in a page: [[Architecture/Native-backend]]. What they taught: [[Project/Reflection-2026-11]].
 
-Not built yet: macOS and Windows ([[MYLA-164]], [[MYLA-165]]), after the work the reflection lists ([[MYLA-62]]).
+- x86-64 Windows ([[MYLA-165]], D209 to D216): the x86-64 backend's code as a PE32+ console program that links only system DLLs, through LLVM's assembler and linker, with `lib/std/platform_windows.my` over the Windows API; tested under Wine and on a Windows runner, and bootstrapped on Windows itself from `bootstrap/seed-windows.s` ([[Architecture/Native-backend]], [[Development/Bootstrap]]).
+- [[Architecture/Website]]: the website, with the docs, the standard library's reference, a playground and a course on the wasm32 checker and interpreter (D208, [[MYLA-159]]).
+
+Not built yet: macOS ([[MYLA-164]]), after the work the reflection lists ([[MYLA-62]]).
 
 The original v0.0 design sketch of this architecture is [[Archive/architecture]].
