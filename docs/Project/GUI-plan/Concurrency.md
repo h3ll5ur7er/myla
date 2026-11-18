@@ -31,7 +31,7 @@ Natively the jobs run in parallel on the workers (D92) while the UI task keeps t
 
 ## It runs today
 
-A probe of 2026-11-18 at `f78f57c`, 190 lines, no language or runtime change: a generic UI loop over an inbox, actions that post messages, jobs run by `task.workers`, and an actor (`Library`) that imports four books 30 ms apart and reports progress, while a scripted user starts the import and presses a second button every 45 ms.
+A probe of 2026-11-18 at `f78f57c`, 182 lines, no language or runtime change: a generic UI loop over an inbox, actions that post messages, jobs run by `task.workers`, and an actor (`Library`) that imports four books 30 ms apart and reports progress, while a scripted user starts the import and presses a second button every 45 ms.
 
 ```myla fragment
 actor Library { books: [str] }

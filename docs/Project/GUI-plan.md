@@ -84,7 +84,7 @@ Done on 2026-11-18 at `dd57b05`, on a 4-CPU Xeon at 2.1 GHz, with the tools buil
 | A function named `Text` | Accepted: capitalised function names are only a convention |
 | `f(1) { … }`, `f(1, y: 3)`, `g(.Title)`, `[1, if c { 2 }]` | Each is a parse error today, so none of the proposed forms changes the meaning of a valid program |
 | Bindings (`Binding<T>` with a two-way `map`), a view found by its id and edited, a theme decoded with `#derive(Toml)`, a button style as a function of its state, a message log encoded to JSON and replayed | Checks; prints the same under `myla run` and natively (at `4ad9493`) |
-| A UI task over an inbox channel, actions that post messages, jobs run by `task.workers`, an actor reporting progress through a sender while a scripted user keeps pressing a button (190 lines) | Checks and runs under `myla run` and natively: the presses land between the progress reports ([[Project/GUI-plan/Concurrency]], at `f78f57c`) |
+| A UI task over an inbox channel, actions that post messages, jobs run by `task.workers`, an actor reporting progress through a sender while a scripted user keeps pressing a button (182 lines) | Checks and runs under `myla run` and natively: the presses land between the progress reports ([[Project/GUI-plan/Concurrency]], at `f78f57c`) |
 | Filling a 1920×1080 `[uint32]` in a plain Myla loop, native | 4 ms a frame (2 ns a pixel) |
 | Source-over blending the same area, native | 10 to 15 ms a frame |
 | The same two loops under `myla run` (at 192×108, scaled by 100) | 4.9 s and 24 s a frame: about 1,200 and 1,600 to 2,400 times slower |
