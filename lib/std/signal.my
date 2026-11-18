@@ -117,9 +117,16 @@ impl Signals {
 
     // No longer listening: once nobody listens, the signals end the program
     // again, and those not taken are dropped. A second close, through any
-    // copy, does nothing (MYLA-548: it stopped another listener's signals).
+    // copy, does nothing (MYLA-548: it stopped another listener's signals),
+    // and so does one of a value built by hand.
     fun close(self) {
-        let r = __signal_listen(self.handle)
+        // (1 is no handle of the runtime's table, whose handles start at
+        // 8,388,608, but `__signal_listen`'s argument to begin listening:
+        // `Signals { handle: 1 }.close()` caught the signals for good,
+        // MYLA-794)
+        if self.handle != 1 {
+            let r = __signal_listen(self.handle)
+        }
     }
 }
 

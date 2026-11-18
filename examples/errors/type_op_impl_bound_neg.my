@@ -1,0 +1,25 @@
+//~ type error: unary '-' is not defined for 'W<A>': 'A' isn't Name
+//~ span: -w
+// `Neg`'s impl's bound holds where unary `-` picks it (MYLA-612).
+trait Name {
+    fun name(self) -> str
+}
+
+struct A {
+    n: int,
+}
+
+struct W<C> {
+    v: C,
+}
+
+impl<C: Name> Neg<str> for W<C> {
+    fun neg(self) -> str {
+        return self.v.name()
+    }
+}
+
+fun main() {
+    let w = W { v: A { n: 1 } }
+    print(-w)
+}

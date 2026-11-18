@@ -9,14 +9,14 @@ The mode is chosen by the arguments, not by the directory: **file mode** when th
 | Command | Does |
 | --- | --- |
 | `myla run f.my [opts] [args…]` | load, check, interpret `main` (or the `#main` function). The program's argv is `[f.my, args…]`. Arguments after the file that aren't `--stdlib`/`--package`/`--root` go to the program, flags included; `--stdlib x` can't be passed to a program |
-| `myla test f.my [--only t] [--list] [--native] [--target T]` | the `#test` cases declared **in `f.my` itself** (not in modules it imports) |
+| `myla test f.my [--only t] [--list] [--native] [--target T] [--timeout s]` | the `#test` cases declared **in `f.my` itself** (not in modules it imports); `--timeout`: a case's time limit in seconds, 60 by default, 0 for none (D259: `FAIL  f: timed out after 60 s`) |
 | `myla build f.my [-o out] [-g] [--checked] [--target T]` | native binary (default `a.out`); writes `out.s`, `out.o`, runs the assembler and linker, removes both; prints nothing on success |
 | `myla check f.my` | type-check; prints `ok` on stdout (warnings on stderr first), exit 0 |
 | `myla repl` | interactive interpreter (below) |
 | `myla new [--lib] <name>` | creates `<name>/myla.toml`, `.gitignore` (`build/`, `.myla/`), `src/main.my` (a `greeting` function with a `#test` and a `main`) or with `--lib` `src/<name>.my` (a `pub fun greeting`). Name: ASCII letter then letters, digits, `_`; not a keyword, not `std`; directory must not exist |
 | `myla build [-g] [--checked] [--target T]` | project: `src/main.my` → `build/<name>` (`-o` is accepted and ignored) |
 | `myla run [args…]` | project: interprets `src/main.my` |
-| `myla test [--only t] [--list] [--native] [--target T]` | project: every `.my` under `src/` (recursively, sorted, dot-names skipped), then `tests/` (below) |
+| `myla test [--only t] [--list] [--native] [--target T] [--timeout s]` | project: every `.my` under `src/` (recursively, sorted, dot-names skipped), then `tests/` (below) |
 | `myla check` | project: checks every file under `src/`; prints **nothing** on success (no `ok`) |
 | `myla clean [--deps]` | removes `build/` (and `.myla/`); needs only the manifest |
 | `myla fetch [--update]` | resolves Git dependencies, checks them out, writes `myla.lock` (`--update`: ignores the lock and re-resolves every one) |
@@ -120,8 +120,8 @@ fun main() {
 
 - Report, after what the cases printed themselves: `PASS  add #1 (small numbers)`, `FAIL  add #2: expected 5, got 4`, `FAIL  f #1: runtime error: <msg>`, `FAIL  f #1: exited with status 3`, `FAIL  f #1: expected runtime error 'm', got 2`; a failed case's own stdout follows under it as `      | line` (a passing case's isn't shown); then a blank line and `6/8 passed.` (project: `5/5 passed in 5 files.`).
 - `--only <text>`: the cases whose **function name** contains the text (`T.m` for a method; not the label, not `#2`); in a project also test programs whose path contains it. `--list`: prints the case names (`add #1 (small numbers)`), runs nothing, exit 0.
-- Interpreted (`myla test`): a failure ends that case only; its deferred blocks run (a failing one adds `; deferred block: runtime error: …`); integer overflow always traps. `MYLA_SCHED`/`MYLA_TIME` are not read: tasks run in the default order.
-- `--native` / `--target T`: builds a harness (`selfhost/harness.my`: the file's text, `main`/`#main` blanked, plus a case dispatcher and a `#main` calling `std.test`'s runner) **checked**, in `$TMPDIR/myla-test-<ns>/` (std.fs's `temp_root`: on Windows `%TEMP%`, joined with `\`), runs every case in a child process of itself; same report. Differences: a failed case runs no deferred block; a function value shows as `<function>`. Other targets run under `$MYLA_EMULATOR` (split on spaces) else `qemu-aarch64` for aarch64; **wasm32 has no default**: `MYLA_EMULATOR="node tools/wasm/run.mjs" myla test f.my --target wasm32-wasi` (without it: `myla: cannot run the test harness with '…/harness'`). On wasm32 (no processes) the harness runs `--from <k>` repeatedly. A harness that doesn't build is kept as `…/harness.my`. A file whose function calls `main` doesn't build as a harness.
+- Interpreted (`myla test`): a failure ends that case only; its deferred blocks run (a failing one adds `; deferred block: runtime error: …`; one that fails as the case returns is the case's failure, natively too); integer overflow always traps. `MYLA_SCHED`/`MYLA_TIME` are not read: tasks run in the default order. A case past its time limit stops without its deferred blocks; one blocked in a system call (waiting for a child process) can't be stopped interpreted.
+- `--native` / `--target T`: builds a harness (`selfhost/harness.my`: the file's text, `main`/`#main` blanked, plus a case dispatcher and a `#main` calling `std.test`'s runner) **checked**, in `$TMPDIR/myla-test-<ns>/` (std.fs's `temp_root`: on Windows `%TEMP%`, joined with `\`), runs every case in a child process of itself; same report. Differences: a failed case runs no deferred block. A case sees only the program in `process.args()`, as interpreted. The runner kills a case past its time limit; on Linux each case leads a process group, killed as it ends, and dies with the runner, which dies with `myla test` (D259). Other targets run under `$MYLA_EMULATOR` (split on spaces) else `qemu-aarch64` for aarch64; **wasm32 has no default**: `MYLA_EMULATOR="node tools/wasm/run.mjs" myla test f.my --target wasm32-wasi` (without it: `myla: cannot run the test harness with '…/harness'`). On wasm32 (no processes) the harness runs `--from <k>` repeatedly. A harness that doesn't build is kept as `…/harness.my`. A file whose function calls `main` doesn't build as a harness.
 
 ### Projects
 
@@ -197,7 +197,7 @@ geo = { git = "https://example.org/geo.git", tag = "v1.2" }      # or branch = "
 | `MYLA_TIME=virtual` | `myla run` only | the interpreter's monotonic clock jumps to the next deadline when no task is ready (sleeps cost nothing); wall clock unaffected |
 | `MYLA_LOG` | `std.log` | `error`, `warn` (default, also for unknown values), `info`, `debug`, `off`; any case |
 | `MYLA_EMULATOR` | `myla test --target` | the command the harness and test programs run under (`node tools/wasm/run.mjs`) |
-| `MYLA_TEST_PROGRAM`, `MYLA_TEST_DIR`, `MYLA_TEST_EMULATOR`, `MYLA_TEST_TOOL` | set by `myla test` for harnesses | `test.program()`, the scratch root, the emulator for child cases, the harness's own path for the test tool (`__test_tool()`: the child std.process's cases start, `<harness> --test-tool <step>…`, interpreted `myla --test-tool …`, MYLA-727) |
+| `MYLA_TEST_PROGRAM`, `MYLA_TEST_DIR`, `MYLA_TEST_EMULATOR`, `MYLA_TEST_TOOL`, `MYLA_TEST_TIMEOUT` | set by `myla test` for harnesses | `test.program()`, the scratch root, the emulator for child cases, a case's time limit in seconds (`--timeout`; none when unset), the harness's own path for the test tool (`__test_tool()`: the child std.process's cases start, `<harness> --test-tool <step>…`, interpreted `myla --test-tool …`, MYLA-727) |
 | `TMPDIR` | `myla test`, `std.test` | scratch root (default `/tmp`; on Windows `%TEMP%`, std.fs's `temp_root`) |
 | `MYLA_OS`, `MYLA_ARCH`, `AS`, `LD`, `DLLTOOL`, `MYLA_RUN` | `scripts/host.sh` | bootstrap another machine's seed here (system `linux`/`windows`, arch, assembler and linker, Windows' llvm-dlltool, emulator to run stages under: `MYLA_OS=windows MYLA_RUN=wine64` for Windows' under Wine) |
 | `MYLA` | `scripts/build-page.sh` | the compiler to use (default `build/myla`) |
@@ -234,7 +234,7 @@ geo = { git = "https://example.org/geo.git", tag = "v1.2" }      # or branch = "
 | `every task waits for another one` | deadlock |
 | `no entry point: define '#main' or a function named 'main'` | `run` without `main` |
 
-A literal format spec in `format`/an f-string is checked at compile time (`type error: invalid format spec 'zz'`); only `x.format(spec)` with a computed spec fails at run time, in `std.fmt`.
+A literal format spec in `format`/an f-string is checked at compile time (`type error: invalid format spec 'zz'`); only `x.format(spec)` with a computed spec fails at run time, at the call: `invalid format spec 'zz'`, or one that doesn't fit the type, `the format spec 'x' needs an integer, found 'float64'` (MYLA-792).
 
 ## Scripts
 
@@ -245,7 +245,7 @@ A literal format spec in `format`/an f-string is checked at compile time (`type 
 | `scripts/check-seed.sh [BUILD]` | exit 0 when the machine's seed bootstraps the sources (it reports whether each seed is also the current compiler); 1 when `selfhost/embedded_std.my` differs from HEAD; 2 when the seed can't bootstrap the sources (D207). CI and the pre-push hook run it |
 | `scripts/host.sh` | sourced: host OS and target (`uname -s`/`-m`), seed, `EXE` (`.exe` on Windows), `asm_to_bin`, `run_tool`, `seed_compile` |
 | `scripts/test.sh [fast\|all]` | burn tests via `python3 -m unittest`; `fast` drops `test_selfhost_*` and ~25 slow modules |
-| `scripts/test-target.py T [MODULE…] [-j N]` | burn suites for `aarch64-linux` (qemu), `wasm32-wasi` (Node) or `x86_64-windows` (Wine: `/usr/lib/wine/wine64` found, `MYLA_EMULATOR` set, a prefix in `build/wineprefix`), exceptions in `tests/burn/_targets.py` |
+| `scripts/test-target.py T [MODULE…] [-j N] [--limit S]` | burn suites (each stopped after S seconds, 1,500 by default) for `aarch64-linux` (qemu), `wasm32-wasi` (Node) or `x86_64-windows` (Wine: `/usr/lib/wine/wine64` found, `MYLA_EMULATOR` set, a prefix in `build/wineprefix`), exceptions in `tests/burn/_targets.py` |
 | `scripts/stress-native.py [--runs N] [--workers 1,4,16] [--only t…]` | concurrency stress programs natively |
 | `scripts/windows-runner.py build OUT` / `run OUT [--wine] [--runs N] [--only t…]` | Windows programs built on Linux with what each must print (`OUT/cases.json`), run on Windows (CI's `windows` job) or under Wine (MYLA-708) |
 | `scripts/build.sh f.my [out]` | `build/stage3 f.my lib` piped to `as`/`ld` (stage3 directly) |

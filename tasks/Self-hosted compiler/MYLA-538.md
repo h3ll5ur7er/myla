@@ -76,3 +76,11 @@ fun main() {
 - **Reproducers** (`repro-r5/checker/`): `bug3_m538_type_confusion.my` and `w6.my` were `ok`, printing `0` and `123456789` interpreted and segfaulting natively; now `operator '==' is not defined for 'W<list.ListIter<int32>>': 'list.ListIter<int32>' isn't Iterator<str> (it implements 'Iterator<int32>')`. `w.my`, `w2.my` (at the `+`), `w5.my`: errors (`'int32' isn't Iterator<int32>`, `'str' isn't Iterator<int32>`, `'list.ListIter<str>' isn't Iterator<int32> (it implements 'Iterator<str>')`); `w3.my`, `w4.my` unchanged (errors already). 27 more variants (each use above, and programs that meet their bounds and must still check and run) in the lane's scratch directory, all as expected.
 - **Check time** (callgrind, `myla check`, instructions; the base and each stage built the same way): hello world 21,205,285 at the base → 21,205,261 with this commit; a std.http server (`repro-r5/http/server.my`) 209,215,133 → 209,217,417 (+0.001 %). With all four of the lane's tasks: 21,232,453 (+0.13 %) and 209,713,254 (+0.24 %), nearly all of it MYLA-544's typing of left literals.
 - **Suites**: see [[MYLA-544]]'s evidence (one run for the lane).
+
+Signed off by [[Project/Review-2026-11-17]] (done).
+
+## Round 7 ([[MYLA-790]])
+
+[[Project/Review-2026-11-17]] found the hole open again through [[MYLA-612]]'s new sites (H1): an operator impl by type arguments, `Neg`, `Index` and `IndexSet` were picked without their bounds. They are checked there now, with this task's messages (`'A' isn't Conv<str> (it implements 'Conv<int32>')`); see [[MYLA-612]]'s round 7 evidence.
+
+- [x] The bounds of every operator impl hold where its operator, an index or a bound's argument picks it

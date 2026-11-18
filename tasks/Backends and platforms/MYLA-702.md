@@ -2,7 +2,7 @@
 id: MYLA-702
 title: "Windows step 3: hello world as a static .exe"
 type: feature
-status: review
+status: done
 priority: high
 labels: [platforms, windows]
 ---
@@ -46,3 +46,5 @@ The owner took the five recommendations; the first is D220, the second D221, the
 - **The bootstrap** reaches its byte-identical fixed point (28,251,516 bytes); no primitive, runtime variable the seed reads or attribute was added, so **no `Stage:` commit**; `selfhost/embedded_std.my` carries `platform_windows.my`.
 - **Suites** (`6b16066`): `scripts/test.sh fast`: 960 tests, OK (4 skipped); `scripts/test.sh` (all): 1,725 tests, OK (374 skipped). `scripts/check-seed.sh`: the committed seed bootstraps these sources and the embedded library is current.
 - **Wine's services and a test's pipes** (found integrating, `6696aa5`): Wine starts its services from the first program of a new server, and they keep that program's standard streams open, so under `test-target.py`'s persistent server a suite reading the program's output never saw its end. A run with no server already running (as on CI) hung in its first suite: no output for 25 minutes. Reproduced alone: a persistent server, then a captured hello world, no EOF after 30 s; with `wineboot` first, its streams on /dev/null, 0.5 s and the run ends. `_native.wine_env` now starts the server and then the services that way. From no server, `test-target.py x86_64-windows`: 38 of 38 suites in 123 s (2026-11-15, `6696aa5`, `-j 3`); `test_windows` 10 of 10.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

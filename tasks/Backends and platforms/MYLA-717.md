@@ -2,7 +2,7 @@
 id: MYLA-717
 title: "Windows: probe the stack for a frame larger than a page"
 type: bug
-status: review
+status: done
 priority: high
 labels: [platforms, windows, backend]
 ---
@@ -11,7 +11,7 @@ Found while building [[MYLA-702]]. Windows commits a thread's stack a page at a 
 Wine maps the whole stack it reserves, so the suites under Wine can't show this ([[MYLA-708]]'s Windows runner can). The main thread reserves 120 MiB (`/stack:125829120`) and commits as it grows.
 
 - [x] On Windows, a prologue whose frame is 4 KiB or more touches each page from the top down (a loop of `subq $4096, %rsp; orq $0, (%rsp)`, or a call of a probe routine of the runtime's), as `__chkstk` does; Linux's code unchanged
-- [ ] A test: a recursion through a function with a 64 KiB frame, on the Windows runner ([[MYLA-708]]) — written (`tests/burn/test_windows.py`'s `FRAMES`): `FramesOnWindows` runs it under Wine, which commits the whole stack, and [[MYLA-708]]'s `windows` job on Windows itself (`scripts/windows-runner.py`'s `frames/64-kib`, on 1, 2 and 16 workers); open until that job's first run, on the pull request
+- [x] A test: a recursion through a function with a 64 KiB frame, on the Windows runner ([[MYLA-708]]) — written (`tests/burn/test_windows.py`'s `FRAMES`): `FramesOnWindows` runs it under Wine, which commits the whole stack, and [[MYLA-708]]'s `windows` job on Windows itself (`scripts/windows-runner.py`'s `frames/64-kib`, on 1, 2 and 16 workers); open until that job's first run, on the pull request
 - [x] Workers' stacks ([[MYLA-703]]) get the same: `CreateThread`'s stack is committed the same way
 
 ## What changed
@@ -24,3 +24,5 @@ Wine maps the whole stack it reserves, so the suites under Wine can't show this 
 - **The compiler built for Windows**: 18 functions probed, 41 probes in all (`build/stage3 selfhost/gen_main.my lib --target x86_64-windows | grep -c 'orq $0, -4096(%rsp)'`, 2026-11-15); its assembly 28,400,478 bytes against BASE's 28,357,445 (with [[MYLA-703]]'s thread-state loads).
 - **Under Wine** the 64 KiB-frame recursion prints `3836` from the main thread 100 deep and `4632` from two tasks 60 deep, as on Linux; BASE's build does the same there, as Wine commits the whole stack: the run on Windows is `FramesOnWindows.test_a_recursion_through_a_64_kib_frame`, skipped under Wine ([[MYLA-708]]'s runner, whose task names it).
 - **Linux, aarch64 and wasm32** write byte-identical assembly (see [[MYLA-703]]'s evidence); `scripts/test-target.py x86_64-windows` 38 of 38 suites.
+
+Signed off by [[Project/Review-2026-11-17]] (done). Its last box is ticked: `frames/64-kib` passed on the Windows runner (PR #79 and #80).

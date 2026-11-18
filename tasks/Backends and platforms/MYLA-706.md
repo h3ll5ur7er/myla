@@ -2,7 +2,7 @@
 id: MYLA-706
 title: "Windows step 7: the poller on IOCP, and sockets over Winsock"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [platforms, windows]
 ---
@@ -59,3 +59,5 @@ A step of [[MYLA-165]], the Windows target, in the plan the owner accepted on 20
 - **The target suites**: `scripts/test-target.py x86_64-windows -j 3`: 38 of 38 suites passed (2026-11-16, `a0ee690`): test_net 30 s OK (2 skipped: `NetOnWasm`, wasm32's, and `test_no_descriptor_for_the_poller_at_all`, which no emulator runs), test_http 197 s OK (1 skipped: `HttpOnWasm`), test_router OK, test_reactor_scaling OK, test_process 49 s OK, test_std_modules 263 s OK. The first run of the four socket suites found only `test_the_configuration` (Windows' hosts file is elsewhere), made target-aware. `lib/std/platform_windows.my`'s cases 151/151 interpreted and with `--target x86_64-windows`. `scripts/test.sh fast`: 982 tests, OK (7 skipped). `python3 -m unittest tests.burn.test_windows`: 28 tests, OK (1 skipped).
 - **The other targets unchanged**: BASE's `stage3` and this branch's write byte-identical assembly for `selfhost/gen_main.my`, `examples/maps.my` and `examples/concurrency.my` with `--target` `x86_64-linux`, `aarch64-linux` and `wasm32-wasi` (nine pairs, sha256 compared; gen_main's x86-64 `c26727c3dd939812…`).
 - **The bootstrap** reaches its byte-identical fixed point (29,146,468 bytes at `a0ee690`); `scripts/check-seed.sh`: the committed seed bootstraps these sources. `__win_net` and `__win_wait_posted` are labels only Windows programs name; no primitive, runtime variable the seed reads or attribute was added: **no `Stage:` commit**.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

@@ -98,6 +98,49 @@ class Records(unittest.TestCase):
         self.assertEqual((ctypes.sizeof(si), si.lpAttributeList.offset, si.hStdInput.offset), (112, 104, 80))
         self.assertEqual(ctypes.sizeof(runner.process_information_type()), 24)
         self.assertEqual(ctypes.sizeof(runner.COORD_type()), 4)
+        # the commit charge's (MYLA-798)
+        perf = runner.performance_information_type()
+        self.assertEqual((ctypes.sizeof(perf), perf.PageSize.offset, perf.ProcessCount.offset), (104, 80, 92))
+        counters = runner.process_memory_counters_type()
+        self.assertEqual((ctypes.sizeof(counters), counters.PeakPagefileUsage.offset), (72, 64))
+
+
+class Reports(unittest.TestCase):
+    """What a failed step says, and a tally's rate (MYLA-798: the report of
+    process/many-children couldn't say why it failed)."""
+
+    def runner_in(self, work: str, tally: bool = False):
+        r = runner.Runner.__new__(runner.Runner)
+        r.bundle, r.wine, r.runs, r.tally, r.env, r.note, r.tools_missing = work, [], 3, tally, dict(os.environ), "", []
+        return r
+
+    def script(self, work: str, body: str) -> None:
+        with open(os.path.join(work, "t.sh"), "w") as fh:
+            fh.write(body)
+
+    def test_a_failed_step_shows_its_standard_error_checked_or_not(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.script(d, "echo 393; echo 'BAD child 7' >&2\n")
+            r = self.runner_in(d)
+            bad = r.run_step(runner.step(["sh", "t.sh"], "400\n", None), d, {})
+            self.assertIn("stdout differs", bad)
+            self.assertIn("its standard error b'BAD child 7\\n'", bad)
+            self.assertEqual(r.run_step(runner.step(["sh", "t.sh"], "393\n", None), d, {}), "")
+
+    def test_a_tally_runs_every_run_and_gives_the_rate(self):
+        with tempfile.TemporaryDirectory() as d:
+            # right the first time, wrong after
+            self.script(d, "if [ -e seen ]; then echo 1; else touch seen; echo 0; fi\n")
+            case = {"name": "x/rate", "steps": [runner.step(["sh", "t.sh"], "0\n", repeat=True)],
+                    "files": {"t.sh": "t.sh"}, "windows_only": ""}
+            import contextlib
+            import io
+            said = io.StringIO()
+            with contextlib.redirect_stdout(said):
+                verdict, what = self.runner_in(d, tally=True).run_case(case)
+            self.assertEqual(verdict, "FAIL")
+            self.assertIn("2 runs failed", what)
+            self.assertIn("rate x/rate step 1 (sh t.sh): 1 of 3 right", said.getvalue())
 
 
 if __name__ == "__main__":

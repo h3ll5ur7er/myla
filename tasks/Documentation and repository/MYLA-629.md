@@ -2,7 +2,7 @@
 id: MYLA-629
 title: "Seeds updated only when needed; CI publishes the seeds and the tools as artifacts"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [bootstrap, ci, seeds]
 ---
@@ -34,3 +34,5 @@ Run on master at `ff4ee86` with the new scripts, in a scratch worktree (2026-11-
 4. **`update-seed.sh --out build/art`** writes `seed.s` (13,277,767 bytes) and `seed-aarch64.s` (28,503,027 bytes), headed `# bootstrap/seed.s: …` and "from commit ff4ee86…"; `git status bootstrap/` is clean.
 
 On the branch: `scripts/bootstrap.sh` reaches the fixed point with no hint printed, and `scripts/check-seed.sh build` exits 0 with both seeds current. The workflow parses as YAML; the artifact steps run only on a push to master, so the first master commit after the merge is their test.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

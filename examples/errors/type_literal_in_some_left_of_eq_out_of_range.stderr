@@ -1,0 +1,5 @@
+type error: integer literal 300 does not fit in 'uint8'
+  --> examples/errors/type_literal_in_some_left_of_eq_out_of_range.my:7:17
+  |
+7 |     return Some(300) == Some(b)
+  |                 ^^^

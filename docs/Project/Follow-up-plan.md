@@ -114,3 +114,30 @@ The owner's plan for the Windows target ([[MYLA-165]]), decisions D209 to D216. 
 
 Each wave is one pull request. Wave 1 changes `lib/std/platform_wasm.my`'s interface with the others; a web application developed alongside may touch the same file, so the waves merge master often.
 
+## Round 7 (2026-11-17)
+
+What [[Project/Review-2026-11-17]] left of round 6, the features of 13 November, the website and the Windows waves: of the 78 tasks that waited in `review`, 64 are `done` and 14 are reopened, [[MYLA-715]] is raised to `high`, and eleven packages are the tasks of the epic `tasks/Round 7/`. Master's CI was red at the reviewed commit (`e153ee08`): [[MYLA-705]]'s case on the Windows runner, which comes first in its lane.
+
+The lanes are grouped by the files they touch, so they run side by side; a reopened task belongs to the lane of its file.
+
+| Lane | Package | Reopened tasks in it | Files |
+| --- | --- | --- | --- |
+| Checker | [[MYLA-790]] R7-1 | [[MYLA-612]] (an operator impl's bounds unchecked), [[MYLA-584]] (`exit` and `cancel` by name) | `selfhost/checker.my` |
+| Lowering and ANF | [[MYLA-791]] R7-2 | [[MYLA-543]] (`m.contains(k())`), [[MYLA-551]] (far trap branches on aarch64) | `selfhost/lower.my`, `anf.my`, `ir_a64.my` |
+| Interpreter and harness | [[MYLA-792]] R7-3 | [[MYLA-435]] (a generic `#track_caller` function), [[MYLA-547]] (the record in one write); [[MYLA-715]] | `selfhost/interp.my`, `harness.my`, `lib/std/test.my` |
+| Parser and loader | [[MYLA-793]] R7-4 | | `selfhost/parser.my`, `loader.my` |
+| HTTP | [[MYLA-794]] R7-5 | [[MYLA-549]] (eviction closes the newcomer), [[MYLA-755]] (glances by turns or time) | `lib/std/http.my`, `rt.my` |
+| Router and JSON | [[MYLA-795]] R7-6 | [[MYLA-613]] (`static_files` on Windows, patterns) | the router in `lib/std/http.my`, `json.my` |
+| Numerics | [[MYLA-796]] R7-7 | [[MYLA-587]] (matrix shapes, `inverse`, cases), [[MYLA-585]] (`sinh`, `tanh`, the implicit module's cost) | `lib/std/matrix*.my`, `float.my`, `math.my`, `fmt.my` |
+| XML | [[MYLA-797]] R7-8 | [[MYLA-460]] (a cut character, the DOCTYPE scan) | `lib/std/xml.my` |
+| Windows | [[MYLA-798]] R7-9 | [[MYLA-705]] (the red case, `env`'s case, batch names) | `lib/std/platform_windows.my`, `scripts/windows-runner.py` |
+| Website | [[MYLA-799]] R7-10 | [[MYLA-630]] (the skip link, a phone's width, the sizes) | `website/`, `learn/` |
+| Docs, skill, CI | [[MYLA-800]] R7-11, last | | `docs/`, `.agents/`, `.github/` |
+
+Order: the checker, lowering, interpreter, HTTP, router and numerics lanes hold the high findings and come first. The HTTP and router lanes share `http.my`, and `rt.my` is touched by the HTTP lane's glances, by [[MYLA-547]]'s record and by the lowering lane's ready ring: order them or split by function. The async place writes of [[MYLA-791]] need a test with a second expectation (the same statement in a function that isn't async), as every runner agrees on the wrong answer. Each package names the range of ids its new tasks take (801 to 884).
+
+Eight decisions are the owner's (section 4 of the review), taken on 2026-11-17 as D255 to D262: as the review recommends, except who may add an operator impl, where any module may implement any trait for any type and two impls of the same signature are an error (D257). They are a folder named `std`, `async` on a trait impl's method and who may add an operator impl ([[MYLA-790]]), an implicit module's cost ([[MYLA-793]], [[MYLA-796]]), a case's time limit ([[MYLA-792]]), `static_files`' policy ([[MYLA-795]]), long paths on Windows ([[MYLA-798]]) and the generated tests' full size ([[MYLA-800]]).
+
+They run in two waves on the 4 CPUs of the machine that integrates them: first the checker, lowering, interpreter, HTTP and Windows lanes, then the parser and loader, router, numerics, XML and docs lanes. The website lane waits: another agent works on the website meanwhile.
+
+Left for later, as before: [[MYLA-433]], [[MYLA-434]], [[MYLA-504]], [[MYLA-530]], [[MYLA-531]], [[MYLA-377]], [[MYLA-317]], [[MYLA-368]], and [[MYLA-885]] (the poller in Myla's terms, the box [[MYLA-716]] left). Part 2 of the review of 9 November, the whole-codebase pass, is still to come.

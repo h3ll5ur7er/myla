@@ -2,7 +2,7 @@
 id: MYLA-605
 title: "Interpreter: a call of a builtin finds it by comparing its name with each builtin's"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [interpreter, performance]
 ---
@@ -35,3 +35,5 @@ Instructions (callgrind, `myla run` of the whole program, millions; the base is 
 - **Tests.** `builtin_code`'s, `primitive_group`'s and `is_method_code`'s cases and `builtin_codes_agree` (`build/myla test selfhost/interp.my`: 453/453).
 - **The interpreter's suites** (the lane's three tasks together, against aef0b21 in a copy of the repository; wall times on a machine shared with five lanes, CPU the robust measure), before → after: `tests.burn.test_selfhost_interp` 30.5 s → 28.0 s wall, 16.9 → 15.7 s CPU (10 tests before, 13 after: [[MYLA-600]]'s, [[MYLA-604]]'s and [[MYLA-620]]'s are new); `test_compiler_parity` 116.8 → 94.1 s wall, 90.0 → 82.6 s CPU; `test_selfhost_cases` 27.8 → 28.9 s CPU on the first run, again 27.2/27.1 → 27.2/26.5 s CPU (wall 12.3/14.0 → 16.9/18.7 s at a load of 7 on 4 cores; `myla test` of each of its files measured alone, 27.2 s → 26.8 s wall in all); `test_std_modules` 188.8 → 187.4 s wall, 169.6 → 162.5 s CPU. All pass.
 - **The lane's tip** (MYLA-600, 604, 605, 620): `build/myla test selfhost/interp.my` 453/453, `selfhost/repl.my` 52/52; `scripts/test.sh fast` 895 tests, OK; `scripts/test.sh` 1,654 tests (342 skipped), one failure, `test_scheduling…test_a_wide_tree_of_tasks_needs_memory_for_its_depth` (native code's memory, lifo 236 MB against fifo 692 MB, the bound 3×): it passes alone, here and at aef0b21, so it was the load of the shared machine. `scripts/bootstrap.sh`: byte-identical fixed point (26,370,638 bytes); `selfhost/embedded_std.my` unchanged (no `lib/` change).
+
+Signed off by [[Project/Review-2026-11-17]] (done).

@@ -51,3 +51,13 @@ Measured by hand on this machine (the review's `hot1` loop, written as the compi
 - **Bootstrap**: byte-identical fixed point (24,189,090 bytes).
 - **Suites**: `scripts/test.sh fast` (874 tests) OK; `test_generated_widths`, `test_generated_extremes`, `test_formats_checked`, `test_debug_info`, `test_test_native`, `test_compiler_parity`, `test_selfhost_codegen`, `test_aarch64`, `test_selfhost_cases`, `test_error_corpus` (770 tests) OK but `test_children_run_in_parallel`, the known timing test, at load 8 on 4 cores (cpu 1.15 s against wall 0.80 s); `scripts/test-target.py aarch64-linux` with `test_overflow`, `test_ir_contract`, `test_generated_widths`, `test_formats_checked`, `test_generated_extremes`, `test_error_corpus` and `wasm32-wasi` with `test_overflow`, `test_generated_widths`, `test_formats_checked` pass. The full `scripts/test.sh` (1,613 tests, 1,870 s): only `test_children_run_in_parallel` fails, which needs idle cores (alone afterwards at load 5 on 4 cores: cpu 1.12 s against wall 1.00 s); a plain build's code being byte for byte the base's, the change can't reach it.
 
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7: M3 ([[MYLA-791]])
+
+- [x] **M3**: on aarch64 a `--checked` function over about 1 MiB (5,000 statements) didn't assemble, `fixup value out of range: b.vs`: a `b.vs` or `cbz` to a trap after the function's `ret` reaches 1 MiB. The traps pending now go in an island in the function's code, behind a branch over them, before the first branch to them is out of reach (`a64_island` in [[selfhost/ir_a64.my]]: 200,000 lines of text, 800 KB at most, each line at most one instruction). A function that small has none, so its code is as before.
+
+### Evidence
+
+- `tests/burn/test_overflow.py`, `test_a_function_past_a_branchs_reach_builds_checked` (new, the review's `a64_checked_big_function.py`): interpreted `5003` then `integer overflow` at 4:11; built `--checked` the same natively and with `MYLA_TEST_TARGET=aarch64-linux`. Before, on aarch64: `assembler failed … b.vs .Lbig_1192`.
+- A function over 1 MiB whose `if`, `else`, `while` and `match` span it builds and runs on aarch64, plain and `--checked` (the plain branches are a `cbnz` to the next block and a `b`, which reaches 128 MiB).

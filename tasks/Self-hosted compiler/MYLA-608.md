@@ -2,7 +2,7 @@
 id: MYLA-608
 title: "A third of a hello world's check is page faults: huge pages for the heap's chunks?"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [runtime, performance, checker, round-6]
 ---
@@ -69,3 +69,5 @@ A cost the opt-in takes on: with the kernel's `defrag` on `madvise` (the usual),
 - **Programs `myla build` builds are unchanged** (1,000 runs a round, two rounds, built by the compiler before and after): a task program that does nothing (`async let a = one()`) 0.71, 0.52 ms before and 0.72, 0.49 after, 19 faults each; a hello world 0.15, 0.12 and 0.12, 0.12 ms, 9 faults each.
 - **Other targets**: the 12 MB program built for aarch64 runs under qemu with and without the call, and for wasm32 under node (the call does nothing there); `myla` built for aarch64 checks a hello world and runs a task program under qemu.
 - **The bootstrap**: byte-identical fixed point (26,387,289 bytes) from the staged seed.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

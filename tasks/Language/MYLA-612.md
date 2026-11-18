@@ -68,3 +68,16 @@ pos += vel * dt
 - `scripts/test.sh fast`: 878 tests, one failure, the skill's concurrency example, which printed `await a + await b` and so depended on which task reached the counter first (the interpreter 5, native workers 4): it prints the counter's total now. `test_doc_blocks`, `test_examples_run`, `test_compiler_parity`: 320/320. Bootstrap: byte-identical fixed point.
 - Docs: [[Language/Methods-and-traits#operator-overloading]] (a tested example), [[Language/Expressions-and-operators]], D200 (with a note on D52), [[Development/Testing]], the skill (`SKILL.md`, `reference/builtins.md`, `reference/compiler.md`).
 - `scripts/test.sh` (all): 1,622 tests, one failure: `test_selfhost_checker`'s recorded answer for `a + b` with `T: Add` and an `int32` `b` is the old `operator '+' requires both operands to have the same type, found 'T' and 'int32'`. A bound that is only the classic one keeps that message now; one with type arguments says what its bounds give. The parity test, the operator test and the error corpus pass after (369/369).
+
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7 ([[MYLA-790]])
+
+- [x] H1: an operator impl's bounds hold where the operator picks it: `*` and the other arithmetic operators (`*=` through them), unary `-`, `x[i]`, `x[i] = v`, and a bound's argument (`T: Mul<float>`). Each impl's bounds are kept by its method (`Checker.op_bounds`) and checked by `op_bound_failing` wherever `find_op_impl` picks one in the checker
+- [x] A parity program that meets the bounds: `operator_impls_whose_bounds_hold`
+- [x] M15 and the left literals, the review's messages (`mul$int32`, `Mul<{error}, …>`, the element that isn't a place, the right operand's type in a missing impl's name), D256 and D257: see [[MYLA-790]]
+
+## Evidence (round 7)
+
+- Before (BASE `fe30af6`): `repro-r6/checker/HIGH_op_impl_bound_unchecked_{index,mul,generic}.my` checked `ok`; `_index` printed `0` and `123456789` interpreted and segfaulted natively (exit 139).
+- After: `type 'W<A>' can't be indexed by 'int32': 'A' isn't Conv<str> (it implements 'Conv<int32>')`, `operator '*' is not defined for 'W<A>' and 'int32': 'A' isn't Name (it needs 'impl Name for A')`, `type 'W<A>' does not satisfy the bound 'T: Mul<float64>' required by 'scale': 'A' isn't Conv<str> (it implements 'Conv<int32>')`; five error-corpus files (`type_op_impl_bound_*`), the generic `*=` in `test_operator_traits`, and the parity program, the same output interpreted and natively before and after. The suites: [[MYLA-790]]'s evidence.

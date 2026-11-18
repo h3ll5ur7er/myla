@@ -2,7 +2,7 @@
 id: MYLA-552
 title: "R10 Check time and the seeds: under 5 ms, code that doesn't depend on what was read, labels per function"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [loader, performance, seed, bootstrap, round-6]
 ---
@@ -66,3 +66,5 @@ Where a hello world's check goes (after): 20.7 M instructions, of which the load
 - **Seeds and the fixed point**: `scripts/bootstrap.sh` byte-identical (24,910,192 bytes); then the seeds `seed_compile` writes put in `bootstrap/` (locally, discarded after with `git checkout -- bootstrap/ selfhost/embedded_std.my`): `scripts/check-seed.sh` says both are the current compiler (from stage 0 of the new x86-64 seed), `scripts/bootstrap.sh` from it reaches the fixed point, and the aarch64 bootstrap from the new aarch64 seed under qemu (`MYLA_ARCH=aarch64 … MYLA_RUN=qemu-aarch64`) too (39,292,870 bytes).
 - **Suites**: `tests.burn.test_float_registers`, `test_label_names`, `test_debug_info`, `test_selfhost_codegen`, `test_wasm`, `test_loop_overhead`, `test_register_args`, `test_aarch64`, `test_vscode_debugger` OK after the label regexes of four of them followed the names (`\.L\d+` → `\.L[0-9a-z]{6}_\d+`, `\.Lfc\d+` → the bits).
 - **Before reporting**: `scripts/test.sh fast` 895 tests OK (3 skipped); `scripts/test.sh` (all) 1,651 tests OK (342 skipped), 26.5 min. `test_lazy_std` moves to the slow suites (the oracle builds 450 programs twice, 37 s).
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

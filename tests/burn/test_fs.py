@@ -567,6 +567,14 @@ fun main() {
         })
         Err(e) => print(f"/dev/null: {e}")
     }
+    // a Unix socket's (D254: under Node's host too, MYLA-798)
+    match fs.metadata("sock") {
+        Ok(m) => print(match m.kind {
+            Socket => "sock: a socket"
+            _ => "sock: something else"
+        })
+        Err(e) => print(f"sock: {e}")
+    }
 }
 """
 
@@ -874,9 +882,14 @@ class DirectoryParity(unittest.TestCase):
     def test_a_device_s_kind(self) -> None:
         if TEST_TARGET == "x86_64-windows":
             self.skipTest("Windows has no /dev/null")
-        for impl, result in self.run_all("device", DEVICE_KIND).items():
+        def prepare(work: str) -> None:
+            import socket
+            with socket.socket(socket.AF_UNIX) as s:
+                s.bind(os.path.join(work, "sock"))
+
+        for impl, result in self.run_all("device", DEVICE_KIND, prepare).items():
             with self.subTest(implementation=impl):
-                self.assertEqual(result, ("/dev/null: a character device\n", "", 0))
+                self.assertEqual(result, ("/dev/null: a character device\nsock: a socket\n", "", 0))
 
     def test_symbolic_links(self) -> None:
         # MYLA-363: a link's own kind, and walks that don't follow links (or

@@ -2,7 +2,7 @@
 id: MYLA-613
 title: std.http Router for typed web APIs
 type: feature
-status: review
+status: todo
 priority: high
 labels: [stdlib, http]
 ---
@@ -50,3 +50,5 @@ A router in `std.http` for easy, typed web APIs in the spirit of Python's FastAP
 - Async handlers: `serve`/`serve_n` take sync handlers, and closures can't be async yet, so a router can't await (a database). Needs async closures, or a router of `async (Request) -> Response` built on `serve_with`.
 - State between requests: handlers are values with copied captures (D89, D93), so a `POST` can't store anything except through the file system or a process; shared state needs an actor reachable from an async handler.
 - The `#route(…)` sugar once custom attributes exist (last step above).
+
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.

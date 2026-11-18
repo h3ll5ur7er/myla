@@ -2,7 +2,7 @@
 id: MYLA-415
 title: "P2 Lowering and native runtime copies"
 type: bug
-status: review
+status: done
 priority: high
 labels: [lowering, runtime, memory-safety, round-5]
 ---
@@ -106,3 +106,5 @@ Reopened ([[Project/Review-2026-11-12]]): H3 isn't closed for one shape, which t
 - Parity program `closures_capturing_recursive_enums_across_tasks` (a closure in a variable to a child, one capturing two recursive enums and a string, a partial `add(cap, _)`, a struct holding the closure, nested closures, `[async () => f(), async () => g()]` to `task.all`, an actor keeping it, two through a channel, a child's closure awaited by two siblings and the parent, which is the clone path, and the parent's copies afterwards). Before (`build/myla` of 6e699ca): exit 139 on x86-64, `--checked` and aarch64. After: the interpreter's output on x86-64, `--checked`, aarch64 (qemu) and wasm32 (Node); the review's two reproducers (`segv_closure_captures_recursive_enum_to_task.my`, `_to_actor.my`) likewise.
 - No leak: a closure capturing a 20-element list handed to a child 10,000 and 100,000 times, 10.9 MB max RSS both.
 - `build/myla test selfhost/lower.my`: 147/147; `scripts/bootstrap.sh`: byte-identical fixed point.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

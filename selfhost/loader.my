@@ -1258,6 +1258,20 @@ impl Loader {
         return rest.len() > 1 && rest[0] == "std"
     }
 
+    // Whether `path` is a module of the program that would be named as
+    // the standard library's are, `std` or `std$…`: its own `std/` folder
+    // or `std.my` at its root, which is refused (D255), as the library's
+    // names would give it the library's privileges (MYLA-584).
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std/process.my")[true]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std.my")[true]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/sub/std/process.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/process.my")[false]
+    fun own_std(self, path: str) -> bool {
+        let id = self.module_id(path)
+        if id != "std" && !starts_with_text(id, "std$") { return false }
+        return !self.in_std_root(path)
+    }
+
     // Load `path` and its imports (depth first) once each; its module index.
     fun load(var self, path: str) -> Result<int32, Report> {
         var k = 0
@@ -1295,6 +1309,7 @@ impl Loader {
             match imp.kind {
                 DeclKind.ImportDecl(p, items, alias, isp) => {
                     let target = self.resolve(path, p)?
+                    if self.own_std(target) { return Err(at(path, p.line, p.col, p.sp, format("cannot import '{}': a folder or file named 'std' at the program's root is refused, as 'std' is the standard library (rename it)", dotted(p)))) }
                     targets.push(self.load(target)?)
                 },
                 _ => {},
@@ -2349,10 +2364,12 @@ fun load_linked(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
         // a native build has tasks where an `async let` is in any body
         // loaded, read or not, as when every body was read (D90, MYLA-413)
         let tasks = if opts.runtime { lazy.task_line() } else { 0 }
-        bodies = LazyBodies { ids: lazy_ids, keys: lazy.keys, parse: (key: int64) => table.read(key), task_line: tasks }
+        bodies = LazyBodies { ids: lazy_ids, keys: lazy.keys, parse: (key: int64) => table.read(key), task_line: tasks, files: [] }
         // the oracle of the lazy load (MYLA-552): every body read now
         if eager_bodies() { decls = read_every_body(decls, bodies) }
     }
+    // each declaration's file, which the checker's notes name (D257)
+    for sp in ld.spans { bodies.files.push((sp.first_id, sp.path)) }
     return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans, std_impls: std_impls, bodies: bodies })
 }
 

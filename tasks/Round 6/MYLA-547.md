@@ -54,3 +54,14 @@ Tests: `tests/burn/test_test_native.py` `_FRAMED` (the boxes in one file: the mu
 Suites (at `cf963fa`, the bootstrap at its byte-identical fixed point): `scripts/test.sh fast` 877 tests, 2 failures, both the expected ones before the seed commit (`test_embedded_std`, and `test_project_commands`' `test_natively`, which passes with `MYLA_STDLIB=$PWD/lib`); `test_test_native` and `test_test_functions` 34 OK (the qemu and Node classes run); `test_compiler_parity`, `test_selfhost_cases`, `test_error_corpus`, `test_selfhost_checker`, `test_overflow` 680 OK; `test_std_modules` and `test_lsp` 169 OK; `scripts/test.sh` 1616 tests, 4 failures: the two above and two timing tests under a load of 5 on 4 cores (`test_round_trips_beside_many_waiting_frames` passes alone; `test_children_run_in_parallel`, the known one, fails alone too at that load and touches no test harness).
 
 Found on the way: [[MYLA-588]] (x86-64 passes `exit`'s status to `exit_program` zero-extended; invisible today, the record masks it).
+
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7 ([[MYLA-792]], M2, M12, D259)
+
+- [x] **The record in one write** (M2): std.rt's `test_record` wrote it in three writes, so a worker's `eprint` cut it (a case with noisy tasks passed 0 to 1 of 4 natively on four workers); it builds the record in the head's cell, which `reporting` makes `RECORD_ROOM` (4,096) bytes long, and writes it at once; a longer one after the other workers stopped (`panic_report_tasks`)
+- [x] **A forged record** (M2): a child a signal ended has no record (`case_outcome`); a case's `process.args()` is the program only, as interpreted, so the nonce isn't in it
+- [x] **A deferred block that fails as the case returns** (M12) is the case's failure on both runners (`run_defers`)
+- [x] **The third proposal, a time limit** (D259): `myla test --timeout <s>`, 60 by default; the runner kills a child past it and, on Linux, the child's process group as the case ends; the child dies with the runner, the runner with `myla test`
+
+What, how and the evidence are on [[MYLA-792]]. The docs: [[Language/Attributes-and-testing]], [[Language/Standard-library/Test]], [[Language/Standard-library/Rt]], the `myla` skill. The remainder, a case's own children when the harness is killed and on Windows, is [[MYLA-819]]; an interpreted case blocked in a system call is [[MYLA-818]].

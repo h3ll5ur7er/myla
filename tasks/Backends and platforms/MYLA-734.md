@@ -2,7 +2,7 @@
 id: MYLA-734
 title: "A line read from Windows' console ends with a CR"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [platforms, windows]
 ---
@@ -50,3 +50,5 @@ A key at a time (`cbreak_mode`) and raw mode clear line input, so their Enter st
 - Natively: `myla test lib/std/platform_windows.my --stdlib lib` with `--native` and with `--target x86_64-windows` under Wine: 173/173 each.
 - **The checks of the lane** (with [[MYLA-723]] and [[MYLA-729]], at `45703f3`'s sources, 2026-11-16): the bootstrap reaches its byte-identical fixed point (29,267,619 bytes); `scripts/check-seed.sh` passes (the seeds bootstrap these sources, the embedded library is current; no `Stage:` commit: no primitive, runtime variable or attribute is new); `scripts/test.sh fast`: 1,011 tests, OK (7 skipped); `tests.burn.test_lsp`, `test_test_native`, `test_project_commands`, `test_test_functions`, `test_embedded_std`: 223 tests, OK; `.github/workflows/ci.yml` parses (11 jobs).
 - **Linux, aarch64 and wasm32 unchanged**: BASE's compiler (`478d656`'s `gen_main.my`) and this branch's `stage3` write byte-identical assembly for `selfhost/gen_main.my`, `examples/maps.my` and `examples/concurrency.my` with `--target` `x86_64-linux`, `aarch64-linux` and `wasm32-wasi`, from BASE's tree and from this branch's: 18 pairs (BASE's gen_main for x86-64 29,260,935 bytes, sha256 `4a7c56029196bac2…`; this branch's 29,269,976, `3811823b84e65368…`).
+
+Signed off by [[Project/Review-2026-11-17]] (done).

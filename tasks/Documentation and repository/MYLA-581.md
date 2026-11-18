@@ -2,7 +2,7 @@
 id: MYLA-581
 title: The myla skill read against the code, with reference files
 type: chore
-status: review
+status: done
 priority: medium
 labels: [docs, agents]
 ---
@@ -25,3 +25,5 @@ Done means: every claim in `SKILL.md` checked against the code (and, where unsur
 - `reference/`: `syntax.md`, `builtins.md`, `stdlib.md`, `toolchain.md`, `compiler.md` (with the checklist for adding a language feature).
 - `test_doc_blocks.py` now also runs the skill's blocks and requires the two copies to be identical: before the reference files, `test_the_skill_has_blocks` failed (2 blocks); after, 5/5 pass (12 skill blocks checked, run and built natively with the same output). A changed byte in the mirror fails `SkillCopies` and names the file. Writing the core page's example, its `// output:` was first wrong (18 for 12); the test caught it.
 - What the read found stale or doubtful elsewhere is [[MYLA-582]].
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

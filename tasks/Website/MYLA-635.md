@@ -2,7 +2,7 @@
 id: MYLA-635
 title: "The website in CI: built, tested and deployed to GitHub Pages"
 type: feature
-status: review
+status: done
 priority: high
 labels: [website, ci]
 ---
@@ -15,3 +15,5 @@ labels: [website, ci]
 - `.github/workflows/ci.yml`: the `website` job (bootstrap, `npm ci`, `npm test`, `npm run build:pages`, `npm run check-course`, Playwright's Chromium, `npm run e2e`; uploads the site on master) and the `pages` job (master: the site with the tools of `bootstrap` and `bootstrap-arm64` and the `.vsix`, `scripts/downloads.mjs` writing `downloads/manifest.json`, deployed with `actions/deploy-pages`). The repository's Pages source must be GitHub Actions.
 - `scripts/serve.mjs` serves `dist/` as GitHub Pages does (a base path, `404.html` for any other path); the e2e tests run against it under `/myla/`.
 - [[Architecture/Website]], [[Development/Testing]] (the jobs and `test_website.py`), `learn/README.md`, the README and the skill.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

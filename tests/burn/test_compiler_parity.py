@@ -8,10 +8,77 @@ import unittest
 
 from tests.burn._targets import program_excuse
 from tests.burn._tools import peak_memory, selfhost_tool
-from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run, build_and_run_full, interpret,
+from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, Program, build_and_run, build_and_run_full, interpret,
                                 native_build, run_argv, run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
+    # H13 (MYLA-792, MYLA-715): a constant made of an imported constant, or of
+    # one declared after it, read unit interpreted
+    "consts_of_another_module": r"""// H13 (MYLA-715): a constant made of another module's constant, or of one
+// declared after it, is that constant's value on every runner
+from std.ioerror import BAD_HANDLE
+const A: int32 = 5
+const B: int32 = A
+const C: int32 = BAD_HANDLE
+const D: int32 = -BAD_HANDLE
+const E: int32 = F * 2 + C
+const F: int32 = G - 1
+const G: int32 = 4
+const S: str = T + "!"
+const T: str = "late"
+fun main() {
+    print(A)
+    print(B)
+    print(C + 1)
+    print(D)
+    print(E)
+    print(S)
+}
+""",
+    # H6 (MYLA-792, MYLA-435): a generic `#track_caller` function or method
+    # kept its caller's position where its type parameters' binding was
+    # looked for, so its operators on `T` were untyped interpreted
+    "track_caller_generic": r"""// H6: `#track_caller` on generic functions and a generic type's methods,
+// a lambda in one, and one calling another
+#track_caller
+fun lt<T: Ord>(a: T, b: T) -> bool {
+    return a < b
+}
+#track_caller
+fun add<T: Add>(a: T, b: T) -> T {
+    return a + b
+}
+#track_caller
+fun show<T: Format>(a: T) -> str {
+    return f"{a}"
+}
+#track_caller
+fun twice<T: Add + Format>(a: T) -> str {
+    let f = (x: T) => x + x
+    return show(f(a)) + " " + show(add(a, a))
+}
+struct Box<T> { v: T }
+impl<T: Ord + Add + Format> Box<T> {
+    #track_caller
+    fun less(self, k: T) -> bool { return self.v < k }
+    #track_caller
+    fun plus(self, k: T) -> T { return self.v + k }
+    #track_caller
+    fun text(self) -> str { return f"{self.v}" }
+}
+fun main() {
+    let big = 18446744073709551615u64
+    print(lt(big, 2u64))
+    print(show(big))
+    print(Box { v: big }.less(2u64))
+    print(Box { v: big }.text())
+    print(add(0.1f32, 0.2f32))
+    print(Box { v: 0.1f32 }.plus(0.2f32))
+    print(add(200u8, 50u8))
+    print(twice(9223372036854775807u64))
+    print(lt(-1i8, 1i8))
+}
+""",
     # MYLA-553, MYLA-580, MYLA-546: containers' iter(), ldexp, padding in bulk
     "iter_ldexp_and_padding_in_bulk": r"""// MYLA-553, MYLA-580, MYLA-546: `iter()` on a BitSet, an Lru and a Grid;
 // `ldexp` past ±2100 in three steps; long paddings and repeats in bulk
@@ -9671,6 +9738,85 @@ fun main() {
     print(f"{g[0].len()} {bs[0].build()}")
 }
 """,
+    "contains_keeps_its_map_while_the_key_replaces_it": r"""// H4 (MYLA-543): `m.contains(k())` where `k()` replaces the map: the map is
+// read first and kept (D193), so the lookup walks the old map. Native code
+// walked the freed one (`true false true`, and `5` once its cells were reused)
+struct H { m: [int: str], sm: [str: int], junk: [[int64]] }
+
+impl H {
+    fun k(var self) -> int {
+        self.m = [5: f"new{5}"]
+        return 1
+    }
+    fun sk(var self) -> str {
+        self.sm = [f"k{9}": 5]
+        return f"k{2}"
+    }
+    fun key(var self, i: int) -> str {
+        self.sm = [:]
+        // the old map's memory reused
+        for j in 0..64 {
+            var xs: [int64] = []
+            for q in 0..(16 + j % 48) { xs.push(0x7fffffff00000000 + (q as int64)) }
+            self.junk.push(xs)
+        }
+        return f"k{i}"
+    }
+}
+
+fun main() {
+    var h = H { m: [0: f"old{0}", 1: f"old{1}"], sm: [f"k{1}": 1, f"k{2}": 2], junk: [] }
+    print(h.m.contains(h.k()))
+    print(h.m.contains(1))
+    print(h.sm.contains(h.sk()))
+    print(h.sm.contains(f"k{2}"))
+    var hits = 0
+    for r in 0..50 {
+        h.sm = [:]
+        for i in 0..40 { h.sm[f"k{i}"] = i }
+        if h.sm.contains(h.key(r % 40)) { hits += 1 }
+        h.junk = []
+    }
+    print(hits)
+}
+""",
+    "places_counted_from_the_end_by_a_call": r"""// MYLA-811: a place's index counted from the end by a call, `g[^at(1)]`,
+// written by a method or an assignment. Native code held the `^n` as a
+// value of its own and wrote `g[0]`
+struct S { g: [[int]], n: int }
+
+impl S {
+    fun bump(var self) -> int {
+        self.n += 1
+        return 1
+    }
+}
+
+fun at(i: int) -> int { return i }
+
+fun lens(g: [[int]]) -> str {
+    var sb = StringBuilder()
+    for x in g { sb.append(f"{x.len()},") }
+    return sb.build()
+}
+
+fun main() {
+    var g = [[1], [2], [3]]
+    g[^at(1)].push(9)
+    g[^at(2)].push(at(8))
+    g[^at(3)].insert(0, 7)
+    print(lens(g))
+    g[^at(1)][0] = 5
+    g[^at(1)][^at(1)] += 1
+    print(f"{g[2][0]} {g[2][1]}")
+    var s = S { g: [[1], [2]], n: 0 }
+    s.g[^s.bump()].push(s.bump())
+    print(f"{lens(s.g)} {s.n} {s.g[1][1]}")
+    var gg = [[[1]], [[2], [3]]]
+    gg[^at(1)][^at(2)].push(4)
+    print(f"{gg[1][0].len()} {gg[1][1].len()}")
+}
+""",
     "recursive_enums_as_map_keys": r"""// C11, D194 (MYLA-543): a recursive enum is a map key natively too, as
 // interpreted: written, read, updated, removed, iterated, copied, handed to
 // a child task, in a literal; natively `main can't be lowered to the IR`
@@ -9812,6 +9958,154 @@ async fun main() {
     print(await st.put_two("pre-", mine))
     print(await st.report())
     print(f"{mine.len()} {tags.len()} {sb.build()}")
+}
+""",    "literals_left_of_operators_take_their_type": r"""// M15 and the left literals (MYLA-612, MYLA-544, MYLA-609): a literal on
+// the left of an operator takes its type from the impl or the other side
+import std.vector32 as v32
+
+struct B<T> {
+    v: T,
+}
+
+struct V {
+    x: int,
+}
+
+impl<T> Mul<B<str>, str> for B<T> {
+    fun mul(self, n: B<str>) -> str {
+        return "by " + n.v
+    }
+}
+
+impl<T> Mul<B<T>, B<T>> for B<T> {
+    fun mul(self, n: B<T>) -> B<T> {
+        return n
+    }
+}
+
+impl Mul<V, V> for int64 {
+    fun mul(self, k: V) -> V {
+        return V { x: k.x * (self as int) }
+    }
+}
+
+fun eqs(x: int64) -> str {
+    let a = Some(1) == Some(x)
+    let b = (1, 1) == (x, 1)
+    let c = [1] == [x]
+    let d = Some(5000000000) == Some(x)
+    let e = (Some(3), [1, 2]) != (Some(x), [1, 2])
+    return f"{a} {b} {c} {d} {e}"
+}
+
+fun main() {
+    let b = B { v: "b" }
+    print(B { v: 1 } * b)
+    print((B { v: 2 } * B { v: 3 }).v)
+    let w = v32.vec3(1.0, 2.0, 3.0)
+    let c = 2.0 * w
+    print(c.y)
+    let d = -0.5 * w
+    print(d.z)
+    let v = V { x: 3 }
+    print((2 * v).x)
+    print((-4 * v).x)
+    print(eqs(1))
+    print(eqs(3))
+    print(eqs(5000000000))
+}
+""",
+    "operator_impls_whose_bounds_hold": r"""// H1 (MYLA-612): operator impls with bounds, used where the bounds hold:
+// `*` by a type argument, `*=`, unary `-`, `x[i]`, `x[i] = v` and a
+// `T: Mul<float>` argument, on concrete types and in generic code
+trait Conv<T> {
+    fun conv(self) -> T
+}
+
+trait Name {
+    fun name(self) -> str
+}
+
+struct A {
+    n: int,
+}
+
+impl Conv<str> for A {
+    fun conv(self) -> str {
+        return f"a{self.n}"
+    }
+}
+
+impl Name for A {
+    fun name(self) -> str {
+        return f"A{self.n}"
+    }
+}
+
+struct W<C> {
+    v: C,
+    k: float,
+    s: str,
+}
+
+impl<C: Conv<str>> Index<int, str> for W<C> {
+    fun index(self, i: int) -> str {
+        return f"{self.v.conv()}[{i}]"
+    }
+}
+
+impl<C: Name> IndexSet<int, str> for W<C> {
+    fun set_index(var self, i: int, x: str) {
+        self.s = f"{self.v.name()}:{i}={x}"
+    }
+}
+
+impl<C: Name> Mul<int, str> for W<C> {
+    fun mul(self, k: int) -> str {
+        return f"{self.v.name()}*{k}"
+    }
+}
+
+impl<C: Conv<str>> Mul<float> for W<C> {
+    fun mul(self, k: float) -> W<C> {
+        return W { v: self.v, k: self.k * k, s: self.s + self.v.conv() }
+    }
+}
+
+impl<C: Name> Neg<str> for W<C> {
+    fun neg(self) -> str {
+        return "-" + self.v.name()
+    }
+}
+
+fun scale<T: Mul<float>>(x: T) -> T {
+    return x * 2.0
+}
+
+fun named<C: Name>(w: W<C>) -> str {
+    return (w * 3) + " " + (-w)
+}
+
+fun indexed<C: Conv<str> + Name>(w: W<C>) -> str {
+    var x = w
+    x[4] = "q"
+    return w[1] + " " + x.s
+}
+
+fun main() {
+    var w = W { v: A { n: 7 }, k: 1.5, s: "" }
+    print(w * 2)
+    print(-w)
+    print(w[3])
+    w[5] = "z"
+    print(w.s)
+    let d = scale(w)
+    print(d.k)
+    print(d.s)
+    w *= 4.0
+    print(w.k)
+    print(named(w))
+    print(indexed(w))
 }
 """,
 }
@@ -11417,8 +11711,12 @@ class TestCompilerParity(unittest.TestCase):
 
     def test_allocation_does_not_scan_unusable_free_cells(self):
         # Must finish far below the 5 s limit: the linear free-list scan took
-        # about 14 s, size-class free lists take milliseconds.
-        out, code = build_and_run(STRESS_FRAGMENTED_FREE_SRC, timeout=5)
+        # about 14 s, size-class free lists take milliseconds. Under an
+        # emulator the program alone takes seconds (qemu-aarch64: 2.1 s
+        # here on master and this branch alike, past 5 s on CI's runner,
+        # 2026-11-18), so the limit there is 30 s, still far below what the
+        # scan would take under it.
+        out, code = build_and_run(STRESS_FRAGMENTED_FREE_SRC, timeout=5 if TEST_TARGET == "" else 30)
         self.assertEqual(code, 0)
         self.assertEqual(out.strip(), "38000")
 
@@ -11503,11 +11801,28 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertTrue(interp[1].startswith(f"runtime error: {text}\n"), interp[1])
                 self.assertTrue(native[1].startswith(f"runtime error: {text}\n"), native[1])
 
+    def test_a_missing_receiver_element_is_reported_after_the_arguments(self):
+        # D193's timing (MYLA-791): a method on `g[5]` takes the place's
+        # indices, runs its arguments, then finds the element, as the
+        # interpreter does; natively a `var self` method of a program or of
+        # std (`insert`, a builder's `append`) found it first. An element
+        # before the last index is found when the place is taken
+        for name, out in (("missing_receiver_element", "index 5\nvalue 7\n"),
+                          ("missing_receiver_key", "value 7\n"), ("missing_builder_element", "value 7\n"),
+                          ("missing_inner_receiver_element", "")):
+            with self.subTest(program=name):
+                interp, native = _both(RUNTIME_ERRORS[name])
+                self.assertEqual(interp[0], out)
+                self.assertEqual(native[0], out)
+
     def test_a_runtime_spec_is_reported_at_the_call(self):
         # MYLA-565: at `x.format(spec)`, on every runner, not in std.fmt
         for name, text in (("runtime_spec_of_an_int", "invalid format spec 'q'"),
                            ("runtime_spec_of_a_float", "invalid format spec '9999999': a width above 1000000"),
                            ("runtime_spec_of_text", "invalid format spec '.x'"),
+                           ("runtime_spec_misfit_of_a_float", "the format spec 'x' needs an integer, found 'float64'"),
+                           ("runtime_spec_misfit_of_an_int", "the format spec '.3' needs a float, found 'int32'"),
+                           ("runtime_spec_misfit_of_text", "the format spec '+5' needs a number, found 'str'"),
                            ("runtime_spec_with_std_fmt", "invalid format spec '<<<'")):
             with self.subTest(program=name):
                 at = ":3:62\n" if name == "runtime_spec_with_std_fmt" else ":1:62\n"
@@ -11621,6 +11936,10 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # H13: interpreted 5 5 1 0 0 0 before the change
+    "consts_of_another_module": "5\n5\n35\n-34\n40\nlate!\n",
+    # H6: interpreted `true`, `-1`, `true`, `-1` and `-2 -2` before the change
+    "track_caller_generic": "false\n18446744073709551615\nfalse\n18446744073709551615\n0.3\n0.3\n250\n18446744073709551614 18446744073709551614\ntrue\n",
     # MYLA-553, MYLA-580, MYLA-546: new; native code gives the same
     "iter_ldexp_and_padding_in_bulk": '0,63,64,199,299, 630\nb1 d1 c1 \n6\ninf -0 8.98846567431158e307 5e-324\n1000000     |  xy\n1999996 éé|éé\n1000000 -000|0005\n100 0x00|00ff\n1000003 0000|00ff\n4097 0000|0101\n999999 abca|cabc\n139998 ßß|ßab\n',
     # MYLA-545: new; failed to parse before (`expected field name or tuple index after '.'`)
@@ -11811,6 +12130,10 @@ PINNED = {
     "holes_and_keys_kept_when_a_later_one_writes_their_variable": 's10!s110\ns30-!\ns10!\nok\n',
     # MYLA-543: native code ran the value first
     "a_method_call_takes_its_receivers_place_first": 'push: 12 2\nmap element push: 12 2\nindex read first: 2 3\nindex 1\nvalue 2\nindex 3\nvalue 4\n1 4\n',
+    # MYLA-543 (H4): native code read the freed map (`true false false false 1` before)
+    "contains_keeps_its_map_while_the_key_replaces_it": 'true\nfalse\ntrue\nfalse\n50\n',
+    # MYLA-811: native code wrote `g[0]` (`4,1,1,`, then an index out of bounds)
+    "places_counted_from_the_end_by_a_call": '2,2,2,\n5 10\n1,2, 2 1\n2 1\n',
     # MYLA-543 (C11, D194): native code was `main can't be lowered to the IR`
     "recursive_enums_as_map_keys": '6\n30\ntrue\nfalse\n25\n5 false\n1515\n5 10\ntrue\n-1\n4 6 0 42\n56\n6\nbin leaf\n50 1999\n',
     # MYLA-415 (H2): native code segfaulted (a string, list or map argument kept)
@@ -11825,6 +12148,13 @@ PINNED = {
     "arithmetic_operators_of_generic_impls": '3\n5\n42\n4\n1\n3.75\nabcd\nababab\n15000000000\n3\n3 xy\nlinked\n',
     # MYLA-415 (M15): stack overflow on aarch64 and wasm32 (release and deep copy recursed)
     "values_nested_through_closures": '7\n1\n1\n2\n5\n50001 100000 50000 100000\nreleased\n',
+    # MYLA-612 (H1): new; the bounds are checked where an operator picks its
+    # impl, and a program that meets them runs as before
+    # MYLA-612 (M15), MYLA-544, MYLA-609: new; a type error before (the
+    # struct literal took the right operand's type, the others stayed
+    # `float64`, `int32` and `Option<int32>`)
+    "literals_left_of_operators_take_their_type": 'by b\n3\n4\n-1.5\n6\n-12\ntrue true true false true\nfalse false false false false\nfalse false false true true\n',
+    "operator_impls_whose_bounds_hold": 'A7*2\n-A7\na7[3]\nA7:5=z\n3\nA7:5=za7\n6\nA7*3 -A7\na7[1] A7:4=q\n',
 }
 
 
@@ -11887,8 +12217,31 @@ RUNTIME_ERRORS = {
                                 'fun main() {\n    print(show(2.5, ".1"))\n    print(show(2.5, "9999999"))\n}\n'),
     "runtime_spec_of_text": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
                              'fun main() {\n    print(show("ab", "^4"))\n    print(show(true, ".x"))\n}\n'),
+    # MYLA-792 (the 2026-11-17 review's follow-up of MYLA-565): a spec that
+    # doesn't fit the value's type, ignored on every runner before
+    "runtime_spec_misfit_of_a_float": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                       'fun main() {\n    print(show(2.5, ">5"))\n    print(show(2.5, "x"))\n}\n'),
+    "runtime_spec_misfit_of_an_int": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                      'fun main() {\n    print(show(5, "x"))\n    print(show(5, ".3"))\n}\n'),
+    "runtime_spec_misfit_of_text": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                    'fun main() {\n    print(show(true, "^6"))\n    print(show("s", "+5"))\n}\n'),
     "runtime_spec_with_std_fmt": ('import std.fmt as fmt\n\nfun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
                                   'fun main() {\n    print(fmt.pad("a", ">2"))\n    print(show(\'c\', "<<<"))\n}\n'),
+    # D193's timing (MYLA-791): the arguments run before the missing element
+    # (natively it was reported first); an element before the last index is
+    # found with the place
+    "missing_receiver_element": ('impl [int] {\n    fun put(var self, v: int) { self.push(v) }\n}\n'
+                                 'fun at(i: int) -> int {\n    print(f"index {i}")\n    return i\n}\n'
+                                 'fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                                 'fun main() {\n    var g = [[1], [2]]\n    g[at(5)].put(val(7))\n}\n'),
+    "missing_receiver_key": ('impl [int] {\n    fun put(var self, v: int) { self.push(v) }\n}\n'
+                             'fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                             'fun main() {\n    var m = [0: [1]]\n    m[9].insert(0, val(7))\n}\n'),
+    "missing_builder_element": ('fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                                'fun main() {\n    var sbs = [StringBuilder()]\n    sbs[5].append(f"{val(7)}")\n}\n'),
+    "missing_inner_receiver_element": ('impl [int] {\n    fun put(var self, v: int) { self.push(v) }\n}\n'
+                                       'fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                                       'fun main() {\n    var gg = [[[1]]]\n    gg[5][0].put(val(7))\n}\n'),
 }
 
 

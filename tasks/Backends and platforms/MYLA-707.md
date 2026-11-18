@@ -2,7 +2,7 @@
 id: MYLA-707
 title: "Windows step 8: the terminal and signals"
 type: feature
-status: review
+status: done
 priority: low
 labels: [platforms, windows]
 ---
@@ -58,3 +58,5 @@ Tests: `read_ended_by`'s five `#test` cases (no console, two raw reads, an abort
 ## Found
 
 - [[MYLA-734]]: a line read from Windows' console ends with a CR (the console's CR LF), which the tests pin for now.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

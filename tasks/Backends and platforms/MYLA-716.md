@@ -2,20 +2,20 @@
 id: MYLA-716
 title: "The platform interface in Myla's terms: what MYLA-701 left"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [platforms, windows, runtime, stdlib]
 ---
 [[MYLA-701]] (D209) made `std.platform`'s errors cause codes, a directory's entries names and kinds, a file its kind, size and permissions, and processes and sockets capabilities a target declares; `tests/burn/test_platform_interface.py` holds the modules to one interface. Left, none needed before Windows' steps ([[MYLA-702]] on), each where a step will meet it:
 
-- [ ] **The poller in Myla's terms.** (Left open: not in Windows wave 6's lane for this task, which took the error boxes; Windows' poller, [[MYLA-706]], is built on the shape as it is.) `poller_watch`, `poller_watch_socket` (`again`: armed once more, EPOLLONESHOT's shape), `poller_event(i)` and `poller_event_ready(i)` over a buffer of the last wait are epoll's form; wasm32 builds it on `poll_oneoff` (a legitimate implementation, not a translation: it stays), Windows will on IOCP ([[MYLA-706]]). A `POLLER` capability, and a wait that gives `(token, ready)` pairs, would let a target without one (and the interpreter) say so. `park` and `unpark_one` are futex's (`addr`, `seen`): wasm32's do nothing, as one worker needs; Windows' are `WaitOnAddress`/`WakeByAddressSingle`, the same shape, so they can stay.
+- [x] **The poller in Myla's terms.** (Left open: not in Windows wave 6's lane for this task, which took the error boxes; Windows' poller, [[MYLA-706]], is built on the shape as it is.) `poller_watch`, `poller_watch_socket` (`again`: armed once more, EPOLLONESHOT's shape), `poller_event(i)` and `poller_event_ready(i)` over a buffer of the last wait are epoll's form; wasm32 builds it on `poll_oneoff` (a legitimate implementation, not a translation: it stays), Windows will on IOCP ([[MYLA-706]]). A `POLLER` capability, and a wait that gives `(token, ready)` pairs, would let a target without one (and the interpreter) say so. `park` and `unpark_one` are futex's (`addr`, `seen`): wasm32's do nothing, as one worker needs; Windows' are `WaitOnAddress`/`WakeByAddressSingle`, the same shape, so they can stay. — not built here; carried over to [[MYLA-885]] (review 2026-11-17)
 - [x] **`Other`'s numbers on Windows.** std gives the causes an error type has no variant for Linux's numbers on every target (`code_number`: `Other(9)` a closed handle, `terminal error 22`, `SpawnError.WorkingDir(2)`), and wasm32 its unmapped errnos Linux's too ([[MYLA-426]]). A Windows code with no cause is `Other` of its own number (D129). Decide whether wasm32 keeps Linux's numbers or gives WASI's own (then `test_fs.py`'s `ERRNOS` changes there), and whether std's own (`Other(9)`, `Other(11)`, `Other(27)`, `Other(29)`) become causes of their own (`Closed`, `WouldBlock`, …), a change programs see.
 - [x] **Texts of a failed write.** `std.rt`'s and `std.io`'s `errno_text` name ENOSPC, EIO, EFBIG and EDQUOT by Linux's numbers; a platform's `error_text(code)` would name its own (`ERROR_DISK_FULL`).
 - [x] **`SpawnError.WorkingDir(int32)`** holds Linux's number of why (D189). Proposal: `WorkingDir(IoError)`, which needs `IoError` to be `Eq` (`SpawnError` derives it).
 - [x] **std.http's `accept_fate`** keys EMFILE and ENFILE (`Other(24)`, `Other(23)`): Windows' `WSAEMFILE` needs a cause (`TooManyOpen`?) or its own number there.
 - [x] **`from_errno`** stays for programs that hold a Linux errno; nothing in std calls it. Remove it, or keep it documented as Linux's.
 - [x] **wasm32's devices.** WASI's file types name block and character devices and sockets; wasm32's module gives them `KIND_OTHER`, as its made-up modes did, so `FileKind` stays what it was. Giving WASI's own is a change programs see there.
-- [ ] **One Linux layer** (Left open: proposal 6 below sizes it; it changes x86-64 Linux's assembly, so it isn't contained) ([[MYLA-265]]'s second box): `platform.my` and `platform_aarch64.my` still differ only in system-call numbers, `struct stat`'s mode offset and a few `*at` calls; the changes of MYLA-701 were made twice.
+- [x] **One Linux layer** (Left open: proposal 6 below sizes it; it changes x86-64 Linux's assembly, so it isn't contained) ([[MYLA-265]]'s second box): `platform.my` and `platform_aarch64.my` still differ only in system-call numbers, `struct stat`'s mode offset and a few `*at` calls; the changes of MYLA-701 were made twice. — not built here; carried by [[MYLA-758]] (review 2026-11-17)
 
 ## What changed
 
@@ -52,3 +52,5 @@ labels: [platforms, windows, runtime, stdlib]
 - **Assembly**: this branch changes every native program's runtime, so the three programs' assembly differs from BASE's on all three Linux-like targets, in exactly the error functions: std.rt's `errno_text` (its texts moved into `std$system_error$error_text`, new), std.platform's `cause` (two more errnos) and the string literals' labels after them (`examples/maps.my` on x86-64: 105,955 → 106,487 bytes; `selfhost/gen_main.my` 29,261,365 → 29,283,268, aarch64 44,732,747 → 44,757,659, wasm32 42,906,170 → 42,933,895; BASE's sources and this branch's, each built by this branch's `gen_tool`, whose code generation is BASE's).
 - **The bootstrap** reaches its byte-identical fixed point (29,282,111 bytes); no primitive, runtime variable or attribute was added, so **no `Stage:` commit**; `scripts/check-seed.sh`: the committed seed bootstraps these sources. The workflow parses (`yaml.safe_load`, 11 jobs).
 - **`scripts/test.sh`** (all, at `a8c073d`, 2026-11-16): 1,771 tests, OK (390 skipped), in 1,575 s.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

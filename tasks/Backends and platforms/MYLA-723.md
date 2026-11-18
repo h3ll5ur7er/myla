@@ -2,7 +2,7 @@
 id: MYLA-723
 title: "The interpreter, myla check and the language server load the host's own modules"
 type: bug
-status: review
+status: done
 priority: low
 labels: [platforms, windows, loader]
 ---
@@ -34,3 +34,5 @@ Left as they are: the language server's other requests (hover, definitions, comp
 - `scripts/windows-runner.py build`: 108 of 108 programs, 162 cases; `run --wine --runs 3`: 149 passed, 0 failed, 13 skipped (the eleven console cases, `stdin/ready` and `tools/myla-build`, Windows only), `tools/myla-host-modules` among the passed.
 - `build/myla test selfhost/loader.my --only same_file`: 3/3.
 - The checks shared with [[MYLA-729]] and [[MYLA-734]] (the bootstrap, `check-seed.sh`, `test.sh fast`, the other targets' assembly) are in [[MYLA-734]]'s evidence.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

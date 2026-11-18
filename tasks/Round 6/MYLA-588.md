@@ -2,7 +2,7 @@
 id: MYLA-588
 title: "x86-64 passes `exit`'s status to exit_program zero-extended"
 type: bug
-status: review
+status: done
 priority: low
 labels: [native, backend, x86-64, round-6]
 ---
@@ -30,3 +30,5 @@ To see it, print `code as int64` in `exit_program` (or look at `%rdi` in gdb at 
 - `tests.burn.test_native_runtime.NativeRuntime.test_exit_passes_its_status_sign_extended` (new; gdb at `__exit_program`, `printf "code %ld"` of `%rdi`, with and without tasks; the status 255): before, `code 4294967295` for both programs (2 failures); after, `code -1`, OK. Skipped without gdb; x86-64 only (gdb here has no aarch64, and that suite builds with `as`/`ld`).
 - The bootstrap reaches its fixed point (`stage2.s` and `stage3.s` byte-identical).
 - Suites: `scripts/test.sh` (1,656 tests, 342 skipped): only `test_embedded_std` (expected until the seed commit) and `test_children_run_in_parallel` under load (OK alone); `scripts/test-target.py aarch64-linux` and `wasm32-wasi` for `test_term`, `test_net`, `test_stdio`, `test_process`: 4 of 4 each.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

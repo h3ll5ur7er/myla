@@ -2,7 +2,7 @@
 id: MYLA-564
 title: "Checker: an impl whose type parameter only a bound names is told to apply to an impossible type"
 type: bug
-status: review
+status: done
 priority: low
 labels: [checker, diagnostics, traits]
 ---
@@ -42,3 +42,5 @@ help: only a generic function may have a type parameter that only a bound names 
 
 - **Failing first**: the corpus case against the base's CLI gave `a generic impl must apply to 'W<I, J, T>' with its type parameters in order` (its `//~` line and `help` missing); with the change `test_error_corpus` passes (355 tests, the `.stderr` pinned by `MYLA_PIN_DIAGNOSTICS=1`). `build/myla test selfhost/checker.my` 990/990 (`impl_param_unused` among them).
 - **Check time** (callgrind, `myla check`, millions of instructions; 07445ab's CLI, then the lane's tip, whose library is the lane's too): a hello world without imports 21.19 → 21.21, with `from std.io import println` 37.49 → 37.51, `repro-r5/http/server.my` (std.http, std.net, std.task, std.process) 210.86 → 211.11. A loop over the impl's type parameters only for a generic impl on a struct, an enum or an actor.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

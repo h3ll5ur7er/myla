@@ -2,7 +2,7 @@
 id: MYLA-636
 title: "The academy after the first review: three bugs and a wider multiverse"
 type: feature
-status: review
+status: done
 priority: high
 labels: [website, learn]
 ---
@@ -22,3 +22,5 @@ The owner's review of the live site (MYLA-634): the next exercise kept the last 
 - 9 chapters, 55 exercises, 1,875 XP; the top level needs 1,560 (83 %).
 - The hero chosen by the owner from mock-ups in light, dark and phone widths: three lines at 1360 px, the facts above the fold, no sideways scrolling on a phone.
 - `npm test`: 14 node tests and 35 Vitest specs pass; `ng build` clean; Playwright 26 passed.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

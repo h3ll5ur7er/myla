@@ -2,7 +2,7 @@
 id: MYLA-611
 title: "A wide tree of tasks on one worker once peaked at 234 MB instead of 64 MB"
 type: bug
-status: review
+status: done
 priority: low
 labels: [runtime, concurrency, tests, round-6]
 ---
@@ -39,3 +39,5 @@ A driver (scratch, not committed) runs the test from a Python process that first
 | 600 MB | FAIL: `lifo 617 MB, fifo 692 MB` | OK |
 
 The program alone, after: `MYLA_THREADS=1` 65,128 kB depth first, 709,128 kB with `MYLA_SCHED=fifo` (the same as `ru_maxrss` read from a small parent). `python3 -m unittest tests.burn.test_scheduling`: 3 tests OK.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

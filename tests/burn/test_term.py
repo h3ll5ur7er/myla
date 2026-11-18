@@ -719,6 +719,23 @@ async fun main() {
 }
 """
 
+# MYLA-794 (MYLA-548's follow-up): `Signals { handle: 1 }.close()` called
+# `__signal_listen(1)`, whose 1 asks to listen, so a value built by hand
+# turned the signals' default off for good
+FORGED_ONE = """import std.task as task
+from std.signal import Signals
+from std.io import println
+
+#main
+async fun main() {
+    let forged = Signals { handle: 1 }
+    forged.close()
+    println("ready")
+    await task.sleep(60000)
+    println("not here")
+}
+"""
+
 IGNORED = """import std.signal as signal
 import std.task as task
 from std.io import println
@@ -847,6 +864,18 @@ class Signals(Case):
                     self.assertEqual(p.line(), "ready\n")
                     p.signal(sig)
                     self.assertEqual(p.finish(), ("", "", -sig))
+
+    def test_a_listener_built_by_hand_and_closed_catches_nothing(self):
+        built = Built(FORGED_ONE)
+        try:
+            for how, argv, exe in built.commands():
+                with self.subTest(how):
+                    p = Lines(argv, exe)
+                    self.assertEqual(p.line(), "ready\n")
+                    p.signal(signal.SIGINT)
+                    self.assertEqual(p.finish(timeout=10), ("", "", -signal.SIGINT))
+        finally:
+            built.close()
 
     def test_a_sent_sigsegv_ends_the_program(self):
         # a SIGSEGV sent by another process (`kill -SEGV`) isn't a fault the

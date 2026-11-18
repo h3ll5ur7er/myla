@@ -2,7 +2,7 @@
 id: MYLA-576
 title: "Native: every call of an actor's method from outside leaks 8 bytes"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [runtime, lowering, concurrency, native, leak, round-6]
 ---
@@ -62,3 +62,7 @@ The fix, in `std.rt` only: a frame taken that empties its queue sets both counte
 - `manyserve3.my` ([[MYLA-549]], 12,000 rounds, one worker): before 568 kB at round 10, 2,232, 3,896, 5,560, 7,224 kB at rounds 2,999 … 11,999; after 568, 572, 572, 572, 572 kB.
 - The burn test `test_selfhost_codegen.SelfHostedCodegenParity.test_actor_calls_from_outside_run_in_bounded_memory`: 1,000 calls, then 999,000 more, the program reading its own `VmRSS` (a peak through the harness counts the Python parent's 10 MB from before the exec, which hid the plateau), on one worker and four, less than 1 MiB more. Before the fix: `7824 not less than 1024` (one worker) and `7780` (four) natively, `7908` and `6928` on aarch64; after: OK natively, on aarch64 and on wasm32 (where the ring is mapped in the linear memory from the start and `/proc` is Node's: the peak is bounded, 64 MB).
 - Suites at the end: `scripts/test.sh fast` (886 tests) and `scripts/test.sh` (1,626 tests, 342 skipped): the one failure `test_embedded_std`, as expected until the integrator's seed; `scripts/test-target.py aarch64-linux` and `wasm32-wasi` for `test_stdio`, `test_net` and `test_term`; the platform modules' own cases on their targets (23, 23, 19), which first found `__on_raw_signal` named wrongly when std.platform is the entry (fixed, `platform_fn`).
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).
+
+Follow-up done by [[MYLA-791]] (round 7): three callers at once kept the queue from draining, so it drifted along its ring all the same (8,280 kB resident after a million calls on one worker); `queue_took` now copies a short queue that drifted back to its ring's start, and the burn test above runs three callers too (7,804 kB more before, under 1 MiB after, natively, on aarch64 and on wasm32).

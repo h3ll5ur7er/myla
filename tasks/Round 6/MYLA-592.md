@@ -2,7 +2,7 @@
 id: MYLA-592
 title: "Native: a SIGSEGV sent by `kill` is swallowed once"
 type: bug
-status: review
+status: done
 priority: low
 labels: [runtime, native, signals, round-6]
 ---
@@ -40,3 +40,5 @@ Tests (new), interpreted (`myla run`, whose binary has the same handler) and bui
 - `tests.burn.test_term.RawModeEnds.test_a_sent_sigsegv_while_raw_puts_the_mode_back` (a SIGSEGV while the terminal is raw: status -11 and the terminal cooked): OK natively and on aarch64.
 - The bootstrap reaches its fixed point.
 - Suites: `scripts/test.sh` (1,656 tests, 342 skipped): only `test_embedded_std` (expected until the seed commit) and `test_children_run_in_parallel` under load (OK alone); `scripts/test-target.py aarch64-linux` and `wasm32-wasi` for `test_term`, `test_net`, `test_stdio`, `test_process`: 4 of 4 each.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

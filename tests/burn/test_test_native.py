@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
@@ -315,9 +316,12 @@ fun pair_err() -> Result<(), (int, str)> {
 # `exit`, which is reported as the exit it is, an exit status as the process
 # ends with it and an expected one outside 0 to 255 refused (C7), an empty
 # `Err`, which fails (C6), an `Err` of `()` and of a closure shown alike, an
-# empty stdin for every case, and a stack overflow, held to every runner
+# empty stdin for every case, a deferred block that fails as the case
+# returns (M12), values with no form of their own inside an `Err`, the
+# arguments a case sees (the program only), and a stack overflow, held to
+# every runner
 _FRAMED = """from std.io import eprint, write, stdin
-from std.process import exit
+from std.process import exit, args
 
 #test("a\\nruntime error: b")[panic("a\\nruntime error: b")]
 #test("a\\nruntime error: b")[panic("b")]
@@ -395,6 +399,32 @@ async fun reads_stdin_async() {
     }
 }
 
+#test(2)[panic("in defer")]
+#test(3)[exit(5)]
+#test(4)[4]
+fun fails_in_defer(n: int) -> int {
+    defer {
+        if n == 2 { panic("in defer") }
+        if n == 3 { exit(5) }
+    }
+    return n
+}
+
+#test
+fun builders_err() -> Result<(), [StringBuilder]> {
+    return Err([StringBuilder()])
+}
+
+#test
+fun functions_err() -> Result<(), [(int) -> int]> {
+    return Err([(x: int) => x + 1])
+}
+
+#test()[1]
+fun its_arguments() -> int {
+    return args().len()
+}
+
 #test(0)[panic("stack overflow")]
 fun deep(n: int) -> int {
     return deep(n + 1) + 1
@@ -417,12 +447,135 @@ FAIL  unit_err: ()
 FAIL  function_err: <function>
 PASS  reads_stdin
 PASS  reads_stdin_async
+PASS  fails_in_defer #1
+PASS  fails_in_defer #2
+PASS  fails_in_defer #3
+FAIL  builders_err: [<StringBuilder>]
+FAIL  functions_err: [<function>]
+PASS  its_arguments #1
 PASS  deep #1
 
-7/16 passed.
+11/22 passed.
 """
 
 _FRAMED_STDERR = "\x01myla-done\x01runtime error: fake\n\x01myla-case\x01"
+
+# M2 (MYLA-792): a case whose tasks write on stderr all the time while it
+# fails; natively on four workers their writes cut the record, written in
+# three writes, and 0 to 1 of the 4 cases passed
+_NOISY = """import std.task as task
+from std.io import eprint
+
+async fun noisy(k: int) -> int {
+    var i = 0
+    while true {
+        eprint("z")
+        i += 1
+        if i % 50 == 0 { await task.yield() }
+    }
+    return k
+}
+
+#test(1)[panic("boom: the message of the panic")]
+#test(2)[panic("boom: the message of the panic")]
+#test(3)[panic("boom: the message of the panic")]
+#test(4)[panic("boom: the message of the panic")]
+async fun noisy_tasks(n: int) -> int {
+    async let a = noisy(1)
+    async let b = noisy(2)
+    async let c = noisy(3)
+    await task.sleep(20)
+    panic("boom: the message of the panic")
+}
+"""
+
+_NOISY_WANT = "".join(f"PASS  noisy_tasks #{k}\n" for k in range(1, 5)) + "\n4/4 passed.\n"
+
+# M2: a case that reads the run's nonce, writes a record of its own that
+# says it passed, and has itself killed: it passed natively
+_FORGED = """import std.process as process
+import std.fs as fs
+from std.io import eprint
+
+#test(1)[2]
+fun forged(n: int) -> int {
+    match fs.read_bytes("/proc/self/cmdline") {
+        Ok(b) => {
+            var words: [str] = []
+            var w = StringBuilder()
+            for c in b {
+                if c == 0 {
+                    words.push(w.build())
+                    w = StringBuilder()
+                } else {
+                    w.append_byte(c)
+                }
+            }
+            if words.len() == 4 {
+                eprint("\\u{1}myla-" + words[3] + "\\u{1}P:0;")
+                let r = process.command("sh").arg("-c").arg("kill -9 $PPID").output()
+            }
+        }
+        Err(e) => {}
+    }
+    return n
+}
+"""
+
+# D259 (MYLA-792): a case's time limit, alike on both runners: a loop, a
+# sleep, a task spinning beside the case's, a deferred block that doesn't
+# run (natively the child is killed); the case after them runs
+_TIMEOUT = """import std.task as task
+
+#test
+fun spins() {
+    print("before")
+    defer { print("deferred") }
+    var i = 0
+    while true { i = (i + 1) % 1000 }
+}
+
+#test
+async fun sleeps() {
+    await task.sleep(100000)
+}
+
+async fun busy() -> int {
+    var i = 0
+    while true {
+        i = (i + 1) % 1000
+        if i == 0 { await task.yield() }
+    }
+    return i
+}
+
+#test
+async fun spins_in_a_task() {
+    async let a = busy()
+    let v = await a
+}
+
+#test
+fun quick() {}
+"""
+
+_TIMEOUT_WANT = """FAIL  spins: timed out after 1 s
+      | before
+FAIL  sleeps: timed out after 1 s
+FAIL  spins_in_a_task: timed out after 1 s
+PASS  quick
+
+1/4 passed.
+"""
+
+# D259: natively, what a case started goes with it (its process group)
+_STARTS_A_SLEEPER = """import std.process as process
+
+#test
+fun starts_a_sleeper() {
+    let r = process.command("sh").arg("-c").arg("sleep 317").output()
+}
+"""
 
 
 def _framed(tmp: str, *flags: str, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -543,6 +696,67 @@ class TestNative(unittest.TestCase):
             with self.subTest(flags=flags), tempfile.TemporaryDirectory() as tmp:
                 proc = _framed(tmp, *flags)
                 self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_FRAMED_WANT, _FRAMED_STDERR, 1))
+
+    def test_a_record_beside_noisy_tasks(self):
+        # M2: the record is one write, which no other worker's cuts
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "noisy.my", _NOISY)
+            for flags in ([], ["--native"]):
+                with self.subTest(flags=flags):
+                    proc = _myla(["test", path, *flags], tmp, {"MYLA_THREADS": "4"})
+                    self.assertEqual((proc.stdout, proc.returncode), (_NOISY_WANT, 0))
+
+    def test_a_forged_record_of_a_killed_child(self):
+        # M2: a child a signal ended has no record
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "forged.my", _FORGED)
+            proc = _myla(["test", path, "--native"], tmp)
+            self.assertEqual((proc.stdout, proc.returncode), ("FAIL  forged #1: killed by signal 9\n\n0/1 passed.\n", 1))
+
+    def test_a_case_s_time_limit(self):
+        # D259, alike on both runners
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "spins.my", _TIMEOUT)
+            for flags in ([], ["--native"]):
+                with self.subTest(flags=flags):
+                    proc = _myla(["test", path, "--timeout", "1", *flags], tmp)
+                    self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_TIMEOUT_WANT, "", 1))
+            proc = _myla(["test", path, "--timeout", "x"], tmp)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("--timeout takes whole seconds", proc.stderr)
+
+    @unittest.skipUnless(os.path.exists("/proc"), "needs Linux")
+    def test_a_case_s_children_go_with_it(self):
+        # D259: past its limit the case's process group is killed, the
+        # child it started too; and the runner and its child die with
+        # `myla test`
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "sleeper.my", _STARTS_A_SLEEPER)
+            proc = _myla(["test", path, "--timeout", "1", "--native"], tmp)
+            self.assertEqual(proc.stdout, "FAIL  starts_a_sleeper: timed out after 1 s\n\n0/1 passed.\n")
+            self.assertEqual(subprocess.run(["pgrep", "-f", "sleep 317"], capture_output=True).returncode, 1)
+            scratch = os.path.join(tmp, "scratch")
+            os.mkdir(scratch)
+            spin = _write(tmp, "spin.my", "#test\nfun spins() {\n    var i = 0\n    while true { i = (i + 1) % 1000 }\n}\n")
+            full = dict(os.environ)
+            full["TMPDIR"] = scratch
+            p = subprocess.Popen([selfhost_tool("main"), "test", spin, "--native", "--timeout", "0", "--stdlib", STDLIB_ROOT],
+                                 cwd=tmp, env=full, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # the harness and its child run (the child under the runner's scratch directory)
+            harness = []
+            for _ in range(600):
+                harness = subprocess.run(["pgrep", "-f", scratch], capture_output=True, text=True).stdout.split()
+                if len(harness) == 2:
+                    break
+                time.sleep(0.1)
+            self.assertEqual(len(harness), 2, harness)
+            p.kill()
+            p.wait()
+            for _ in range(50):
+                if subprocess.run(["pgrep", "-f", scratch], capture_output=True).returncode == 1:
+                    break
+                time.sleep(0.1)
+            self.assertEqual(subprocess.run(["pgrep", "-f", scratch], capture_output=True, text=True).stdout, "")
 
     def test_the_runtime_s_own_cases(self):
         # std.rt is every native program's runtime: its cases run interpreted

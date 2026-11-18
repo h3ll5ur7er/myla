@@ -30,7 +30,10 @@ woken and all but one watched again.
   first writing a byte after 200 ms to a socket a task waits on: the reader
   is woken within 200 ms on 1 and 2 workers (MYLA-755: a busy worker
   glances at the poller once a millisecond has passed). Before the fix:
-  1,060 and 1,040 ms (a glance every 64 frames).
+  1,060 and 1,040 ms (a glance every 64 frames). And a ping-pong beside as
+  many tasks that only yield (short turns) makes more than 5,000 round trips
+  a second: a busy worker glances every 64 turns too (MYLA-794). With the
+  millisecond alone: 499 a second.
 """
 from __future__ import annotations
 
@@ -362,12 +365,79 @@ async fun busy(n: int) -> int64 {
     return (await r - wrote) / 1000000
 }
 
+// A task that only yields until `until` (ms): how many times.
+async fun spinner(until: int64) -> int {
+    var n = 0
+    while time.now_ms() < until {
+        for i in 0..100 {
+            await task.yield()
+        }
+        n += 100
+    }
+    return n
+}
+
+// A byte read and written back until the other side closes: how many.
+async fun echo_bytes(l: TcpListener) -> int {
+    var c = match await l.accept_async() {
+        Ok(s) => s
+        Err(e) => { return 0 }
+    }
+    var n = 0
+    while true {
+        match await c.read_async(1) {
+            Ok(b) => {
+                if b.len() == 0 {
+                    break
+                }
+                let w = await c.write_async(b)
+                n += 1
+            }
+            Err(e) => { break }
+        }
+    }
+    let gone = c.close()
+    return n
+}
+
+// The round trips of a byte in 500 ms on a connection, both sides in
+// `read_async` and `write_async`, beside `n` tasks that only yield: every
+// turn is short and no worker is idle, so only a busy worker's glance at
+// the poller wakes either side (MYLA-794).
+async fun ping_busy(n: int) -> int {
+    let l = listener()
+    async let e = echo_bytes(l)
+    var c = connected(port_of(l))
+    let until = time.now_ms() + 500
+    var hs: [async () -> int] = []
+    for i in 0..n {
+        hs.push(async () => await spinner(until))
+    }
+    async let spun = task.all(hs)
+    var trips = 0
+    while time.now_ms() < until {
+        let w = await c.write_async([1u8])
+        match await c.read_async(1) {
+            Ok(b) => { trips += 1 }
+            Err(e) => { panic(f"read: {e}") }
+        }
+    }
+    let gone = c.close()
+    let s = await spun
+    if await e != trips {
+        panic("echo")
+    }
+    return trips
+}
+
 #main
 async fun main() {
     let a = args()
     let n = match num.parse_int(a[2]) { Some(v) => v as int, None => 0 }
     if a[1] == "busy" {
         print(await busy(n))
+    } else if a[1] == "ping-busy" {
+        print(await ping_busy(n))
     } else if a[1] == "round-trips" {
         print(await round_trips(n))
     } else if a[1] == "closed" {
@@ -456,6 +526,21 @@ class BusyWorkers(_Built):
             with self.subTest(workers=workers):
                 waited = int(self.run_text("busy", workers, workers=workers))
                 self.assertLess(waited, 200, f"a ready socket waited {waited} ms on {workers} busy workers")
+
+    def test_round_trips_beside_tasks_that_only_yield(self):
+        # every worker busy with short turns (tasks that only yield): a busy
+        # worker glances every 64 turns as well as once a millisecond has
+        # passed (MYLA-794). With the millisecond alone a round trip took
+        # two of them: 499 a second on 1 worker, where 64 turns gave 98,942
+        for workers in [1, 2]:
+            with self.subTest(workers=workers):
+                trips = int(self.run_text("ping-busy", workers, workers=workers))
+                # in 500 ms: the cliff is bound by the millisecond, about
+                # 250 on any machine (BASE: 250 and 445); 1,000 is four
+                # times that, which an emulator's slower turns still pass
+                # (2,136 to 2,260 under CI's qemu-aarch64, about 46,000
+                # natively, 2026-11-18 at e659342)
+                self.assertGreater(trips, 1000, f"{trips} round trips in 500 ms beside {workers} yielding tasks")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

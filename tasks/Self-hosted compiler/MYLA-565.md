@@ -2,7 +2,7 @@
 id: MYLA-565
 title: "An invalid spec given to `x.format(spec)` on a builtin `T: Format` is reported at the call interpreted and in std.fmt natively"
 type: bug
-status: review
+status: done
 priority: low
 labels: [interpreter, native, diagnostics, parity]
 ---
@@ -40,3 +40,5 @@ The call is the better place (the spec is the caller's mistake, as a hole's inva
 - **Failing first**: the new `RUNTIME_ERRORS` programs (`runtime_spec_of_an_int`, `…_of_a_float`, `…_of_text`, `…_with_std_fmt`) and `test_compiler_parity…test_a_runtime_spec_is_reported_at_the_call` against the base: natively `--> …/lib/std/fmt.my:209:28` (and `:150:28`, `:249:28`), interpreted with `import std.fmt` `--> …/lib/std/fmt.my:150:28`, and interpreted `invalid format spec '9999999'` against native code's `…: a width above 1000000`: 7 failures. Now both pass, every report at `main.my:1:62` (`:3:62` with the import), and on aarch64 (qemu) and wasm32 (Node) too (`MYLA_TEST_TARGET`).
 - A valid spec costs one more `parse_spec` a call natively; 4,000,000 `x.format(">7")` calls of an `int` and a `str` in 0.9 s, 11 MB resident (no leak of `spec_error`'s string), the same with `--checked`.
 - `build/myla test lib/std/fmt.my --stdlib lib`: 36/36 interpreted, `--native`, `--target aarch64-linux`, `--target wasm32-wasi`; `build/myla test selfhost/lower.my` 150/150.
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

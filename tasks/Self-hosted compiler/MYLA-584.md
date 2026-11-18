@@ -38,3 +38,17 @@ fun main() {
 - **Test first**: `test_raw_memory.test_a_programs_own_std_directory_is_the_programs`: a program with its own `std/raw.my` (`__addr_of`, `__load64`) and `std/helper.my` (`__write`), and the same under `other/`. At `aef0b21` the `std` case failed (`myla check` exit 0, no error); after, both directories give `type error: '__addr_of' reads or writes raw memory: only the standard library may call it` at `raw.my:2:13`, and `warning[primitive]: '__write' is a primitive of the standard library, not meant to be called from a program` at `helper.my:2:13`. `tests.burn.test_raw_memory`: 4 of 4 pass (the library's own files still may call them).
 - No new warning anywhere: `myla check --stdlib lib` of the 37 examples and a std.http server prints `ok`; the bootstrap builds the toolchain (std.rt's raw memory) with a byte-identical fixed point; `scripts/test.sh fast` passes (898 tests).
 
+Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its round 7 package (section 5) the work.
+
+## Round 7 ([[MYLA-790]], D255)
+
+The owner took the review's decision 1 (D255): a folder named `std` at a program's root is refused, so no module of a program is named as the library's (`std$process`) and none gets its privileges, those the checker gives by name (`exit` that never returns, `task.cancel`) included.
+
+- [x] The loader refuses an import that reaches a `std/` folder or a `std.my` at the program's root (`Loader.own_std`, by module id: `std` or `std$…` outside the library's root): `module error: cannot import '.std.process': a folder or file named 'std' at the program's root is refused, as 'std' is the standard library (rename it)`, at the import
+- [x] Tests: `tests/burn/test_modules.py` `TestARootStdFolderIsRefused` (the review's `own_std_process/` and `own_std_rt_collision/`, and `std.my`, by `check`, `run` and `build`); this task's and [[MYLA-413]]'s tests use `sub/std/`, which stays a folder like any other
+- [x] Docs: [[Language/Modules]], [[Architecture/Module-loader]], the skill's `reference/builtins.md`
+
+## Evidence (round 7)
+
+- Before (BASE `fe30af6`): `own_std_process/main.my` (an empty `exit` in its `std/process.my`) checked `ok`, printed `0` and `ERR: VUnit` interpreted and segfaulted natively; `own_std_rt_collision/m2.my` checked `ok` (and failed to build with `module id collision 'std$fmt'`, per the review).
+- After: both, and `main_cancel.my`, are the module error above at their import; `tests.burn.test_modules` (8 tests), `test_raw_memory` and `test_lazy_std` pass. The suites: [[MYLA-790]]'s evidence.

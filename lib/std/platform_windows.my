@@ -266,6 +266,15 @@ pub fun windows_start() {
     if __load64(cp + 8) != 0 {
         let i = __syscall(__rt_get("__imp_SetConsoleCP"), CP_UTF8, 0, 0)
     }
+    if __load64(cp) != 0 || __load64(cp + 8) != 0 {
+        // the console's control handler, which puts the code pages back
+        // before Windows' default ends the program for a Ctrl-C, a
+        // Ctrl-Break or the console's close (`raw_signal`; MYLA-798: they
+        // were left UTF-8)
+        let st = sig_lock()
+        let r = ctrl_handler_added(st)
+        __store_rel64(st + 24, 0)
+    }
     let cl = __syscall(__rt_get("__imp_GetCommandLineW"), 0, 0, 0)
     var line: [int] = []
     if cl != 0 {
@@ -998,6 +1007,114 @@ fun store_unit(p: int64, u: int64) {
     __store8(p + 1, ((u >> 8) & 255) as uint8)
 }
 
+// A path the system reads (`wide`, in memory the caller frees), made
+// absolute and verbatim when it is long (D261, as Rust's standard library
+// makes it, `get_long_path`): one whose absolute form is LONG_PATH units or
+// more, which Windows refuses past MAX_PATH (260, CreateDirectoryW's 248)
+// unless the machine opted in to long paths, is that form
+// (`GetFullPathNameW`'s: `/` made `\`, `.` and `..` resolved, which a
+// verbatim path doesn't do) after `\\?\` (`verbatim_units`). The length
+// that counts is the absolute one: Windows makes a relative path absolute
+// before it measures it, so a relative path of 230 units in a directory of
+// 50 is past the limit (MYLA-798: on Windows `make_dir_all` of such a path
+// failed at its first long parent, NotFound, where Wine has no limit). A
+// path that is absolute and short (`absolute_short`), one verbatim
+// already, and one whose absolute form is short are as given.
+fun path_wide(path: str) -> int64 {
+    let w = wide(path)
+    let n = wide_len(w)
+    if n < 4 {
+        if absolute_short(units_at(w, n)) {
+            return w
+        }
+    } else if is_verbatim(units_at(w, 4)) || (n < LONG_PATH && absolute_short(units_at(w, 4))) {
+        return w
+    }
+    let need = __syscall5(__rt_get("__imp_GetFullPathNameW"), w, 0, 0, 0, 0) & LOW32
+    if need == 0 {
+        return w
+    }
+    let full = __alloc(2 * need + 2)
+    let got = __syscall5(__rt_get("__imp_GetFullPathNameW"), w, need, full, 0, 0) & LOW32
+    if got == 0 || got >= need || got + 1 < LONG_PATH {
+        // (short as a whole: as given, so a relative name stays one, and a
+        // device's, `NUL`, stays what Windows makes of it)
+        __free(full)
+        return w
+    }
+    var v = verbatim_units(units_at(full, got))
+    __free(full)
+    __free(w)
+    v.push(0)
+    return units_mem(v)
+}
+
+// The length from which a path is made verbatim (Rust's LEGACY_MAX_PATH).
+const LONG_PATH: int64 = 248
+
+// Whether the first units `u` of a path start one Windows takes as it is
+// for its length: a drive and a root (`C:\`, `C:/`) or two separators (a
+// share's `\\srv`, a device's `\\.\`), as Rust's `get_long_path` keeps a
+// short one; a relative path (`a`, `\a`, `C:a`) is made absolute first.
+#test([67, 58, 92, 97])[true]
+#test([67, 58, 47, 97])[true]
+#test([92, 92, 115, 114])[true]
+#test([47, 47, 115, 114])[true]
+#test([67, 58])[false]
+#test([67, 58, 97, 98])[false]
+#test([92, 97, 98, 99])[false]
+#test([108, 111, 110, 103])[false]
+fun absolute_short(u: [int]) -> bool {
+    if u.len() >= 3 && u[1] == 58 && is_sep(u[2] as int64) && !is_sep(u[0] as int64) {
+        return true
+    }
+    return u.len() >= 2 && is_sep(u[0] as int64) && is_sep(u[1] as int64)
+}
+
+// Whether the units `u` start a verbatim or NT path (`\\?\`, `\??\`).
+fun is_verbatim(u: [int]) -> bool {
+    return u.len() >= 4 && u[0] == 92 && (u[1] == 92 || u[1] == 63) && u[2] == 63 && u[3] == 92
+}
+
+// The absolute path `abs` (GetFullPathNameW's) verbatim: a drive's
+// `C:\a` is `\\?\C:\a`, a share's `\\srv\s\a` `\\?\UNC\srv\s\a`, a
+// device's `\\.\x` `\\?\x`; one verbatim already, or of another form, as
+// it is.
+#test("C:\\a\\b")["\\\\?\\C:\\a\\b"]
+#test("\\\\srv\\share\\a")["\\\\?\\UNC\\srv\\share\\a"]
+#test("\\\\.\\COM1")["\\\\?\\COM1"]
+#test("\\\\?\\C:\\a")["\\\\?\\C:\\a"]
+#test("\\??\\C:\\a")["\\??\\C:\\a"]
+#test("a\\b")["a\\b"]
+fun verbatim_test(s: str) -> str {
+    let u = verbatim_units(units_of(s))
+    return utf8_of(u, 0, u.len())
+}
+
+fun verbatim_units(abs: [int]) -> [int] {
+    var prefix = [92, 92, 63, 92]   // \\?\
+    var start = 0
+    if abs.len() >= 3 && abs[1] == 58 && abs[2] == 92 {
+        start = 0                   // C:\
+    } else if is_verbatim(abs) {
+        return abs
+    } else if abs.len() >= 4 && abs[0] == 92 && abs[1] == 92 && abs[2] == 46 && abs[3] == 92 {
+        start = 4                   // \\.\
+    } else if abs.len() >= 2 && abs[0] == 92 && abs[1] == 92 {
+        prefix = [92, 92, 63, 92, 85, 78, 67, 92]   // \\?\UNC\
+        start = 2
+    } else {
+        return abs
+    }
+    var out = prefix
+    var i = start
+    while i < abs.len() {
+        out.push(abs[i])
+        i += 1
+    }
+    return out
+}
+
 // The code point of the UTF-8 character that starts with the byte `b`, the
 // bytes after it `next` (the first lowest), `left` of them there, and its
 // length in bytes; a byte that starts none (a stray continuation, an
@@ -1175,7 +1292,7 @@ fun is_sep(c: int64) -> bool {
 // a file is IS_A_DIRECTORY (Windows: access denied), as Linux reports
 // reading or writing one.
 fun open_handle(path: str, access: int64, disposition: int64, flags: int64) -> int64 {
-    let w = wide(path)
+    let w = path_wide(path)
     // CREATEFILE2_EXTENDED_PARAMETERS: its size and FILE_ATTRIBUTE_NORMAL,
     // the flags, no security attributes or template
     let params = __alloc(32)
@@ -1527,7 +1644,7 @@ pub fun path_kind(path: str) -> int64 {
 // A call of the kernel32 function at `f` on the path `path` (a BOOL): 0, or
 // minus the cause (`path_failed`).
 fun on_path(f: int64, path: str) -> int64 {
-    let w = wide(path)
+    let w = path_wide(path)
     var r: int64 = 0
     if !ok(__syscall(f, w, 0, 0)) {
         r = path_failed(w, last_error())
@@ -1546,7 +1663,7 @@ pub fun make_dir(path: str, mode: int64) -> int64 {
 // denied), but a link to one is removed as Windows removes one
 // (`RemoveDirectoryW`).
 pub fun remove_file(path: str) -> int64 {
-    let w = wide(path)
+    let w = path_wide(path)
     var r: int64 = 0
     if !ok(__syscall(__rt_get("__imp_DeleteFileW"), w, 0, 0)) {
         let e = last_error()
@@ -1573,8 +1690,8 @@ pub fun remove_dir(path: str) -> int64 {
 // `from_path` renamed `to_path`, replacing a file there, as Linux's rename
 // (`MoveFileExW` with MOVEFILE_REPLACE_EXISTING).
 pub fun rename(from_path: str, to_path: str) -> int64 {
-    let a = wide(from_path)
-    let b = wide(to_path)
+    let a = path_wide(from_path)
+    let b = path_wide(to_path)
     var r: int64 = 0
     if !ok(__syscall(__rt_get("__imp_MoveFileExW"), a, b, 1)) {
         r = path_failed(a, last_error())
@@ -2056,9 +2173,62 @@ fun list_entries(s: str) -> [str] {
     return out
 }
 
-// Whether `path` names a batch file, which cmd runs.
+// Whether `path` names a batch file, which cmd runs: its name ends in
+// `.bat` or `.cmd` once the dots and spaces after it are gone, which
+// Windows drops from a name (`x.bat.` and `x.bat ` are `x.bat`, and
+// CreateProcess runs them by cmd too, with the C runtime's quoting: Rust's
+// CVE-2024-43402, MYLA-798).
+#test("x.bat")[true]
+#test("dir\\X.CMD")[true]
+#test("x.bat.")[true]
+#test("x.bat ")[true]
+#test("x.bat. .")[true]
+#test("x.cmd..")[true]
+#test("x.exe")[false]
+#test("x.bat.exe")[false]
+#test("bat")[false]
+#test("..")[false]
 fun is_batch(path: str) -> bool {
-    return ends_with_ci(path, ".bat") || ends_with_ci(path, ".cmd")
+    let name = trailing_trimmed(path)
+    return ends_with_ci(name, ".bat") || ends_with_ci(name, ".cmd")
+}
+
+// `path` without the dots and spaces at its end, which Windows drops from
+// a name.
+#test("x.bat. .")["x.bat"]
+#test("x.bat")["x.bat"]
+#test("..")[""]
+fun trailing_trimmed(path: str) -> str {
+    var end = path.len()
+    while end > 0 && (path[end - 1] == '.' || path[end - 1] == ' ') {
+        end -= 1
+    }
+    if end == path.len() {
+        return path
+    }
+    // (no slice: std.platform loads no std.slice)
+    var sb = StringBuilder()
+    sb.append(path, 0, end)
+    return sb.build()
+}
+
+// The batch file `path` as cmd is given it: without the dots and spaces at
+// its end, the name of the same file (Windows drops them from a name).
+// Given `./e.bat.` itself, cmd ran nothing on Windows (MYLA-798, CI's
+// `process/batch-names`: no output, where `./e.bat` and `./e.bat ` ran;
+// Wine's cmd ran all three). A verbatim path, which Windows takes as
+// written, stays.
+#test("./e.bat.")["./e.bat"]
+#test("./E.CMD..")["./E.CMD"]
+#test("./e.bat. .")["./e.bat"]
+#test("./e.bat ")["./e.bat"]
+#test("./e.bat")["./e.bat"]
+#test("\\\\?\\C:\\e.bat.")["\\\\?\\C:\\e.bat."]
+fun batch_name(path: str) -> str {
+    if path.len() >= 4 && path[0] == 92u8 && path[1] == 92u8 && path[2] == 63u8 && path[3] == 92u8 {
+        return path
+    }
+    return trailing_trimmed(path)
 }
 
 // The attributes of the file at `path` (`GetFileAttributesW`), or minus the
@@ -2339,7 +2509,10 @@ fun input_file(text: str) -> int64 {
     let pid = __syscall(__rt_get("__imp_GetCurrentProcessId"), 0, 0, 0) & LOW32
     var tries: int64 = 0
     while true {
-        let w = spawn_wide(dir + "myla-input-" + decimal(pid) + "-" + decimal(clock_ns() & 4294967295i64) + "-" + decimal(tries) + ".tmp")
+        // (a number of this process's own, which no other worker takes, and
+        // the time, which another process of the same ID didn't have)
+        let k = __fetch_add64(net() + NET_PIPES, 1)
+        let w = spawn_wide(dir + "myla-input-" + decimal(pid) + "-" + decimal(k) + "-" + decimal(clock_ns() & 4294967295i64) + ".tmp")
         // GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | _WRITE | _DELETE,
         // CREATE_NEW, FILE_FLAG_DELETE_ON_CLOSE | FILE_ATTRIBUTE_TEMPORARY
         let h = win_call(__rt_get("__imp_CreateFileW"), [w, 3221225472i64, 7, 0, 1, 67109120, 0])
@@ -2360,7 +2533,10 @@ fun input_file(text: str) -> int64 {
         }
         let e = last_error()
         tries += 1
-        if (e != 80 && e != 183) || tries > 100 {   // FILE_EXISTS, ALREADY_EXISTS: another name
+        // FILE_EXISTS, ALREADY_EXISTS, and ACCESS_DENIED for a name whose
+        // file is being deleted (one closed whose child still runs): another
+        // name
+        if (e != 80 && e != 183 && e != 5) || tries > 100 {
             return -cause(e)
         }
     }
@@ -2657,7 +2833,7 @@ fun create_child(paths: [str], argv: [str], s: Streams, env: int64, dir: int64, 
                 if a < 0 || (a & 16) != 0 {
                     tried = false
                 } else {
-                    cl = bat_command_line(cand, rest)
+                    cl = bat_command_line(batch_name(cand), rest)
                     if cl == "" {
                         failure = INVALID_INPUT
                         tried = false
@@ -2744,6 +2920,9 @@ pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
     var o = h[3] as int64
     var e = h[4] as int64
     let buf = __alloc(65536)
+    // (the cause of the first read that failed: the run's, once the child
+    // ended, MYLA-798; it was taken for the stream's end)
+    var failed: int64 = 0
     while o >= 0 || e >= 0 {
         var src: int64 = -1
         if o >= 0 && e >= 0 {
@@ -2762,6 +2941,9 @@ pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
         }
         let got = read(src, buf, 65536)
         if got <= 0 {
+            if got < 0 && failed == 0 {
+                failed = -got
+            }
             let c = close(src)
             if src == o {
                 o = -1
@@ -2785,7 +2967,7 @@ pub fun run_with(paths: [str], argv: [str], opts: [str]) -> [uint8] {
     let w = __syscall(__rt_get("__imp_WaitForSingleObject"), process, WAIT_INFINITE, 0)
     let code = exit_code_of(process)
     let c = __syscall(__rt_get("__imp_CloseHandle"), process, 0, 0)
-    __set_run_status(code, 0, 0)
+    __set_run_status(code, 0, failed)
     __set_run_stderr(err)
     return out
 }
@@ -3542,12 +3724,20 @@ fun ws_nudge(ws: int64) {
     }
 }
 
+// How long a close waits for the send or write going on (`ws_close_later`)
+// at most: 30 s.
+const CLOSE_LATER_MS: int64 = 30000
+
 // The handle of `ws` closed once its send or write ends, by a wait of the
 // thread pool's on that operation's event (`__win_wait_posted` calls
 // `close_fn`, closesocket or CloseHandle, with the handle): true, or false
 // when no wait could be made (the caller closes it now). `ws` is out of
 // the table and closed later (F_LATER), on the list `ws_later` frees from.
-// The lock held.
+// The wait has a limit, CLOSE_LATER_MS: a peer that takes nothing in that
+// time (a client that never reads) gets the close then, its send cancelled,
+// so the handle and its copy of the bytes aren't kept for good (MYLA-798),
+// as Linux gives up an orphaned socket's data after its probes. The lock
+// held.
 fun ws_close_later(ws: int64, close_fn: int64) -> bool {
     let ctx = ws + WS_POST
     __store64(ctx, close_fn)
@@ -3556,7 +3746,7 @@ fun ws_close_later(ws: int64, close_fn: int64) -> bool {
     __store64(ctx + 24, 0)
     __store64(ctx + 32, 0)
     let r = win_call(__rt_get("__imp_RegisterWaitForSingleObject"),
-        [ws + WS_WAIT, __load64(ws + WS_SEND_EVENT), __rt_addr("__win_wait_posted"), ctx, WAIT_INFINITE, WT_ONCE])
+        [ws + WS_WAIT, __load64(ws + WS_SEND_EVENT), __rt_addr("__win_wait_posted"), ctx, CLOSE_LATER_MS, WT_ONCE])
     if !ok(r) {
         return false
     }
@@ -4374,11 +4564,12 @@ fun name_servers() -> str {
 // logoff or a shutdown, which Windows ends the process for once its
 // handlers return, it waits: the program has until Windows' time limit
 // (5 seconds for a close) to end itself. Else,
-// while std.term holds the console raw (`__exit_hook`), it runs
-// `raw_signal`, which puts the mode back (D192), and passes the event on
-// to Windows' default handler, which ends the process
-// (STATUS_CONTROL_C_EXIT). Else it passes the event on at once, as if it
-// weren't there: it is added the first time it is needed and stays.
+// it runs `raw_signal`, which puts the console back (the mode, while
+// std.term holds it raw, `__exit_hook`, D192; the code pages and the
+// output mode, MYLA-798), and passes the event on to Windows' default
+// handler, which ends the process (STATUS_CONTROL_C_EXIT). It is added at
+// the start when the program has a console (`windows_start`), else the
+// first time it is needed, and stays.
 // `__sig_pipe`'s words: the pipe's write end, its read end plus one, how
 // many listen, a lock, whether the handler was added.
 
@@ -4692,8 +4883,8 @@ pub fun signal_take(h: int64) -> int64 {
 }
 
 // What the console's control handler runs for an interrupt or a request to
-// terminate while std.term holds the console raw and nobody listens (D192):
-// the mode before raw mode put back, as the exit hook does (D187; the
+// terminate that nobody listens for: while std.term holds the console raw
+// (D192), the mode before raw mode put back, as the exit hook does (D187; the
 // runtime's `__exit_hook`: the descriptor plus one, then the mode as a
 // string's cell, its 4 bytes at 32), and the console's code pages and
 // output mode (`console_back`); the handler then passes the event on to

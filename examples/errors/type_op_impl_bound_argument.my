@@ -1,0 +1,38 @@
+//~ type error: type 'W<A>' does not satisfy the bound 'T: Mul<float64>' required by 'scale': 'A' isn't Conv<str> (it implements 'Conv<int32>')
+//~ span: scale(W { v: A { n: 1 } })
+// A bound's argument meets an operator bound only by an impl whose own
+// bounds it meets (MYLA-612): `W<A>` is `Mul<float>` only where `A` is
+// `Conv<str>`.
+trait Conv<T> {
+    fun conv(self) -> T
+}
+
+struct A {
+    n: int,
+}
+
+impl Conv<int> for A {
+    fun conv(self) -> int {
+        return 123456789
+    }
+}
+
+struct W<C> {
+    v: C,
+}
+
+impl<C: Conv<str>> Mul<float> for W<C> {
+    fun mul(self, k: float) -> W<C> {
+        let s = self.v.conv()
+        print(s)
+        return self
+    }
+}
+
+fun scale<T: Mul<float>>(x: T) -> T {
+    return x * 2.0
+}
+
+fun main() {
+    let r = scale(W { v: A { n: 1 } })
+}

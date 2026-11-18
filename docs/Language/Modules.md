@@ -23,7 +23,7 @@ pub from .shapes import Circle         // re-export an item
 pub import .geometry.vector as vector  // re-export a module (needs `as`)
 ```
 
-- Without leading dots, a path is looked up under the project root first, then in the [packages](#packages-dependencies), then in the standard library. `std` is reserved: a project file or folder named `std` is an error.
+- Without leading dots, a path is looked up under the project root first, then in the [packages](#packages-dependencies), then in the standard library. `std` is reserved: a folder `std/` or a file `std.my` at the program's root is an error at the import that reaches it, however it is written (`from .std.x import f` too), so that a program's own module is never named as the library's and gets none of its privileges (D255, [[MYLA-584]]). A folder named `std` below the root (`sub/std/`) is a folder like any other.
 - `from a.b import c` resolves `c` as a module (`a/b/c.my`) before looking for an item `c` exported by `a.b`.
 - Imports must be explicit; there are no wildcards. A name that collides with another name in the module is an error: rename it with `as`.
 - Import cycles are allowed.

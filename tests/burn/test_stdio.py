@@ -363,7 +363,12 @@ class NonBlockingOutput(unittest.TestCase):
                         # the reader alone takes 0.64 s; the interpreter's
                         # start (reading the library) is most of what is left
                         self.assertGreater(wall, 0.6)
-                        self.assertLess(cpu, 0.4 * wall, f"{cpu:.2f} s of CPU in {wall:.2f} s")
+                        # a writer that spun would use all of it; under an
+                        # emulator the start costs more of the CPU (qemu
+                        # on CI: 0.42 of the wall time where this machine
+                        # gives 0.23, 2026-11-18 at e659342; master 0.26)
+                        share = 0.4 if TEST_TARGET == "" else 0.6
+                        self.assertLess(cpu, share * wall, f"{cpu:.2f} s of CPU in {wall:.2f} s")
 
 
 # MYLA-572: a read of two billion bytes of a short input, and how much the

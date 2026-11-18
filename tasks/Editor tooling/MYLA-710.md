@@ -2,7 +2,7 @@
 id: MYLA-710
 title: "A builtin call named like a field of the file isn't resolved, and test_lsp fails on it"
 type: bug
-status: review
+status: done
 priority: low
 labels: [lsp]
 ---
@@ -38,3 +38,4 @@ None that needs a decision. The alternative: resolving a builtin's call to a pse
 - **Test first**: `test_a_member_is_no_global` before the fix fails on the kinds (`'def 0:11-17 global format'` where `field` is wanted, `def 5:8-14 global format` for the method, `def 9:4-5 global A` for the variant); `test_the_corpus_resolves` with `target.my`'s `format(…)` back, before the fix: `format at 143:12 is not resolved` (selfhost/target.my).
 - **After**: `TestResolutionCorpus` 5 tests OK (the corpus, the new test, members 98 of 99 as before, both builds agree); tools/lsp/resolve.my's cases 9/9 (`kind_name`'s 5 new); `python3 -m unittest tests.burn.test_lsp` 167 tests OK (2026-11-16, this branch).
 
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

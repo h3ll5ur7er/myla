@@ -1,0 +1,5 @@
+type error: method 'set_index' in impl of trait 'IndexSet' for 'G' does not match the trait signature (expected '(int32, int32) -> ()')
+  --> examples/errors/type_op_impl_method_named_as_written.my:11:5
+   |
+11 |     fun set_index(var self, i: int, v: str) { }
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

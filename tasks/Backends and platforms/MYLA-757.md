@@ -2,7 +2,7 @@
 id: MYLA-757
 title: "Debug information on Windows: `myla build -g --target x86_64-windows`"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [platforms, windows, debugging]
 ---
@@ -53,3 +53,5 @@ For [[tests/burn/test_debug_info.py]]'s `WIN_PROGRAM` (`add` at line 6, `main` a
 - **Without `-g` the same as before, every target**: BASE's `stage3` and this branch's compile BASE's `selfhost/gen_main.my`, and `examples/maps.my` and `examples/concurrency.my`, to byte-identical assembly for `x86_64-linux`, `aarch64-linux`, `wasm32-wasi` and `x86_64-windows` (12 pairs); with `-g` on x86-64 Linux too, but for gen_main's `DW_AT_comp_dir`, the working directory it was built from. Each compiler with its own sources: `maps` and `concurrency` identical, gen_main differs as its sources do.
 - **The runner** (`scripts/windows-runner.py`): `build` 109 of 109 programs, 164 cases (4 new: `debug/runs`, `debug/symbolizer`, `debug/dwarfdump`, `tools/myla-build-g`); `run --wine --runs 3`: 149 passed, 0 failed, 15 skipped (`debug/runs` passes; the three that need LLVM's Windows tools are skipped under Wine and say so). The `debug/symbolizer` and `debug/dwarfdump` steps, run by the runner's `Runner` without Wine on the same bundle with Linux's LLVM 18: ok. `test_windows_runner`'s new `Programs` case: a bare word is a tool on PATH.
 - **Checks**: `scripts/bootstrap.sh` reaches its byte-identical fixed point (29,264,020 bytes); `scripts/check-seed.sh`: the committed seeds bootstrap these sources, nothing new for them (no primitive, runtime variable or attribute): **no `Stage:` commit**; `tests.burn.test_windows tests.burn.test_windows_runner` 50 tests OK (1 skipped); `tests.burn.test_debug_info` 41 tests OK; `scripts/test.sh fast` 1013 tests OK (7 skipped); `.github/workflows/ci.yml` parses (11 jobs, unchanged).
+
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

@@ -2,7 +2,7 @@
 id: MYLA-722
 title: "Windows: random bytes over bcrypt"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [platforms, windows]
 ---
@@ -36,3 +36,5 @@ Until then a Windows program has no `__random_bytes`, so `std.random`'s seeding 
 - **The other targets unchanged**: BASE's `stage3` and this branch's, given the same `lib/`, write byte-identical assembly for `selfhost/gen_main.my`, `examples/maps.my` and `examples/concurrency.my` with `--target` `x86_64-linux`, `aarch64-linux` and `wasm32-wasi` (nine pairs; gen_main 28,828,734 bytes on x86-64): the compiler's changes are all Windows'. Each with its own `lib/`, `maps` and `concurrency` are still identical and `gen_main` differs only in its lambdas' numbers (`__lam484719` → `__lam485074`), the node ids std.fs's new `joined_on` adds before them.
 - **The bootstrap** reaches its byte-identical fixed point (28,823,876 bytes); `scripts/check-seed.sh`: the committed seed bootstraps these sources. Nothing the seed reads was added (the import table and the comments are Windows' text only; `__win_synch` went): **no `Stage:` commit**.
 - **Suites**: `scripts/test.sh fast` 979 tests, OK (8 skipped); `test_test_functions`, `test_test_native`, `test_platform_interface`, `test_lazy_std`, `test_std_modules`, `test_fs`, `test_doc_blocks`: 83 tests, OK.
+
+Signed off by [[Project/Review-2026-11-17]] (done).

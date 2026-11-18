@@ -2,7 +2,7 @@
 id: MYLA-726
 title: "Windows: a task writing to a child's full input pipe blocks its worker"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [platforms, windows, concurrency]
 ---
@@ -21,3 +21,5 @@ With [[MYLA-706]] a child's input is a named pipe whose end here is overlapped (
 
 - **Test first**: the reproduction above (`INPUT_WHILE_OUTPUT` in tests/burn/test_windows.py, 10 writes of 60,000 bytes and a newline) built with BASE `9738e37`'s library and this branch's compiler, under Wine: `MYLA_THREADS=1` stopped by `timeout 30` (124), 4 workers `600000 600000 0` (2026-11-16).
 - **On this branch**: `600000 600000 0` on 1, 2 and 4 workers (`Sockets.test_a_childs_input_written_while_its_output_is_read`; `scripts/windows-runner.py run --wine`'s `process/input-while-output`, 0.3 s).
+
+Signed off by [[Project/Review-2026-11-17]] (done).

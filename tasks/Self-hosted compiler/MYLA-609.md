@@ -2,7 +2,7 @@
 id: MYLA-609
 title: "Checker: an integer literal past int32 in an if or match arm doesn't take another arm's type"
 type: bug
-status: review
+status: done
 priority: low
 labels: [checker, literals, round-6]
 ---
@@ -39,3 +39,4 @@ The same with `if c { 5000000000 } else { big }`, `-5000000000` in either arm, a
 - **Tests first**, failing at `aef0b21` and passing after: `errors_of` ×6 (the `if` and `match` arms in both orders, negated, a block arm, three arms, a `uint64` past `int64`: no error, where the first was `integer literal 5000000000 does not fit in 'int32'`; and no typed arm, an `int8` arm (`does not fit in 'int8'`, was `'int32'`), a string arm and an `int32` expected: the errors they were), `arm_literal_waits` ×4. Parity program `arm_literals_past_int32` (pinned; a type error at 5:33 before): the interpreter and native code print the same, `5000000000 0 0 0`, `13000000004`, `10000000000000000000`, …
 - The checker's cases: `errors_of` 101 of 101, `literal_waits` and `arm_literal_waits` 8 of 8; `scripts/test.sh fast` passes (898 tests); the bootstrap's fixed point.
 
+Signed off by [[Project/Review-2026-11-17]] (done, with a follow-up in its round 7 package: section 2's table).

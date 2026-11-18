@@ -1128,18 +1128,21 @@ pub fun signal_take(h: int) -> int {
 // --- the environment ---------------------------------------------------------
 
 // `__getenv`: the value of the first `name=value` entry of the environment
-// the process started with, or "" with the cause NOT_FOUND.
+// the process started with, or "" with the cause NOT_FOUND. On Windows the
+// name's ASCII letters match in either case, as Windows compares names
+// (`GetEnvironmentVariableW`): its `Path` is `env("PATH")` (MYLA-798).
 pub fun getenv(name: str) -> str {
     __set_io_errno(0)
     let np = __addr_of(name)
     let n = __load64(np)
+    let folded = os.TARGET == "x86_64-windows"
     var entry = __environ()
     while true {
         let e = __load64(entry)
         if e == 0 {
             break
         }
-        if __equal_bytes(e, np + 8, n) && __load8(e + n) == 61u8 {  // '='
+        if (__equal_bytes(e, np + 8, n) || (folded && same_folded(e, np + 8, n))) && __load8(e + n) == 61u8 {  // '='
             let v = e + n + 1
             var len: int64 = 0
             while __load8(v + len) != 0u8 {
@@ -1154,6 +1157,28 @@ pub fun getenv(name: str) -> str {
     }
     __set_io_errno(os.NOT_FOUND)
     return ""
+}
+
+// Whether the `n` bytes at `a` are those at `b`, ASCII's letters of either
+// case alike (the first byte that differs otherwise ends the look, so a
+// shorter NUL-terminated text at `a` is never read past its end).
+fun same_folded(a: int64, b: int64, n: int64) -> bool {
+    var i: int64 = 0
+    while i < n {
+        var x = __load8(a + i)
+        var y = __load8(b + i)
+        if x >= 97u8 && x <= 122u8 {
+            x -= 32u8
+        }
+        if y >= 97u8 && y <= 122u8 {
+            y -= 32u8
+        }
+        if x != y {
+            return false
+        }
+        i += 1
+    }
+    return true
 }
 
 // --- processes ---------------------------------------------------------------
@@ -2676,32 +2701,58 @@ pub fun exit_program(code: int) {
 // cell, or 0 for none). The head is taken off as it is written, so a case's
 // end has one record. Whether this process is a test child that had none
 // yet. It allocates nothing.
+//
+// The record is one write where it fits in the head's cell, whose bytes
+// `reporting` made RECORD_ROOM long: a write of at most PIPE_BUF bytes to a
+// pipe is never cut, so another worker's write to stderr lands before it or
+// after it (the 2026-11-17 review's M2: it was three writes, and a noisy
+// task cut them). A longer one is written in pieces, after the other
+// workers stopped when a task failed (`panic_report_tasks`).
 fun test_record(kind: int64, n: int64, text: int64) -> bool {
     let head = __xchg64(__rt_addr("__test_report"), 0)
     if head == 0 {
         return false
     }
-    write_err(head)
-    let end = __rt_addr("__panic_buf") + 32
-    var at = end - 1
-    __store8(at, 59u8)  // ';'
-    var v = n
-    while true {
-        at -= 1
-        __store8(at, (48 + v % 10) as uint8)
-        v = v / 10
-        if v == 0 {
-            break
+    let tn = if text != 0 { __load64(text) } else { 0 }
+    let buf = head + 8
+    var at = __load64(head)
+    __store8(buf + at, kind as uint8)
+    __store8(buf + at + 1, 58u8)  // ':'
+    at += 2
+    var p: int64 = 1
+    while p <= n / 10 {
+        p *= 10
+    }
+    while p > 0 {
+        __store8(buf + at, (48 + n / p % 10) as uint8)
+        p = p / 10
+        at += 1
+    }
+    __store8(buf + at, 59u8)  // ';'
+    at += 1
+    if at + tn <= RECORD_ROOM {
+        if tn > 0 {
+            __copy_bytes(buf + at, text + 8, tn)
         }
+        os.write_all(2, buf, at + tn)
+        return true
     }
-    at -= 2
-    __store8(at, kind as uint8)
-    __store8(at + 1, 58u8)  // ':'
-    os.write_all(2, at, end - at)
-    if text != 0 {
-        write_err(text)
-    }
+    os.write_all(2, buf, at)
+    write_err(text)
     return true
+}
+
+// The bytes of a test child's record head's cell (std.test's `reporting`
+// makes it as long, its `RECORD_ROOM`): PIPE_BUF on Linux, what a write to
+// a pipe keeps whole.
+const RECORD_ROOM: int64 = 4096
+
+// Whether this is a test child whose record of a runtime error with the
+// message `msg` (a string's cell) can't be written at once (`test_record`).
+fun record_in_pieces(msg: int64) -> bool {
+    let head = __load64(__rt_addr("__test_report"))
+    // (the kind, `:`, at most 19 digits and `;`)
+    return head != 0 && __load64(head) + 22 + __load64(msg) > RECORD_ROOM
 }
 
 // The exit hook: the terminal `__term_raw` made raw, if nothing put it back
@@ -2728,8 +2779,13 @@ pub fun panic_report(msg: int64, pos: int64) {
     exit_program(1)
 }
 
-// `panic_report` with tasks: the end waits for the other workers (D97).
+// `panic_report` with tasks: the end waits for the other workers (D97),
+// and so does a test child's record that is written in pieces, which
+// another worker's write would cut (M2).
 pub fun panic_report_tasks(msg: int64, pos: int64) {
+    if record_in_pieces(msg) {
+        failed_wait()
+    }
     report_error(msg, pos)
     failed_wait()
     exit_program(1)
@@ -3268,6 +3324,10 @@ pub fun wait_stopped() {
 // Nothing here allocates, and the lock is never held across a trap.
 
 const EXEC_CAP: int64 = 1048576
+// `queue_took`'s move of a queue back to its ring's start: the slots a short
+// queue touches, about 10 KiB at each end of the ring
+const RING_HOME: int64 = 1024
+const RING_MOVE: int64 = 256
 const SCHED_MUL: int64 = 6364136223846793005
 const SCHED_ADD: int64 = 1442695040888963407
 
@@ -3386,7 +3446,7 @@ pub fun exec_find() -> int64 {
             let head = __load64(q + 8)
             if tail >= head {
                 let fr = __load64(ring_of(me) + ((tail & (EXEC_CAP - 1)) << 3))
-                queue_took(q, head, tail)
+                queue_took(q, me, head, tail)
                 give_lock(q)
                 return fr
             }
@@ -3401,11 +3461,30 @@ pub fun exec_find() -> int64 {
 // that drains reuses the start of its ring. The counters drift otherwise (a
 // frame pushed at one end and taken at the other), each turn a slot further,
 // and the ring's 8 MiB were all touched in time, resident for good: a
-// million actor calls on one worker (MYLA-576).
-fun queue_took(q: int64, head: int64, tail: int64) {
+// million actor calls on one worker (MYLA-576). A queue that never drains
+// drifts too (three tasks calling an actor on one worker, MYLA-791): one of
+// at most RING_MOVE frames whose oldest has drifted RING_HOME slots or more
+// from the ring's start, either way, is copied back to its start (its
+// frames at slots 0 and on, far from where they were), at most a copy of a
+// frame for every four taken. The counters change, its length doesn't: a
+// glance without the lock (`exec_peek`) reading one counter from before and
+// the other from after never sees an empty queue that has a frame, as the
+// two can't be equal.
+fun queue_took(q: int64, w: int64, head: int64, tail: int64) {
+    let n = tail - head
+    let s = head & (EXEC_CAP - 1)
     if head == tail {
         __store64(q + 8, 0)
         __store64(q + 16, 0)
+    } else if n <= RING_MOVE && s >= RING_HOME && s <= EXEC_CAP - RING_HOME - n {
+        let ring = ring_of(w)
+        var i: int64 = 0
+        while i < n {
+            __store64(ring + (i << 3), __load64(ring + ((s + i) << 3)))
+            i += 1
+        }
+        __store64(q + 8, 0)
+        __store64(q + 16, n)
     } else {
         __store64(q + 8, head)
         __store64(q + 16, tail)
@@ -3425,7 +3504,7 @@ fun exec_steal(me: int64) -> int64 {
             let head = __load64(q + 8)
             if head != __load64(q + 16) {
                 let fr = __load64(ring_of(w) + ((head & (EXEC_CAP - 1)) << 3))
-                queue_took(q, head + 1, __load64(q + 16))
+                queue_took(q, w, head + 1, __load64(q + 16))
                 give_lock(q)
                 return fr
             }
@@ -3564,22 +3643,28 @@ pub fun actor_leave(rec: int64) {
 // stack: it keeps nothing from one frame to the next.
 pub fun exec_run() {
     // with descriptors watched: the turns since the clock was read, how
-    // many go between two reads, when it was read and when this worker
-    // glanced at the poller
+    // many go between two reads, when it was read, when this worker
+    // glanced at the poller, the turns since and how many go between two
+    // glances by turns
     var turns: int64 = 0
     var every: int64 = 1
     var read_at: int64 = 0
     var glanced: int64 = 0
+    var unglanced: int64 = 0
+    var gap: int64 = GLANCE_TURNS
     while true {
         if __rt_get("__timer_count") != 0 {
             timers_fire()
         }
         // descriptors watched: a glance at the poller once GLANCE_NS has
-        // passed since this worker's last, for workers too busy to poll
-        // (D124, MYLA-755: a glance every 64 turns came seconds apart
-        // while every worker ran slow frames)
+        // passed since this worker's last, or once `gap` turns have,
+        // whichever comes first, for workers too busy to poll (D124,
+        // MYLA-755: a glance every 64 turns came seconds apart while
+        // every worker ran slow frames; MYLA-794: one a millisecond alone
+        // let each wake-up for I/O beside short turns wait a millisecond)
         if __rt_get("__watch_count") != 0 {
             turns += 1
+            unglanced += 1
             if turns >= every {
                 let now = os.clock_ns()
                 every = glance_every(every, now - read_at)
@@ -3589,10 +3674,18 @@ pub fun exec_run() {
                     // (the first turn with descriptors watched counts as
                     // a glance: the frames queued run first, as before)
                     glanced = now
+                    unglanced = 0
                 } else if now - glanced >= GLANCE_NS {
                     glanced = now
-                    exec_glance()
+                    unglanced = 0
+                    gap = glance_gap(gap, exec_glanced())
                 }
+            }
+            if unglanced >= gap {
+                // (its time: the last read's, at most `every` turns old)
+                glanced = read_at
+                unglanced = 0
+                gap = glance_gap(gap, exec_glanced())
             }
         }
         let fr = exec_find()
@@ -3626,13 +3719,39 @@ pub fun exec_run() {
 // A busy worker glances at the poller once GLANCE_NS has passed since its
 // last glance (MYLA-755), as Go's sysmon polls the network once 10 ms have
 // passed without a poll: a ready descriptor waits about that long, or until
-// a frame suspends, whatever the run queues hold. The clock is read every
-// so many turns (`glance_every`): about every GLANCE_READ_NS, at most every
-// GLANCE_TURNS turns, so short turns pay a read of it every 64 (on Linux a
-// system call, as a glance every 64 turns was) and long ones a read each.
+// a frame suspends, whatever the run queues hold. And after so many turns
+// (`glance_gap`): every GLANCE_TURNS while glances wake frames, as before
+// D245, so that I/O beside short turns waits a few microseconds, not a
+// millisecond (MYLA-794: a ping-pong beside a task that only yields made
+// 499 round trips a second with the time alone), twice as many after each
+// that wakes none, so that descriptors watched and quiet cost about the
+// time's glances (under Wine a glance is a call to the Wine server: 8
+// tasks yielding 200,000 times beside a waiting accept took 1.4 s with a
+// glance every 64 turns, 80 ms with the time's alone and with these). The
+// clock is read every so many turns (`glance_every`): about every
+// GLANCE_READ_NS, at most every GLANCE_TURNS turns, so short turns pay a
+// read of it every 64 (on Linux a system call) and long ones a read each.
 const GLANCE_NS: int64 = 1000000
 const GLANCE_READ_NS: int64 = 250000
 const GLANCE_TURNS: int64 = 64
+const GLANCE_GAP_MAX: int64 = 1048576
+
+// The turns until the next glance by turns, after one that woke `woke`
+// frames with `gap` turns before it: GLANCE_TURNS once it woke some, else
+// twice `gap`, at most GLANCE_GAP_MAX.
+#test(64i64, 1i64)[64i64]
+#test(4096i64, 3i64)[64i64]
+#test(64i64, 0i64)[128i64]
+#test(1048576i64, 0i64)[1048576i64]
+fun glance_gap(gap: int64, woke: int64) -> int64 {
+    if woke > 0 {
+        return GLANCE_TURNS
+    }
+    if gap >= GLANCE_GAP_MAX / 2 {
+        return GLANCE_GAP_MAX
+    }
+    return gap * 2
+}
 
 // The turns between reads of the clock next, from `every` and the `since`
 // ns those `every` took: as many as take about GLANCE_READ_NS, from 1 to
@@ -4403,11 +4522,18 @@ fun exec_poll() {
 // A busy worker's look at the poller, when no other worker polls: the
 // frames whose descriptors became readable queued.
 fun exec_glance() {
+    let woke = exec_glanced()
+}
+
+// `exec_glance`: how many frames it woke (0 too when another worker polls).
+fun exec_glanced() -> int64 {
     if __rt_get("__exec_poller") > 0 && __xchg64(__rt_addr("__exec_polling"), 1) == 0 {
         let woken = poll_events(os.poller_wait(__rt_get("__exec_poller"), 0))
         __store_rel64(__rt_addr("__exec_polling"), 0)
         push_woken(woken)
+        return woken.len() as int64
     }
+    return 0
 }
 
 // The `n` events of the last wait (the poll held): for each descriptor
