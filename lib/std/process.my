@@ -77,7 +77,8 @@ pub enum SpawnError {
 impl SpawnError {
     // The reason in words.
     #test(SpawnError.NotFound)["program not found"]
-    #test(SpawnError.Other(12))["could not start the program: errno 12"]
+    #test(SpawnError.Other(12))["could not start the program: error 12"]
+    #test(SpawnError.Other(193))["could not start the program: error 193"]
     #test(SpawnError.WorkingDir(IoError.NotFound))["working directory not found"]
     #test(SpawnError.WorkingDir(IoError.Other(5)))["could not enter the working directory: error 5 (Other(5))"]
     fun message(self) -> str {
@@ -88,7 +89,9 @@ impl SpawnError {
             Cancelled => "cancelled"
             InvalidInput => "invalid input"
             WorkingDir(why) => dir_message(why)
-            Other(code) => f"could not start the program: errno {code}"
+            // (std's own number or the system's, an errno on Linux and
+            // Windows' code there: named neither, as `IoError`'s, MYLA-770)
+            Other(code) => f"could not start the program: error {code}"
         }
     }
 }
@@ -221,7 +224,10 @@ pub async fun run_async(program: str, args: [str]) -> Result<Output, SpawnError>
 }
 
 // `collect`, waiting as `run_async` does: the child started, its two pipes
-// read as either has bytes, then its end awaited (its pidfd) and reaped.
+// read as either has bytes, then its end awaited (its pidfd) and reaped. A
+// pipe that fails to read is `Other` of the cause, once the child ended, as
+// `output`'s (MYLA-798: it was taken for the stream's end, and the output
+// cut with nothing said).
 async fun collect_async(program: str, argv: [str], opts: [str]) -> Result<Output, SpawnError> {
     if unfit(program, argv, opts) {
         return Err(SpawnError.InvalidInput)
@@ -236,6 +242,7 @@ async fun collect_async(program: str, argv: [str], opts: [str]) -> Result<Output
     var ofd = h[2]
     var efd = h[3]
     var stopped = false
+    var failed: int32 = 0
     while ofd >= 0 || efd >= 0 {
         if ofd >= 0 && efd >= 0 {
             await __wait_either(ofd, efd)
@@ -251,6 +258,9 @@ async fun collect_async(program: str, argv: [str], opts: [str]) -> Result<Output
         if ofd >= 0 && __poll(ofd, 0) != 0 {
             let chunk = __read(ofd, 4096)
             if chunk.len() == 0 {
+                if failed == 0 {
+                    failed = __io_errno()
+                }
                 __close(ofd)
                 ofd = -1
             }
@@ -263,6 +273,9 @@ async fun collect_async(program: str, argv: [str], opts: [str]) -> Result<Output
         if efd >= 0 && __poll(efd, 0) != 0 {
             let chunk = __read(efd, 4096)
             if chunk.len() == 0 {
+                if failed == 0 {
+                    failed = __io_errno()
+                }
                 __close(efd)
                 efd = -1
             }
@@ -290,6 +303,9 @@ async fun collect_async(program: str, argv: [str], opts: [str]) -> Result<Output
     let code = __reap(pid)
     let status = reaped_status()
     __close(h[4])
+    if failed != 0 {
+        return Err(SpawnError.Other(code_number(failed)))
+    }
     return Ok(Output { stdout: out, stderr: err, status: status })
 }
 

@@ -72,8 +72,8 @@ def wine_server() -> str:
 def wine_env(persist: str = "60") -> None:
     """Wine's defaults in this process's environment, for it and its children
     (`myla test --target x86_64-windows`'s runs among them): no debug output,
-    and a prefix of the repository's own under build/, made here if it isn't
-    there yet (some seconds).
+    a UTF-8 locale, and a prefix of the repository's own under build/, made
+    here if it isn't there yet (some seconds).
 
     Its services are started here too, their standard streams /dev/null. Wine
     starts them from the first program of a new server, which they outlive
@@ -84,6 +84,10 @@ def wine_env(persist: str = "60") -> None:
     finds running), so the services aren't started again between tests."""
     os.environ.setdefault("WINEDEBUG", "-all")
     os.environ.setdefault("WINEPREFIX", os.path.join(_ROOT, "build", "wineprefix"))
+    # a UTF-8 locale, which Wine converts a program's arguments, environment
+    # and paths from: in the C locale an argument `é中` came as `C)d8-` (MYLA-798)
+    if "UTF-8" not in os.environ.get("LC_ALL", os.environ.get("LANG", "")).upper().replace("UTF8", "UTF-8"):
+        os.environ["LC_ALL"] = "C.UTF-8"
     if not wine():
         return
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}

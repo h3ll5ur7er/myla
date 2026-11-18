@@ -386,16 +386,26 @@ impl CodeGen {
         if self.frames {
             // as many workers as `__workers_count` says (MYLA_THREADS, or
             // the CPUs this process may run on); their rings of ready
-            // frames, EXEC_CAP frames each (D106), then the other workers
-            let map_memory = self.request_fn(self.platform_fn("map_memory"), [])
+            // frames, EXEC_CAP frames each (D106), then the other workers.
+            // The rings are reserved, not committed (`VirtualAlloc`'s
+            // MEM_RESERVE; PAGE_READONLY marks memory committed as it is
+            // touched, `__win_on_fault`): Windows counts what is committed
+            // against the system's limit, and 8 MiB a worker, mostly never
+            // touched, made a program of 16 workers cost 128 MiB of it
+            // (MYLA-798, H12)
             self.raw("\tcall __sched_init")
             self.raw("\tcall __workers_count")
             self.raw("\tmovl %eax, __exec_workers(%rip)")
-            self.raw("\tmovl %eax, %edi")
-            self.raw(format("\timulq ${}, %rdi", 8 * EXEC_CAP))
-            self.raw(f"\tcall myla_{map_memory}")
+            self.raw("\tmovl %eax, %edx")
+            self.raw(format("\timulq ${}, %rdx", 8 * EXEC_CAP))
+            self.raw("\txorl %ecx, %ecx")
+            self.raw("\tmovl $0x2000, %r8d")
+            self.raw("\tmovl $2, %r9d")
+            self.raw("\tsubq $32, %rsp")
+            self.win_call("VirtualAlloc")
+            self.raw("\taddq $32, %rsp")
             self.raw("\ttestq %rax, %rax")
-            self.raw("\tjs __trap_oom")
+            self.raw("\tjz __trap_oom")
             self.raw("\tmovq %rax, __wq_rings(%rip)")
             self.raw("\tcall __start_workers")
         }
@@ -519,8 +529,10 @@ impl CodeGen {
     // standard error, then the exit hook and status 1; a thread
     // overflowing after another sleeps until that one's exit ends the
     // process (MYLA-172). Anything else goes on to the system's handling
-    // (EXCEPTION_CONTINUE_SEARCH). `__win_no_slot`: `_start` found no TLS
-    // slot for the workers' blocks.
+    // (EXCEPTION_CONTINUE_SEARCH). An access violation at memory reserved
+    // to be committed as it is touched (the workers' rings) commits it
+    // (`emit_windows_lazy_commit`, MYLA-798). `__win_no_slot`: `_start`
+    // found no TLS slot for the workers' blocks.
     fun emit_windows_handlers(var self) {
         self.raw("__win_on_fault:")
         self.raw("\tmovq (%rcx), %rax")
@@ -529,6 +541,12 @@ impl CodeGen {
         self.raw("\tje .Lwin_fault_stack")
         self.raw("\tcmpl $0xC0000005, %edx")
         self.raw("\tjne .Lwin_fault_other")
+        // memory committed as it is touched first: a worker's stack can
+        // lie right below the rings, within the window looked at next
+        self.raw("\tmovq 40(%rax), %rax")
+        self.raw("\tjmp .Lwin_fault_lazy")
+        self.raw(".Lwin_fault_near:")
+        self.raw("\tmovq (%rcx), %rax")
         self.raw("\tmovq 40(%rax), %rax")
         self.raw("\tmovq 8(%rcx), %rdx")
         self.raw("\tmovq 152(%rdx), %rdx")
@@ -553,6 +571,7 @@ impl CodeGen {
         self.emit_windows_stderr(".Lmsg_win_sov", 30)
         self.raw("\tmovl $1, %edi")
         self.raw("\tcall __exit_program")
+        self.emit_windows_lazy_commit()
         self.raw(".Lwin_fault_other:")
         self.raw("\txorl %eax, %eax")
         self.raw("\tret")
@@ -566,9 +585,80 @@ impl CodeGen {
         self.win_call("ExitProcess")
         self.raw(".Lmsg_win_sov:")
         self.raw("\t.ascii \"runtime error: stack overflow\\n\"")
+        self.raw(".Lmsg_win_oom:")
+        self.raw("\t.ascii \"runtime error: out of memory\\n\"")
         self.raw(".Lmsg_win_no_slot:")
         self.raw("\t.ascii \"runtime error: no thread-local storage slot left\\n\"")
         self.raw("")
+    }
+
+    // `__win_on_fault`'s commit of memory reserved to be committed as it is
+    // touched, the address in %rax: private memory reserved PAGE_READONLY
+    // (the rings, `_start`'s) is committed from the page touched, 64 KiB at
+    // most, and the access runs again (EXCEPTION_CONTINUE_EXECUTION, also
+    // when another thread committed it meanwhile); a commit Windows refuses
+    // (the system's limit) is reported once as out of memory, as a stack
+    // overflow is; anything else goes on to the look at the stack
+    // (`.Lwin_fault_near`, the exception's pointers in %rcx again).
+    // `VirtualQuery`'s MEMORY_BASIC_INFORMATION is above the shadow space
+    // (the region's base at 0, the allocation's protection at 16, the
+    // region's size at 24, its state at 32, its type at 40); %rbx, which
+    // keeps the pointers meanwhile, is kept, as Win64 asks.
+    fun emit_windows_lazy_commit(var self) {
+        self.raw(".Lwin_fault_lazy:")
+        // (not an instruction fetched from it: committed, it still
+        // couldn't run)
+        self.raw("\tmovq (%rcx), %rdx")
+        self.raw("\tcmpq $8, 32(%rdx)")
+        self.raw("\tje .Lwin_fault_near")
+        self.raw("\tpushq %rbx")
+        self.raw("\tmovq %rcx, %rbx")
+        self.raw("\tsubq $80, %rsp")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tleaq 32(%rsp), %rdx")
+        self.raw("\tmovl $48, %r8d")
+        self.win_call("VirtualQuery")
+        self.raw("\tcmpq $48, %rax")
+        self.raw("\tjne .Lwin_fault_lazy_not")
+        self.raw("\tcmpl $0x20000, 72(%rsp)")
+        self.raw("\tjne .Lwin_fault_lazy_not")
+        self.raw("\tcmpl $2, 48(%rsp)")
+        self.raw("\tjne .Lwin_fault_lazy_not")
+        self.raw("\tcmpl $0x1000, 64(%rsp)")
+        self.raw("\tje .Lwin_fault_lazy_again")
+        self.raw("\tcmpl $0x2000, 64(%rsp)")
+        self.raw("\tjne .Lwin_fault_lazy_not")
+        // VirtualAlloc(page, min(region, 64 KiB), MEM_COMMIT, PAGE_READWRITE)
+        self.raw("\tmovq 32(%rsp), %rcx")
+        self.raw("\tmovq 56(%rsp), %rdx")
+        self.raw("\tmovl $65536, %eax")
+        self.raw("\tcmpq %rax, %rdx")
+        self.raw("\tcmovaq %rax, %rdx")
+        self.raw("\tmovl $0x1000, %r8d")
+        self.raw("\tmovl $4, %r9d")
+        self.win_call("VirtualAlloc")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lwin_fault_lazy_oom")
+        self.raw(".Lwin_fault_lazy_again:")
+        self.raw("\taddq $80, %rsp")
+        self.raw("\tpopq %rbx")
+        self.raw("\tmovl $-1, %eax")
+        self.raw("\tret")
+        self.raw(".Lwin_fault_lazy_not:")
+        self.raw("\taddq $80, %rsp")
+        self.raw("\tmovq %rbx, %rcx")
+        self.raw("\tpopq %rbx")
+        self.raw("\tjmp .Lwin_fault_near")
+        self.raw(".Lwin_fault_lazy_oom:")
+        self.raw("\tandq $-16, %rsp")
+        self.raw("\tsubq $48, %rsp")
+        self.raw("\tmovl $1, %eax")
+        self.raw("\txchgl %eax, __segv_once(%rip)")
+        self.raw("\ttestl %eax, %eax")
+        self.raw("\tjnz .Lwin_fault_sleep")
+        self.emit_windows_stderr(".Lmsg_win_oom", 29)
+        self.raw("\tmovl $1, %edi")
+        self.raw("\tcall __exit_program")
     }
 
     // `__win_on_ctrl` (MYLA-707, D216), the console's control handler that
@@ -589,10 +679,12 @@ impl CodeGen {
     // each millisecond), and the event is handled (TRUE); after a
     // SIGTERM's, the thread waits,
     // since Windows ends the process once its handlers return, so that the
-    // program can end itself first. Else, while std.term holds the console
-    // raw (`__exit_hook`), `__on_raw_signal` puts its mode back (D192) and
-    // the event goes on to the next handler, Windows' default, which ends
-    // the process. The registers Win64 keeps and Myla's code doesn't (%rdi,
+    // program can end itself first. Else `__on_raw_signal` puts the console
+    // back, its mode if std.term holds it raw (`__exit_hook`, D192) and the
+    // code pages and output mode the program changed (MYLA-798: Windows'
+    // default ended the program without them), and the event goes on to
+    // the next handler, Windows' default, which ends the process. The
+    // registers Win64 keeps and Myla's code doesn't (%rdi,
     // %rsi, %xmm6 to %xmm15) are saved with the rest it keeps; the stack
     // aligned to 16 bytes, the shadow space, the fifth argument at 32, the
     // byte at 40, the count written at 48, the vector registers from 56.
@@ -650,8 +742,6 @@ impl CodeGen {
         self.raw("\tmovl $1, %eax")
         self.raw("\tjmp .Lwin_ctrl_done")
         self.raw(".Lwin_ctrl_raw:")
-        self.raw("\tcmpq $0, __exit_hook(%rip)")
-        self.raw("\tje .Lwin_ctrl_pass")
         self.raw("\tmovl %ebx, %edi")
         self.raw("\tcall __on_raw_signal")
         self.raw(".Lwin_ctrl_pass:")

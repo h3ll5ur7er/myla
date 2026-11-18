@@ -1128,18 +1128,21 @@ pub fun signal_take(h: int) -> int {
 // --- the environment ---------------------------------------------------------
 
 // `__getenv`: the value of the first `name=value` entry of the environment
-// the process started with, or "" with the cause NOT_FOUND.
+// the process started with, or "" with the cause NOT_FOUND. On Windows the
+// name's ASCII letters match in either case, as Windows compares names
+// (`GetEnvironmentVariableW`): its `Path` is `env("PATH")` (MYLA-798).
 pub fun getenv(name: str) -> str {
     __set_io_errno(0)
     let np = __addr_of(name)
     let n = __load64(np)
+    let folded = os.TARGET == "x86_64-windows"
     var entry = __environ()
     while true {
         let e = __load64(entry)
         if e == 0 {
             break
         }
-        if __equal_bytes(e, np + 8, n) && __load8(e + n) == 61u8 {  // '='
+        if (__equal_bytes(e, np + 8, n) || (folded && same_folded(e, np + 8, n))) && __load8(e + n) == 61u8 {  // '='
             let v = e + n + 1
             var len: int64 = 0
             while __load8(v + len) != 0u8 {
@@ -1154,6 +1157,28 @@ pub fun getenv(name: str) -> str {
     }
     __set_io_errno(os.NOT_FOUND)
     return ""
+}
+
+// Whether the `n` bytes at `a` are those at `b`, ASCII's letters of either
+// case alike (the first byte that differs otherwise ends the look, so a
+// shorter NUL-terminated text at `a` is never read past its end).
+fun same_folded(a: int64, b: int64, n: int64) -> bool {
+    var i: int64 = 0
+    while i < n {
+        var x = __load8(a + i)
+        var y = __load8(b + i)
+        if x >= 97u8 && x <= 122u8 {
+            x -= 32u8
+        }
+        if y >= 97u8 && y <= 122u8 {
+            y -= 32u8
+        }
+        if x != y {
+            return false
+        }
+        i += 1
+    }
+    return true
 }
 
 // --- processes ---------------------------------------------------------------

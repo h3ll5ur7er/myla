@@ -5,7 +5,7 @@
 //   myla run   <file.my> [options] [args...]          interpret a program
 //   myla test  <file.my> [options]                    run its #test cases
 //   myla build <file.my> [-o <out>] [-g] [options]    compile to a native binary
-//   myla check <file.my> [options]                    type-check it (prints `ok`)
+//   myla check <file.my> [--target <t>] [options]     type-check it (prints `ok`), with <t>'s modules
 //   myla repl  [options]                              the interactive interpreter (repl.my)
 //
 // Without a file (the first argument after the command doesn't end in `.my`)
@@ -34,7 +34,7 @@ from .loader import load_options, LoadOptions, parse_package_flag
 from .stdroot import default_stdlib_root
 from .diag import render
 from .target import Target, host, parse_target, target_names
-from .driver import cmd_build, cmd_interp, cmd_test, cmd_test_native, load_for_host
+from .driver import cmd_build, cmd_interp, cmd_test, cmd_test_native, load_for_host, load_for_target
 from .interp import TestOptions, all_tests, DEFAULT_TIMEOUT
 from .project_cmd import project_build, project_run, project_test, project_check, project_clean, project_new, project_fetch, ends_with
 
@@ -51,7 +51,7 @@ fun usage_lines() -> [str] {
         "  build <file.my> [-o <out>] [-g] [--checked] [--target <t>] [options]  compile to a binary (-g: debug information for gdb;",
         "                                       --checked: integer overflow is a runtime error, as in run and test;",
         "                                       <t>: " + target_names() + "; the default " + host().name + ", this machine's)",
-        "  check <file.my> [options]            type-check it",
+        "  check <file.my> [--target <t>] [options]  type-check it (--target: with <t>'s std.platform, std.path, …)",
         "  repl  [options]                      the interactive interpreter",
         "commands on the project around the working directory (myla.toml):",
         "  new   [--lib] <name>                 create a project in the directory <name> (--lib: a library)",
@@ -141,7 +141,7 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
         } else if cmd == "test" && a == "--native" {
             cl.native = true
             j = j + 1
-        } else if (cmd == "build" || cmd == "test") && a == "--target" && has_value {
+        } else if (cmd == "build" || cmd == "test" || cmd == "check") && a == "--target" && has_value {
             cl.target = match parse_target(argv[j + 1]) {
                 Some(t) => t,
                 None => { return Err(CliError { msg: "myla: unknown target '" + argv[j + 1] + "' (" + target_names() + ")", usage: false }) },
@@ -251,7 +251,10 @@ fun main() {
         exit(cmd_build(cl.file, cl.output, cl.opts, cl.debug, cl.checked, cl.target))
     }
     if cmd == "check" {
-        match load_for_host(cl.file, cl.opts) {
+        // (`--target` set `native`: the target's modules, as its build
+        // takes them, MYLA-798; else the machine's)
+        let loaded = if cl.native { load_for_target(cl.file, cl.opts, cl.target) } else { load_for_host(cl.file, cl.opts) }
+        match loaded {
             Ok(ch) => {
                 print("ok")
                 exit(0)
