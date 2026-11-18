@@ -66,6 +66,10 @@ Reopened by [[Project/Review-2026-11-17]]: section 2 names the blocker, and its 
 ## Round 7 ([[MYLA-798]])
 
 - [x] H12, from the code: a child's failure is said (`test_windows.MANY_CHILDREN` on the standard error, the runner showing it), a read of a child's pipe that fails is `Other` of its cause instead of the stream's end, and a Windows program's workers' rings of ready frames are committed as they are touched (128 MiB of commit for a child of 16 workers before); M13: `env`'s names in any case, batch files named with trailing dots or spaces quoted for cmd
-- [ ] H12's rate on Windows itself: the `windows` job's rates step gives it (`rate process/many-children step 2 (…, 16 workers): N of 10 right`, with the commit charge), [[MYLA-798]] says what to look for; open until a run of the job has it
+- [x] H12's rate on Windows itself: the `windows` job's rates step gives it (`rate process/many-children step 2 (…, 16 workers): N of 10 right`, with the commit charge), [[MYLA-798]] says what to look for; open until a run of the job has it
 
 What changed, and the evidence, are [[MYLA-798]]'s.
+
+## Evidence (round 7, on Windows itself)
+
+- CI's `windows` job on real Windows (Windows Server 2025, run 44218898126, job 134516068845, PR #81, the round 7 branch with this lane merged): `process/many-children` 10 of 10 right on 4 workers (1.8 to 1.9 s) and 10 of 10 on 16 workers (2.7 s) in the "Rates" step, and 6 of 6 in the main run (3 runs of each step). The system's commit charge peaked at 4.7 to 6.5 GiB of its 18.9 GiB limit, with at most 344 processes; the program's own peak was 81 to 323 MiB. So the 393 of 400 didn't come back in 26 runs, and the commit limit was nowhere near: this run neither confirms nor rules out MYLA-798's commit theory (a runner whose commit is already high, or whose limit is lower, might still reach it). `process/a-child-s-commit`: a helper of 16 workers committed 260 to 273 MiB at its peak, the heap's arenas' ([[MYLA-861]]).
