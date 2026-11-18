@@ -149,8 +149,8 @@ Next on the [Roadmap](docs/Project/Roadmap.md): a target description and one bac
 ## Working on Myla
 
 ```bash
-scripts/test.sh fast        # the quick burn tests, about a minute once the tools are cached (2026-11-06, bae1a7f)
-scripts/test.sh             # every burn test, the self-hosting gates included (about 5 minutes, 2026-11-06, bae1a7f)
+scripts/test.sh fast        # the quick burn tests, about 15 minutes on 4 cores (2026-11-18, 2a1a69c)
+scripts/test.sh             # every burn test, the self-hosting gates included (about 34 minutes, 2026-11-18, 2a1a69c)
 scripts/bootstrap.sh        # after changing selfhost/: the fixed point
 scripts/check-seed.sh       # the seed still bootstraps the sources; a new one only when it can't (D207)
 ```
