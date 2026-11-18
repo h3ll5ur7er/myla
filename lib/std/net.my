@@ -1196,7 +1196,9 @@ impl LineReader {
     fun line(var self) -> Result<Option<Option<str>>, IoError> {
         let n = self.buf.len()
         var end = n
-        if self.max >= 0 && self.pos + self.max + 1 < end {
+        // (compared so, not as `pos + max + 1 < n`: the largest `int` as the
+        // limit overflowed, MYLA-794)
+        if self.max >= 0 && self.max < n - self.pos - 1 {
             end = self.pos + self.max + 1
         }
         var i = self.pos + self.scanned
@@ -1242,6 +1244,44 @@ impl LineReader {
         }
         self.buf.extend(chunk)
     }
+}
+
+// The lines a reader whose limit is `max` gives of a stream that sends
+// `text` and ends, each followed by "|" (" cut" after one without "\n"),
+// then "end", or "invalid" at a line past the limit.
+#test("one\ntwo\nthree", 2147483647)["one|two|three cut|end"]
+#test("one\ntwo\n", 3)["one|two|end"]
+#test("one\nfour\n", 3)["one|invalid"]
+#test("", 0)["end"]
+fun lines_given(text: str, max: int) -> str {
+    var r = line_reader_with(TcpStream { handle: -1, read_ms: -1, write_ms: -1 }, max)
+    r.took(bytes_m.from_str(text))
+    r.took([])
+    var sb = StringBuilder()
+    while true {
+        match r.line() {
+            Ok(Some(Some(line))) => {
+                sb.append(line)
+                if r.cut_off() {
+                    sb.append(" cut")
+                }
+                sb.append("|")
+            }
+            Ok(Some(None)) => {
+                sb.append("end")
+                break
+            }
+            Ok(None) => {
+                sb.append("more")
+                break
+            }
+            Err(_) => {
+                sb.append("invalid")
+                break
+            }
+        }
+    }
+    return sb.build()
 }
 
 // --- UDP -----------------------------------------------------------------------

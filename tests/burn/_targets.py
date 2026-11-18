@@ -169,7 +169,12 @@ SKIP: dict[str, dict[str, str]] = {
         **{f"test_term.Signals.{t}": _WIN_SIGNALS
            for t in ["test_awaited_while_another_task_runs", "test_interrupted_without_tasks",
                      "test_a_program_that_never_listens_ends", "test_a_sent_sigsegv_ends_the_program",
-                     "test_an_ignored_signal_stays_ignored"]},
+                     "test_an_ignored_signal_stays_ignored",
+                     "test_a_listener_built_by_hand_and_closed_catches_nothing"]},
+        # MYLA-794: a loopback round trip under Wine takes a call to the
+        # Wine server or two, whatever the glance
+        "test_reactor_scaling.BusyWorkers.test_round_trips_beside_tasks_that_only_yield":
+            "Wine's loopback round trips are a few hundred to a few thousand a second, with or without the glance",
         # the start makes the command line and the environment UTF-8 in
         # the heap, so a cell freed then is taken again before a new one
         "test_selfhost_codegen.SelfHostedCodegenParity.test_a_runtime_variable_is_its_own_operand":

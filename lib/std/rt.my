@@ -3587,22 +3587,28 @@ pub fun actor_leave(rec: int64) {
 // stack: it keeps nothing from one frame to the next.
 pub fun exec_run() {
     // with descriptors watched: the turns since the clock was read, how
-    // many go between two reads, when it was read and when this worker
-    // glanced at the poller
+    // many go between two reads, when it was read, when this worker
+    // glanced at the poller, the turns since and how many go between two
+    // glances by turns
     var turns: int64 = 0
     var every: int64 = 1
     var read_at: int64 = 0
     var glanced: int64 = 0
+    var unglanced: int64 = 0
+    var gap: int64 = GLANCE_TURNS
     while true {
         if __rt_get("__timer_count") != 0 {
             timers_fire()
         }
         // descriptors watched: a glance at the poller once GLANCE_NS has
-        // passed since this worker's last, for workers too busy to poll
-        // (D124, MYLA-755: a glance every 64 turns came seconds apart
-        // while every worker ran slow frames)
+        // passed since this worker's last, or once `gap` turns have,
+        // whichever comes first, for workers too busy to poll (D124,
+        // MYLA-755: a glance every 64 turns came seconds apart while
+        // every worker ran slow frames; MYLA-794: one a millisecond alone
+        // let each wake-up for I/O beside short turns wait a millisecond)
         if __rt_get("__watch_count") != 0 {
             turns += 1
+            unglanced += 1
             if turns >= every {
                 let now = os.clock_ns()
                 every = glance_every(every, now - read_at)
@@ -3612,10 +3618,18 @@ pub fun exec_run() {
                     // (the first turn with descriptors watched counts as
                     // a glance: the frames queued run first, as before)
                     glanced = now
+                    unglanced = 0
                 } else if now - glanced >= GLANCE_NS {
                     glanced = now
-                    exec_glance()
+                    unglanced = 0
+                    gap = glance_gap(gap, exec_glanced())
                 }
+            }
+            if unglanced >= gap {
+                // (its time: the last read's, at most `every` turns old)
+                glanced = read_at
+                unglanced = 0
+                gap = glance_gap(gap, exec_glanced())
             }
         }
         let fr = exec_find()
@@ -3649,13 +3663,39 @@ pub fun exec_run() {
 // A busy worker glances at the poller once GLANCE_NS has passed since its
 // last glance (MYLA-755), as Go's sysmon polls the network once 10 ms have
 // passed without a poll: a ready descriptor waits about that long, or until
-// a frame suspends, whatever the run queues hold. The clock is read every
-// so many turns (`glance_every`): about every GLANCE_READ_NS, at most every
-// GLANCE_TURNS turns, so short turns pay a read of it every 64 (on Linux a
-// system call, as a glance every 64 turns was) and long ones a read each.
+// a frame suspends, whatever the run queues hold. And after so many turns
+// (`glance_gap`): every GLANCE_TURNS while glances wake frames, as before
+// D245, so that I/O beside short turns waits a few microseconds, not a
+// millisecond (MYLA-794: a ping-pong beside a task that only yields made
+// 499 round trips a second with the time alone), twice as many after each
+// that wakes none, so that descriptors watched and quiet cost about the
+// time's glances (under Wine a glance is a call to the Wine server: 8
+// tasks yielding 200,000 times beside a waiting accept took 1.4 s with a
+// glance every 64 turns, 80 ms with the time's alone and with these). The
+// clock is read every so many turns (`glance_every`): about every
+// GLANCE_READ_NS, at most every GLANCE_TURNS turns, so short turns pay a
+// read of it every 64 (on Linux a system call) and long ones a read each.
 const GLANCE_NS: int64 = 1000000
 const GLANCE_READ_NS: int64 = 250000
 const GLANCE_TURNS: int64 = 64
+const GLANCE_GAP_MAX: int64 = 1048576
+
+// The turns until the next glance by turns, after one that woke `woke`
+// frames with `gap` turns before it: GLANCE_TURNS once it woke some, else
+// twice `gap`, at most GLANCE_GAP_MAX.
+#test(64i64, 1i64)[64i64]
+#test(4096i64, 3i64)[64i64]
+#test(64i64, 0i64)[128i64]
+#test(1048576i64, 0i64)[1048576i64]
+fun glance_gap(gap: int64, woke: int64) -> int64 {
+    if woke > 0 {
+        return GLANCE_TURNS
+    }
+    if gap >= GLANCE_GAP_MAX / 2 {
+        return GLANCE_GAP_MAX
+    }
+    return gap * 2
+}
 
 // The turns between reads of the clock next, from `every` and the `since`
 // ns those `every` took: as many as take about GLANCE_READ_NS, from 1 to
@@ -4426,11 +4466,18 @@ fun exec_poll() {
 // A busy worker's look at the poller, when no other worker polls: the
 // frames whose descriptors became readable queued.
 fun exec_glance() {
+    let woke = exec_glanced()
+}
+
+// `exec_glance`: how many frames it woke (0 too when another worker polls).
+fun exec_glanced() -> int64 {
     if __rt_get("__exec_poller") > 0 && __xchg64(__rt_addr("__exec_polling"), 1) == 0 {
         let woken = poll_events(os.poller_wait(__rt_get("__exec_poller"), 0))
         __store_rel64(__rt_addr("__exec_polling"), 0)
         push_woken(woken)
+        return woken.len() as int64
     }
+    return 0
 }
 
 // The `n` events of the last wait (the poll held): for each descriptor
