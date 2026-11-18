@@ -2,7 +2,7 @@
 id: MYLA-800
 title: "R7-11 Docs, skill and CI: the skill's false claims, Known issues and README after Windows, the generated tests' full size"
 type: bug
-status: todo
+status: in-progress
 priority: medium
 labels: [documentation, ci, round-7]
 ---

@@ -35,7 +35,7 @@ Builds and prints `2`, like `myla run`.
 
 ## Fix
 
-[[src/myla/compiler/codegen_x86.py]] and [[selfhost/codegen.my]]: every assignment of a heap-owning type goes through the staged store from [[MYLA-4]] (take the new value with its references, compute the place, release the old value, move the new one in), and every assignment computes its place with `_mut_place_addr` (formerly `_mut_addr_of_struct`), which unshares each list and map on the path. `_addr_of_lvalue` (and the self-hosted `addr_of_lvalue` and unused `mut_holder_addr`) are gone. A variable holds a boxed enum inline, a field or element holds it as a pointer: the staging helpers take an `inline` flag for that.
+`src/myla/compiler/codegen_x86.py` and [[selfhost/codegen.my]]: every assignment of a heap-owning type goes through the staged store from [[MYLA-4]] (take the new value with its references, compute the place, release the old value, move the new one in), and every assignment computes its place with `_mut_place_addr` (formerly `_mut_addr_of_struct`), which unshares each list and map on the path. `_addr_of_lvalue` (and the self-hosted `addr_of_lvalue` and unused `mut_holder_addr`) are gone. A variable holds a boxed enum inline, a field or element holds it as a pointer: the staging helpers take an `inline` flag for that.
 
 - [x] Assignment of a heap-owning aggregate to any place (`a.b`, `a.b.c`, `xs[i].f`, `m[k].f`) builds the new value, drops the old one at the computed address, copies and retains
 - [x] Parity tests, seen failing first: `assign_heap_owning_struct_to_any_place` and `assign_heap_owning_struct_to_itself` (compiler crash), `assign_to_a_field_of_a_shared_element_copies_it` (printed `5 5 2 7 9 9` instead of `1 5 1 1 1 9`); the same programs through the self-hosted compiler in `test_selfhost_codegen.py`
@@ -43,3 +43,5 @@ Builds and prints `2`, like `myla run`.
 - [x] Burn suite green (333 tests); bootstrap fixed point holds (4,467,756 bytes)
 
 `a.0 = v` (tuple fields) isn't assignable in the language, so there is nothing to test there.
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

@@ -22,5 +22,6 @@ The TextMate grammar and snippets mix in the Rust dialect and miss parts of the 
 
 ## Evidence
 
-[[tests/unit/test_vscode_extension.py]] ties the files to the compiler: the grammar's keywords must be lexer keywords ([[src/myla/tokens.py]]), its type names exactly the built-in ones, no Rust-dialect word anywhere, every literal form matched; every snippet, expanded with its default text, must parse with the Myla parser. Before: 16 failures and 8 errors (7 snippets didn't parse); after: all 6 tests pass. The TextMate grammar could later be generated with the tree-sitter grammar ([[MYLA-77]]).
+`tests/unit/test_vscode_extension.py` ties the files to the compiler: the grammar's keywords must be lexer keywords (`src/myla/tokens.py`), its type names exactly the built-in ones, no Rust-dialect word anywhere, every literal form matched; every snippet, expanded with its default text, must parse with the Myla parser. Before: 16 failures and 8 errors (7 snippets didn't parse); after: all 6 tests pass. The TextMate grammar could later be generated with the tree-sitter grammar ([[MYLA-77]]).
 
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*
