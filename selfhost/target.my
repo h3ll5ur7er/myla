@@ -50,8 +50,11 @@ pub struct Toolchain { assemble: [str], imports: [str], link: [str], debug_link:
 // A target: its name (`x86_64-linux`, the `--target` word), operating
 // system, architecture and object format; the suffix of its programs'
 // files ("" on Linux and WASI, ".exe" on Windows); the file of `std/` that
-// is its `std/platform.my` ("" for x86-64 Linux's own, `for_target`); the
-// tools that build for it from any machine (`cross`), and on a machine of
+// is its `std/platform.my` ("" for x86-64 Linux's own, `for_target`;
+// aarch64's until its seed knows `copies`, MYLA-758); how the files of `std/` that are its own copies
+// of other modules end (`copies`: "_aarch64.my", so `linux_calls_aarch64.my`
+// is its `linux_calls.my`, D223; "" for none); the tools that build for it
+// from any machine (`cross`), and on a machine of
 // its own (`native`, None: `cross`'s); the command its programs run under on
 // another machine without MYLA_EMULATOR ([] for none: wasm32 needs
 // MYLA_EMULATOR); whether its programs can start processes (a test
@@ -65,6 +68,7 @@ pub struct Target {
     format: ObjectFormat,
     exe_suffix: str,
     platform_file: str,
+    copies: str,
     cross: Toolchain,
     native: Option<Toolchain>,
     emulator: [str],
@@ -91,13 +95,13 @@ fun linux_native(flags: [str]) -> Toolchain {
 // Every target, in the order the usage and the errors name them.
 pub fun targets() -> [Target] {
     return [
-        Target { name: "x86_64-linux", os: Os.Linux, arch: Arch.X86_64, format: ObjectFormat.Elf, exe_suffix: "", platform_file: "",
+        Target { name: "x86_64-linux", os: Os.Linux, arch: Arch.X86_64, format: ObjectFormat.Elf, exe_suffix: "", platform_file: "", copies: "",
                  cross: linux_cross("x86_64-linux-gnu"), native: Some(linux_native(["--64"])), emulator: [], spawns: true, debug_info: true, supported: true },
-        Target { name: "aarch64-linux", os: Os.Linux, arch: Arch.Aarch64, format: ObjectFormat.Elf, exe_suffix: "", platform_file: "platform_aarch64.my",
+        Target { name: "aarch64-linux", os: Os.Linux, arch: Arch.Aarch64, format: ObjectFormat.Elf, exe_suffix: "", platform_file: "platform_aarch64.my", copies: "_aarch64.my",
                  cross: linux_cross("aarch64-linux-gnu"), native: Some(linux_native([])), emulator: ["qemu-aarch64"], spawns: true, debug_info: false, supported: true },
         // the stack below the data, so running out of it can't overwrite
         // the data (MYLA-261)
-        Target { name: "wasm32-wasi", os: Os.Wasi, arch: Arch.Wasm32, format: ObjectFormat.Wasm, exe_suffix: "", platform_file: "platform_wasm.my",
+        Target { name: "wasm32-wasi", os: Os.Wasi, arch: Arch.Wasm32, format: ObjectFormat.Wasm, exe_suffix: "", platform_file: "platform_wasm.my", copies: "_wasm.my",
                  cross: Toolchain { assemble: ["clang", "--target=wasm32-wasi", "-mtail-call", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext", "-c", "-o", "{obj}", "{asm}"], imports: [],
                                     link: ["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", "{out}", "{obj}"], debug_link: [], needs: "clang and wasm-ld" },
                  native: None, emulator: [], spawns: false, debug_info: false, supported: true },
@@ -110,7 +114,7 @@ pub fun targets() -> [Target] {
         // COFF sections is kept in the image (`/debug:dwarf`, no PDB), and
         // what the program doesn't call is still left out as without it
         // (`/opt:ref`, which `/debug` would turn off; MYLA-757)
-        Target { name: "x86_64-windows", os: Os.Windows, arch: Arch.X86_64, format: ObjectFormat.Coff, exe_suffix: ".exe", platform_file: "platform_windows.my",
+        Target { name: "x86_64-windows", os: Os.Windows, arch: Arch.X86_64, format: ObjectFormat.Coff, exe_suffix: ".exe", platform_file: "platform_windows.my", copies: "_windows.my",
                  cross: Toolchain { assemble: ["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", "{obj}", "{asm}"], imports: ["llvm-dlltool", "-m", "i386:x86-64", "-d", "{def}", "-l", "{lib}"],
                                     link: ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:{out}", "{obj}", "{libs}"],
                                     debug_link: ["/debug:dwarf", "/opt:ref"], needs: "clang, llvm-dlltool and lld-link" },
