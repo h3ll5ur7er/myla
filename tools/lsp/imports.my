@@ -7,11 +7,11 @@
 
 from std.fs import read_to_string, list_dir, is_dir
 from ...selfhost.loader import LoadOptions, normalize, source_text
-from ...selfhost.parser import parse_source
+from ...selfhost.parser import parse_source, parse_source_lazy
 from ...selfhost.ast import DeclKind, ImportItem
 from ...selfhost.stdroot import EMBEDDED_ROOT
 from ...selfhost.embedded_std import embedded_paths
-from .symbols import Symbol, SymKind, Range, outline
+from .symbols import Symbol, SymKind, Range, module_outline
 from .text import Pos
 
 // Where the cursor is in an import: `kind` 0 outside one, 1 in its module
@@ -366,9 +366,14 @@ pub fun module_exports(spot: ImportSpot, file: str, opts: LoadOptions) -> [Symbo
             }
         },
     }
+    // its declarations, its bodies skipped where one doesn't parse
+    // (`module_outline`)
     let parsed = match parse_source(text, 0) {
         Ok(p) => p,
-        Err(e) => { return out },
+        Err(e) => match parse_source_lazy(text, 0) {
+            Ok(lp) => lp.parsed,
+            Err(e2) => { return out },
+        },
     }
     var public: [str: bool] = [:]
     var reexports: [str] = []
@@ -394,7 +399,7 @@ pub fun module_exports(spot: ImportSpot, file: str, opts: LoadOptions) -> [Symbo
         }
     }
     var symbols: [Symbol] = []
-    match outline(text) {
+    match module_outline(text) {
         Some(s) => { symbols = s },
         None => {},
     }

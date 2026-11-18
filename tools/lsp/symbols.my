@@ -7,8 +7,8 @@
 // declaration's start to its last token: the closing brace, or the end of a
 // field or variant.
 
-from ...selfhost.lexer import lex
-from ...selfhost.parser import parse_source
+from ...selfhost.lexer import lex, lex_lazy
+from ...selfhost.parser import parse_source, parse_source_lazy
 from ...selfhost.tokens import Token, TokenKind
 from ...selfhost.ast import Decl, DeclKind, FunData, TypeExpr, TypeKind, Field, Variant, Program, TypeParam
 from .text import lines_of, to_lsp, code_points, Pos
@@ -130,6 +130,28 @@ pub fun outline(source: str) -> Option<[Symbol]> {
         Err(d) => { return None },
     }
     return Some(outline_parsed(source, toks, parsed.program))
+}
+
+// The symbols of a module another file imports: its outline, or where a
+// function's body doesn't lex or parse, the outline of the rest, its bodies
+// skipped as the compiler reads a library's (D179), so that one broken
+// body doesn't take every member of its module from hover and completion
+// (MYLA-710's follow-up). None when the declarations don't parse either.
+#test("pub fun f() -> int {\n    let = 1\n}\n\npub fun g() -> int {\n    return 2\n}\n")[Some([Symbol { name: "f", kind: SymKind.Function, detail: "pub fun f() -> int", range: Range { start: Pos { line: 0, character: 4 }, end: Pos { line: 2, character: 1 } }, selection: Range { start: Pos { line: 0, character: 8 }, end: Pos { line: 0, character: 9 } }, parent: -1 }, Symbol { name: "g", kind: SymKind.Function, detail: "pub fun g() -> int", range: Range { start: Pos { line: 4, character: 4 }, end: Pos { line: 6, character: 1 } }, selection: Range { start: Pos { line: 4, character: 8 }, end: Pos { line: 4, character: 9 } }, parent: -1 }])]
+#test("pub fun f( {\n}\n")[None]
+pub fun module_outline(source: str) -> Option<[Symbol]> {
+    match outline(source) {
+        Some(s) => { return Some(s) },
+        None => {},
+    }
+    let toks = match lex_lazy(source) {
+        Ok(r) => r.0,
+        Err(d) => { return None },
+    }
+    return match parse_source_lazy(source, 0) {
+        Ok(lp) => Some(outline_parsed(source, toks, lp.parsed.program)),
+        Err(d) => None,
+    }
 }
 
 // The symbols of `source`, given its tokens and its parsed program.
