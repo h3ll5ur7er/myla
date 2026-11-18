@@ -82,6 +82,7 @@ type error: unknown function 'nope'
 
 ## Built since the first design
 
+- [[Architecture/Agent-harness]]: `examples/agent/`, an agentic AI harness in Myla: the tool loop against an OpenAI-style server, skills, memory, compaction and the prompt cache, streaming, the REPL ([[MYLA-758]]).
 - [[Architecture/Project-tool]]: `myla` as a project tool like cargo, with a manifest (`myla.toml`), path and Git dependencies and the commands `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` (D73, [[MYLA-64]]).
 - [[Architecture/IR]]: the mid-level IR between the checker and the self-hosted backend: three-address code on basic blocks with explicit reference counting and a verifier; every function goes through it since [[MYLA-107]] (D79, D85).
 

@@ -1,0 +1,217 @@
+// mock.my: a stand-in for the server on a local port, for `--demo` and the
+// tests. It plays one conversation, by how many answers the model has
+// given so far, and builds the summary from the tool results it got. A
+// streamed request gets its reply as server-sent events, cut in pieces as
+// a server would send them; a request without tools (a summary) gets a
+// summary.
+import std.fs as fs
+import std.http as http
+import std.json as json
+import std.net as net
+import std.path as path
+from std.http import Request
+from std.json import Json
+from .config import defaults
+from .session import Session, session, input
+from .tools import Workspace
+
+fun s(v: Json, path: str) -> str {
+    return json.at(v, path).and_then((x: Json) => x.as_str()).unwrap_or("")
+}
+
+// A reply with this text and these tool calls, and a usage as a server
+// with a prefix cache would count it: what the last request had is cached.
+#test("Hi", [], 30, 12)["{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"}}],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":1,\"prompt_tokens_details\":{\"cached_tokens\":12}}}"]
+fun reply(text: str, calls: [Json], prompt: int, cached: int) -> str {
+    var msg = [("role", json.text("assistant")), ("content", json.text(text))]
+    if calls.len() > 0 {
+        msg.push(("tool_calls", json.arr(calls)))
+    }
+    let finish = if calls.len() > 0 { "tool_calls" } else { "stop" }
+    let usage = json.obj([
+        ("prompt_tokens", Json.Int(prompt as int64)),
+        ("completion_tokens", Json.Int((text.len() / 3 + calls.len() * 10 + 1) as int64)),
+        ("prompt_tokens_details", json.obj([("cached_tokens", Json.Int(cached as int64))])),
+    ])
+    return json.to_string(json.obj([("choices", json.arr([json.obj([("finish_reason", json.text(finish)), ("message", json.obj(msg))])])), ("usage", usage)]))
+}
+
+#test("c1", "list_files", [("path", Json.Str("."))])[Json.Object([("id", Json.Str("c1")), ("type", Json.Str("function")), ("function", Json.Object([("name", Json.Str("list_files")), ("arguments", Json.Str("{\"path\":\".\"}"))]))])]
+fun call(id: str, name: str, args: [(str, Json)]) -> Json {
+    return json.obj([
+        ("id", json.text(id)),
+        ("type", json.text("function")),
+        ("function", json.obj([("name", json.text(name)), ("arguments", json.text(json.to_string(json.obj(args))))])),
+    ])
+}
+
+// The reply the stand-in gives to a request.
+#test("{\"messages\":[{\"role\":\"user\",\"content\":\"Go\"}],\"tools\":[]}")["{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"role\":\"assistant\",\"content\":\"<think>A summary of notes: first see what there is.</think>\\n\\nLet me look at the notes.\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}}]}}],\"usage\":{\"prompt_tokens\":18,\"completion_tokens\":39,\"prompt_tokens_details\":{\"cached_tokens\":0}}}"]
+#test("{\"messages\":[{\"role\":\"user\",\"content\":\"Go\"}]}")["{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"The user asked for a summary of the notes; nothing is done yet.\"}}],\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":22,\"prompt_tokens_details\":{\"cached_tokens\":0}}}"]
+#test("{\"tools\":[],\"messages\":[{\"role\":\"assistant\",\"content\":\"\"},{\"role\":\"assistant\",\"content\":\"\"},{\"role\":\"assistant\",\"content\":\"\"},{\"role\":\"assistant\",\"content\":\"\"}]}")["{\"object\":\"error\",\"message\":\"unexpected request\",\"code\":400}"]
+pub fun mock_reply(request: str) -> str {
+    let j = json.parse(request).unwrap_or(Json.Null)
+    let messages = json.at(j, "messages").and_then((v: Json) => v.as_list()).unwrap_or([])
+    let role = (m: Json) => s(m, "role")
+    // the prompt as tokens, and what of it the last request had already
+    let prompt = request.len() / 3
+    var last = 0
+    for (i, m) in messages.enumerate() {
+        if role(m) == "assistant" {
+            last = i
+        }
+    }
+    // the request but the messages after the model's last answer
+    let fresh = messages[last + 1:].map((m: Json) => json.to_string(m).len() + 1).sum(0)
+    let cached = if last == 0 { 0 } else { (request.len() - fresh) / 3 }
+    if json.field(j, "tools").is_none() {
+        return reply("The user asked for a summary of the notes; nothing is done yet.", [], prompt, cached)
+    }
+    let answered = messages.count((m: Json) => role(m) == "assistant")
+    // the contents of the tool messages since the model's last answer
+    var results: [str] = []
+    for m in messages {
+        if role(m) == "assistant" {
+            results = []
+        } else if role(m) == "tool" {
+            results.push(s(m, "content"))
+        }
+    }
+    return match answered {
+        0 => reply("<think>A summary of notes: first see what there is.</think>\n\nLet me look at the notes.", [call("c1", "list_files", [("path", json.text("."))])], prompt, cached)
+        1 => {
+            let names = results[0].lines().filter((n: str) => n.ends_with(".txt"))
+            reply("", names.enumerate().map((p: (int, str)) => call(f"c{p.0 + 2}", "read_file", [("path", json.text(p.1))])), prompt, cached)
+        }
+        2 => {
+            let content = "# Summary\n\n" + results.map((r: str) => "- " + r.lines()[0]).join("\n") + "\n"
+            reply("Writing the summary.", [call("c9", "write_file", [("path", json.text("summary.md")), ("content", json.text(content))])], prompt, cached)
+        }
+        3 => reply(f"Done: summary.md has the first line of each note ({results[0]}).", [], prompt, cached)
+        _ => "{\"object\":\"error\",\"message\":\"unexpected request\",\"code\":400}"
+    }
+}
+
+// A reply as the events of a stream: the text in two pieces, each tool
+// call's name, then its arguments in two pieces, the finish, the usage.
+#test("{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"Hello\"}}],\"usage\":{\"prompt_tokens\":3}}")["data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"He\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"llo\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":3}}\n\ndata: [DONE]\n\n"]
+#test("{\"object\":\"error\",\"message\":\"no\"}")["data: {\"object\":\"error\",\"message\":\"no\"}\n\ndata: [DONE]\n\n"]
+pub fun as_events(reply: str) -> str {
+    let j = json.parse(reply).unwrap_or(Json.Null)
+    let ev = (v: Json) => "data: " + json.to_string(v) + "\n\n"
+    let delta = (d: [(str, Json)]) => ev(json.obj([("choices", json.arr([json.obj([("delta", json.obj(d))])]))]))
+    if json.field(j, "choices").is_none() {
+        return ev(j) + "data: [DONE]\n\n"
+    }
+    let text = s(j, "choices[0].message.content")
+    let half = text.len() / 2
+    var sb = StringBuilder()
+    sb.append(delta([("role", json.text("assistant")), ("content", json.text(text[:half]))]))
+    sb.append(delta([("content", json.text(text[half:]))]))
+    let calls = json.at(j, "choices[0].message.tool_calls").and_then((v: Json) => v.as_list()).unwrap_or([])
+    for (i, c) in calls.enumerate() {
+        let args = s(c, "function.arguments")
+        let piece = (fields: [(str, Json)]) => delta([("tool_calls", json.arr([json.obj([("index", Json.Int(i as int64))].concat(fields))]))])
+        sb.append(piece([("id", json.text(s(c, "id"))), ("type", json.text("function")), ("function", json.obj([("name", json.text(s(c, "function.name"))), ("arguments", json.text(args[:args.len() / 2]))]))]))
+        sb.append(piece([("function", json.obj([("arguments", json.text(args[args.len() / 2:]))]))]))
+    }
+    sb.append(ev(json.obj([("choices", json.arr([json.obj([("delta", json.obj([])), ("finish_reason", json.text(s(j, "choices[0].finish_reason")))])]))])))
+    if let Some(u) = json.field(j, "usage") {
+        sb.append(ev(json.obj([("choices", json.arr([])), ("usage", u)])))
+    }
+    sb.append("data: [DONE]\n\n")
+    return sb.build()
+}
+
+// The stand-in's answer to an HTTP request.
+pub fun respond(r: Request) -> http.Response {
+    let body = mock_reply(r.text())
+    let streamed = json.parse(r.text()).ok().and_then((j: Json) => json.field(j, "stream")).and_then((v: Json) => v.as_bool()).unwrap_or(false)
+    if streamed {
+        return http.response(200, as_events(body)).with_header("content-type", "text/event-stream")
+    }
+    return http.response(200, body).with_header("content-type", "application/json")
+}
+
+fun err(e: fs.IoError) -> str {
+    return f"{e}"
+}
+
+// A workspace with three notes, in a new temporary directory.
+fun notes() -> Result<str, str> {
+    let root = fs.make_temp_dir().map_err(err)?
+    let files = [("ideas.txt", "Teach the toaster to compile.\nAlso: towels."), ("todo.txt", "Buy a towel.\nDon't panic."), ("photo.png", "not a note")]
+    for (name, text) in files {
+        fs.write_to_file(path.join(root, name), text).map_err(err)?
+    }
+    return Ok(root)
+}
+
+// The demo: a session on the notes against the stand-in. Gives the answer
+// and the summary the model wrote, and the session (for its statistics).
+pub async fun demo(stream: bool, show: bool) -> Result<(str, str, Session), str> {
+    let root = notes()?
+    defer {
+        let removed = fs.remove_dir_all(root)
+    }
+    var l = net.listen(net.addr(net.loopback(), 0)).map_err(err)?
+    defer {
+        let closed = l.close()
+    }
+    let port = l.local_addr().map_err(err)?.port
+    async let server = http.serve_n(l, 4, respond)
+    var config = defaults()
+    config.server = f"http://127.0.0.1:{port}"
+    config.stream = stream
+    config.commands = "deny"
+    let ws = Workspace { root: root, max_read_bytes: config.max_read_bytes, command_timeout_ms: 1000, skills: [], memory_dir: path.join(root, ".memory") }
+    var sess = session(config, ws, "You summarise notes.", input(), show)
+    let answer = await sess.ask("Summarise the notes into summary.md.")
+    let served = await server
+    let answered = answer?
+    let written = fs.read_to_string(path.join(root, "summary.md")).unwrap_or("(nothing)")
+    return Ok((answered, written, sess))
+}
+
+// The demo plays its conversation, streamed and not.
+#test
+async fun demo_plays() -> Result<(), str> {
+    for stream in [false, true] {
+        let (answer, written, sess) = (await demo(stream, false))?
+        if answer != "Done: summary.md has the first line of each note (wrote 58 bytes)." {
+            return Err(f"stream {stream}: the answer is {answer}")
+        }
+        if written != "# Summary\n\n- Teach the toaster to compile.\n- Buy a towel.\n" {
+            return Err(f"stream {stream}: summary.md is {written}")
+        }
+        if sess.stats.requests != 4 || sess.stats.cached == 0 {
+            return Err(f"stream {stream}: {sess.stats()}")
+        }
+    }
+    return Ok(())
+}
+
+// A compaction: the stand-in's summary replaces the conversation, behind
+// the system prompt and the first request.
+#test
+async fun compaction_by_summary() -> Result<(), str> {
+    var l = net.listen(net.addr(net.loopback(), 0)).map_err(err)?
+    defer {
+        let closed = l.close()
+    }
+    let port = l.local_addr().map_err(err)?.port
+    async let server = http.serve_n(l, 1, respond)
+    var config = defaults()
+    config.server = f"http://127.0.0.1:{port}"
+    let ws = Workspace { root: "/no/such", max_read_bytes: 1000, command_timeout_ms: 1000, skills: [], memory_dir: "/no/such" }
+    var sess = session(config, ws, "S", input(), false)
+    sess.messages.push("{\"role\":\"user\",\"content\":\"Summarise the notes.\"}")
+    sess.messages.push("{\"role\":\"assistant\",\"content\":\"Reading.\"}")
+    let how = (await sess.compact())?
+    let served = await server
+    let summary = sess.messages[^1]
+    if sess.messages.len() != 3 || !summary.contains("nothing is done yet") || sess.stats.compactions != 1 || !how.starts_with("compacted: ") {
+        return Err(f"{how}: {sess.messages.join(" | ")}")
+    }
+    return Ok(())
+}

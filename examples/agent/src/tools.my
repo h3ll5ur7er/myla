@@ -1,0 +1,432 @@
+// tools.my: what the model can do, and the tool calls run. Every path is
+// relative to the workspace and stays inside it (by the path's text; a
+// symbolic link inside could still point out).
+import std.bytes as bytes
+import std.fs as fs
+import std.glob as glob
+import std.json as json
+import std.num as num
+import std.path as path
+import std.process as process
+import std.regex as regex
+import std.task as task
+from std.json import Json
+from std.process import Stdio, ExitStatus, Output
+from .chat import Call
+from .text import page, prefix, squeeze
+from .skills import Skill, load
+from .memory import remember, recall, forget
+
+// What the tools work on.
+pub struct Workspace {
+    root: str,
+    max_read_bytes: int,
+    command_timeout_ms: int,
+    skills: [Skill],
+    memory_dir: str,
+}
+
+// --- the schemas -----------------------------------------------------------
+
+// A parameter: its name, its JSON type, whether it must be given, and
+// what it is.
+#derive(Eq)
+pub struct Param {
+    name: str,
+    kind: str,
+    required: bool,
+    about: str,
+}
+
+#test("path", "a file")[Param { name: "path", kind: "string", required: true, about: "a file" }]
+fun text(name: str, about: str) -> Param {
+    return Param { name: name, kind: "string", required: true, about: about }
+}
+
+#test("glob", "")[Param { name: "glob", kind: "string", required: false, about: "" }]
+fun maybe_text(name: str, about: str) -> Param {
+    return Param { name: name, kind: "string", required: false, about: about }
+}
+
+#test("start", "")[Param { name: "start", kind: "integer", required: false, about: "" }]
+fun maybe_int(name: str, about: str) -> Param {
+    return Param { name: name, kind: "integer", required: false, about: about }
+}
+
+// A tool's schema, as the request lists it.
+#test("read_file", "Read a file.", [Param { name: "path", kind: "string", required: true, about: "" }])["{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Read a file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}"]
+#test("f", "F.", [Param { name: "start", kind: "integer", required: false, about: "the first line" }])["{\"type\":\"function\",\"function\":{\"name\":\"f\",\"description\":\"F.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"start\":{\"type\":\"integer\",\"description\":\"the first line\"}},\"required\":[]}}}"]
+pub fun tool(name: str, description: str, params: [Param]) -> str {
+    let props = params.map((p: Param) => {
+        var schema = [("type", json.text(p.kind))]
+        if p.about != "" {
+            schema.push(("description", json.text(p.about)))
+        }
+        return (p.name, json.obj(schema))
+    })
+    let required = params.filter((p: Param) => p.required).map((p: Param) => json.text(p.name))
+    let schema = json.obj([("type", json.text("object")), ("properties", json.obj(props)), ("required", json.arr(required))])
+    let function = json.obj([("name", json.text(name)), ("description", json.text(description)), ("parameters", schema)])
+    return json.to_string(json.obj([("type", json.text("function")), ("function", function)]))
+}
+
+// Every tool's schema, in a fixed order (a prompt's prefix, MYLA-762).
+// `with_skills` leaves load_skill out when there are none.
+#test(12000, false)[10]
+#test(12000, true)[11]
+fun tool_count(read_bytes: int, with_skills: bool) -> int {
+    return tools(read_bytes, with_skills).len()
+}
+
+pub fun tools(read_bytes: int, with_skills: bool) -> [str] {
+    let start = maybe_int("start", "the first line to read, 1 if left out")
+    var all = [
+        tool("list_files", "List the names in a directory of the workspace; directories end with /.", [text("path", "a directory, . for the workspace")]),
+        tool("read_file", f"Read a text file of the workspace, a page of at most {read_bytes} bytes; a page that isn't the whole file ends by saying where the next one starts.", [text("path", ""), start]),
+        tool("write_file", "Create or replace a text file of the workspace.", [text("path", ""), text("content", "the whole new text")]),
+        tool("edit_file", "Replace one piece of a text file: `old` must be in it exactly once, so give enough of the lines around it.", [text("path", ""), text("old", "the text as it is now"), text("new", "what replaces it")]),
+        tool("grep", "Search the text files below a directory for a regular expression (RE2 syntax); gives file:line: text for each line that matches.", [text("pattern", ""), maybe_text("path", "a directory or file, . if left out"), maybe_text("glob", "only files whose name matches, e.g. *.my")]),
+        tool("run_command", "Run a shell command (sh -c) in the workspace and give its output and exit status. The user may be asked first and may refuse.", [text("command", "")]),
+        tool("remember", "Save a fact in your memory, which lasts between sessions; a name already used is replaced.", [text("name", "a short name, e.g. build-steps"), text("description", "one line: what the memory is about"), text("content", "the fact, in Markdown")]),
+        tool("recall", "Read a memory of the index.", [text("name", "")]),
+        tool("forget", "Remove a memory that is wrong or out of date.", [text("name", "")]),
+    ]
+    if with_skills {
+        all.push(tool("load_skill", "Read a skill's instructions (its SKILL.md) or, with file, another file of the skill.", [text("name", ""), maybe_text("file", "a path inside the skill, as SKILL.md names it"), start]))
+    }
+    // the tools in any order but this one's would do; this keeps it the same
+    all.push(tool("done", "Say that the task is finished, with what to tell the user. Only needed when you can't answer without a tool call.", [text("summary", "")]))
+    return all
+}
+
+// --- the arguments ---------------------------------------------------------------
+
+// A path inside the workspace `root`, or why not.
+#test("/w", "notes/a.txt")[Ok("/w/notes/a.txt")]
+#test("/w", ".")[Ok("/w")]
+#test("/w", "./a")[Ok("/w/a")]
+#test("/w", "../secrets")[Err("'../secrets' is outside the workspace")]
+#test("/w", "/etc/passwd")[Err("'/etc/passwd' is outside the workspace")]
+#test("/w", "/w/src/a.my")[Ok("/w/src/a.my")]
+#test("/w", "/w")[Ok("/w")]
+#test("/w", "/wx/a")[Err("'/wx/a' is outside the workspace")]
+pub fun inside(root: str, p: str) -> Result<str, str> {
+    // an absolute path in the workspace is as good as a relative one
+    let rel = if p == root { "." } else { p.strip_prefix(root + "/").unwrap_or(p) }
+    if rel.starts_with("/") || rel.split("/").contains("..") {
+        return Err(f"'{p}' is outside the workspace")
+    }
+    let rest = rel.split("/").filter((s: str) => s != "." && s != "").join("/")
+    if rest == "" {
+        return Ok(root)
+    }
+    return Ok(f"{root}/{rest}")
+}
+
+// The arguments of a call, an object.
+#test("{\"a\": 1}")[Ok(Json.Object([("a", Json.Int(1i64))]))]
+#test("nope")[Err("the arguments aren't JSON")]
+#test("")[Ok(Json.Object([]))]
+fun args_of(input: str) -> Result<Json, str> {
+    if input.trim() == "" {
+        return Ok(json.obj([]))
+    }
+    return json.parse(input).map_err((e: json.JsonError) => "the arguments aren't JSON")
+}
+
+// A string argument of a call.
+#test("{\"path\": \"a.txt\"}", "path")[Ok("a.txt")]
+#test("{}", "path")[Err("missing 'path'")]
+#test("nope", "path")[Err("the arguments aren't JSON")]
+pub fun arg(input: str, name: str) -> Result<str, str> {
+    let j = args_of(input)?
+    return json.field(j, name).and_then((v: Json) => v.as_str()).ok_or(f"missing '{name}'")
+}
+
+// An optional string argument, `default` when it is left out or null.
+#test("{\"glob\": \"*.my\"}", "glob", "")[Ok("*.my")]
+#test("{}", "glob", "")[Ok("")]
+#test("{\"glob\": null}", "glob", "x")[Ok("x")]
+#test("{\"glob\": 3}", "glob", "")[Err("'glob' isn't a string")]
+pub fun maybe_arg(input: str, name: str, default: str) -> Result<str, str> {
+    let j = args_of(input)?
+    return match json.field(j, name) {
+        None => Ok(default)
+        Some(Null) => Ok(default)
+        Some(v) => v.as_str().ok_or(f"'{name}' isn't a string")
+    }
+}
+
+// An optional integer argument, `default` when it is left out; a model
+// may write the number as a string.
+#test("{\"start\": 201}", "start", 1)[Ok(201)]
+#test("{\"start\": \"7\"}", "start", 1)[Ok(7)]
+#test("{\"path\": \"a\"}", "start", 1)[Ok(1)]
+#test("{\"start\": null}", "start", 1)[Ok(1)]
+#test("{\"start\": \"x\"}", "start", 1)[Err("'start' isn't a number")]
+pub fun int_arg(input: str, name: str, default: int) -> Result<int, str> {
+    let j = args_of(input)?
+    let Some(v) = json.field(j, name) else {
+        return Ok(default)
+    }
+    if let Null = v {
+        return Ok(default)
+    }
+    let n = v.as_int().or_else(() => v.as_str().and_then((s: str) => num.parse_int(s.trim())))
+    return match n {
+        Some(k) => Ok(k as int)
+        None => Err(f"'{name}' isn't a number")
+    }
+}
+
+fun io_text(e: fs.IoError) -> str {
+    return f"{e}"
+}
+
+// --- the tools ---------------------------------------------------------------------
+
+#test("/no/such/dir", "{\"path\": \".\"}")[Err("not found (NotFound)")]
+fun list_files(root: str, input: str) -> Result<str, str> {
+    let dir = inside(root, arg(input, "path")?)?
+    let names = fs.list_dir(dir).map_err(io_text)?
+    return Ok(names.map((n: str) => if fs.is_dir(f"{dir}/{n}") { n + "/" } else { n }).join("\n"))
+}
+
+#test("/no/such/dir", "{\"path\": \"a.txt\"}", 100)[Err("not found (NotFound)")]
+#test("/w", "{\"path\": \"a.txt\", \"start\": \"x\"}", 100)[Err("'start' isn't a number")]
+fun read_file(root: str, input: str, limit: int) -> Result<str, str> {
+    let file = inside(root, arg(input, "path")?)?
+    let start = int_arg(input, "start", 1)?
+    let text = fs.read_to_string(file).map_err(io_text)?
+    return Ok(page(text, start, limit, "read_file"))
+}
+
+#test("/no/such/dir", "{\"path\": \"a.txt\", \"content\": \"hi\"}")[Err("not found (NotFound)")]
+#test("/w", "{\"path\": \"a.txt\"}")[Err("missing 'content'")]
+fun write_file(root: str, input: str) -> Result<str, str> {
+    let file = inside(root, arg(input, "path")?)?
+    let content = arg(input, "content")?
+    fs.write_to_file(file, content).map_err(io_text)?
+    return Ok(f"wrote {content.len()} bytes")
+}
+
+// The text with `old` replaced by `new`, if `old` is in it once.
+#test("a b c", "b", "B")[Ok("a B c")]
+#test("a b b", "b", "B")[Err("'old' is in the file 2 times: give more of the text around it")]
+#test("a", "x", "B")[Err("'old' isn't in the file (it must match exactly, spaces and all)")]
+#test("a", "", "B")[Err("'old' is empty")]
+pub fun replace_once(text: str, old: str, new: str) -> Result<str, str> {
+    if old == "" {
+        return Err("'old' is empty")
+    }
+    let n = text.count(old)
+    if n == 0 {
+        return Err("'old' isn't in the file (it must match exactly, spaces and all)")
+    }
+    if n > 1 {
+        return Err(f"'old' is in the file {n} times: give more of the text around it")
+    }
+    return Ok(text.replacen(old, new, 1))
+}
+
+#test("/no/such/dir", "{\"path\": \"a.txt\", \"old\": \"a\", \"new\": \"b\"}")[Err("not found (NotFound)")]
+fun edit_file(root: str, input: str) -> Result<str, str> {
+    let file = inside(root, arg(input, "path")?)?
+    let old = arg(input, "old")?
+    let new = arg(input, "new")?
+    let text = fs.read_to_string(file).map_err(io_text)?
+    let changed = replace_once(text, old, new)?
+    fs.write_to_file(file, changed).map_err(io_text)?
+    return Ok(f"replaced {old.lines().len()} lines with {new.lines().len()}")
+}
+
+// Whether grep skips a path of the walk: version control, build output,
+// dependencies.
+#test("src/a.my")[false]
+#test(".git/HEAD")[true]
+#test("examples/agent/build/x")[true]
+#test("web/node_modules/a.js")[true]
+fun skipped(rel: str) -> bool {
+    let parts = rel.split("/")
+    return parts.any((p: str) => p == ".git" || p == "build" || p == "node_modules" || p == ".myla" || p == "__pycache__")
+}
+
+// The lines of `text` (the file `name`) that match, as grep gives them.
+#test("a1\nb\nc22", "f.txt", "[0-9]+", 10)[["f.txt:1: a1", "f.txt:3: c22"]]
+#test("x\nx\nx", "f", "x", 2)[["f:1: x", "f:2: x"]]
+fun matching(text: str, name: str, pattern: str, most: int) -> [str] {
+    let Ok(re) = regex.compile(pattern) else {
+        return []
+    }
+    var out: [str] = []
+    for (i, line) in text.lines().enumerate() {
+        if out.len() >= most {
+            break
+        }
+        if re.is_match(line) {
+            out.push(f"{name}:{i + 1}: {prefix(line.trim(), 200)}")
+        }
+    }
+    return out
+}
+
+#test("/w", "{\"pattern\": \"(\"}", 1000)[Err("'(' isn't a regular expression: missing closing ) at 0")]
+#test("/no/such/dir", "{\"pattern\": \"x\"}", 1000)[Err("not found (NotFound)")]
+fun grep(root: str, input: str, limit: int) -> Result<str, str> {
+    let pattern = arg(input, "pattern")?
+    if let Err(e) = regex.compile(pattern) {
+        return Err(f"'{pattern}' isn't a regular expression: {e}")
+    }
+    let base = maybe_arg(input, "path", ".")?
+    let dir = inside(root, base)?
+    let only = maybe_arg(input, "glob", "")?
+    let files = if fs.is_file(dir) { [""] } else { glob.walk(dir).map_err(io_text)? }
+    var out: [str] = []
+    var size = 0
+    var full = false
+    for rel in files {
+        if full {
+            break
+        }
+        if skipped(rel) {
+            continue
+        }
+        let file = if rel == "" { dir } else { path.join(dir, rel) }
+        let shown = path.normalize(if rel == "" { base } else { path.join(base, rel) })
+        if only != "" && !glob.matches(only, path.file_name(file).unwrap_or("")) && !glob.matches(only, shown) {
+            continue
+        }
+        let Ok(md) = fs.metadata(file) else {
+            continue
+        }
+        if !md.is_file() || md.size > 1000000i64 {
+            continue
+        }
+        let Ok(text) = fs.read_to_string(file) else {
+            continue
+        }
+        if text.contains("\0") {
+            continue
+        }
+        for line in matching(text, shown, pattern, 100) {
+            if out.len() >= 200 || size + line.len() + 1 > limit {
+                full = true
+                break
+            }
+            out.push(line)
+            size += line.len() + 1
+        }
+    }
+    if out.len() == 0 {
+        return Ok("no matches")
+    }
+    let note = if full { f"\n[stopped after {out.len()} matches: narrow the pattern, path or glob]" } else { "" }
+    return Ok(out.join("\n") + note)
+}
+
+// A command's result as the model reads it, at most `limit` bytes.
+#test(Output { stdout: "hi\n".bytes(), stderr: [], status: ExitStatus.Exited(0) }, 1000)["exit status 0\nhi\n"]
+#test(Output { stdout: [], stderr: "no\n".bytes(), status: ExitStatus.Exited(2) }, 1000)["exit status 2\n[stderr]\nno\n"]
+#test(Output { stdout: [], stderr: [], status: ExitStatus.Signaled(9) }, 1000)["killed by signal 9\n"]
+pub fun command_result(out: Output, limit: int) -> str {
+    let status = match out.status {
+        Exited(n) => f"exit status {n}"
+        Signaled(n) => f"killed by signal {n}"
+    }
+    let so = bytes.to_str(out.stdout)
+    let se = bytes.to_str(out.stderr)
+    var text = so
+    if se != "" {
+        text = text + (if so != "" && !so.ends_with("\n") { "\n" } else { "" }) + "[stderr]\n" + se
+    }
+    return status + "\n" + squeeze(text, limit)
+}
+
+async fun run_command(root: str, input: str, limit: int, timeout_ms: int) -> Result<str, str> {
+    let command = arg(input, "command")?
+    let c = process.command("sh").arg("-c").arg(command).cwd(root).stdin_from(Stdio.Null)
+    let got = await task.timeout(timeout_ms, async () => await c.output_async())
+    return match got {
+        None => Err(f"the command took longer than {timeout_ms / 1000} s and was stopped")
+        Some(Ok(out)) => Ok(command_result(out, limit))
+        Some(Err(e)) => Err(f"sh: {e}")
+    }
+}
+
+// What a tool call gives back, and whether it failed. run_command must be
+// allowed first: the session asks (session.my).
+#test(Workspace { root: "/no/such/dir", max_read_bytes: 100, command_timeout_ms: 1000, skills: [], memory_dir: "/no/such" }, Call { id: "c1", name: "read_file", input: "{\"path\": \"a.txt\"}" })[("not found (NotFound)", true)]
+#test(Workspace { root: "/w", max_read_bytes: 100, command_timeout_ms: 1000, skills: [], memory_dir: "/no/such" }, Call { id: "c2", name: "write_file", input: "{\"path\": \"../x\", \"content\": \"\"}" })[("'../x' is outside the workspace", true)]
+#test(Workspace { root: "/w", max_read_bytes: 100, command_timeout_ms: 1000, skills: [], memory_dir: "/no/such" }, Call { id: "c3", name: "delete_everything", input: "{}" })[("there is no tool 'delete_everything'", true)]
+#test(Workspace { root: "/w", max_read_bytes: 100, command_timeout_ms: 1000, skills: [], memory_dir: "/no/such" }, Call { id: "c4", name: "done", input: "{\"summary\": \"All good.\"}" })[("All good.", false)]
+pub async fun run_tool(ws: Workspace, call: Call) -> (str, bool) {
+    let i = call.input
+    let result = match call.name {
+        "list_files" => list_files(ws.root, i)
+        "read_file" => read_file(ws.root, i, ws.max_read_bytes)
+        "write_file" => write_file(ws.root, i)
+        "edit_file" => edit_file(ws.root, i)
+        "grep" => grep(ws.root, i, ws.max_read_bytes)
+        "run_command" => await run_command(ws.root, i, ws.max_read_bytes, ws.command_timeout_ms)
+        "load_skill" => load_skill(ws, i)
+        "remember" => remember_tool(ws.memory_dir, i)
+        "recall" => arg(i, "name").and_then((n: str) => recall(ws.memory_dir, n))
+        "forget" => arg(i, "name").and_then((n: str) => forget(ws.memory_dir, n))
+        "done" => arg(i, "summary")
+        _ => Err(f"there is no tool '{call.name}'")
+    }
+    return match result {
+        Ok(out) => (out, false)
+        Err(e) => (e, true)
+    }
+}
+
+#test(Workspace { root: "/w", max_read_bytes: 100, command_timeout_ms: 1000, skills: [], memory_dir: "" }, "{\"name\": \"x\"}")[Err("there is no skill 'x'; there are: ")]
+fun load_skill(ws: Workspace, input: str) -> Result<str, str> {
+    let name = arg(input, "name")?
+    let file = maybe_arg(input, "file", "")?
+    let start = int_arg(input, "start", 1)?
+    return load(ws.skills, name, file, start, ws.max_read_bytes)
+}
+
+#test("/no/such", "{\"name\": \"x\"}")[Err("missing 'description'")]
+fun remember_tool(dir: str, input: str) -> Result<str, str> {
+    let name = arg(input, "name")?
+    let description = arg(input, "description")?
+    let content = arg(input, "content")?
+    let saved = remember(dir, name, description, content)?
+    return Ok(saved + "; the index in your instructions shows it from the next session")
+}
+
+// The tools on a workspace of their own: edit, grep and a command.
+#test
+async fun tools_at_work() -> Result<(), str> {
+    let root = fs.make_temp_dir().map_err(io_text)?
+    defer {
+        let r = fs.remove_dir_all(root)
+    }
+    let ws = Workspace { root: root, max_read_bytes: 1000, command_timeout_ms: 5000, skills: [], memory_dir: path.join(root, ".mem") }
+    let call = (name: str, args: [(str, Json)]) => Call { id: "c", name: name, input: json.to_string(json.obj(args)) }
+    let s = (v: str) => json.text(v)
+    let w = await run_tool(ws, call("write_file", [("path", s("src/a.txt")), ("content", s("one\ntwo\n"))]))
+    if !w.1 {
+        return Err("wrote into a directory that isn't there")
+    }
+    fs.make_dir(path.join(root, "src")).map_err(io_text)?
+    let steps = [
+        (call("write_file", [("path", s("src/a.txt")), ("content", s("one\ntwo\n"))]), "wrote 8 bytes"),
+        (call("edit_file", [("path", s("src/a.txt")), ("old", s("two")), ("new", s("2\n3"))]), "replaced 1 lines with 2"),
+        (call("read_file", [("path", s("src/a.txt"))]), "one\n2\n3\n"),
+        (call("grep", [("pattern", s("^[0-9]$")), ("glob", s("*.txt"))]), "src/a.txt:2: 2\nsrc/a.txt:3: 3"),
+        (call("grep", [("pattern", s("^[0-9]$")), ("glob", s("*.md"))]), "no matches"),
+        (call("run_command", [("command", s("cat src/a.txt | wc -l; echo oops >&2; exit 3"))]), "exit status 3\n3\n[stderr]\noops\n"),
+        (call("remember", [("name", s("tests")), ("description", s("How to test.")), ("content", s("Run make."))]), "saved the memory 'tests'; the index in your instructions shows it from the next session"),
+    ]
+    for (c, want) in steps {
+        let (got, failed) = await run_tool(ws, c)
+        if failed || got != want {
+            return Err(f"{c.name}: got {got}")
+        }
+    }
+    return Ok(())
+}

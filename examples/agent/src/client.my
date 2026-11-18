@@ -1,0 +1,210 @@
+// client.my: the requests to the server. A plain one goes through
+// std.http; a streamed one (MYLA-765) needs the body as it comes, which
+// std.http doesn't give, so it speaks HTTP/1.1 over std.net itself.
+import std.bytes as bytes
+import std.http as http
+import std.io as io
+import std.json as json
+import std.net as net
+import std.url as url
+from std.json import Json
+from std.fs import IoError
+from .chat import Turn, read_turn, server_error
+from .stream import partial, absorb, finish_turn, events, dechunk
+
+// Where the requests go: the server's base URL and its key.
+#derive(Eq)
+pub struct Server {
+    base: str,
+    api_key: str,
+}
+
+// One request, the whole reply at once.
+pub async fun post(server: Server, body: str) -> Result<Turn, str> {
+    var req = http.request("POST", f"{server.base}/v1/chat/completions").with_header("content-type", "application/json").with_body(body)
+    if server.api_key != "" {
+        req = req.with_header("authorization", f"Bearer {server.api_key}")
+    }
+    let text = match await http.send_async(req) {
+        Ok(resp) => if resp.is_success() || json.parse(resp.text()).is_ok() { resp.text() } else { return Err(f"HTTP {resp.status} {resp.reason}") }
+        Err(e) => {
+            return Err(f"{server.base}: {e}")
+        }
+    }
+    return read_turn(text)
+}
+
+// The host, port and path of a base URL.
+#test("http://jarvis:9293")[Ok(("jarvis", 9293, "/v1/chat/completions"))]
+#test("http://10.0.0.5/llm/")[Ok(("10.0.0.5", 80, "/llm/v1/chat/completions"))]
+#test("https://api.example.com")[Err("https://api.example.com: only plain http is supported")]
+#test("jarvis:9293")[Err("jarvis:9293: not an http:// URL")]
+pub fun endpoint(base: str) -> Result<(str, int, str), str> {
+    let u = url.parse(base).map_err((e: url.UrlError) => f"{base}: {e}")?
+    if u.scheme == "https" {
+        return Err(f"{base}: only plain http is supported")
+    }
+    let Some(host) = u.host else {
+        return Err(f"{base}: not an http:// URL")
+    }
+    if u.scheme != "http" {
+        return Err(f"{base}: not an http:// URL")
+    }
+    let path = u.path.strip_suffix("/").unwrap_or(u.path)
+    return Ok((host, u.port.unwrap_or(80), path + "/v1/chat/completions"))
+}
+
+// The request's text.
+#test("h", 80, "/v1/chat/completions", "", "{}")["POST /v1/chat/completions HTTP/1.1\r\nHost: h:80\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"]
+#test("h", 80, "/p", "k", "")["POST /p HTTP/1.1\r\nHost: h:80\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\nAuthorization: Bearer k\r\n\r\n"]
+pub fun stream_request(host: str, port: int, path: str, api_key: str, body: str) -> str {
+    let auth = if api_key != "" { f"Authorization: Bearer {api_key}\r\n" } else { "" }
+    return f"POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nContent-Length: {body.len()}\r\nConnection: close\r\n{auth}\r\n{body}"
+}
+
+// A response's head: its status and whether its body is chunked.
+#test("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked")[Ok((200, true))]
+#test("HTTP/1.1 400 Bad Request\r\ncontent-length: 10")[Ok((400, false))]
+#test("SSH-2.0")[Err("not an HTTP response: SSH-2.0")]
+pub fun read_head(head: str) -> Result<(int, bool), str> {
+    let lines = head.split("\r\n")
+    let parts = lines[0].split(" ")
+    if !lines[0].starts_with("HTTP/") || parts.len() < 2 {
+        return Err(f"not an HTTP response: {lines[0]}")
+    }
+    let status = match parts[1].trim().len() {
+        3 => (parts[1][0] - '0') as int * 100 + (parts[1][1] - '0') as int * 10 + (parts[1][2] - '0') as int
+        _ => 0
+    }
+    var chunked = false
+    for l in lines[1:] {
+        let kv = l.splitn(":", 2)
+        if kv.len() == 2 && kv[0].trim().to_lower() == "transfer-encoding" && kv[1].to_lower().contains("chunked") {
+            chunked = true
+        }
+    }
+    return Ok((status, chunked))
+}
+
+// What of a streamed reply's text to print: the visible text so far is
+// what follows the reasoning (`<think>…</think>`), and `printed` bytes of
+// it are out already; white space at its end waits. Gives the new text and the new count.
+#test("Hel", 0)[("Hel", 3)]
+#test("Hello", 3)[("lo", 5)]
+#test("<think>hm", 0)[("", 0)]
+#test("<thi", 0)[("", 0)]
+#test("<think>hm</think>\n\nOk", 0)[("Ok", 2)]
+#test("\n\nOk", 0)[("Ok", 2)]
+#test("Ok\n\n", 2)[("", 2)]
+#test("Ok\n\nNext", 2)[("\n\nNext", 8)]
+pub fun reveal(raw: str, printed: int) -> (str, int) {
+    let start = raw.trim_start()
+    var shown = ""
+    if let Some(i) = raw.find("</think>") {
+        shown = raw[i + 8:].trim_start()
+    } else if !start.starts_with("<think>") && !"<think>".starts_with(start) {
+        shown = start
+    }
+    // trailing white space waits for what follows it
+    shown = shown.trim_end()
+    if shown.len() <= printed {
+        return ("", printed)
+    }
+    return (shown[printed:], shown.len())
+}
+
+// A streamed request: the text is printed as it comes (after "model: ")
+// when `show` is on, and the reply is put together from the events.
+pub async fun stream_post(server: Server, body: str, show: bool) -> Result<Turn, str> {
+    let (host, port, path) = endpoint(server.base)?
+    let ip = match net.parse_ip(host) {
+        Ok(ip) => ip
+        Err(e) => {
+            let found = net.lookup(host).map_err((e: IoError) => f"{host}: {e}")?
+            if found.len() == 0 {
+                return Err(f"{host}: no address")
+            }
+            found[0]
+        }
+    }
+    var s = (await net.connect_async(net.addr(ip, port))).map_err((e: IoError) => f"{server.base}: {e}")?
+    defer {
+        let c = s.close()
+    }
+    var out = bytes.from_str(stream_request(host, port, path, server.api_key, body))
+    while out.len() > 0 {
+        let n = (await s.write_async(out)).map_err((e: IoError) => f"{server.base}: {e}")?
+        out = out[n:]
+    }
+    var raw = ""
+    var head_done = false
+    var status = 0
+    var chunked = false
+    var pending = ""
+    var sse = ""
+    var p = partial()
+    var printed = 0
+    var ended = false
+    while !ended && !p.done {
+        let got = (await s.read_async(65536)).map_err((e: IoError) => f"{server.base}: {e}")?
+        if got.len() == 0 {
+            ended = true
+        }
+        raw = raw + bytes.to_str(got)
+        if !head_done {
+            let Some(end) = raw.find("\r\n\r\n") else {
+                continue
+            }
+            let (st, ch) = read_head(raw[:end])?
+            status = st
+            chunked = ch
+            raw = raw[end + 4:]
+            head_done = true
+        }
+        if status != 200 {
+            // an error: its whole body, then what it says
+            continue
+        }
+        if chunked {
+            let (data, rest, last) = dechunk(pending + raw)
+            sse = sse + data
+            pending = rest
+            if last {
+                ended = true
+            }
+        } else {
+            sse = sse + raw
+        }
+        raw = ""
+        let (evs, rest) = events(sse)
+        sse = rest
+        for e in evs {
+            p = absorb(p, e)
+            if show {
+                let (more, n) = reveal(p.text, printed)
+                if more != "" {
+                    if printed == 0 {
+                        io.write(1, "model: ").unwrap_or(())
+                    }
+                    io.write(1, more).unwrap_or(())
+                    printed = n
+                }
+            }
+        }
+    }
+    if printed > 0 {
+        print("")
+    }
+    if !head_done {
+        return Err(f"{server.base}: the connection closed before a response")
+    }
+    if status != 200 {
+        let text = if chunked { dechunk(raw).0 } else { raw }
+        let problem = json.parse(text).ok().map((j: Json) => server_error(j)).unwrap_or("")
+        return Err(if problem != "" { f"the server says: {problem}" } else { f"HTTP {status}" })
+    }
+    if !p.done && p.finish == "" && p.error == "" {
+        return Err(f"{server.base}: the stream ended early")
+    }
+    return finish_turn(p)
+}

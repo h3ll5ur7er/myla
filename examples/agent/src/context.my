@@ -1,0 +1,155 @@
+// context.my: keeping the conversation inside the model's window
+// (MYLA-757, MYLA-761) in a way the server's prefix cache can follow
+// (MYLA-762).
+//
+// The conversation is only appended to, so each request's prompt starts
+// with the last one's and the server reuses what it computed. When it
+// grows past `compact_at` percent of the window, the model sums it up and
+// the conversation starts again from the system prompt, the first request
+// and the summary: one rewrite, then appending again. Dropping old tool
+// results (`fit`) is what's left when even that can't be done.
+from .chat import Usage, message, tool_message, field_of
+
+// A request's size in tokens is estimated from its bytes: JSON-escaped
+// code ran at about 3.3 bytes a token with Qwen3's tokenizer.
+const BYTES_PER_TOKEN: int = 3
+
+#test(3000)[1000]
+#test(0)[0]
+pub fun tokens(n_bytes: int) -> int {
+    return n_bytes / BYTES_PER_TOKEN
+}
+
+// What the conversation takes of the window now: the last reply's usage
+// counts everything up to and with the reply (`known` tokens, the first
+// `count` messages); what came after it (the tool results) is estimated.
+// Before any reply all of it is estimated, with `overhead` bytes (the
+// tools) beside the messages.
+#test(0, 0, ["aaa", "bbbbbb"], 30)[13]
+#test(1000, 1, ["aaa", "bbbbbb"], 30)[1002]
+pub fun projected(known: int, count: int, messages: [str], overhead: int) -> int {
+    if known == 0 {
+        return tokens(messages.map((m: str) => m.len() + 1).sum(0) + overhead)
+    }
+    return known + tokens(messages[count:].map((m: str) => m.len() + 1).sum(0))
+}
+
+// Whether a conversation of `size` tokens should be summed up: past
+// `percent` of what the window leaves after the reply.
+#test(20000, 32768, 4096, 75)[false]
+#test(22000, 32768, 4096, 75)[true]
+pub fun should_compact(size: int, context: int, max_tokens: int, percent: int) -> bool {
+    return size * 100 > (context - max_tokens) * percent
+}
+
+// --- dropping ---------------------------------------------------------------------
+
+// The conversation made to fit in `budget` bytes: tool results the model
+// has answered since are replaced by a note, the oldest first, until it
+// fits. The newest results stay, even if it then doesn't.
+#test(["{\"role\":\"user\",\"content\":\"Go\"}", "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nb\"}", "{\"role\":\"assistant\",\"content\":\"ok\"}", "{\"role\":\"tool\",\"tool_call_id\":\"c2\",\"content\":\"new\"}"], 1000)[["{\"role\":\"user\",\"content\":\"Go\"}", "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nb\"}", "{\"role\":\"assistant\",\"content\":\"ok\"}", "{\"role\":\"tool\",\"tool_call_id\":\"c2\",\"content\":\"new\"}"]] // it fits
+#test(["{\"role\":\"user\",\"content\":\"Go\"}", "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nb\"}", "{\"role\":\"assistant\",\"content\":\"ok\"}", "{\"role\":\"tool\",\"tool_call_id\":\"c2\",\"content\":\"new\"}"], 300)[["{\"role\":\"user\",\"content\":\"Go\"}", "{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"[dropped to save context: it had 2 lines; call the tool again if you need it]\"}", "{\"role\":\"assistant\",\"content\":\"ok\"}", "{\"role\":\"tool\",\"tool_call_id\":\"c2\",\"content\":\"new\"}"]] // the answered result goes
+#test(["{\"role\":\"user\",\"content\":\"Go\"}", "{\"role\":\"tool\",\"tool_call_id\":\"c2\",\"content\":\"not yet answered\"}"], 10)[["{\"role\":\"user\",\"content\":\"Go\"}", "{\"role\":\"tool\",\"tool_call_id\":\"c2\",\"content\":\"not yet answered\"}"]] // nothing answered to drop
+pub fun fit(messages: [str], budget: int) -> [str] {
+    var last_answer = 0
+    for (i, m) in messages.enumerate() {
+        if field_of(m, "role") == "assistant" {
+            last_answer = i
+        }
+    }
+    // the request's array: the messages and the commas between them
+    var size = messages.map((m: str) => m.len() + 1).sum(0)
+    var out = messages
+    for i in 0..last_answer {
+        if size <= budget {
+            break
+        }
+        let content = field_of(out[i], "content")
+        if field_of(out[i], "role") == "tool" && !content.starts_with("[dropped") {
+            let note = tool_message(field_of(out[i], "tool_call_id"), (f"[dropped to save context: it had {content.lines().len()} lines; call the tool again if you need it]", false))
+            size -= out[i].len() - note.len()
+            out[i] = note
+        }
+    }
+    return out
+}
+
+// --- compaction ---------------------------------------------------------------
+
+pub const SUMMARY_REQUEST: str = "Your context window is nearly full, so this conversation will be replaced by your summary of it. Write that summary now, without tool calls. Keep what you need to go on: the user's requests, in their words where they matter; what you have done and found (files, facts, decisions and their reasons, results of commands); what you were doing when this came; what remains to do. Leave out what you no longer need, such as file contents you are done with."
+
+// The messages that ask for the summary: the conversation, fitted into
+// `budget` bytes if need be, and the request.
+#test(["{\"role\":\"system\",\"content\":\"S\"}"], 1000)[2]
+fun summary_request_length(messages: [str], budget: int) -> int {
+    return summary_request(messages, budget).len()
+}
+
+pub fun summary_request(messages: [str], budget: int) -> [str] {
+    var out = fit(messages, budget - SUMMARY_REQUEST.len() - 40)
+    out.push(message("user", SUMMARY_REQUEST))
+    return out
+}
+
+// Where the newest turn starts: the model's last message, if tool results
+// follow it (the model hasn't seen them yet, so they stay as they are);
+// else the end.
+#test(["{\"role\":\"system\"}", "{\"role\":\"user\"}", "{\"role\":\"assistant\"}", "{\"role\":\"tool\"}", "{\"role\":\"tool\"}"])[2]
+#test(["{\"role\":\"system\"}", "{\"role\":\"user\"}", "{\"role\":\"assistant\"}"])[3]
+#test(["{\"role\":\"system\"}", "{\"role\":\"user\"}"])[2]
+pub fun newest_turn(messages: [str]) -> int {
+    var last = messages.len()
+    for (i, m) in messages.enumerate() {
+        if field_of(m, "role") == "assistant" {
+            last = i
+        }
+    }
+    return if last < messages.len() - 1 { last } else { messages.len() }
+}
+
+// The conversation after a compaction: the system prompt, the first
+// request, the summary of what came before `keep`, and the messages from
+// `keep` on (the newest turn).
+#test(["{\"role\":\"system\",\"content\":\"S\"}", "{\"role\":\"user\",\"content\":\"Task\"}", "{\"role\":\"assistant\",\"content\":\"a\"}"], "Did a.", 3)[["{\"role\":\"system\",\"content\":\"S\"}", "{\"role\":\"user\",\"content\":\"Task\"}", "{\"role\":\"user\",\"content\":\"[The conversation so far was too long and has been replaced by your summary of it.]\\n\\nDid a.\\n\\nGo on from here.\"}"]]
+#test(["{\"role\":\"system\",\"content\":\"S\"}", "{\"role\":\"user\",\"content\":\"T\"}", "{\"role\":\"assistant\",\"content\":\"a\"}", "A", "R"], "Did a.", 3)[["{\"role\":\"system\",\"content\":\"S\"}", "{\"role\":\"user\",\"content\":\"T\"}", "{\"role\":\"user\",\"content\":\"[The conversation so far was too long and has been replaced by your summary of it.]\\n\\nDid a.\\n\\nGo on from here.\"}", "A", "R"]]
+#test(["{\"role\":\"system\",\"content\":\"S\"}"], "Nothing.", 1)[["{\"role\":\"system\",\"content\":\"S\"}", "{\"role\":\"user\",\"content\":\"[The conversation so far was too long and has been replaced by your summary of it.]\\n\\nNothing.\\n\\nGo on from here.\"}"]]
+pub fun compacted(messages: [str], summary: str, keep: int) -> [str] {
+    var out = [messages[0]]
+    if keep > 1 && field_of(messages[1], "role") == "user" {
+        out.push(messages[1])
+    }
+    out.push(message("user", f"[The conversation so far was too long and has been replaced by your summary of it.]\n\n{summary.trim()}\n\nGo on from here."))
+    return out.concat(messages[keep:])
+}
+
+// --- what it cost -----------------------------------------------------------
+
+#derive(Eq)
+pub struct Stats {
+    requests: int,
+    prompt: int,
+    cached: int,
+    completion: int,
+    compactions: int,
+}
+
+#test()[Stats { requests: 0, prompt: 0, cached: 0, completion: 0, compactions: 0 }]
+pub fun no_stats() -> Stats {
+    return Stats { requests: 0, prompt: 0, cached: 0, completion: 0, compactions: 0 }
+}
+
+#test(Stats { requests: 1, prompt: 100, cached: 0, completion: 5, compactions: 0 }, Usage { prompt: 150, cached: 100, completion: 7 })[Stats { requests: 2, prompt: 250, cached: 100, completion: 12, compactions: 0 }]
+pub fun counted(s: Stats, u: Usage) -> Stats {
+    return Stats { requests: s.requests + 1, prompt: s.prompt + u.prompt, cached: s.cached + u.cached, completion: s.completion + u.completion, compactions: s.compactions }
+}
+
+// The statistics in a line: the cache's share is of the prompts' tokens.
+#test(Stats { requests: 2, prompt: 250, cached: 100, completion: 12, compactions: 1 })["2 requests, 250 prompt tokens (100 from the cache, 40 %), 12 reply tokens, 1 compaction"]
+#test(Stats { requests: 0, prompt: 0, cached: 0, completion: 0, compactions: 0 })["0 requests, 0 prompt tokens (the server reports no cached tokens), 0 reply tokens, 0 compactions"]
+pub fun stats_line(s: Stats) -> str {
+    let share = if s.prompt > 0 { s.cached * 100 / s.prompt } else { 0 }
+    // vLLM counts them only with --enable-prompt-tokens-details
+    let cache = if s.cached == 0 { "the server reports no cached tokens" } else { f"{s.cached} from the cache, {share} %" }
+    let plural = (n: int, word: str) => if n == 1 { f"{n} {word}" } else { f"{n} {word}s" }
+    return f"{plural(s.requests, "request")}, {s.prompt} prompt tokens ({cache}), {s.completion} reply tokens, {plural(s.compactions, "compaction")}"
+}

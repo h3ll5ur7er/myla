@@ -1,0 +1,183 @@
+// An agentic AI harness: a model works on a directory through tools, in a
+// loop: it asks for a tool, the harness runs it and sends the result back,
+// until the model answers without one (session.my).
+//
+//   myla run [options] [TASK]                 (in examples/agent/)
+//   build/agent -C ~/notes "Summarise the notes into summary.md"
+//   build/agent                               (a conversation: the REPL)
+//   build/agent --demo                        (offline, against a stand-in)
+//
+// It talks to a model served with the OpenAI-style chat completions API
+// (vLLM, llama.cpp's server, Ollama, ...), configured in config.my. vLLM
+// calls tools only when started with `--enable-auto-tool-choice
+// --tool-call-parser <the model's parser>`.
+//
+// What it gives the model besides the tools: the workspace's instruction
+// files and its own memory (memory.my), the skills it may load
+// (skills.my). It keeps the conversation inside the window by summing it
+// up when it grows (context.my), and its prompt's prefix the same from one
+// request to the next, which the server's cache reuses.
+import std.args as args
+import std.fs as fs
+import std.path as path
+import std.process as process
+from .config import Config, defaults, load, check, config_dir
+from .memory import instructions, index, memory_prompt, memory_dir_for
+from .mock import demo
+from .session import Session, SYSTEM, session, system_prompt, input
+from .skills import Skill, discover, listing
+from .tools import Workspace
+
+fun cli() -> args.Spec {
+    return (args.spec("agent", "A model works in a directory through tools. Without a task: a conversation.")
+        .option("dir", 'C', "DIR", "the workspace (default: the current directory)")
+        .option("config", '\0', "FILE", "the configuration file (default: ~/.config/myla-agent/config.toml)")
+        .option("server", '\0', "URL", "the server, e.g. http://localhost:8000")
+        .option("model", '\0', "NAME", "the model")
+        .flag("no-stream", '\0', "wait for each whole reply instead of streaming it")
+        .flag("yes", 'y', "run commands without asking")
+        .flag("demo", '\0', "play the offline demo against a stand-in for the server")
+        .many("task", "the task; without one the agent reads requests one after another"))
+}
+
+// The configuration with the command line's settings over it.
+#test(["--model", "m", "-y", "--no-stream"])[Ok(("m", "allow", false))]
+#test([])[Ok(("nvidia/Qwen3.6-35B-A3B-NVFP4", "ask", true))]
+fun settings_of(argv: [str]) -> Result<(str, str, bool), str> {
+    let a = args.parse(cli(), argv).map_err((e: args.ArgsError) => f"{e}")?
+    let c = with_args(defaults(), a)?
+    return Ok((c.model, c.commands, c.stream))
+}
+
+fun with_args(base: Config, a: args.Args) -> Result<Config, str> {
+    var c = base
+    if let Some(v) = a.get("server") {
+        c.server = v
+    }
+    if let Some(v) = a.get("model") {
+        c.model = v
+    }
+    if a.flag("no-stream") {
+        c.stream = false
+    }
+    if a.flag("yes") {
+        c.commands = "allow"
+    }
+    return check(c)
+}
+
+// An absolute, normalized path for `p` (relative to `cwd`).
+#test("/home/u", ".")["/home/u"]
+#test("/home/u", "code/../notes")["/home/u/notes"]
+#test("/home/u", "/tmp/w/")["/tmp/w"]
+fun absolute(cwd: str, p: str) -> str {
+    let full = path.normalize(path.join(cwd, p))
+    return if full.len() > 1 { full.strip_suffix("/").unwrap_or(full) } else { full }
+}
+
+fun fail(message: str) {
+    print(f"agent: {message}")
+    process.exit(1)
+}
+
+const HELP: str = "/help this list · /exit (or Ctrl-D) the end · /clear a new conversation · /compact sum the conversation up now · /stats tokens and the cache · /skills the skills · /memory the memory's index"
+
+// The conversation: a request a line, and commands.
+async fun repl(start: Session, skills: [Skill], memory_dir: str) {
+    var sess = start
+    print(f"agent: {sess.config.model} at {sess.config.server}, in {sess.ws.root}. /help for the commands.")
+    while true {
+        let Some(line) = sess.input.read("> ") else {
+            break
+        }
+        let request = line.trim()
+        if request == "" {
+            continue
+        }
+        sess.input.remember(request)
+        if request == "/exit" || request == "/quit" {
+            break
+        }
+        match request {
+            "/help" => print(HELP)
+            "/clear" => {
+                sess.clear()
+                print("a new conversation")
+            }
+            "/compact" => match await sess.compact() {
+                Ok(how) => print(how)
+                Err(e) => print(f"failed: {e}")
+            }
+            "/stats" => print(sess.stats())
+            "/skills" => print(if skills.len() == 0 { "no skills" } else { skills.map((s: Skill) => f"{s.name}: {s.description}").join("\n") })
+            "/memory" => {
+                let idx = index(memory_dir)
+                print(if idx == "" { f"the memory in {memory_dir} is empty" } else { f"{memory_dir}:\n{idx.trim_end()}" })
+            }
+            _ => {
+                if request.starts_with("/") {
+                    print(f"no command {request}: {HELP}")
+                    continue
+                }
+                match await sess.ask(request) {
+                    Ok(answer) => {
+                        if answer == "" {
+                            print("(no answer)")
+                        }
+                    }
+                    Err(e) => print(f"failed: {e}")
+                }
+            }
+        }
+    }
+    print(sess.stats())
+}
+
+#main
+async fun main() {
+    let a = args.parse_or_exit(cli(), process.args()[1:])
+    if a.flag("demo") {
+        match await demo(!a.flag("no-stream"), true) {
+            Ok((answer, written, sess)) => {
+                print("summary.md:")
+                print(written.trim_end())
+                print(sess.stats())
+            }
+            Err(e) => fail(e)
+        }
+        return
+    }
+    let config = match load(a.get_or("config", "")).and_then((c: Config) => with_args(c, a)) {
+        Ok(c) => c
+        Err(e) => {
+            fail(e)
+            return
+        }
+    }
+    let cwd = fs.current_dir().unwrap_or(".")
+    let root = absolute(cwd, a.get_or("dir", "."))
+    if !fs.is_dir(root) {
+        fail(f"{root} is not a directory")
+    }
+    let home = process.env("HOME").unwrap_or(".")
+    let user_dir = config_dir(process.env("XDG_CONFIG_HOME"), process.env("HOME"))
+    let memory_dir = if config.memory_dir != "" { config.memory_dir } else { memory_dir_for(f"{home}/.local/share/myla-agent", root) }
+    let skill_dirs = [path.join(root, ".agents/skills"), path.join(root, ".claude/skills"), path.join(user_dir, "skills")].concat(config.skill_dirs)
+    let skills = discover(skill_dirs)
+    // built once: the same system prompt for the whole session (MYLA-762)
+    let system = system_prompt(SYSTEM, [config.system, instructions(user_dir, root, config.max_read_bytes), listing(skills), memory_prompt(index(memory_dir))], root)
+    let ws = Workspace { root: root, max_read_bytes: config.max_read_bytes, command_timeout_ms: config.command_timeout_ms, skills: skills, memory_dir: memory_dir }
+    var sess = session(config, ws, system, input(), true)
+    let task = a.all("task").join(" ")
+    if task == "" {
+        await repl(sess, skills, memory_dir)
+        return
+    }
+    match await sess.ask(task) {
+        Ok(answer) => print(sess.stats())
+        Err(e) => {
+            print(sess.stats())
+            fail(e)
+        }
+    }
+}

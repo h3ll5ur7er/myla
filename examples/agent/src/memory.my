@@ -1,0 +1,242 @@
+// memory.my: what the agent knows before it starts (MYLA-760).
+//
+// - Instruction files the user writes: the user's AGENTS.md in the config
+//   directory, then the workspace's AGENTS.md and CLAUDE.md. A line `@path`
+//   includes that file (relative to the file it is in), once.
+// - A memory the agent keeps between sessions: one Markdown file per fact
+//   in the memory directory, and the index MEMORY.md, a line per fact, that
+//   the system prompt carries. The tools remember, recall and forget.
+import std.fs as fs
+import std.path as path
+from .text import prefix
+
+// --- instruction files ---------------------------------------------------------
+
+// The file a line includes (`@AGENTS.md`), "" if it includes none.
+#test("@AGENTS.md")["AGENTS.md"]
+#test("  @docs/x.md  ")["docs/x.md"]
+#test("@ someone said")[""]
+#test("email me @home")[""]
+#test("@")[""]
+fun include_of(line: str) -> str {
+    let t = line.trim()
+    if !t.starts_with("@") || t.len() < 2 || t.contains(" ") || t.contains("\t") {
+        return ""
+    }
+    return t[1:]
+}
+
+// `text` (the file `file`) with its includes put in, each file once: `seen`
+// holds the files already in (the outer ones too), `read` reads a file or
+// says it can't (missing, or a place it may not read). Gives the text and
+// the files seen since.
+#test("a\n@b.md\nc", "/w/A.md", ["/w/A.md"], (p: str) => if p == "/w/b.md" { Some("B") } else { None }, 0)[("a\nB\nc", ["/w/A.md", "/w/b.md"])]
+#test("@A.md\n@A.md", "/w/C.md", ["/w/C.md"], (p: str) => Some("x"), 0)[("x\n", ["/w/C.md", "/w/A.md"])]
+#test("@missing.md", "/w/A.md", [], (p: str) => None, 0)[("@missing.md", [])]
+#test("@s/x.md", "/w/A.md", [], (p: str) => if p == "/w/s/x.md" { Some("@../y.md") } else if p == "/w/y.md" { Some("Y") } else { None }, 0)[("Y", ["/w/s/x.md", "/w/y.md"])]
+pub fun expand(text: str, file: str, seen: [str], read: (str) -> Option<str>, depth: int) -> (str, [str]) {
+    var known = seen
+    var out: [str] = []
+    let dir = path.parent(file).unwrap_or(".")
+    for line in text.lines() {
+        let inc = include_of(line)
+        if inc == "" || depth >= 5 {
+            out.push(line)
+            continue
+        }
+        let target = path.normalize(path.join(dir, inc))
+        if known.contains(target) {
+            out.push("")
+            continue
+        }
+        match read(target) {
+            Some(t) => {
+                known.push(target)
+                let (inner, more) = expand(t, target, known, read, depth + 1)
+                known = more
+                out.push(inner)
+            }
+            None => out.push(line)
+        }
+    }
+    return (out.join("\n"), known)
+}
+
+// The instruction files, the way the system prompt carries them: each
+// file under its name, all of them at most `limit` bytes. `user_dir` is
+// the config directory, `root` the workspace (absolute paths).
+pub fun instructions(user_dir: str, root: str, limit: int) -> str {
+    let files = [path.join(user_dir, "AGENTS.md"), path.join(root, "AGENTS.md"), path.join(root, "CLAUDE.md")]
+    // an include reads only inside the workspace or the config directory
+    let read = (p: str) => if p.starts_with(root + "/") || p.starts_with(user_dir + "/") { fs.read_to_string(p).ok() } else { None }
+    var seen: [str] = []
+    var parts: [str] = []
+    for f in files {
+        if seen.contains(f) {
+            continue
+        }
+        let Some(text) = fs.read_to_string(f).ok() else {
+            continue
+        }
+        seen.push(f)
+        let (full, more) = expand(text, f, seen, read, 0)
+        seen = more
+        if full.trim() != "" {
+            parts.push(f"Instructions from {f}:\n{full.trim()}")
+        }
+    }
+    let all = parts.join("\n\n")
+    if all.len() > limit {
+        return prefix(all, limit) + f"\n[instructions cut at {limit} bytes]"
+    }
+    return all
+}
+
+// --- the agent's memory -----------------------------------------------------
+
+// A memory's file name: lower case letters, digits and dashes.
+#test("Build steps")[Ok("build-steps")]
+#test("seed_update!")[Ok("seed-update")]
+#test("--")[Err("'--' is no name: use letters or digits")]
+pub fun slug(name: str) -> Result<str, str> {
+    var sb = StringBuilder()
+    var dash = false
+    for c in name.to_lower() {
+        if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+            if dash && sb.len() > 0 {
+                sb.append_char('-')
+            }
+            sb.append_char(c)
+            dash = false
+        } else {
+            dash = true
+        }
+    }
+    let s = sb.build()
+    if s == "" {
+        return Err(f"'{name}' is no name: use letters or digits")
+    }
+    return Ok(s)
+}
+
+// Where a workspace's memory goes: below `base`, a directory named after
+// the workspace's absolute path.
+#test("/home/u/.local/share/myla-agent", "/home/u/code/myla")["/home/u/.local/share/myla-agent/home-u-code-myla"]
+pub fun memory_dir_for(base: str, root: str) -> str {
+    let name = root.split("/").filter((p: str) => p != "").join("-")
+    return path.join(base, if name == "" { "root" } else { name })
+}
+
+// The index with the line of memory `slug` put in (or replaced).
+#test("", "a", "Alpha.")["- [a](a.md): Alpha.\n"]
+#test("- [a](a.md): Old.\n- [b](b.md): B.\n", "a", "New.")["- [b](b.md): B.\n- [a](a.md): New.\n"]
+pub fun index_with(index: str, slug: str, description: str) -> str {
+    let kept = index_without(index, slug)
+    return kept + f"- [{slug}]({slug}.md): {description.replace("\n", " ").trim()}\n"
+}
+
+// The index without the line of memory `slug`.
+#test("- [a](a.md): A.\n- [b](b.md): B.\n", "a")["- [b](b.md): B.\n"]
+#test("- [a](a.md): A.\n", "a")[""]
+pub fun index_without(index: str, slug: str) -> str {
+    let kept = index.lines().filter((l: str) => !l.starts_with(f"- [{slug}]("))
+    return if kept.len() == 0 { "" } else { kept.join("\n") + "\n" }
+}
+
+// The index, "" if there is none yet.
+#test("/no/such")[""]
+pub fun index(dir: str) -> str {
+    return fs.read_to_string(path.join(dir, "MEMORY.md")).unwrap_or("")
+}
+
+// The memory as the system prompt carries it.
+#test("")["You have a memory that lasts between sessions. It is empty so far. Save a fact worth keeping (how this workspace builds and tests, the user's preferences, a decision and its reason) with remember."]
+#test("- [a](a.md): A.\n")["You have a memory that lasts between sessions; recall reads a memory, remember saves or replaces one (a change shows in this list from the next session), forget removes one. Its index:\n- [a](a.md): A."]
+pub fun memory_prompt(idx: str) -> str {
+    if idx.trim() == "" {
+        return "You have a memory that lasts between sessions. It is empty so far. Save a fact worth keeping (how this workspace builds and tests, the user's preferences, a decision and its reason) with remember."
+    }
+    return "You have a memory that lasts between sessions; recall reads a memory, remember saves or replaces one (a change shows in this list from the next session), forget removes one. Its index:\n" + idx.trim()
+}
+
+fun io_text(p: str, e: fs.IoError) -> str {
+    return f"{p}: {e}"
+}
+
+// Saves a memory and its line in the index.
+pub fun remember(dir: str, name: str, description: str, content: str) -> Result<str, str> {
+    let s = slug(name)?
+    fs.make_dir_all(dir).map_err((e: fs.IoError) => io_text(dir, e))?
+    let file = path.join(dir, f"{s}.md")
+    let existed = fs.exists(file)
+    let text = f"---\nname: {s}\ndescription: {description.replace("\n", " ").trim()}\n---\n\n{content.trim()}\n"
+    fs.write_to_file(file, text).map_err((e: fs.IoError) => io_text(file, e))?
+    let idx = path.join(dir, "MEMORY.md")
+    fs.write_to_file(idx, index_with(index(dir), s, description)).map_err((e: fs.IoError) => io_text(idx, e))?
+    return Ok(if existed { f"replaced the memory '{s}'" } else { f"saved the memory '{s}'" })
+}
+
+// A memory's text.
+#test("/no/such", "x")[Err("there is no memory 'x'")]
+pub fun recall(dir: str, name: str) -> Result<str, str> {
+    let s = slug(name)?
+    return fs.read_to_string(path.join(dir, f"{s}.md")).map_err((e: fs.IoError) => f"there is no memory '{s}'")
+}
+
+// Removes a memory and its line in the index.
+#test("/no/such", "x")[Err("there is no memory 'x'")]
+pub fun forget(dir: str, name: str) -> Result<str, str> {
+    let s = slug(name)?
+    let file = path.join(dir, f"{s}.md")
+    fs.remove_file(file).map_err((e: fs.IoError) => f"there is no memory '{s}'")?
+    let idx = path.join(dir, "MEMORY.md")
+    fs.write_to_file(idx, index_without(index(dir), s)).map_err((e: fs.IoError) => io_text(idx, e))?
+    return Ok(f"forgot the memory '{s}'")
+}
+
+// The memory's round trip, in a directory of its own.
+#test
+fun remember_recall_forget() -> Result<(), str> {
+    let dir = fs.make_temp_dir().map_err((e: fs.IoError) => f"{e}")?
+    defer {
+        let r = fs.remove_dir_all(dir)
+    }
+    let m = path.join(dir, "mem")
+    if remember(m, "Build", "How to build.", "Run make.")? != "saved the memory 'build'" {
+        return Err("not saved")
+    }
+    if remember(m, "build", "How it builds.", "Run make twice.")? != "replaced the memory 'build'" {
+        return Err("not replaced")
+    }
+    if index(m) != "- [build](build.md): How it builds.\n" {
+        return Err(f"index: {index(m)}")
+    }
+    if !recall(m, "build")?.contains("Run make twice.") {
+        return Err("not recalled")
+    }
+    let gone = forget(m, "build")?
+    if index(m) != "" || recall(m, "build").is_ok() {
+        return Err("not forgotten")
+    }
+    return Ok(())
+}
+
+// Instruction files with an include, from a workspace of their own.
+#test
+fun instruction_files() -> Result<(), str> {
+    let dir = fs.make_temp_dir().map_err((e: fs.IoError) => f"{e}")?
+    defer {
+        let r = fs.remove_dir_all(dir)
+    }
+    let w = path.join(dir, "w")
+    let u = path.join(dir, "u")
+    fs.make_dir_all(w).map_err((e: fs.IoError) => f"{e}")?
+    fs.write_to_file(path.join(w, "AGENTS.md"), "Use tabs.").map_err((e: fs.IoError) => f"{e}")?
+    fs.write_to_file(path.join(w, "CLAUDE.md"), "Read this:\n@AGENTS.md\n@/etc/passwd").map_err((e: fs.IoError) => f"{e}")?
+    let got = instructions(u, w, 10000)
+    let want = f"Instructions from {w}/AGENTS.md:\nUse tabs.\n\nInstructions from {w}/CLAUDE.md:\nRead this:\n\n@/etc/passwd"
+    if got != want {
+        return Err(f"got:\n{got}")
+    }
+    return Ok(())
+}

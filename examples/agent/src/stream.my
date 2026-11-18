@@ -1,0 +1,151 @@
+// stream.my: a streamed reply (`"stream": true`, MYLA-765). The server
+// sends server-sent events, each a `data: {...}` line with a piece of the
+// reply, the last `data: [DONE]`; the body may come in chunks
+// (`Transfer-Encoding: chunked`). Everything here is pure: the transport
+// (client.my) feeds it what it reads.
+import std.json as json
+import std.num as num
+from std.json import Json
+from .chat import Call, Turn, Usage, no_usage, server_error, usage_of, assistant_message
+
+// A reply put together from its events so far. A tool call comes in
+// pieces by its index: first its id and name, then its arguments' text.
+#derive(Eq)
+pub struct Partial {
+    text: str,
+    ids: [str],
+    names: [str],
+    args: [str],
+    finish: str,
+    usage: Usage,
+    error: str,
+    done: bool,
+}
+
+#test()[Partial { text: "", ids: [], names: [], args: [], finish: "", usage: Usage { prompt: 0, cached: 0, completion: 0 }, error: "", done: false }]
+pub fun partial() -> Partial {
+    return Partial { text: "", ids: [], names: [], args: [], finish: "", usage: no_usage(), error: "", done: false }
+}
+
+// The reply with one more event's data.
+#test(partial(), "{\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}")[Partial { text: "Hel", ids: [], names: [], args: [], finish: "", usage: Usage { prompt: 0, cached: 0, completion: 0 }, error: "", done: false }]
+#test(partial(), "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"pa\"}}]}}]}")[Partial { text: "", ids: ["c1"], names: ["read_file"], args: ["{\"pa"], finish: "", usage: Usage { prompt: 0, cached: 0, completion: 0 }, error: "", done: false }]
+#test(Partial { text: "", ids: ["c1"], names: ["read_file"], args: ["{\"pa"], finish: "", usage: Usage { prompt: 0, cached: 0, completion: 0 }, error: "", done: false }, "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"th\\\": 1}\"}}]},\"finish_reason\":\"tool_calls\"}]}")[Partial { text: "", ids: ["c1"], names: ["read_file"], args: ["{\"path\": 1}"], finish: "tool_calls", usage: Usage { prompt: 0, cached: 0, completion: 0 }, error: "", done: false }]
+#test(partial(), "{\"choices\":[],\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":32}}}")[Partial { text: "", ids: [], names: [], args: [], finish: "", usage: Usage { prompt: 50, cached: 32, completion: 3 }, error: "", done: false }]
+#test(partial(), "{\"object\":\"error\",\"message\":\"too long\"}")[Partial { text: "", ids: [], names: [], args: [], finish: "", usage: Usage { prompt: 0, cached: 0, completion: 0 }, error: "too long", done: false }]
+#test(partial(), "[DONE]")[Partial { text: "", ids: [], names: [], args: [], finish: "", usage: Usage { prompt: 0, cached: 0, completion: 0 }, error: "", done: true }]
+#test(partial(), "{oops")[Partial { text: "", ids: [], names: [], args: [], finish: "", usage: Usage { prompt: 0, cached: 0, completion: 0 }, error: "an event that isn't JSON: {oops", done: false }]
+pub fun absorb(p: Partial, data: str) -> Partial {
+    var out = p
+    if data.trim() == "[DONE]" {
+        out.done = true
+        return out
+    }
+    let j = match json.parse(data) {
+        Ok(j) => j
+        Err(e) => {
+            out.error = f"an event that isn't JSON: {data}"
+            return out
+        }
+    }
+    let problem = server_error(j)
+    if problem != "" {
+        out.error = problem
+        return out
+    }
+    let u = usage_of(j)
+    if u != no_usage() {
+        out.usage = u
+    }
+    let s = (v: Json, path: str) => json.at(v, path).and_then((x: Json) => x.as_str()).unwrap_or("")
+    out.text = out.text + s(j, "choices[0].delta.content")
+    let finish = s(j, "choices[0].finish_reason")
+    if finish != "" {
+        out.finish = finish
+    }
+    let calls = json.at(j, "choices[0].delta.tool_calls").and_then((v: Json) => v.as_list()).unwrap_or([])
+    for c in calls {
+        let i = json.field(c, "index").and_then((v: Json) => v.as_int()).unwrap_or(out.ids.len() as int64) as int
+        while out.ids.len() <= i {
+            out.ids.push("")
+            out.names.push("")
+            out.args.push("")
+        }
+        out.ids[i] = out.ids[i] + s(c, "id")
+        out.names[i] = out.names[i] + s(c, "function.name")
+        out.args[i] = out.args[i] + s(c, "function.arguments")
+    }
+    return out
+}
+
+// The finished reply, as a non-streamed one reads (chat.read_turn).
+#test(Partial { text: "Done.", ids: [], names: [], args: [], finish: "stop", usage: Usage { prompt: 9, cached: 0, completion: 2 }, error: "", done: true })[Ok(Turn { text: "Done.", calls: [], finish: "stop", message: "{\"role\":\"assistant\",\"content\":\"Done.\"}", usage: Usage { prompt: 9, cached: 0, completion: 2 } })]
+#test(Partial { text: "", ids: ["c1"], names: ["list_files"], args: ["{\"path\":\".\"}"], finish: "tool_calls", usage: Usage { prompt: 0, cached: 0, completion: 0 }, error: "", done: true })[Ok(Turn { text: "", calls: [Call { id: "c1", name: "list_files", input: "{\"path\":\".\"}" }], finish: "tool_calls", message: "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}}]}", usage: Usage { prompt: 0, cached: 0, completion: 0 } })]
+#test(Partial { text: "", ids: [], names: [], args: [], finish: "", usage: Usage { prompt: 0, cached: 0, completion: 0 }, error: "too long", done: false })[Err("the server says: too long")]
+pub fun finish_turn(p: Partial) -> Result<Turn, str> {
+    if p.error != "" {
+        return Err(f"the server says: {p.error}")
+    }
+    var calls: [Call] = []
+    var raw: [Json] = []
+    for i in 0..p.ids.len() {
+        calls.push(Call { id: p.ids[i], name: p.names[i], input: p.args[i] })
+        raw.push(json.obj([
+            ("id", json.text(p.ids[i])),
+            ("type", json.text("function")),
+            ("function", json.obj([("name", json.text(p.names[i])), ("arguments", json.text(p.args[i]))])),
+        ]))
+    }
+    return Ok(Turn { text: p.text, calls: calls, finish: p.finish, message: assistant_message(p.text, raw), usage: p.usage })
+}
+
+// The data of the complete events in `buffer`, and what is left of it (a
+// line not ended yet). Other fields (`event:`, `id:`) and comments
+// (`: keep-alive`) are skipped.
+#test("data: {\"a\":1}\n\ndata: [DONE]\n\n")[(["{\"a\":1}", "[DONE]"], "")]
+#test("data: {\"a\"")[([], "data: {\"a\"")]
+#test(": ping\r\ndata:x\r\nda")[(["x"], "da")]
+pub fun events(buffer: str) -> ([str], str) {
+    let lines = buffer.split("\n")
+    var out: [str] = []
+    for line in lines[:lines.len() - 1] {
+        let l = line.trim_end()
+        if let Some(d) = l.strip_prefix("data:") {
+            out.push(d.trim_start())
+        }
+    }
+    return (out, lines[^1])
+}
+
+// The data of the complete chunks at the start of a chunked body, the
+// rest (an incomplete chunk), and whether the last (empty) chunk came.
+#test("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")[("hello world", "", true)]
+#test("5\r\nhel")[("", "5\r\nhel", false)]
+#test("a;ext=1\r\n0123456789\r\n3")[("0123456789", "3", false)]
+#test("zz\r\nx")[("", "zz\r\nx", true)]
+pub fun dechunk(buffer: str) -> (str, str, bool) {
+    var at = 0
+    var sb = StringBuilder()
+    while true {
+        let Some(eol) = buffer.find_from("\r\n", at) else {
+            break
+        }
+        let head = buffer[at:eol].split(";")[0].trim()
+        let size = match num.parse_int_radix(head, 16) {
+            Ok(n) => n as int
+            Err(e) => {
+                // not a chunked body after all: give up on it
+                return (sb.build(), buffer[at:], true)
+            }
+        }
+        if size == 0 {
+            return (sb.build(), "", true)
+        }
+        if eol + 2 + size + 2 > buffer.len() {
+            break
+        }
+        sb.append(buffer, eol + 2, eol + 2 + size)
+        at = eol + 2 + size + 2
+    }
+    return (sb.build(), buffer[at:], false)
+}

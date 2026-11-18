@@ -1,0 +1,233 @@
+// session.my: one conversation with the model. A request is answered in a
+// loop: the harness sends the conversation, runs the tools the model asks
+// for, sends their results, until the model answers without a tool call.
+import std.io as io
+import std.json as json
+import std.term as term
+from std.json import Json
+from .chat import Ask, Call, Turn, message, tool_message, request_body, visible
+from .client import Server, post, stream_post
+from .config import Config
+from .context import Stats, no_stats, counted, stats_line, projected, should_compact, fit, summary_request, compacted, newest_turn
+from .text import prefix
+from .tools import Workspace, tools, run_tool
+
+// Where the user's lines come from: the terminal's line editor, or plain
+// lines from a pipe.
+pub struct Input {
+    tty: bool,
+    editor: term.Editor,
+    reader: io.Reader,
+}
+
+pub fun input() -> Input {
+    return Input { tty: term.is_tty(term.Stream.Stdin) && term.is_tty(term.Stream.Stdout), editor: term.editor(term.Stream.Stdout), reader: io.stdin() }
+}
+
+impl Input {
+    // The next line, None at the end of the input.
+    fun read(var self, prompt: str) -> Option<str> {
+        if self.tty {
+            return match self.editor.read_line(prompt) {
+                Ok(line) => line
+                Err(e) => None
+            }
+        }
+        return match self.reader.read_line() {
+            Ok(Some(line)) => Some(line.trim_end())
+            _ => None
+        }
+    }
+
+    fun remember(var self, line: str) {
+        if self.tty {
+            self.editor.add_history(line)
+        }
+    }
+}
+
+// The system prompt's own part; the session adds the workspace's
+// instructions, skills and memory. Nothing in it changes during a session
+// (no time, no counts): the prompt's prefix stays the same (MYLA-762).
+pub const SYSTEM: str = "You are an agent that works in a directory through tools. Paths are relative to it. Your context window is small: read files a page at a time, and say what you found as you go, because old tool results may later be replaced by your summary of them. Prefer edit_file to rewriting a whole file. When the task is done, answer without a tool call: that answer is what the user reads."
+
+// The system prompt, from its parts; empty parts are left out.
+#test("base", ["", "Instructions.", "Skills."], "/w")["base\n\nThe workspace is /w.\n\nInstructions.\n\nSkills."]
+pub fun system_prompt(base: str, parts: [str], root: str) -> str {
+    var all = [base, f"The workspace is {root}."]
+    for p in parts {
+        if p.trim() != "" {
+            all.push(p.trim())
+        }
+    }
+    return all.join("\n\n")
+}
+
+// A tool call in one line, for the log.
+#test(Call { id: "c", name: "read_file", input: "{\"path\": \"a.txt\"}" }, ("a\nb\n", false))["  read_file {\"path\": \"a.txt\"} -> 2 lines"]
+#test(Call { id: "c", name: "write_file", input: "{\"path\": \"a\", \"content\": \"0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\"}" }, ("wrote 5 bytes", false))["  write_file {\"path\": \"a\", \"content\": \"01234567890123456789012345678901234567890123456789012345678901234567890123… -> wrote 5 bytes"]
+#test(Call { id: "c", name: "grep", input: "{}" }, ("missing 'pattern'", true))["  grep {} -> error: missing 'pattern'"]
+pub fun log_line(call: Call, r: (str, bool)) -> str {
+    let (out, failed) = r
+    let input = if call.input.len() > 100 { prefix(call.input, 100) + "…" } else { call.input }
+    let lines = out.lines().len()
+    let what = if failed { f"error: {out}" } else if lines > 1 { f"{lines} lines" } else { prefix(out, 100) }
+    return f"  {call.name} {input} -> {what}"
+}
+
+pub struct Session {
+    config: Config,
+    server: Server,
+    ws: Workspace,
+    tools: [str],
+    messages: [str],
+    stats: Stats,
+    // the last reply's usage, the tokens of the first `known_count`
+    // messages (MYLA-761)
+    known_tokens: int,
+    known_count: int,
+    input: Input,
+    // whether to print what goes on
+    show: bool,
+}
+
+pub fun session(config: Config, ws: Workspace, system: str, input: Input, show: bool) -> Session {
+    return Session {
+        config: config,
+        server: Server { base: config.server, api_key: config.api_key },
+        ws: ws,
+        tools: tools(config.max_read_bytes, ws.skills.len() > 0),
+        messages: [message("system", system)],
+        stats: no_stats(),
+        known_tokens: 0,
+        known_count: 0,
+        input: input,
+        show: show,
+    }
+}
+
+impl Session {
+    fun say(self, line: str) {
+        if self.show {
+            print(line)
+        }
+    }
+
+    // One request with the conversation as it is (or `messages` instead,
+    // for a summary: then without tools).
+    async fun send(var self, messages: [str], with_tools: bool) -> Result<Turn, str> {
+        let ask = Ask {
+            model: self.config.model,
+            max_tokens: self.config.max_tokens,
+            tools: if with_tools { self.tools } else { [] },
+            stream: self.config.stream,
+            cache_prompt: self.config.cache_prompt,
+        }
+        let body = request_body(ask, messages)
+        let turn = if self.config.stream { (await stream_post(self.server, body, self.show && with_tools))? } else { (await post(self.server, body))? }
+        self.stats = counted(self.stats, turn.usage)
+        return Ok(turn)
+    }
+
+    // The size of the conversation now, in tokens (estimated in part).
+    fun size(self) -> int {
+        let overhead = self.tools.map((t: str) => t.len() + 1).sum(0)
+        return projected(self.known_tokens, self.known_count, self.messages, overhead)
+    }
+
+    // The conversation summed up by the model and started again from the
+    // summary; if that fails, old tool results are dropped instead.
+    async fun compact(var self) -> Result<str, str> {
+        // the newest turn stays as it is: the model hasn't read its results yet
+        let keep = newest_turn(self.messages)
+        if keep <= 2 {
+            return Ok("nothing to compact")
+        }
+        let before = self.size()
+        let budget = (self.config.context_tokens - self.config.max_tokens) * 3
+        let summary = match await self.send(summary_request(self.messages[:keep], budget), false) {
+            Ok(turn) => visible(turn.text)
+            Err(e) => ""
+        }
+        if summary == "" {
+            self.messages = fit(self.messages, budget * self.config.compact_at / 100)
+            self.known_tokens = 0
+            return Ok(f"compacted by dropping old tool results: about {before} tokens before, {self.size()} after")
+        }
+        self.messages = compacted(self.messages, summary, keep)
+        self.known_tokens = 0
+        self.known_count = 0
+        self.stats.compactions += 1
+        return Ok(f"compacted: about {before} tokens before, {self.size()} after")
+    }
+
+    // Why a call may not run, "" if it may: run_command by the policy, the
+    // others always.
+    fun refusal(var self, call: Call) -> str {
+        if call.name != "run_command" || self.config.commands == "allow" {
+            return ""
+        }
+        if self.config.commands == "deny" {
+            return "commands are switched off here (commands = \"deny\"): do without"
+        }
+        if !self.input.tty {
+            return "there is no terminal to ask the user whether this command may run, so it didn't; do without, or tell the user to start the agent with --yes"
+        }
+        let command = json.parse(call.input).ok().and_then((j: Json) => json.field(j, "command")).and_then((v: Json) => v.as_str()).unwrap_or(call.input)
+        print(f"  run `{command}`?")
+        let answer = self.input.read("  [y/N] ").unwrap_or("").trim().to_lower()
+        return if answer == "y" || answer == "yes" { "" } else { "the user didn't allow this command" }
+    }
+
+    // A request answered: the model's turns until it answers without a
+    // tool call (or with done).
+    async fun ask(var self, request: str) -> Result<str, str> {
+        self.messages.push(message("user", request))
+        for n in 0..self.config.max_turns {
+            if should_compact(self.size(), self.config.context_tokens, self.config.max_tokens, self.config.compact_at) {
+                let how = (await self.compact())?
+                self.say(f"  ({how})")
+            }
+            let turn = (await self.send(self.messages, true))?
+            self.messages.push(turn.message)
+            self.known_tokens = turn.usage.prompt + turn.usage.completion
+            self.known_count = self.messages.len()
+            let said = visible(turn.text)
+            if said != "" && !self.config.stream {
+                self.say(f"model: {said}")
+            }
+            if turn.calls.len() == 0 {
+                if turn.finish == "length" {
+                    return Err(f"the reply was cut off at {self.config.max_tokens} tokens")
+                }
+                return Ok(said)
+            }
+            var finished = ""
+            for call in turn.calls {
+                let no = self.refusal(call)
+                let r = if no == "" { await run_tool(self.ws, call) } else { (no, true) }
+                self.say(log_line(call, r))
+                self.messages.push(tool_message(call.id, r))
+                if call.name == "done" && !r.1 {
+                    finished = r.0
+                }
+            }
+            if finished != "" {
+                self.say(f"model: {finished}")
+                return Ok(finished)
+            }
+        }
+        return Err(f"no answer after {self.config.max_turns} turns")
+    }
+
+    // A new conversation with the same system prompt.
+    fun clear(var self) {
+        self.messages = [self.messages[0]]
+        self.known_tokens = 0
+        self.known_count = 0
+    }
+
+    fun stats(self) -> str {
+        return f"{stats_line(self.stats)}; the conversation is about {self.size()} of {self.config.context_tokens} tokens"
+    }
+}

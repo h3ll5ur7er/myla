@@ -1,0 +1,169 @@
+// chat.my: the OpenAI-style chat completions API (vLLM, llama.cpp's server,
+// Ollama, ...): the messages of a conversation, the request, the reply.
+//
+// A message is kept as its JSON text, as it goes to the server, so that
+// the conversation's prefix stays byte for byte what the server saw last
+// time (its prefix cache, MYLA-762).
+import std.json as json
+from std.json import Json
+
+// A tool call: its arguments are JSON text, as the model wrote them.
+#derive(Eq)
+pub struct Call {
+    id: str,
+    name: str,
+    input: str,
+}
+
+// What a request cost, as the server counts it: the prompt's tokens, how
+// many of them came from its cache, and the reply's.
+#derive(Eq)
+pub struct Usage {
+    prompt: int,
+    cached: int,
+    completion: int,
+}
+
+// One reply: its text, its tool calls, why it ended, the message that goes
+// back into the conversation, and its usage.
+#derive(Eq)
+pub struct Turn {
+    text: str,
+    calls: [Call],
+    finish: str,
+    message: str,
+    usage: Usage,
+}
+
+#test()[Usage { prompt: 0, cached: 0, completion: 0 }]
+pub fun no_usage() -> Usage {
+    return Usage { prompt: 0, cached: 0, completion: 0 }
+}
+
+#test("user", "Hi")["{\"role\":\"user\",\"content\":\"Hi\"}"]
+pub fun message(role: str, text: str) -> str {
+    return json.to_string(json.obj([("role", json.text(role)), ("content", json.text(text))]))
+}
+
+// A tool's result, as the message that answers its call.
+#test("c1", ("missing 'path'", true))["{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"error: missing 'path'\"}"]
+#test("c2", ("hello", false))["{\"role\":\"tool\",\"tool_call_id\":\"c2\",\"content\":\"hello\"}"]
+pub fun tool_message(id: str, result: (str, bool)) -> str {
+    let content = if result.1 { "error: " + result.0 } else { result.0 }
+    return json.to_string(json.obj([("role", json.text("tool")), ("tool_call_id", json.text(id)), ("content", json.text(content))]))
+}
+
+// The assistant's message as it goes back into the conversation: what the
+// model said (without its reasoning) and the tool calls it made.
+#test("<think>Hm.</think>Done.", [])["{\"role\":\"assistant\",\"content\":\"Done.\"}"]
+#test("", [Json.Object([("id", Json.Str("c1"))])])["{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\"}]}"]
+pub fun assistant_message(text: str, calls: [Json]) -> str {
+    var back = [("role", json.text("assistant")), ("content", json.text(visible(text)))]
+    if calls.len() > 0 {
+        back.push(("tool_calls", Json.Array(calls)))
+    }
+    return json.to_string(json.obj(back))
+}
+
+// A field of a message, "" if it has none.
+#test("{\"role\":\"tool\",\"content\":\"x\"}", "role")["tool"]
+#test("{\"role\":\"tool\"}", "content")[""]
+#test("nope", "role")[""]
+pub fun field_of(m: str, key: str) -> str {
+    return json.parse(m).ok().and_then((j: Json) => json.field(j, key)).and_then((v: Json) => v.as_str()).unwrap_or("")
+}
+
+// What a reply says, without the reasoning a model like Qwen3 writes
+// first between <think> tags (when the server doesn't take it out).
+#test("<think>Hmm.</think>\n\nDone.")["Done."]
+#test("Done.")["Done."]
+pub fun visible(text: str) -> str {
+    let parts = text.split("</think>")
+    return parts[^1].trim()
+}
+
+// What a request asks for, besides the conversation.
+#derive(Eq)
+pub struct Ask {
+    model: str,
+    max_tokens: int,
+    tools: [str],
+    stream: bool,
+    cache_prompt: bool,
+}
+
+// The request: the model, the tools and the whole conversation so far.
+// Without tools it asks for text only (a summary, MYLA-761).
+#test(Ask { model: "m", max_tokens: 10, tools: [], stream: false, cache_prompt: false }, ["{\"role\":\"user\",\"content\":\"Hi\"}"])["{\"model\":\"m\",\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}"]
+#test(Ask { model: "m", max_tokens: 10, tools: ["{\"type\":\"function\"}"], stream: true, cache_prompt: true }, [])["{\"model\":\"m\",\"max_tokens\":10,\"tools\":[{\"type\":\"function\"}],\"tool_choice\":\"auto\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"cache_prompt\":true,\"messages\":[]}"]
+pub fun request_body(ask: Ask, messages: [str]) -> str {
+    var fields = [("model", json.text(ask.model)), ("max_tokens", Json.Int(ask.max_tokens as int64))]
+    if ask.tools.len() > 0 {
+        fields.push(("tools", json.arr(ask.tools.map((t: str) => json.parse(t).unwrap_or(Json.Null)))))
+        fields.push(("tool_choice", json.text("auto")))
+    }
+    if ask.stream {
+        fields.push(("stream", Json.Bool(true)))
+        fields.push(("stream_options", json.obj([("include_usage", Json.Bool(true))])))
+    }
+    if ask.cache_prompt {
+        // llama.cpp's server keeps the prompt's cache with this; vLLM
+        // caches prefixes by itself and ignores it
+        fields.push(("cache_prompt", Json.Bool(true)))
+    }
+    fields.push(("messages", json.arr(messages.map((m: str) => json.parse(m).unwrap_or(Json.Null)))))
+    return json.to_string(json.obj(fields))
+}
+
+// The server's error in a reply (OpenAI's `{"error": {...}}` or vLLM's
+// `{"object": "error", ...}`), "" if it is none.
+#test(json.parse("{\"object\":\"error\",\"message\":\"bad\",\"code\":400}").unwrap_or(Json.Null))["bad"]
+#test(json.parse("{\"error\":{\"message\":\"model not found\"}}").unwrap_or(Json.Null))["model not found"]
+#test(json.parse("{\"choices\":[]}").unwrap_or(Json.Null))[""]
+pub fun server_error(j: Json) -> str {
+    let s = (path: str) => json.at(j, path).and_then((x: Json) => x.as_str()).unwrap_or("")
+    return if s("object") == "error" { s("message") } else { s("error.message") }
+}
+
+// The usage of a reply (or of a stream's last event); zeros if it has none.
+#test(json.parse("{\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":96}}}").unwrap_or(Json.Null))[Usage { prompt: 120, cached: 96, completion: 7 }]
+#test(json.parse("{\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"prompt_tokens_details\":null}}").unwrap_or(Json.Null))[Usage { prompt: 5, cached: 0, completion: 1 }]
+#test(json.parse("{\"usage\":null}").unwrap_or(Json.Null))[Usage { prompt: 0, cached: 0, completion: 0 }]
+pub fun usage_of(j: Json) -> Usage {
+    let n = (path: str) => json.at(j, path).and_then((x: Json) => x.as_int()).unwrap_or(0i64) as int
+    return Usage { prompt: n("usage.prompt_tokens"), cached: n("usage.prompt_tokens_details.cached_tokens"), completion: n("usage.completion_tokens") }
+}
+
+// A reply read: its text, tool calls, finish reason and usage, or the
+// server's error.
+#test("{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"role\":\"assistant\",\"content\":\"Looking.\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\": \\\".\\\"}\"}}]}}]}")[Ok(Turn { text: "Looking.", calls: [Call { id: "c1", name: "list_files", input: "{\"path\": \".\"}" }], finish: "tool_calls", message: "{\"role\":\"assistant\",\"content\":\"Looking.\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\": \\\".\\\"}\"}}]}", usage: Usage { prompt: 0, cached: 0, completion: 0 } })]
+#test("{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"Done.\"}}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}")[Ok(Turn { text: "Done.", calls: [], finish: "stop", message: "{\"role\":\"assistant\",\"content\":\"Done.\"}", usage: Usage { prompt: 9, cached: 0, completion: 2 } })]
+#test("{\"object\":\"error\",\"message\":\"\\\"auto\\\" tool choice requires --enable-auto-tool-choice\",\"code\":400}")[Err("the server says: \"auto\" tool choice requires --enable-auto-tool-choice")]
+#test("{\"error\":{\"message\":\"model not found\"}}")[Err("the server says: model not found")]
+#test("<html>")[Err("not a JSON reply: 1:1: Expecting value")]
+pub fun read_turn(text: str) -> Result<Turn, str> {
+    let j = match json.parse(text) {
+        Ok(j) => j
+        Err(e) => {
+            return Err(f"not a JSON reply: {e}")
+        }
+    }
+    let problem = server_error(j)
+    if problem != "" {
+        return Err(f"the server says: {problem}")
+    }
+    let Some(msg) = json.at(j, "choices[0].message") else {
+        return Err("a reply without a message")
+    }
+    let s = (v: Json, path: str) => json.at(v, path).and_then((x: Json) => x.as_str()).unwrap_or("")
+    let raw = json.field(msg, "tool_calls").and_then((v: Json) => v.as_list()).unwrap_or([])
+    var calls: [Call] = []
+    for c in raw {
+        // the arguments are a JSON string, though some servers send an object
+        let args = json.at(c, "function.arguments").unwrap_or(json.obj([]))
+        let input = args.as_str().unwrap_or(json.to_string(args))
+        calls.push(Call { id: s(c, "id"), name: s(c, "function.name"), input: input })
+    }
+    let text = s(msg, "content")
+    return Ok(Turn { text: text, calls: calls, finish: s(j, "choices[0].finish_reason"), message: assistant_message(text, raw), usage: usage_of(j) })
+}

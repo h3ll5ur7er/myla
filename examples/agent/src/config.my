@@ -1,0 +1,172 @@
+// config.my: what the agent is configured with (MYLA-758). The defaults,
+// then the user's file (`$XDG_CONFIG_HOME/myla-agent/config.toml`, or
+// `~/.config/…`, or `--config FILE`), then the environment
+// (`MYLA_AGENT_SERVER`, `MYLA_AGENT_MODEL`, `MYLA_AGENT_API_KEY`), then the
+// command line. The workspace has no say: a file in it could allow the
+// agent to run commands there.
+import std.fs as fs
+import std.process as process
+import std.toml as toml
+
+pub struct Config {
+    // where the model is: std.http speaks plain HTTP, and a host's name
+    // goes through /etc/hosts and DNS (without search domains)
+    server: str,
+    model: str,
+    // the server's --api-key, if it has one
+    api_key: str,
+    // the model's context window, and what one reply may take of it
+    context_tokens: int,
+    max_tokens: int,
+    // the model's answers to one request before the harness gives up
+    max_turns: int,
+    // the most one read gives back (about 4,000 tokens)
+    max_read_bytes: int,
+    stream: bool,
+    // run_command: "ask" (the user says yes or no), "allow" or "deny"
+    commands: str,
+    command_timeout_ms: int,
+    // the conversation is summed up when it passes this percentage of what
+    // the window leaves after the reply (MYLA-761)
+    compact_at: int,
+    // llama.cpp's server keeps the prompt cached with this (MYLA-762)
+    cache_prompt: bool,
+    // "" for ~/.local/share/myla-agent/<workspace>/
+    memory_dir: str,
+    // more skill directories, after the workspace's .agents/skills and .claude/skills
+    skill_dirs: [str],
+    // said after the harness's own system prompt
+    system: str,
+}
+
+// The file's form: what it leaves out keeps its default.
+#derive(Toml)
+struct ConfigFile {
+    server: Option<str>,
+    model: Option<str>,
+    api_key: Option<str>,
+    context_tokens: Option<int>,
+    max_tokens: Option<int>,
+    max_turns: Option<int>,
+    max_read_bytes: Option<int>,
+    stream: Option<bool>,
+    commands: Option<str>,
+    command_timeout_ms: Option<int>,
+    compact_at: Option<int>,
+    cache_prompt: Option<bool>,
+    memory_dir: Option<str>,
+    skill_dirs: Option<[str]>,
+    system: Option<str>,
+}
+
+pub fun defaults() -> Config {
+    return Config {
+        server: "http://jarvis:9293",
+        model: "nvidia/Qwen3.6-35B-A3B-NVFP4",
+        api_key: "",
+        context_tokens: 32768,
+        max_tokens: 4096,
+        max_turns: 50,
+        max_read_bytes: 12000,
+        stream: true,
+        commands: "ask",
+        command_timeout_ms: 120000,
+        compact_at: 75,
+        cache_prompt: true,
+        memory_dir: "",
+        skill_dirs: [],
+        system: "",
+    }
+}
+
+// A configuration with a file's settings over it, or what is wrong with it.
+#test("model = \"q\"\nmax_turns = 9\n")[Ok(("q", 9, "http://jarvis:9293"))]
+#test("commands = \"sometimes\"\n")[Err("commands must be \"ask\", \"allow\" or \"deny\", not \"sometimes\"")]
+#test("compact_at = 120\n")[Err("compact_at is a percentage (10 to 95), not 120")]
+#test("modle = \"q\"\n")[Ok(("nvidia/Qwen3.6-35B-A3B-NVFP4", 50, "http://jarvis:9293"))]
+#test("max_tokens = 40000\n")[Err("max_tokens (40000) must be less than context_tokens (32768)")]
+#test("max_turns = \"x\"\n")[Err("$.max_turns: expected an integer, found a string")]
+fun summary_of(text: str) -> Result<(str, int, str), str> {
+    let c = with_file(defaults(), text)?
+    return Ok((c.model, c.max_turns, c.server))
+}
+
+pub fun with_file(base: Config, text: str) -> Result<Config, str> {
+    let f = toml.decode<ConfigFile>(text).map_err((e: toml.TomlError) => f"{e}")?
+    var c = base
+    c.server = f.server.unwrap_or(c.server)
+    c.model = f.model.unwrap_or(c.model)
+    c.api_key = f.api_key.unwrap_or(c.api_key)
+    c.context_tokens = f.context_tokens.unwrap_or(c.context_tokens)
+    c.max_tokens = f.max_tokens.unwrap_or(c.max_tokens)
+    c.max_turns = f.max_turns.unwrap_or(c.max_turns)
+    c.max_read_bytes = f.max_read_bytes.unwrap_or(c.max_read_bytes)
+    c.stream = f.stream.unwrap_or(c.stream)
+    c.commands = f.commands.unwrap_or(c.commands)
+    c.command_timeout_ms = f.command_timeout_ms.unwrap_or(c.command_timeout_ms)
+    c.compact_at = f.compact_at.unwrap_or(c.compact_at)
+    c.cache_prompt = f.cache_prompt.unwrap_or(c.cache_prompt)
+    c.memory_dir = f.memory_dir.unwrap_or(c.memory_dir)
+    c.skill_dirs = f.skill_dirs.unwrap_or(c.skill_dirs)
+    c.system = f.system.unwrap_or(c.system)
+    return check(c)
+}
+
+// The settings that can be wrong whatever their type (summary_of's cases
+// try them).
+pub fun check(c: Config) -> Result<Config, str> {
+    if c.commands != "ask" && c.commands != "allow" && c.commands != "deny" {
+        return Err(f"commands must be \"ask\", \"allow\" or \"deny\", not \"{c.commands}\"")
+    }
+    if c.compact_at < 10 || c.compact_at > 95 {
+        return Err(f"compact_at is a percentage (10 to 95), not {c.compact_at}")
+    }
+    if c.max_tokens >= c.context_tokens {
+        return Err(f"max_tokens ({c.max_tokens}) must be less than context_tokens ({c.context_tokens})")
+    }
+    if c.max_read_bytes < 256 {
+        return Err(f"max_read_bytes is too small: {c.max_read_bytes}")
+    }
+    return Ok(c)
+}
+
+// The user's configuration directory: $XDG_CONFIG_HOME/myla-agent, or
+// ~/.config/myla-agent.
+#test(Some("/x"), Some("/home/u"))["/x/myla-agent"]
+#test(None, Some("/home/u"))["/home/u/.config/myla-agent"]
+#test(None, None)["./.config/myla-agent"]
+pub fun config_dir(xdg: Option<str>, home: Option<str>) -> str {
+    if let Some(x) = xdg {
+        if x != "" {
+            return f"{x}/myla-agent"
+        }
+    }
+    return f"{home.unwrap_or(".")}/.config/myla-agent"
+}
+
+// The configuration: the defaults, the file (`path`, or the user's if it
+// is ""; a missing user file is no error), then the environment.
+pub fun load(path: str) -> Result<Config, str> {
+    let file = if path != "" { path } else { config_dir(process.env("XDG_CONFIG_HOME"), process.env("HOME")) + "/config.toml" }
+    var c = defaults()
+    match fs.read_to_string(file) {
+        Ok(text) => {
+            c = with_file(c, text).map_err((e: str) => f"{file}: {e}")?
+        }
+        Err(e) => {
+            if path != "" {
+                return Err(f"{file}: {e}")
+            }
+        }
+    }
+    if let Some(v) = process.env("MYLA_AGENT_SERVER") {
+        c.server = v
+    }
+    if let Some(v) = process.env("MYLA_AGENT_MODEL") {
+        c.model = v
+    }
+    if let Some(v) = process.env("MYLA_AGENT_API_KEY") {
+        c.api_key = v
+    }
+    return Ok(c)
+}

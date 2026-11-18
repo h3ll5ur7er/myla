@@ -1,0 +1,133 @@
+// skills.my: skills (MYLA-759). A skill is a directory with a SKILL.md
+// whose frontmatter names it and says when to use it:
+//
+//   ---
+//   name: myla
+//   description: Write, read and debug Myla code. Use before ...
+//   ---
+//
+// The system prompt lists every skill's name and description; the model
+// loads one with the load_skill tool when a task needs it, so a skill
+// costs context only when it is used.
+import std.fs as fs
+import std.path as path
+from .text import page
+
+#derive(Eq)
+pub struct Skill {
+    name: str,
+    description: str,
+    dir: str,
+}
+
+// A YAML scalar as written on one line: without its quotes.
+#test("\"a: b\"")["a: b"]
+#test("'it''s'")["it's"]
+#test("plain")["plain"]
+fun unquote(v: str) -> str {
+    let t = v.trim()
+    if t.len() >= 2 && t.starts_with("\"") && t.ends_with("\"") {
+        return t[1:t.len() - 1].replace("\\\"", "\"")
+    }
+    if t.len() >= 2 && t.starts_with("'") && t.ends_with("'") {
+        return t[1:t.len() - 1].replace("''", "'")
+    }
+    return t
+}
+
+// The name and description in a SKILL.md's frontmatter, if it has both.
+// A value may go on over the indented lines below its key (`>` or `|`).
+#test("---\nname: myla\ndescription: Write Myla.\n---\n# Myla\n")[Some(("myla", "Write Myla."))]
+#test("---\r\nname: \"x\"\r\ndescription: >\r\n  Two\r\n  lines.\r\nother: 1\r\n---\r\n")[Some(("x", "Two lines."))]
+#test("# no frontmatter\n")[None]
+#test("---\nname: x\n---\n")[None]
+pub fun frontmatter(text: str) -> Option<(str, str)> {
+    let lines = text.lines()
+    if lines.len() == 0 || lines[0].trim() != "---" {
+        return None
+    }
+    var name = ""
+    var description = ""
+    var key = ""
+    for line in lines[1:] {
+        if line.trim() == "---" {
+            break
+        }
+        if (line.starts_with(" ") || line.starts_with("\t")) && key != "" {
+            // a continuation of the last key's value
+            let more = line.trim()
+            if key == "name" {
+                name = (name + " " + more).trim()
+            } else if key == "description" {
+                description = (description + " " + more).trim()
+            }
+            continue
+        }
+        let kv = line.splitn(":", 2)
+        if kv.len() < 2 {
+            continue
+        }
+        key = kv[0].trim()
+        var value = unquote(kv[1])
+        if value == ">" || value == "|" || value == ">-" || value == "|-" {
+            value = ""
+        }
+        if key == "name" {
+            name = value
+        } else if key == "description" {
+            description = value
+        }
+    }
+    if name == "" || description == "" {
+        return None
+    }
+    return Some((name, description))
+}
+
+// The skills in the directories `dirs`, the first of a name winning.
+pub fun discover(dirs: [str]) -> [Skill] {
+    var found: [Skill] = []
+    for d in dirs {
+        let names = fs.list_dir(d).unwrap_or([])
+        for n in names {
+            let dir = path.join(d, n)
+            let text = fs.read_to_string(path.join(dir, "SKILL.md")).unwrap_or("")
+            if let Some((name, description)) = frontmatter(text) {
+                if !found.any((s: Skill) => s.name == name) {
+                    found.push(Skill { name: name, description: description, dir: dir })
+                }
+            }
+        }
+    }
+    return found
+}
+
+// The skills as the system prompt lists them.
+#test([Skill { name: "a", description: "Does A.", dir: "/s/a" }])["You have skills: instructions for kinds of tasks, loaded with load_skill. Before you start a task that a skill's description covers, load the skill and follow it.\n- a: Does A."]
+#test([])[""]
+pub fun listing(skills: [Skill]) -> str {
+    if skills.len() == 0 {
+        return ""
+    }
+    let items = skills.map((s: Skill) => f"- {s.name}: {s.description}").join("\n")
+    return "You have skills: instructions for kinds of tasks, loaded with load_skill. Before you start a task that a skill's description covers, load the skill and follow it.\n" + items
+}
+
+// A page of a skill's SKILL.md, or of another file of its directory (as
+// SKILL.md names them, e.g. `reference/syntax.md`).
+#test([Skill { name: "a", description: "d", dir: "/no/such" }], "b", "", 1, 100)[Err("there is no skill 'b'; there are: a")]
+#test([Skill { name: "a", description: "d", dir: "/no/such" }], "a", "../x", 1, 100)[Err("'../x' is outside the skill")]
+#test([Skill { name: "a", description: "d", dir: "/no/such" }], "a", "", 1, 100)[Err("/no/such/SKILL.md: not found (NotFound)")]
+pub fun load(skills: [Skill], name: str, file: str, start: int, limit: int) -> Result<str, str> {
+    let Some(s) = skills.find((k: Skill) => k.name == name) else {
+        return Err(f"there is no skill '{name}'; there are: {skills.map((k: Skill) => k.name).join(", ")}")
+    }
+    let rel = if file == "" { "SKILL.md" } else { file }
+    if rel.starts_with("/") || rel.split("/").contains("..") {
+        return Err(f"'{rel}' is outside the skill")
+    }
+    let p = path.join(s.dir, rel)
+    let text = fs.read_to_string(p).map_err((e: fs.IoError) => f"{p}: {e}")?
+    let note = if file == "" { f"[the skill '{name}' is in {s.dir}; load_skill with file reads its other files]\n" } else { "" }
+    return Ok(note + page(text, start, limit, "load_skill"))
+}

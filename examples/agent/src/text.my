@@ -1,0 +1,86 @@
+// text.my: cutting text to size, for the tools' results.
+
+// The first `n` bytes of `s`, or fewer so as not to split a character.
+#test("hello", 3)["hel"]
+#test("hé", 2)["h"]
+#test("hi", 9)["hi"]
+pub fun prefix(s: str, n: int) -> str {
+    if s.len() <= n {
+        return s
+    }
+    var end = n
+    while end > 0 && (s[end] & 0xC0) == 0x80 {
+        end -= 1
+    }
+    return s[:end]
+}
+
+// The last `n` bytes of `s`, or fewer so as not to split a character.
+#test("hello", 3)["llo"]
+#test("éa", 2)["a"]
+#test("hi", 9)["hi"]
+pub fun suffix(s: str, n: int) -> str {
+    if s.len() <= n {
+        return s
+    }
+    var start = s.len() - n
+    while start < s.len() && (s[start] & 0xC0) == 0x80 {
+        start += 1
+    }
+    return s[start:]
+}
+
+// The lines of `text` from line `start` (1 the first) that fit in `limit`
+// bytes, and a note saying which they are and how `again` (the tool's
+// name) reads on; or the whole text if it fits. A line longer than
+// `limit` alone is cut.
+#test("a\nb\nc", 1, 100, "read_file")["a\nb\nc"]
+#test("a\nb\nc", 1, 3, "read_file")["a\n[lines 1-1 of 3; read_file with start 2 for more]"]
+#test("a\nb\nc", 2, 100, "read_file")["b\nc\n[lines 2-3 of 3, the end]"]
+#test("a\nb\nc", 9, 100, "read_file")["[the file has 3 lines]"]
+#test("a\nb\nc", 0, 100, "read_file")["[the file has 3 lines]"]
+#test("abcdef\nx", 1, 4, "load_skill")["abcd\n[lines 1-1 of 2, line 1 cut at 4 bytes; load_skill with start 2 for more]"]
+#test("hé", 1, 2, "read_file")["h\n[lines 1-1 of 1, line 1 cut at 1 bytes, the end]"]
+pub fun page(text: str, start: int, limit: int, again: str) -> str {
+    if start == 1 && text.len() <= limit {
+        return text
+    }
+    let lines = text.lines()
+    if start < 1 || start > lines.len() {
+        return f"[the file has {lines.len()} lines]"
+    }
+    var sb = StringBuilder()
+    var size = 0
+    var last = start - 1
+    var cut = ""
+    while last < lines.len() && size + lines[last].len() + 1 <= limit {
+        sb.append(lines[last])
+        sb.append_char('\n')
+        size += lines[last].len() + 1
+        last += 1
+    }
+    if last == start - 1 {
+        // not even the first line fits: as much of it as does
+        let part = prefix(lines[last], limit)
+        sb.append(part)
+        sb.append_char('\n')
+        cut = f", line {start} cut at {part.len()} bytes"
+        last += 1
+    }
+    let rest = if last == lines.len() { ", the end" } else { f"; {again} with start {last + 1} for more" }
+    sb.append(f"[lines {start}-{last} of {lines.len()}{cut}{rest}]")
+    return sb.build()
+}
+
+// `s` if it fits in `limit` bytes, else its start and its end with a note
+// of what was left out between them.
+#test("short", 100)["short"]
+#test("aaaaabbbbbccccc", 10)["aaaaa\n[... 5 bytes left out ...]\nccccc"]
+pub fun squeeze(s: str, limit: int) -> str {
+    if s.len() <= limit {
+        return s
+    }
+    let head = prefix(s, limit / 2)
+    let tail = suffix(s, limit / 2)
+    return f"{head}\n[... {s.len() - head.len() - tail.len()} bytes left out ...]\n{tail}"
+}
