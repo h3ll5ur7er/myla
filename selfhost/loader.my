@@ -574,6 +574,72 @@ pub fun implicit_modules() -> [str] {
     return ["str", "char", "int", "float", "list", "option", "map", "hash"]
 }
 
+// The names of std.float's methods (D199), the same at both widths
+// (`test_float_methods` holds the list to lib/std/float.my): a program that
+// calls none of them as a method, and has no impl on a float type, is
+// loaded without std.float and the std.math it imports, which would cost
+// its check 4.2 M instructions (D258, `uses_float_methods`).
+pub fun float_method_names() -> [str] {
+    return ["abs", "acos", "approx_eq", "asin", "atan", "atan2", "cbrt", "ceil", "clamp", "copysign", "cos", "cosh", "exp", "floor", "fract", "hypot", "is_finite", "is_infinite", "is_nan", "lerp", "ln", "log", "log10", "log2", "max", "min", "pow", "powi", "round", "signum", "sin", "sinh", "sqrt", "tan", "tanh", "to_bits", "to_degrees", "to_radians", "total_cmp", "trunc"]
+}
+
+// Whether `b` may be in an identifier: an ASCII letter, a digit, `_`, or a
+// byte of a character past ASCII.
+#test('a')[true]
+#test('_')[true]
+#test('(')[false]
+fun ident_byte(b: uint8) -> bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b >= 0x80
+}
+
+// Whether the text `src` may call a method named in `names`, `.name(` or
+// `.name<…>(` with any spaces between, or has an impl on a float type
+// (`impl float64`, whose methods' names a duplicate of std.float's needs
+// it for, D199). Read as bytes, comments and strings included (an f-string's
+// holes hold calls), so it errs on the side of loading (D258).
+#test("fun main() {\n    print(\"hello\")\n}\n", ["sqrt"])[false]
+#test("let y = x.sqrt()", ["sqrt"])[true]
+#test("let y = x . sqrt ()", ["sqrt"])[true]
+#test("let y = x.sqrtx() + x.sqrt", ["sqrt"])[false]
+#test("print(f\"{x.abs()}\")", ["abs"])[true]
+#test("import std.float as float\nlet n = float.PI", ["float"])[false]
+#test("impl float64 {", ["sqrt"])[true]
+#test("impl   float {", ["sqrt"])[true]
+#test("impl floaty {", ["sqrt"])[false]
+#test("x.", ["sqrt"])[false]
+fun may_call_method(src: str, names: [str]) -> bool {
+    var wanted: [str: bool] = [:]
+    for n in names { wanted[n] = true }
+    let n = src.len()
+    var i = 0
+    while i < n {
+        let b = src[i]
+        if b == '.' {
+            var j = i + 1
+            while j < n && (src[j] == ' ' || src[j] == '\t') { j += 1 }
+            let start = j
+            while j < n && ident_byte(src[j]) { j += 1 }
+            let end = j
+            while j < n && (src[j] == ' ' || src[j] == '\t') { j += 1 }
+            if end > start && j < n && (src[j] == '(' || src[j] == '<') && wanted.contains(src[start:end]) { return true }
+            i = if end > i + 1 { end } else { i + 1 }
+            continue
+        }
+        if b == 'i' && i + 4 <= n && src[i + 1] == 'm' && src[i + 2] == 'p' && src[i + 3] == 'l' && (i == 0 || !ident_byte(src[i - 1])) {
+            var j = i + 4
+            while j < n && (src[j] == ' ' || src[j] == '\t') { j += 1 }
+            let start = j
+            while j < n && ident_byte(src[j]) { j += 1 }
+            let w = src[start:j]
+            if w == "float" || w == "float64" || w == "float32" { return true }
+            i = if j > i + 4 { j } else { i + 4 }
+            continue
+        }
+        i += 1
+    }
+    return false
+}
+
 #test([0, 2], 2)[true]
 #test([0, 2], 1)[false]
 fun has_index(xs: [int32], k: int32) -> bool {
@@ -1144,6 +1210,23 @@ impl Loader {
             if !has_index(out, k) { out.push(k) }
         }
         return Ok(out)
+    }
+
+    // `files`, the implicit modules', without std.float's where no module
+    // of the program may call one of its methods (`may_call_method`): its
+    // methods and the std.math it imports cost nothing until they are used
+    // (D258). The program's modules are loaded by now; the library's own
+    // import what they use.
+    fun without_unused_float(self, files: [str]) -> [str] {
+        let names = float_method_names()
+        for m in self.modules {
+            if !self.in_std_root(m.path) && may_call_method(m.src, names) { return files }
+        }
+        var out: [str] = []
+        for f in files {
+            if !f.ends_with("/std/float.my") { out.push(f) }
+        }
+        return out
     }
 
     // The files of the implicit modules the standard library in use has.
@@ -2285,6 +2368,7 @@ fun load_linked(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
     if stdlib != "" && !is_std_module(e, stdlib) { files = ld.implicit_files()? }
     for f in files { ld.lazy[f] = true }
     ld.load(e)?
+    files = ld.without_unused_float(files)
     let implicit = ld.load_implicit(files)?
     // the runtime's functions in Myla (MYLA-162), compiled where a program
     // uses them: the standard library's, else the copy the tools carry
