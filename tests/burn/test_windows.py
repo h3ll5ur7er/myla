@@ -113,6 +113,34 @@ def coff_imports(path: str) -> dict[str, list[str]]:
     return out
 
 
+@unittest.skipUnless(bool(wine()), "Wine isn't installed")
+class WinePrefix(unittest.TestCase):
+    def test_a_fresh_prefix_is_made_before_its_server_is_kept(self):
+        """`wine_env` on a prefix that isn't there yet, as on every CI runner
+        (MYLA-759): the prefix is made and its setup has ended (Wine's update
+        stamp written) when it returns, and the server it keeps is still
+        running after a boot's own server would have stopped (3 s). The
+        server was started before the prefix existed, so it stopped at once,
+        and on 2026-11-18 a suite's program got Wine's `configuration ...
+        has been updated` in its output (master's dd57b05)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = os.path.join(tmp, "prefix")
+            env = {k: v for k, v in os.environ.items() if k not in ("WINEPREFIX", "TMPDIR")}
+            env["WINEPREFIX"] = prefix
+            code = ("import sys, os; sys.path.insert(0, os.getcwd())\n"
+                    "from tests.burn import _native\n"
+                    "_native.wine_env(persist='30')\n"
+                    "print(os.path.exists(os.path.join(os.environ['WINEPREFIX'], '.update-timestamp')))\n")
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            proc = subprocess.run(["python3", "-c", code], cwd=root, env=env, capture_output=True, text=True, timeout=600)
+            self.assertEqual((proc.stdout, proc.returncode), ("True\n", 0), proc.stderr)
+            time.sleep(6)
+            server = os.path.join(os.path.dirname(wine()[0]), "wineserver")
+            server = shutil.which("wineserver") or server
+            kill = subprocess.run([server, "-k"], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(kill.returncode, 0, "no server for the prefix 6 s after wine_env")
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
 class HelloWorld(unittest.TestCase):

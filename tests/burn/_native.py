@@ -79,7 +79,9 @@ def wine_env(persist: str = "60") -> None:
     starts them from the first program of a new server, which they outlive
     holding its standard streams: a test reading a program's output would wait
     for them, while the server lives, never seeing the end. The server is
-    started first, kept `persist` seconds after its last program (`-p60`;
+    started once the prefix is there (a new prefix is made and its setup
+    waited for first, MYLA-759), kept `persist` seconds after its last
+    program (`-p60`;
     scripts/test-target.py starts its own for the whole run, `-p`, which this
     finds running), so the services aren't started again between tests."""
     os.environ.setdefault("WINEDEBUG", "-all")
@@ -92,10 +94,18 @@ def wine_env(persist: str = "60") -> None:
         return
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     server = wine_server()
+    if not os.path.isdir(os.environ["WINEPREFIX"]):
+        # the prefix made first, and its setup waited for to its end (its
+        # server stopped): a server can't start on a prefix that isn't there
+        # yet, and one started before would have stopped at once, leaving
+        # the suites to a server of the boot's, setting up as they ran
+        # (MYLA-759: CI's runners start with no prefix)
+        subprocess.run([*wine(), "wineboot", "--init"], timeout=300, **quiet)
+        if server:
+            subprocess.run([server, "-w"], timeout=300, **quiet)
     if server:
         subprocess.run([server, "-p" + persist], **quiet)
-    boot = ["wineboot"] if os.path.isdir(os.environ["WINEPREFIX"]) else ["wineboot", "--init"]
-    subprocess.run([*wine(), *boot], timeout=300, **quiet)
+    subprocess.run([*wine(), "wineboot"], timeout=300, **quiet)
 
 
 def windows_imports(asm: str) -> list[tuple[str, list[str]]]:

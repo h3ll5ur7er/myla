@@ -18,6 +18,15 @@ Since [[MYLA-798]]'s 5075488, each suite is stopped after `--limit` seconds (1,5
 
 Two runs on one Wine prefix kill each other's programs. Each run's `prepare_wine` stops the prefix's server at exit (`wineserver -k`), and a program still running in the other run ends with nothing printed and exit code 0. That is what a first stress run here showed: `task_tree` printed nothing in 7 of 16 runs. With a prefix each, 16 of 16 passed. This is a hazard for whoever runs the suites twice at once, not a bug in Myla's code.
 
-- [ ] The hung test, named by the limit's log in a run that hangs again (or by stress in CI's conditions: 4 suites at once on the runner)
-- [ ] The cause: a program that doesn't end under Wine, or a `subprocess.run` whose timeout waits for a pipe a Wine process holds
+**On master, 2026-11-18, twice more:**
+- `e6e1b9e` (run 44258065912): `test_tasks_on_any_number_of_workers` failed with `scopes_wait_for_children` past its 60 s, the timeout firing this time. The hung test is most likely this one, its program not ending under Wine.
+- `dd57b05` (run 44272004148): two programs at once. A `test_compiler_parity` program's stderr began with Wine's own `wine: failed to open L"C:\windows\syswow64\rundll32.exe": c0000135` and `wine: configuration in L".../build/wineprefix" has been updated.`; a `--checked` program of `test_generated_extremes` printed its error and was still running at its 20 s. So Wine set its prefix up again while the suites ran.
+
+**The setup's fault** (`_native.wine_env`, fixed here): it started the persistent server (`wineserver -p`) before the prefix existed, and on a prefix that isn't there the server stops at once (`wineserver: chdir to …: No such file or directory`, exit 1). CI's runners start with no prefix, so their suites ran on the short-lived server of the boot, with nothing waiting for the prefix's setup to end. Now a new prefix is made and its setup waited for (`wineboot --init`, then `wineserver -w`), and the server is started then. `tests.burn.test_windows.WinePrefix` (a fresh prefix keeps its server 6 s after `wine_env`) failed before and passes after.
+
+(Here, in this container since its restart, `TMPDIR=/tmp` set alone makes `wine64` abort with `free(): invalid pointer`; unset it to run Wine here.)
+
+- [x] The hung test: `scopes_wait_for_children` in `test_tasks_on_any_number_of_workers` (master's `e6e1b9e`)
+- [x] The setup's fault: the persistent server started before a new prefix existed (fixed, with `WinePrefix`)
+- [ ] Why `scopes_wait_for_children` doesn't end under Wine (on 1 to 16 workers, until it hangs), and whether the setup's fault caused it: a program that doesn't end under Wine, or a `subprocess.run` whose timeout waits for a pipe a Wine process holds
 - [ ] A fix, and the program's run bounded under Wine (kill the process group or the Wine prefix's processes at the timeout)

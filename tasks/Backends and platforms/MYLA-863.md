@@ -19,6 +19,10 @@ The same job's "Rates" step then ran the case 30 of 30 on 1, 4 and 16 workers (0
 
 **What it isn't**: no code cancels by handle (no `CancelIo`/`CancelIoEx` anywhere in std or the runtime); MYLA-798's deferred-close limit closes, after 30 s, a socket handle that is still the program's own (it stays open until then, so its value can't have been reused), and this run never had a close wait 30 s before the 20th request.
 
+**Again on master, 2026-11-18** (`e6e1b9e`, the merge of PR #81, run 44258065912, the `windows` job's first step): step 3, run 1 (16 workers), `ask 19: timed out after 30002 ms, 19 answered before` and `269 of 270 right`. The same 20th request, the last of the run's 20, both times; that job's "Rates" step then ran the case 30 of 30 right. Twice so far on real Windows, where each `windows` job runs the case 33 times (3 in its first step, 30 in "Rates"); never on Linux (200 of 200 natively, this branch and master, 16 workers).
+
+**What the last request points at:** the server is `http.serve_n(hl, 20, handle)`, which stops once its tally counts 20 answered (`serve_with` cancels its workers when `Tally.finished`) and closes the connections still open; the program never closes `hl`. A request counted twice, or an answer counted that the client didn't take as its own, stops the server one answer early: the client's last request then goes to a connection the server closes, and a retry on a new connection sits in the listener's backlog, which nothing accepts, until the client's 30 s. To find out: the server's count beside the client's (`serve_n`'s result, which the program prints only when both are right), and whether the client resends a request on a connection it found closed.
+
 - [ ] `SOCKETS` now gives each request 30 s (MYLA-798): a recurrence says `ask N: timed out after … ms, K answered before` and ends the run with its count; find which side lost the request (a server-side count of requests read, in the program, would tell)
 - [ ] Reproduce: `windows-runner.py run --runs 30 --tally --only net/sockets-and-children` on Windows, or under Wine with load
 - [ ] Fix, with a test
