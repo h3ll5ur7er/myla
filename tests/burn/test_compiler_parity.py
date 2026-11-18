@@ -8,7 +8,7 @@ import unittest
 
 from tests.burn._targets import program_excuse
 from tests.burn._tools import peak_memory, selfhost_tool
-from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run, build_and_run_full, interpret,
+from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, Program, build_and_run, build_and_run_full, interpret,
                                 native_build, run_argv, run_file_both_now, selfhost_run, write_program)
 
 PROGRAMS = {
@@ -11711,8 +11711,12 @@ class TestCompilerParity(unittest.TestCase):
 
     def test_allocation_does_not_scan_unusable_free_cells(self):
         # Must finish far below the 5 s limit: the linear free-list scan took
-        # about 14 s, size-class free lists take milliseconds.
-        out, code = build_and_run(STRESS_FRAGMENTED_FREE_SRC, timeout=5)
+        # about 14 s, size-class free lists take milliseconds. Under an
+        # emulator the program alone takes seconds (qemu-aarch64: 2.1 s
+        # here on master and this branch alike, past 5 s on CI's runner,
+        # 2026-11-18), so the limit there is 30 s, still far below what the
+        # scan would take under it.
+        out, code = build_and_run(STRESS_FRAGMENTED_FREE_SRC, timeout=5 if TEST_TARGET == "" else 30)
         self.assertEqual(code, 0)
         self.assertEqual(out.strip(), "38000")
 
