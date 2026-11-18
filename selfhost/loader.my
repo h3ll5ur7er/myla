@@ -578,7 +578,7 @@ pub fun implicit_modules() -> [str] {
 // (`test_float_methods` holds the list to lib/std/float.my): a program that
 // calls none of them as a method, and has no impl on a float type, is
 // loaded without std.float and the std.math it imports, which would cost
-// its check 4.2 M instructions (D258, `uses_float_methods`).
+// its check 4.2 M instructions (D258, `Loader.without_unused_float`).
 pub fun float_method_names() -> [str] {
     return ["abs", "acos", "approx_eq", "asin", "atan", "atan2", "cbrt", "ceil", "clamp", "copysign", "cos", "cosh", "exp", "floor", "fract", "hypot", "is_finite", "is_infinite", "is_nan", "lerp", "ln", "log", "log10", "log2", "max", "min", "pow", "powi", "round", "signum", "sin", "sinh", "sqrt", "tan", "tanh", "to_bits", "to_degrees", "to_radians", "total_cmp", "trunc"]
 }
@@ -592,24 +592,22 @@ fun ident_byte(b: uint8) -> bool {
     return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b >= 0x80
 }
 
-// Whether the text `src` may call a method named in `names`, `.name(` or
+// Whether the text `src` may call a method named in `names` (a set), `.name(` or
 // `.name<…>(` with any spaces between, or has an impl on a float type
 // (`impl float64`, whose methods' names a duplicate of std.float's needs
 // it for, D199). Read as bytes, comments and strings included (an f-string's
 // holes hold calls), so it errs on the side of loading (D258).
-#test("fun main() {\n    print(\"hello\")\n}\n", ["sqrt"])[false]
-#test("let y = x.sqrt()", ["sqrt"])[true]
-#test("let y = x . sqrt ()", ["sqrt"])[true]
-#test("let y = x.sqrtx() + x.sqrt", ["sqrt"])[false]
-#test("print(f\"{x.abs()}\")", ["abs"])[true]
-#test("import std.float as float\nlet n = float.PI", ["float"])[false]
-#test("impl float64 {", ["sqrt"])[true]
-#test("impl   float {", ["sqrt"])[true]
-#test("impl floaty {", ["sqrt"])[false]
-#test("x.", ["sqrt"])[false]
-fun may_call_method(src: str, names: [str]) -> bool {
-    var wanted: [str: bool] = [:]
-    for n in names { wanted[n] = true }
+#test("fun main() {\n    print(\"hello\")\n}\n", ["sqrt": true])[false]
+#test("let y = x.sqrt()", ["sqrt": true])[true]
+#test("let y = x . sqrt ()", ["sqrt": true])[true]
+#test("let y = x.sqrtx() + x.sqrt", ["sqrt": true])[false]
+#test("print(f\"{x.abs()}\")", ["abs": true])[true]
+#test("import std.float as float\nlet n = float.PI", ["float": true])[false]
+#test("impl float64 {", ["sqrt": true])[true]
+#test("impl   float {", ["sqrt": true])[true]
+#test("impl floaty {", ["sqrt": true])[false]
+#test("x.", ["sqrt": true])[false]
+fun may_call_method(src: str, names: [str: bool]) -> bool {
     let n = src.len()
     var i = 0
     while i < n {
@@ -621,7 +619,7 @@ fun may_call_method(src: str, names: [str]) -> bool {
             while j < n && ident_byte(src[j]) { j += 1 }
             let end = j
             while j < n && (src[j] == ' ' || src[j] == '\t') { j += 1 }
-            if end > start && j < n && (src[j] == '(' || src[j] == '<') && wanted.contains(src[start:end]) { return true }
+            if end > start && j < n && (src[j] == '(' || src[j] == '<') && names.contains(src[start:end]) { return true }
             i = if end > i + 1 { end } else { i + 1 }
             continue
         }
@@ -1218,13 +1216,14 @@ impl Loader {
     // (D258). The program's modules are loaded by now; the library's own
     // import what they use.
     fun without_unused_float(self, files: [str]) -> [str] {
-        let names = float_method_names()
+        var names: [str: bool] = [:]
+        for name in float_method_names() { names[name] = true }
         for m in self.modules {
             if !self.in_std_root(m.path) && may_call_method(m.src, names) { return files }
         }
         var out: [str] = []
         for f in files {
-            if !f.ends_with("/std/float.my") { out.push(f) }
+            if self.module_id(f) != "std$float" { out.push(f) }
         }
         return out
     }

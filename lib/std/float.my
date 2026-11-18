@@ -6,9 +6,9 @@
 // float`, then `float.nan()`, `float.from_bits(b)`, `float.PI`.
 //
 // The float64 methods are std.math's functions (fdlibm ports, bit-identical
-// in the interpreter and natively). A float32 method computes in float64 and rounds the result
-// to float32: exact for `sqrt` and the rounding methods, within the float64
-// function's error before the rounding for the rest. `to_bits` reads every
+// in the interpreter and natively). A float32 method computes in float64 and
+// rounds the result to float32: exact for `sqrt` and the rounding methods,
+// within the float64 function's error before the rounding for the rest. `to_bits` reads every
 // NaN as the one quiet NaN, as std.math's does (D128).
 
 import std.math as math

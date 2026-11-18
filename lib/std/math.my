@@ -4,8 +4,9 @@
 // written in Myla after fdlibm, the reference implementation most C math
 // libraries descend from (its range reductions and polynomial coefficients),
 // so the interpreter and native code give bit-identical results:
-// - `exp`, `ln`, `log2`, `log10`, `pow`, `hypot`, `sin`, `cos` and `atan`
-//   within about one unit in the last place of the exact result;
+// - `exp`, `expm1`, `ln`, `log2`, `log10`, `pow`, `hypot`, `cbrt`, `sin`,
+//   `cos` and `atan` within about one unit in the last place of the exact
+//   result, `sinh`, `cosh` and `tanh` within two (MYLA-796);
 // - `tan`, `asin`, `acos` and `atan2` within a few (tests/burn/test_math.py
 //   holds them to 4);
 // - `sin`, `cos` and `tan` reduce their argument exactly: by a three-part π/2
