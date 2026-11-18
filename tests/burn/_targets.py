@@ -89,6 +89,8 @@ _WIN_SIGNALS = ("a Unix signal is Wine's (SIGINT a Ctrl-C, the rest end Wine), a
 _BOTH = {
     **{t: _X86_CODE for t in _X86_TESTS},
     "test_std_modules.StdModuleCases.test_interpreted": "the interpreter's runs are the host's",
+    "test_float_print.FloatPrint.test_random_floats_print_in_few_instructions":
+        "it counts the host's instructions (an emulator's aren't the program's)",
 }
 
 SKIP: dict[str, dict[str, str]] = {

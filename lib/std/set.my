@@ -24,6 +24,9 @@ pub fun new<T: Eq + Hash>() -> Set<T> {
 }
 
 // The set of the elements of `xs`, in the order they first occur there.
+// A NaN element is the runtime error `cannot hash NaN` at the call, as for
+// `insert`, `remove` and `contains` (MYLA-850).
+#track_caller
 pub fun of<T: Eq + Hash>(xs: [T]) -> Set<T> {
     var m: [T: ()] = [:]
     for x in xs {
@@ -35,6 +38,7 @@ pub fun of<T: Eq + Hash>(xs: [T]) -> Set<T> {
 impl<T: Eq + Hash> Set<T> {
     // Adds `x`; true if it wasn't in the set. An element already there
     // keeps its place.
+    #track_caller
     fun insert(var self, x: T) -> bool {
         let n = self.m.len()
         self.m[x] = ()
@@ -42,12 +46,14 @@ impl<T: Eq + Hash> Set<T> {
     }
 
     // Removes `x`; true if it was in the set.
+    #track_caller
     fun remove(var self, x: T) -> bool {
         let n = self.m.len()
         self.m.remove(x)
         return self.m.len() < n
     }
 
+    #track_caller
     fun contains(self, x: T) -> bool {
         return self.m.contains(x)
     }

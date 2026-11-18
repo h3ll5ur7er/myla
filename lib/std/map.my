@@ -4,13 +4,16 @@
 // its place, one removed and added again goes last. `values` and `items`
 // follow that order, as `keys()` and `for k in m` do. The builtins `len`,
 // `contains`, `keys` and `remove` stay the builtins' (D151); `get` is here,
-// the prelude's free `get(m, k)` gone (MYLA-393).
+// the prelude's free `get(m, k)` gone (MYLA-393). The methods that take a
+// key, and `counts`, report a NaN key's `cannot hash NaN` at their call
+// (`#track_caller`, MYLA-850).
 
 import std.list as list_m // `m.iter()` is an iterator over `items()`
 
 impl<K: Eq + Hash, V> [K: V] {
     // The value of `k`, or `None` when the map has no `k` (a read `m[k]` of
     // a key it lacks is a runtime error).
+    #track_caller
     fun get(self, k: K) -> Option<V> {
         if self.contains(k) {
             return Some(self[k])
@@ -19,6 +22,7 @@ impl<K: Eq + Hash, V> [K: V] {
     }
 
     // The value of `k`, or `default` when the map has no `k`.
+    #track_caller
     fun get_or(self, k: K, default: V) -> V {
         return match self.get(k) {
             Some(v) => v
@@ -28,6 +32,7 @@ impl<K: Eq + Hash, V> [K: V] {
 
     // Sets `k` to `f` of its value, or of `default` when the map has no `k`:
     // `m.update(word, 0, (n) => n + 1)` counts a word.
+    #track_caller
     fun update(var self, k: K, default: V, f: (V) -> V) {
         self[k] = f(self.get_or(k, default))
     }
@@ -68,6 +73,7 @@ impl<K: Eq + Hash, V> [K: V] {
 
 // How often each element of `xs` occurs, the elements in the order they
 // first occur.
+#track_caller
 pub fun counts<T: Eq + Hash>(xs: [T]) -> [T: int] {
     var out: [T: int] = [:]
     for x in xs {

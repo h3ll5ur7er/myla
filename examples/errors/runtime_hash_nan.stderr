@@ -1,0 +1,5 @@
+runtime error: cannot hash NaN
+  --> examples/errors/runtime_hash_nan.my:7:11
+  |
+7 |     m[0.0 / 0.0] = 1
+  |       ^^^^^^^^^
