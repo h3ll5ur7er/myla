@@ -1009,16 +1009,25 @@ fun store_unit(p: int64, u: int64) {
 
 // A path the system reads (`wide`, in memory the caller frees), made
 // absolute and verbatim when it is long (D261, as Rust's standard library
-// makes it): one of LONG_PATH units or more, which Windows refuses past
-// MAX_PATH (260, CreateDirectoryW's 248) unless the machine opted in to
-// long paths, is `GetFullPathNameW`'s absolute form (`/` made `\`, `.` and
-// `..` resolved, which a verbatim path doesn't do) after `\\?\`
-// (`verbatim_units`). A shorter one, and one verbatim already, is as
-// given.
+// makes it, `get_long_path`): one whose absolute form is LONG_PATH units or
+// more, which Windows refuses past MAX_PATH (260, CreateDirectoryW's 248)
+// unless the machine opted in to long paths, is that form
+// (`GetFullPathNameW`'s: `/` made `\`, `.` and `..` resolved, which a
+// verbatim path doesn't do) after `\\?\` (`verbatim_units`). The length
+// that counts is the absolute one: Windows makes a relative path absolute
+// before it measures it, so a relative path of 230 units in a directory of
+// 50 is past the limit (MYLA-798: on Windows `make_dir_all` of such a path
+// failed at its first long parent, NotFound, where Wine has no limit). A
+// path that is absolute and short (`absolute_short`), one verbatim
+// already, and one whose absolute form is short are as given.
 fun path_wide(path: str) -> int64 {
     let w = wide(path)
     let n = wide_len(w)
-    if n < LONG_PATH || is_verbatim(units_at(w, 4)) {
+    if n < 4 {
+        if absolute_short(units_at(w, n)) {
+            return w
+        }
+    } else if is_verbatim(units_at(w, 4)) || (n < LONG_PATH && absolute_short(units_at(w, 4))) {
         return w
     }
     let need = __syscall5(__rt_get("__imp_GetFullPathNameW"), w, 0, 0, 0, 0) & LOW32
@@ -1027,7 +1036,9 @@ fun path_wide(path: str) -> int64 {
     }
     let full = __alloc(2 * need + 2)
     let got = __syscall5(__rt_get("__imp_GetFullPathNameW"), w, need, full, 0, 0) & LOW32
-    if got == 0 || got >= need {
+    if got == 0 || got >= need || got + 1 < LONG_PATH {
+        // (short as a whole: as given, so a relative name stays one, and a
+        // device's, `NUL`, stays what Windows makes of it)
         __free(full)
         return w
     }
@@ -1040,6 +1051,25 @@ fun path_wide(path: str) -> int64 {
 
 // The length from which a path is made verbatim (Rust's LEGACY_MAX_PATH).
 const LONG_PATH: int64 = 248
+
+// Whether the first units `u` of a path start one Windows takes as it is
+// for its length: a drive and a root (`C:\`, `C:/`) or two separators (a
+// share's `\\srv`, a device's `\\.\`), as Rust's `get_long_path` keeps a
+// short one; a relative path (`a`, `\a`, `C:a`) is made absolute first.
+#test([67, 58, 92, 97])[true]
+#test([67, 58, 47, 97])[true]
+#test([92, 92, 115, 114])[true]
+#test([47, 47, 115, 114])[true]
+#test([67, 58])[false]
+#test([67, 58, 97, 98])[false]
+#test([92, 97, 98, 99])[false]
+#test([108, 111, 110, 103])[false]
+fun absolute_short(u: [int]) -> bool {
+    if u.len() >= 3 && u[1] == 58 && is_sep(u[2] as int64) && !is_sep(u[0] as int64) {
+        return true
+    }
+    return u.len() >= 2 && is_sep(u[0] as int64) && is_sep(u[1] as int64)
+}
 
 // Whether the units `u` start a verbatim or NT path (`\\?\`, `\??\`).
 fun is_verbatim(u: [int]) -> bool {
@@ -2159,18 +2189,46 @@ fun list_entries(s: str) -> [str] {
 #test("bat")[false]
 #test("..")[false]
 fun is_batch(path: str) -> bool {
+    let name = trailing_trimmed(path)
+    return ends_with_ci(name, ".bat") || ends_with_ci(name, ".cmd")
+}
+
+// `path` without the dots and spaces at its end, which Windows drops from
+// a name.
+#test("x.bat. .")["x.bat"]
+#test("x.bat")["x.bat"]
+#test("..")[""]
+fun trailing_trimmed(path: str) -> str {
     var end = path.len()
     while end > 0 && (path[end - 1] == '.' || path[end - 1] == ' ') {
         end -= 1
     }
-    var name = path
-    if end < path.len() {
-        // (no slice: std.platform loads no std.slice)
-        var sb = StringBuilder()
-        sb.append(path, 0, end)
-        name = sb.build()
+    if end == path.len() {
+        return path
     }
-    return ends_with_ci(name, ".bat") || ends_with_ci(name, ".cmd")
+    // (no slice: std.platform loads no std.slice)
+    var sb = StringBuilder()
+    sb.append(path, 0, end)
+    return sb.build()
+}
+
+// The batch file `path` as cmd is given it: without the dots and spaces at
+// its end, the name of the same file (Windows drops them from a name).
+// Given `./e.bat.` itself, cmd ran nothing on Windows (MYLA-798, CI's
+// `process/batch-names`: no output, where `./e.bat` and `./e.bat ` ran;
+// Wine's cmd ran all three). A verbatim path, which Windows takes as
+// written, stays.
+#test("./e.bat.")["./e.bat"]
+#test("./E.CMD..")["./E.CMD"]
+#test("./e.bat. .")["./e.bat"]
+#test("./e.bat ")["./e.bat"]
+#test("./e.bat")["./e.bat"]
+#test("\\\\?\\C:\\e.bat.")["\\\\?\\C:\\e.bat."]
+fun batch_name(path: str) -> str {
+    if path.len() >= 4 && path[0] == 92u8 && path[1] == 92u8 && path[2] == 63u8 && path[3] == 92u8 {
+        return path
+    }
+    return trailing_trimmed(path)
 }
 
 // The attributes of the file at `path` (`GetFileAttributesW`), or minus the
@@ -2775,7 +2833,7 @@ fun create_child(paths: [str], argv: [str], s: Streams, env: int64, dir: int64, 
                 if a < 0 || (a & 16) != 0 {
                     tried = false
                 } else {
-                    cl = bat_command_line(cand, rest)
+                    cl = bat_command_line(batch_name(cand), rest)
                     if cl == "" {
                         failure = INVALID_INPUT
                         tried = false

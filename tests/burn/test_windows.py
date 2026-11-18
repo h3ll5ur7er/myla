@@ -1519,6 +1519,24 @@ class PlatformFollowUps(unittest.TestCase):
         ran = self.run_exe()
         self.assertEqual((ran.stdout.decode(), ran.stderr.decode(), ran.returncode), (LONG_PATHS_OUT, "", 0))
 
+    def test_a_relative_path_long_once_absolute_is_verbatim(self):
+        # CI's Windows (run 44218898126): `files/long-paths` was NotFound
+        # throughout, as a relative path short itself but past MAX_PATH once
+        # absolute (make_dir_all's parents) reached Windows as it was; Wine
+        # has no limit, so its trace says what Windows was given
+        self.build("prog", 'import std.fs as fs\n\nfun main() {\n    let rel = "r" + "x".repeat(229)\n'
+                           '    let a = fs.make_dir(rel)\n    let b = fs.remove_dir(rel)\n'
+                           '    let c = fs.make_dir("short")\n    let d = fs.remove_dir("short")\n'
+                           '    print(f"{a.is_ok()} {b.is_ok()} {c.is_ok()} {d.is_ok()}")\n}\n')
+        ran = subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe")], capture_output=True, cwd=self.tmp,
+                             timeout=120, env=dict(os.environ, WINEDEBUG="+file"))
+        self.assertEqual(ran.stdout, b"true true true true\n")
+        made = [line for line in ran.stderr.decode(errors="replace").splitlines()
+                if "CreateDirectoryW" in line and ("rxxx" in line or '"short"' in line)]
+        self.assertEqual(len(made), 2, made)
+        self.assertIn('L"\\\\\\\\?\\\\', made[0])   # the absolute path after \\?\
+        self.assertIn('L"short"', made[1])          # a short one as given
+
     def test_the_rings_are_reserved_not_committed(self):
         # H12: a program of 16 workers committed their rings of ready frames,
         # 8 MiB each, which Windows counts against the system's limit (Wine
