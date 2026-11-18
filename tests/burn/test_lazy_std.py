@@ -166,6 +166,57 @@ class ImportedStdBodies(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertEqual(proc.stderr.split("\n")[:5], first)
 
+    # a body with a brace too many or missing: the skipped body ends short or
+    # long, and what is left reads as declarations (MYLA-413's follow-up in
+    # the review of 2026-11-17, 116 of its 3,000 mutants)
+    BRACES = (
+        ("extra_close", "pub fun f_793(x: int) -> int {\n    if x > 0 }{\n        return 1\n    }\n    return 0\n}\n"),
+        ("missing_open", "pub fun f_793(x: int) -> int {\n    var t = 0\n    for y in [x]\n        t += y\n    }\n    return t\n}\n"),
+        ("extra_open", "pub struct P { a: int }\n\nimpl P {\n    fun get(self) -> int {\n        while self.a < 0 {{\n        }\n        return self.a\n    }\n}\n\npub fun f_793(x: int) -> int {\n    let p = P { a: x }\n    return p.get()\n}\n"),
+    )
+
+    def test_a_brace_too_many_or_missing_has_the_eager_error(self) -> None:
+        for name, text in self.BRACES:
+            with self.subTest(name=name):
+                with open(os.path.join(self.lib, "std", f"brace_{name}.my"), "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                eager = self.myla_cmd("check", os.path.join(self.lib, "std", f"brace_{name}.my"))
+                self.assertEqual(eager.returncode, 1)
+                self.assertTrue(eager.stderr.startswith("parse error: "), eager.stderr)
+                path = self.write("braces.my", f"import std.brace_{name} as b\n\nfun main() {{\n    print(b.f_793(1))\n}}\n")
+                proc = self.myla_cmd("check", path)
+                self.assertEqual(proc.stderr.split("\n")[:5], eager.stderr.split("\n")[:5])
+
+    def test_a_test_attribute_in_a_body_is_an_error(self) -> None:
+        # M9 of the review of 2026-11-17: a `#test` in a function's body is
+        # lexed, and an error, in an imported module of std and in a
+        # program's own module as in the module checked itself; it was
+        # skipped unparsed, with the statements in its brackets (D179)
+        text = ("pub fun twice_793(x: int) -> int {\n    let y = x + x\n    #test(1)[2]\n"
+                "    #test(\"the next statement never runs\")[\n    let z = y + 1000\n    ]\n    return y\n}\n")
+        with open(os.path.join(self.lib, "std", "attr_793.my"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        eager = self.myla_cmd("check", os.path.join(self.lib, "std", "attr_793.my"))
+        first = eager.stderr.split("\n")[:5]
+        self.assertEqual(first[0], "parse error: expected an expression, found '#'", eager.stderr)
+        self.assertTrue(first[1].endswith("attr_793.my:3:5"), first)
+        os.makedirs(os.path.join(self.work, "own_attr"), exist_ok=True)
+        self.write("own_attr/attr_793.my", text)
+        for path in (self.write("attr.my", "import std.attr_793 as a\n\nfun main() {\n    print(a.twice_793(21))\n}\n"),
+                     self.write("own_attr/main.my", "from .attr_793 import twice_793\n\nfun main() {\n    print(twice_793(21))\n}\n")):
+            for cmd in ("check", "run"):
+                with self.subTest(path=path, cmd=cmd):
+                    proc = self.myla_cmd(cmd, path)
+                    self.assertEqual((proc.stdout, proc.returncode), ("", 1))
+                    self.assertEqual(proc.stderr.split("\n")[0], first[0])
+                    self.assertTrue(proc.stderr.split("\n")[1].endswith("attr_793.my:3:5"), proc.stderr)
+        # one above a method in an impl, and at the top level, is still skipped
+        self.write("own_attr/ok_793.my", "pub struct P { a: int }\n\nimpl P {\n    #test(P { a: 1 })[1]\n    fun get(self) -> int {\n"
+                   "        return self.a\n    }\n}\n\n#test(2)[4]\npub fun twice(x: int) -> int {\n    return x + x\n}\n")
+        path = self.write("own_attr/ok.my", "from .ok_793 import twice\n\nfun main() {\n    print(twice(21))\n}\n")
+        proc = self.myla_cmd("run", path)
+        self.assertEqual((proc.stdout, proc.stderr), ("42\n", ""))
+
     def test_a_programs_own_module_is_read_whole(self) -> None:
         # D179 (3): `myla check` means every function of the program's own
         # modules checks, called or not

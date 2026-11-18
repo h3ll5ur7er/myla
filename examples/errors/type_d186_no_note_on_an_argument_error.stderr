@@ -1,0 +1,5 @@
+type error: argument type mismatch in call to 'pair': expected 'str', found 'int32'
+  --> examples/errors/type_d186_no_note_on_an_argument_error.my:9:35
+  |
+9 |     print(first(pair<int, str>(1, 2)))
+  |                                   ^

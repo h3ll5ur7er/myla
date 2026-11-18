@@ -1,0 +1,10 @@
+//~ type error: argument type mismatch in call to 'pair': expected 'str', found 'int32'
+// D186's note is for a misreading: a generic call read as meant whose error
+// is in its arguments alone gets none (MYLA-793, the review of 2026-11-17:
+// it proposed `(pair < int), str > (1, 2)`)
+struct Pair<A, B> { a: A, b: B }
+fun pair<A, B>(a: A, b: B) -> Pair<A, B> { return Pair { a: a, b: b } }
+fun first(p: Pair<int, str>) -> int { return p.a }
+fun main() {
+    print(first(pair<int, str>(1, 2)))
+}

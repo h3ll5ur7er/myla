@@ -592,6 +592,71 @@ class TypeScenarios(LspRequestHelpers):
         self.assertEqual(self.hover(uri, 0, 8), "pub fun first<T: Eq>(xs: [T]) -> T")
         self.assertEqual(self.hover(uri, 3, 11), "pub struct Box<T>")
 
+    def test_literals_and_index_results_are_typed(self):
+        # MYLA-710's follow-up (the review of 2026-11-17): a float literal's
+        # type, and the result of a type's `Index` impl, were unknown, so
+        # `let m = (2.5).floor()` and `let h = g[0]` had no type, nor `.floor`
+        # its hover
+        text = ("struct Grid { cells: [int], w: int }\n\n"
+                "impl Index<int, int> for Grid {\n    fun index(self, at: int) -> int { return self.cells[at] }\n}\n\n"
+                "fun main() {\n    let m = (2.5).floor()\n    let k = 2.5.floor()\n    let s = 2.0f32\n    let t = 7u8\n"
+                "    let g = Grid { cells: [1], w: 1 }\n    let h = g[0]\n    let b = \"ab\"[0]\n    print(h)\n}\n")
+        uri = self.open(text)
+        lines = text.splitlines()
+        for line, want in ((7, "let m: float64"), (8, "let k: float64"), (9, "let s: float32"), (10, "let t: uint8"),
+                           (12, "let h: int"), (13, "let b: uint8")):
+            with self.subTest(line=line):
+                self.assertEqual(self.hover(uri, line, 8), want)
+        self.assertEqual(self.hover(uri, 7, lines[7].index("floor")), "fun floor(self) -> float64")
+        self.assertEqual(self.hover(uri, 8, lines[8].index("floor")), "fun floor(self) -> float64")
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspABrokenLibraryBody(LspRequestHelpers, unittest.TestCase):
+    """MYLA-710's follow-up (the review of 2026-11-17): a library module with
+    one body that doesn't parse, which no program calls (D179), keeps its
+    other members' hover, definition and completion; they were all gone, in a
+    document that checks clean."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import shutil
+        cls.binary = myla_tool("tools/lsp/main.my", "lsp")
+        cls._lib = tempfile.TemporaryDirectory(prefix="myla_lsp_lib_")
+        cls.lib = os.path.join(cls._lib.name, "lib")
+        shutil.copytree(STDLIB_ROOT, cls.lib)
+        for name, head in (("str", "    fun split(self, sep: str) -> [str] {"), ("text", "pub fun fill(")):
+            path = os.path.join(cls.lib, "std", name + ".my")
+            with open(path, encoding="utf-8") as fh:
+                src = fh.read()
+            at = src.index("{", src.index(head)) + 1
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src[:at] + "\n    let = 1\n" + src[at:])
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._lib.cleanup()
+
+    def server_command(self) -> list[str]:
+        return [self.binary, "--stdlib", self.lib]
+
+    def hover(self, uri, line, character):
+        h = self.at("textDocument/hover", uri, line, character)
+        return h and h["contents"]["value"].removeprefix("```myla\n").removesuffix("\n```")
+
+    def labels(self, uri, line, character):
+        return sorted(i["label"] for i in self.at("textDocument/completion", uri, line, character)["items"])
+
+    def test_the_other_members_stay(self):
+        uri = self.open("import std.text as text\n\nfun main() {\n    print(text.dedent(\"  x\"))\n    print(\"x\".trim())\n}\n")
+        self.assertEqual(self.hover(uri, 3, 16), "pub fun dedent(text: str) -> str")
+        self.assertEqual(self.hover(uri, 4, 14), "fun trim(self) -> str")
+        found = self.at("textDocument/definition", uri, 4, 14)
+        found = found[0] if isinstance(found, list) else found
+        self.assertTrue(found["uri"].endswith("/std/str.my"), found)
+        self.assertIn("trim", self.labels(uri, 4, len("    print(\"x\".")))
+        self.assertIn("dedent", self.labels(uri, 3, len("    print(text.")))
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestMylaLspTypes(TypeScenarios, unittest.TestCase):
