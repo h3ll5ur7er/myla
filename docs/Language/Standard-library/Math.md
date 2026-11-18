@@ -22,7 +22,10 @@ fun main() {
 | --- | --- |
 | `PI`, `TAU`, `E`, `LN2`, `LN10`, `SQRT2` | The constants, rounded to `float64` |
 | `sqrt(x)`, `hypot(x, y)` | The square root (correctly rounded); √(x² + y²) without overflow on the way (within 1 ulp) |
-| `exp(x)`, `ln(x)`, `log2(x)`, `log10(x)`, `pow(x, y)` | Within 1 ulp; `log2` is exact for powers of two, `log10` for powers of ten up to 10²², `ln(0)` is `-inf`, `ln(-1)` NaN |
+| `exp(x)`, `ln(x)`, `log2(x)`, `log10(x)`, `pow(x, y)` | Within 1 ulp; `log2` is exact for powers of two, `log10` for powers of ten up to 10²² (FreeBSD's `log10`, which keeps its digits near 1, [[MYLA-796]]), `ln(0)` is `-inf`, `ln(-1)` NaN |
+| `expm1(x)` | e^x - 1, its digits kept near 0 where `exp(x) - 1.0` loses them; within 1 ulp |
+| `sinh(x)`, `cosh(x)`, `tanh(x)` | Within 2 ulp, from `expm1`; `sinh` and `cosh` finite up to 710.4758600739439, `tanh` ±1 from ±22 on; zeros keep their sign ([[MYLA-796]]) |
+| `cbrt(x)` | The cube root, within 1 ulp (exact for a perfect cube), negative for a negative `x` |
 | `sin(x)`, `cos(x)`, `atan(x)` | Within 1 ulp, for every finite argument: arguments above 2^20·π/2 are reduced by Payne and Hanek's method |
 | `tan(x)`, `asin(x)`, `acos(x)`, `atan2(y, x)` | Within 4 ulp |
 | `abs(x)`, `copysign(x, s)`, `trunc(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Exact; `round` takes halves away from zero, zeros keep their sign; `copysign` reads a NaN `s` as positive (D128) |

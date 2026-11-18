@@ -6,8 +6,7 @@
 // float`, then `float.nan()`, `float.from_bits(b)`, `float.PI`.
 //
 // The float64 methods are std.math's functions (fdlibm ports, bit-identical
-// in the interpreter and natively), plus `cbrt`, `sinh`, `cosh` and `tanh`
-// written here. A float32 method computes in float64 and rounds the result
+// in the interpreter and natively). A float32 method computes in float64 and rounds the result
 // to float32: exact for `sqrt` and the rounding methods, within the float64
 // function's error before the rounding for the rest. `to_bits` reads every
 // NaN as the one quiet NaN, as std.math's does (D128).
@@ -156,9 +155,12 @@ impl float64 {
         return math.max(self, other)
     }
 
+    // `self` within `lo`..`hi`; a NaN stays NaN, as in Rust (a NaN bound is
+    // no bound). `clamp_keeps_nan` tests the NaN, which equals nothing.
     #test(5.0, 0.0, 1.0)[1.0]
     #test(-5.0, 0.0, 1.0)[0.0]
     fun clamp(self, lo: float64, hi: float64) -> float64 {
+        if self != self { return self }
         return math.max(lo, math.min(self, hi))
     }
 
@@ -167,16 +169,12 @@ impl float64 {
         return math.sqrt(self)
     }
 
-    // The cube root: `pow`'s, refined by a Newton step, so a perfect cube's
-    // is exact; negative for a negative number.
+    // The cube root, negative for a negative number; a perfect cube's is
+    // exact.
     #test(27.0)[3.0]
     #test(-8.0)[-2.0]
     fun cbrt(self) -> float64 {
-        if self == 0.0 || self != self || math.is_infinite(self) { return self }
-        let a = math.abs(self)
-        var y = math.pow(a, 1.0 / 3.0)
-        y = y - (y * y * y - a) / (3.0 * y * y)
-        return math.copysign(y, self)
+        return math.cbrt(self)
     }
 
     #test(3.0, 4.0)[5.0]
@@ -272,34 +270,27 @@ impl float64 {
         return math.atan2(self, x)
     }
 
-    // The hyperbolic sine: `(e^x - e^-x) / 2`, its series near zero; within
-    // a few units in the last place (sinh(1) is 1.1752011936438014…).
+    // The hyperbolic sine, finite up to 710.4758600739439.
     #test(0.0)[0.0]
-    #test(1.0)[1.1752011936438016]
+    #test(1.0)[1.1752011936438014]
+    #test(710.0)[1.1169973830808557e308]
     fun sinh(self) -> float64 {
-        if math.abs(self) < 1e-5 { return self + self * self * self / 6.0 }
-        let e = math.exp(self)
-        return (e - 1.0 / e) / 2.0
+        return math.sinh(self)
     }
 
-    // The hyperbolic cosine, `(e^x + e^-x) / 2`, within a few units in the
-    // last place (cosh(1) is 1.5430806348152437…).
+    // The hyperbolic cosine, finite up to 710.4758600739439.
     #test(0.0)[1.0]
     #test(1.0)[1.543080634815244]
     fun cosh(self) -> float64 {
-        let e = math.exp(self)
-        return (e + 1.0 / e) / 2.0
+        return math.cosh(self)
     }
 
-    // The hyperbolic tangent, its series near zero, ±1 past ±20.
+    // The hyperbolic tangent, ±1 from ±22 on.
     #test(0.0)[0.0]
     #test(100.0)[1.0]
+    #test(-0.5)[-0.46211715726000974]
     fun tanh(self) -> float64 {
-        if math.abs(self) < 1e-5 { return self - self * self * self / 3.0 }
-        if self > 20.0 { return 1.0 }
-        if self < -20.0 { return -1.0 }
-        let e = math.exp(2.0 * self)
-        return (e - 1.0) / (e + 1.0)
+        return math.tanh(self)
     }
 
     #test(3.141592653589793)[180.0]
@@ -404,6 +395,7 @@ impl float32 {
 
     #test(5.0f32, 0.0f32, 1.0f32)[1.0f32]
     fun clamp(self, lo: float32, hi: float32) -> float32 {
+        if self != self { return self }
         return math.max(lo as float64, math.min(self as float64, hi as float64)) as float32
     }
 
@@ -413,7 +405,7 @@ impl float32 {
     }
 
     fun cbrt(self) -> float32 {
-        return (self as float64).cbrt() as float32
+        return math.cbrt(self as float64) as float32
     }
 
     fun hypot(self, other: float32) -> float32 {
@@ -478,15 +470,15 @@ impl float32 {
     }
 
     fun sinh(self) -> float32 {
-        return (self as float64).sinh() as float32
+        return math.sinh(self as float64) as float32
     }
 
     fun cosh(self) -> float32 {
-        return (self as float64).cosh() as float32
+        return math.cosh(self as float64) as float32
     }
 
     fun tanh(self) -> float32 {
-        return (self as float64).tanh() as float32
+        return math.tanh(self as float64) as float32
     }
 
     fun to_degrees(self) -> float32 {
@@ -529,4 +521,13 @@ impl float32 {
     fun approx_eq(self, other: float32, eps: float32) -> bool {
         return math.abs((self as float64) - (other as float64)) <= (eps as float64)
     }
+}
+
+// `clamp` of a NaN, at both widths, is NaN (MYLA-796).
+#test
+fun clamp_keeps_nan() {
+    let n = nan()
+    assert(n.clamp(0.0, 1.0).is_nan(), "float64")
+    assert((n as float32).clamp(0.0f32, 1.0f32).is_nan(), "float32")
+    assert(2.0.clamp(0.0, n) == 2.0, "a NaN bound is no bound")
 }
