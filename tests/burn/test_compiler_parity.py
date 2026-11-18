@@ -10108,6 +10108,77 @@ fun main() {
     print(indexed(w))
 }
 """,
+    "type_parameters_an_operator_bound_fixes": r"""// MYLA-802: a type parameter only an operator bound names is fixed by the
+// impl the argument's type has for the bound's trait and its known
+// arguments (D200), as `I: Iterator<T>` fixes `T` (D171)
+struct B<T> {
+    v: T,
+}
+
+impl<T> Index<int, T> for B<T> {
+    fun index(self, i: int) -> T {
+        return self.v
+    }
+}
+
+struct V {
+    x: float,
+}
+
+impl Mul<float, str> for V {
+    fun mul(self, k: float) -> str {
+        return f"V*{k}"
+    }
+}
+
+impl Mul<V, float> for V {
+    fun mul(self, o: V) -> float {
+        return self.x * o.x
+    }
+}
+
+impl Neg<int> for V {
+    fun neg(self) -> int {
+        return -(self.x as int)
+    }
+}
+
+fun sum3<C: Index<int, T>, T: Add>(c: C) -> T {
+    return c[0] + c[1] + c[2]
+}
+
+fun at<C: Index<K, T>, K, T>(c: C, k: K) -> T {
+    return c[k]
+}
+
+fun again<D: Index<int, U>, U: Add>(d: D) -> U {
+    return sum3(d)
+}
+
+fun times<A: Mul<R, O>, R, O>(a: A, r: R) -> O {
+    return a * r
+}
+
+fun negated<N: Neg<O>, O>(n: N) -> O {
+    return -n
+}
+
+fun main() {
+    print(sum3(B { v: 2 }))
+    print(sum3([1, 2, 3]))
+    print(sum3([0.5, 0.25, 2.0]))
+    print(sum3("ABC"))
+    print(at(["one": 1, "two": 2], "two"))
+    print(at(B { v: "b" }, 7))
+    print(again(B { v: 5i64 }))
+    print(again([4u8, 5, 6]))
+    print(times(V { x: 1.5 }, 2.0))
+    print(times(V { x: 1.5 }, V { x: 3.0 }))
+    print(times(6, 7))
+    print(negated(V { x: 4.0 }))
+    print(negated(2.5))
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -12155,6 +12226,8 @@ PINNED = {
     # `float64`, `int32` and `Option<int32>`)
     "literals_left_of_operators_take_their_type": 'by b\n3\n4\n-1.5\n6\n-12\ntrue true true false true\nfalse false false false false\nfalse false false true true\n',
     "operator_impls_whose_bounds_hold": 'A7*2\n-A7\na7[3]\nA7:5=z\n3\nA7:5=za7\n6\nA7*3 -A7\na7[1] A7:4=q\n',
+    # MYLA-802: new; `cannot infer type parameter(s) T for 'sum3'` before
+    "type_parameters_an_operator_bound_fixes": '6\n6\n2.75\n198\n2\nb\n15\n15\nV*2\n4.5\n42\n-4\n-2.5\n',
 }
 
 
