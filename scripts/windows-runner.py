@@ -11,7 +11,9 @@ D213, D214).
       when it is on PATH), and myla.exe and myla-lsp.exe, into
       OUT, and writes OUT/cases.json: each case's
       commands and what each must print and exit with (the examples' from
-      the interpreter here, as bootstrap-arm64 takes them).
+      the interpreter here, as bootstrap-arm64 takes them). OUT is emptied
+      first, so it must be new, empty or a bundle built before (with its
+      cases.json): any other directory is refused, left as it is.
 
   windows-runner.py run OUT [--wine [CMD]] [--runs N] [--only TEXT] [--list] [--tally]
       On Windows (CI's windows-latest job): runs every case of OUT and
@@ -399,6 +401,14 @@ def default_myla() -> str:
     return selfhost_tool("main")
 
 
+def may_empty(out: str) -> bool:
+    """Whether `build` may empty `out`: missing, empty, or a bundle it made
+    before (its cases.json), never a checkout or a home given by mistake."""
+    if not os.path.isdir(out):
+        return True
+    return not os.listdir(out) or os.path.isfile(os.path.join(out, "cases.json"))
+
+
 def build(out: str, myla: str, jobs: int) -> int:
     sys.path.insert(0, _REPO)
     from tests.burn import test_windows as tw
@@ -406,6 +416,9 @@ def build(out: str, myla: str, jobs: int) -> int:
 
     stdlib = os.path.join(_REPO, "lib")
     myla = os.path.abspath(myla)
+    if not may_empty(out):
+        raise SystemExit(f"windows-runner: {out} isn't a bundle (no cases.json) and isn't empty: "
+                         "give a new or empty directory, which build fills")
     if os.path.exists(out):
         shutil.rmtree(out)
     for sub in ("bin", "tools", "files"):
