@@ -2574,8 +2574,9 @@ pub async fun post_async(url: str, body: str) -> Result<Response, HttpError> {
 // whose request has begun and waits for more of it, its parser kept
 // (MYLA-549), the bodies so kept within `workers` times `max_body_bytes`
 // (past it 503, MYLA-794), and so is one whose response its socket didn't
-// take at once, until it takes more (MYLA-833), `workers` of them at most
-// (past it the worker sends the response itself, within `write_ms`); a
+// take at once, until it takes more (MYLA-833), the bytes so kept within
+// `workers` times `max_body_bytes` too (past it the worker sends the
+// response itself, within `write_ms`); a
 // keeper task closes those whose time runs out (a request begun answered
 // 408). The handler's own time isn't limited.
 pub struct ServerOptions {
@@ -2806,7 +2807,7 @@ struct Lot {
 fun lot_made(o: ServerOptions, tally: Tally) -> Lot {
     let n = task.notifier()
     let pending = Pending { begun: [:], held: 0, room: body_room(o), order: [], first: 0, queued: [:] }
-    let sends = Sends { kept: [:], room: worker_count(o) }
+    let sends = Sends { kept: [:], held: 0, room: send_room(o) }
     return Lot { id: __sock_lot(n.id), ready: n, pending: pending, sends: sends, tally: tally }
 }
 
@@ -3365,15 +3366,37 @@ impl Sending {
     }
 }
 
+// The bytes of a response being sent that it holds (`Sends.held`): its
+// pieces' left to send (a body sent from a file holds the piece read of
+// it, 64 KiB at most).
+fun send_bytes(s: Sending) -> int64 {
+    var n: int64 = -(s.at as int64)
+    for piece in s.pieces {
+        n += piece.len() as int64
+    }
+    return n
+}
+
+// The room for the bytes of the responses a server keeps parked
+// (MYLA-833), as for the request bodies it keeps (`body_room`, D270):
+// `workers` times `max_body_bytes` (with no limit to a body, its default).
+#test(ServerOptions { workers: 4, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1000, keep_alive_ms: 1, idle_ms: 1, read_ms: 1, write_ms: 1 })[4000i64]
+#test(ServerOptions { workers: 2, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: -1, keep_alive_ms: 1, idle_ms: 1, read_ms: 1, write_ms: 1 })[33554432i64]
+fun send_room(o: ServerOptions) -> int64 {
+    let per = if o.max_body_bytes >= 0 { o.max_body_bytes } else { SERVER_MAX_BODY }
+    return worker_count(o) as int64 * per as int64
+}
+
 // The responses of a server's parked connections that their sockets
 // didn't take at once (MYLA-833), by the connection's handle, which its
-// workers share: at most `room`, what its workers held before they were
-// parked (`workers` responses), past which a worker sends a response
-// itself, as before. A response is gone on with here (`resume`), so that
-// its bytes aren't copied out and back each time its socket takes more.
+// workers share; the bytes they hold (`held`, `send_bytes`) within `room`
+// (`send_room`), past which a worker sends a response itself, as before.
+// A response is gone on with here (`resume`), so that its bytes aren't
+// copied out and back each time its socket takes more.
 actor Sends {
     kept: [int: Sending],
-    room: int,
+    held: int64,
+    room: int64,
 }
 
 // What became of a parked response gone on with (`Sends.resume`).
@@ -3387,11 +3410,14 @@ enum Resent {
 }
 
 impl Sends {
-    // `s` kept for `h`: false, and not kept, when the room is full.
+    // `s` kept for `h`: false, and not kept, when its bytes would take
+    // those kept past the room.
     fun put(var self, h: int, s: Sending) -> bool {
-        if self.kept.len() >= self.room {
+        let size = send_bytes(s)
+        if self.held + size > self.room {
             return false
         }
+        self.held += size
         self.kept[h] = s
         return true
     }
@@ -3406,8 +3432,11 @@ impl Sends {
         var s = self.kept[h]
         // (`s` the only holder of its pieces now: sent on in place)
         self.kept.remove(h)
+        self.held -= send_bytes(s)
         let how = s.go_on(h, now, write_ms)
         if how == SENT_MORE {
+            // (a file's next piece may take it a little past the room)
+            self.held += send_bytes(s)
             let deadline = s.deadline
             self.kept[h] = s
             return Resent.Waits(deadline)
@@ -3423,6 +3452,7 @@ impl Sends {
         }
         var s = self.kept[h]
         self.kept.remove(h)
+        self.held -= send_bytes(s)
         s.pieces = []
         return Some(s)
     }
@@ -3438,6 +3468,7 @@ impl Sends {
             }
         }
         self.kept = [:]
+        self.held = 0
         return out
     }
 }
