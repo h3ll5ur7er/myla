@@ -59,6 +59,7 @@ A `File` is an open file, read and written at its cursor a piece at a time, so a
 | `options() -> OpenOptions` | Options that choose nothing yet, for any other way: `options().read(true).write(true).create(true).open(path)` |
 | `o.read(on)`, `o.write(on)`, `o.append(on)`, `o.truncate(on)`, `o.create(on)`, `o.create_new(on)` | The options with one choice changed: to read; to write at the cursor; to write at the end (it writes, too); to empty the file; to create it when it isn't there; to create it and fail with `AlreadyExists` when it is (one step, so no other program comes in between) |
 | `o.mode(perms: int32) -> OpenOptions` | The permissions of a file it creates (0644 unless chosen; less the umask) |
+| `o.nonblocking(on)`, `o.no_follow(on)` | Not waiting for what it opens: a FIFO opens at once, without a writer (O_NONBLOCK; nothing on Windows, whose file system has no FIFOs); not following a symbolic link at the path's end, which fails the open with `Other(40)` (ELOOP) on every target, the links before it followed (O_NOFOLLOW; on Windows the reparse point opened itself and refused when it is a link). std.http opens a response's file with both and checks what it opened ([[MYLA-842]]) |
 | `o.open(path: str) -> Result<File, IoError>` | The file, opened as chosen; neither reading nor writing is `InvalidInput` |
 | `f.read(n: int) -> Result<[uint8], IoError>` | One read of up to `n` bytes at the cursor; `[]` at the end (`Read`) |
 | `f.write(b: [uint8]) -> Result<int, IoError>` | All the bytes at the cursor, their count (`Write`) |

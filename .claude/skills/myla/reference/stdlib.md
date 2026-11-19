@@ -323,7 +323,7 @@ Import: `import std.fs as fs`. `IoError`, `from_errno` and `io_error_name` are r
   - Also on a `File`, from the traits: `f.read(n: int) -> Result<[uint8], IoError>`, `f.write(b: [uint8]) -> Result<int, IoError>`, `f.flush()`, `f.seek(pos: io.SeekFrom) -> Result<int64, IoError>`, `f.descriptor() -> int32`
 - Open options:
   - `pub fun options() -> OpenOptions`, where `pub struct OpenOptions` is `Eq`.
-  - Each method returns a new `OpenOptions`: `.read(on: bool)`, `.write(on: bool)`, `.append(on: bool)`, `.truncate(on: bool)`, `.create(on: bool)`, `.create_new(on: bool)`, `.mode(perms: int32)`
+  - Each method returns a new `OpenOptions`: `.read(on: bool)`, `.write(on: bool)`, `.append(on: bool)`, `.truncate(on: bool)`, `.create(on: bool)`, `.create_new(on: bool)`, `.nonblocking(on: bool)` (a FIFO opens at once), `.no_follow(on: bool)` (a link at the end is `Other(40)`, MYLA-842), `.mode(perms: int32)`
   - Finally `.open(path: str) -> Result<File, IoError>`. Options that choose nothing give `InvalidInput`.
 - Temporary files:
   - `pub fun temp_root() -> str` (`$TMPDIR` or `/tmp`; on Windows `%TMPDIR%`, `%TEMP%`, `%TMP%` or `.`)

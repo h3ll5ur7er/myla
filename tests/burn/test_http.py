@@ -1034,6 +1034,38 @@ class TimeLimits(unittest.TestCase):
                 with self.subTest(server=name):
                     self.serve(argv, exe, lambda port: check(port, big_file))
 
+    def test_what_the_server_opens_is_what_it_checks(self):
+        # MYLA-842: a response's file was looked at by `static_files` and
+        # opened later, when it was sent, and only then checked: a FIFO
+        # swapped in meanwhile blocked the worker in its open until
+        # something wrote to it, and a link was followed. The server opens
+        # the file without waiting and without following a link at the
+        # end, then checks what it opened: the FIFO and the link are 404 at
+        # once, on a one-worker server, and a regular file is served.
+        def check(port, d):
+            for name, want in (("fifo", b"HTTP/1.1 404 Not Found\r\n"), ("link", b"HTTP/1.1 404 Not Found\r\n"),
+                               ("a.txt", b"HTTP/1.1 200 OK\r\n")):
+                path = urllib.parse.quote(os.path.join(d, name)).encode()
+                with socket.create_connection(("127.0.0.1", port), timeout=3) as s:
+                    t0 = time.monotonic()
+                    s.sendall(b"GET /file?p=" + path + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    out, _ = end_of(s, 3)
+                    self.assertTrue(out.startswith(want), (name, out))
+                    self.assertLess(time.monotonic() - t0, 2, name)
+                    if name == "a.txt":
+                        self.assertTrue(out.endswith(b"\r\n\r\nhello"), out)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = os.path.join(tmp, "www")
+            os.mkdir(d)
+            with open(os.path.join(d, "a.txt"), "w") as f:
+                f.write("hello")
+            os.mkfifo(os.path.join(d, "fifo"))
+            os.symlink("a.txt", os.path.join(d, "link"))
+            for name, (argv, exe) in self.forms(tmp, ["4000", "1", "-", "5000", "5000", "5000"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, lambda port: check(port, d), {"MYLA_THREADS": "1"})
+
     def test_a_request_that_came_while_the_server_was_busy(self):
         # MYLA-756: a parked connection whose request came before its idle
         # time ran out, while the program's one worker was held, is served

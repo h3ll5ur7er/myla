@@ -447,15 +447,16 @@ fun fd_handle(fd: int64) -> int64 {
 // `__open(path, flags, mode)`: the file at `path` opened, a handle for its
 // descriptor (closed on exec), or -1 with the cause. `flags`: 1 read, 2
 // write (both: read and write), 4 create, 8 truncate, 16 append, 32 exclusive (with
-// create: ALREADY_EXISTS when the file is there); without 1 or 2, or with
-// another bit, INVALID_INPUT. `mode`: the permissions of a file it creates, less the umask
+// create: ALREADY_EXISTS when the file is there), 64 not waiting (a FIFO
+// opens at once), 128 no symbolic link at the end (MYLA-842); without 1 or
+// 2, or with another bit, INVALID_INPUT. `mode`: the permissions of a file it creates, less the umask
 // (none on wasm32).
 pub fun open(path: str, flags: int, mode: int) -> int {
     __set_io_errno(0)
     if nul_in(path) {
         return -1
     }
-    if (flags & 3) == 0 || (flags & -64) != 0 {
+    if (flags & 3) == 0 || (flags & -256) != 0 {
         __set_io_errno(os.INVALID_INPUT)
         return -1
     }

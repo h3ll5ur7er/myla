@@ -1367,9 +1367,13 @@ pub fun file_size(fd: int64) -> int64 {
 }
 
 // The file at `path` opened with std.rt's portable `flags` (1 read, 2
-// write, 4 create, 8 truncate, 16 append, 32 exclusive; at least one of the
-// first two): its descriptor. `mode` isn't used: Windows has no permission
-// bits, and a new file isn't read-only (D218).
+// write, 4 create, 8 truncate, 16 append, 32 exclusive, 64 not waiting,
+// 128 no link at the end; at least one of the first two): its descriptor.
+// Not waiting changes nothing (a FIFO isn't a file here); with no link at
+// the end the reparse point is opened itself (FILE_FLAG_OPEN_REPARSE_POINT)
+// and a link refused as Linux's O_NOFOLLOW refuses one, ELOOP's `Other`
+// (MYLA-842). `mode` isn't used: Windows has no permission bits, and a new
+// file isn't read-only (D218).
 pub fun open_file(path: str, flags: int64, mode: int64) -> int64 {
     var access: int64 = 0
     if (flags & 1) != 0 {
@@ -1382,8 +1386,30 @@ pub fun open_file(path: str, flags: int64, mode: int64) -> int64 {
             access |= GENERIC_WRITE
         }
     }
-    return open_handle(path, access, disposition_of(flags), 0)
+    if (flags & 128) == 0 {
+        return open_handle(path, access, disposition_of(flags), 0)
+    }
+    let h = open_handle(path, access, disposition_of(flags), FILE_FLAG_OPEN_REPARSE_POINT)
+    if h < 0 {
+        return h
+    }
+    let out = __alloc(32)
+    let r = handle_stat(h, out, false)
+    let kind = __load64(out + 8)
+    __free(out)
+    if r < 0 || kind == KIND_SYMLINK {
+        let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+        if r < 0 {
+            return r
+        }
+        return -LINK_AT_END
+    }
+    return h
 }
+
+// What an open with no link at the end gives for one: Linux's ELOOP's
+// `Other`, as std.ioerror numbers it.
+const LINK_AT_END: int64 = 296
 
 // How CreateFile2 opens a file for the portable `flags`: exclusive with
 // create CREATE_NEW, create and truncate CREATE_ALWAYS, create alone

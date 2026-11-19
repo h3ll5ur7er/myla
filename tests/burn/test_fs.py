@@ -518,6 +518,48 @@ t/missing/.. -> NotFound
 true
 """
 
+# Opens that don't wait and don't follow a link at the end (MYLA-842), in
+# the tree `test_opens_that_neither_wait_nor_follow` makes: `t/fifo` a FIFO
+# nobody writes to, `t/lf` a link to `f.txt`, `t/la` one to the directory
+# `a`. A FIFO opened without waiting opens at once, a link at the end is
+# ELOOP's `Other(40)`, one before the end is followed.
+NEITHER_WAIT_NOR_FOLLOW = """import std.fs as fs
+import std.bytes as bytes
+from std.fs import IoError, File
+
+fun shown(r: Result<File, IoError>) -> str {
+    return match r {
+        Ok(f) => {
+            var g = f
+            let what = match g.metadata() {
+                Ok(m) => if m.is_file() { match g.read(10) { Ok(b) => f"a file: {bytes.to_str(b)}", Err(e) => fs.io_error_name(e) } } else { "not a file" }
+                Err(e) => fs.io_error_name(e)
+            }
+            let c = g.close()
+            what
+        }
+        Err(e) => fs.io_error_name(e)
+    }
+}
+
+fun main() {
+    let o = fs.options().read(true)
+    print(shown(o.nonblocking(true).open("t/fifo")))
+    print(shown(o.no_follow(true).open("t/lf")))
+    print(shown(o.no_follow(true).open("t/la/x.txt")))
+    print(shown(o.no_follow(true).nonblocking(true).open("t/f.txt")))
+    print(shown(o.open("t/lf")))
+    print(shown(o.no_follow(true).open("t/missing")))
+}
+"""
+NEITHER_WAIT_NOR_FOLLOW_OUTPUT = """not a file
+Other(40)
+a file: x
+a file: abc
+a file: abc
+NotFound
+"""
+
 # Seeks past the ends of an offset (MYLA-426): a sum past int64's range or
 # below 0 is EINVAL and leaves the cursor; past the end is allowed and a
 # write there leaves a hole. Node's WASI shim lost precision and moved the
@@ -989,6 +1031,23 @@ class DirectoryParity(unittest.TestCase):
         for impl, result in self.run_all("where", WHERE_LINKS_LEAD, prepare).items():
             with self.subTest(implementation=impl):
                 self.assertEqual(result, (WHERE_LINKS_LEAD_OUTPUT, "", 0))
+
+    def test_opens_that_neither_wait_nor_follow(self) -> None:
+        # MYLA-842: `OpenOptions.nonblocking` and `no_follow`
+        def prepare(work: str) -> None:
+            t = os.path.join(work, "t")
+            os.makedirs(os.path.join(t, "a"))
+            with open(os.path.join(t, "f.txt"), "w") as fh:
+                fh.write("abc")
+            with open(os.path.join(t, "a", "x.txt"), "w") as fh:
+                fh.write("x")
+            os.mkfifo(os.path.join(t, "fifo"))
+            os.symlink("f.txt", os.path.join(t, "lf"))
+            os.symlink("a", os.path.join(t, "la"))
+
+        for impl, result in self.run_all("open_bits", NEITHER_WAIT_NOR_FOLLOW, prepare).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, (NEITHER_WAIT_NOR_FOLLOW_OUTPUT, "", 0))
 
     def test_many_long_names(self) -> None:
         names = [f"{i:03d}" + "x" * (i - 3) if i >= 3 else "n" * i for i in range(1, 256)]

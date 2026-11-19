@@ -499,20 +499,24 @@ pub fun path_stat(path: str, follow: bool, out: int64) -> int64 {
 }
 
 // The file at `path` opened with std.rt's portable `flags` (1 read, 2
-// write, 4 create, 8 truncate, 16 append, 32 exclusive) as `path_open`
-// takes them (MYLA-336): the open flags (CREAT 1, EXCL 4, TRUNC 8), the
-// rights to read or write (`open_rights`) and the descriptor's flags
-// (APPEND 1); WASI has no permissions, so `mode` is not used.
+// write, 4 create, 8 truncate, 16 append, 32 exclusive, 64 not waiting,
+// 128 no link at the end) as `path_open` takes them (MYLA-336, MYLA-842):
+// the lookup flags (SYMLINK_FOLLOW 1 unless 128), the open flags (CREAT 1,
+// EXCL 4, TRUNC 8), the rights to read or write (`open_rights`) and the
+// descriptor's flags (APPEND 1, NONBLOCK 4); WASI has no permissions, so
+// `mode` is not used.
 pub fun open_file(path: str, flags: int64, mode: int64) -> int64 {
     var oflags: int64 = 0
     if (flags & 4) != 0 { oflags |= 1 }
     if (flags & 32) != 0 { oflags |= 4 }
     if (flags & 8) != 0 { oflags |= 8 }
     var fdflags: int64 = 0
-    if (flags & 16) != 0 { fdflags = 1 }
+    if (flags & 16) != 0 { fdflags |= 1 }
+    if (flags & 64) != 0 { fdflags |= 4 }
+    let lookup: int64 = if (flags & 128) != 0 { 0 } else { 1 }
     let rights = open_rights(flags)
     let fdp = scratch(7)
-    let r = on_path(W_PATH_OPEN, path, true, [oflags, rights, rights, fdflags, fdp])
+    let r = on_path_lookup(W_PATH_OPEN, path, lookup, [oflags, rights, rights, fdflags, fdp])
     if r < 0 {
         return r
     }

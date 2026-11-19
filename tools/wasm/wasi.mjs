@@ -15,7 +15,8 @@
 // read blocks the program as a blocking one would.
 //
 // A file system gives: `open(path, {create, trunc, excl, dir, read, write,
-// append})` a handle (`read` and `write` the access asked for, undefined
+// append, nofollow, nonblock})` a handle (`nofollow`: a link at the end is
+// ELOOP; `nonblock`: a FIFO opens at once, MYLA-842) (`read` and `write` the access asked for, undefined
 // when the program asked for every right, as its own reads and writes of
 // whole files do; MYLA-336), `read(handle, bytes)` and `write(handle,
 // bytes)` how many at the handle's cursor, `seek(handle, offset, whence)`
@@ -279,9 +280,10 @@ export class Wasi {
           this.view().setUint32(used, at, true);
           return 0;
         }),
-        path_open: g(function (dirfd, _dirflags, p, len, oflags, rights, _inherit, fdflags, out) {
+        path_open: g(function (dirfd, dirflags, p, len, oflags, rights, _inherit, fdflags, out) {
           const path = this.resolve(dirfd, p, len);
-          const want = { create: !!(oflags & 1), dir: !!(oflags & 2), excl: !!(oflags & 4), trunc: !!(oflags & 8) };
+          const want = { create: !!(oflags & 1), dir: !!(oflags & 2), excl: !!(oflags & 4), trunc: !!(oflags & 8),
+                         nofollow: !(dirflags & 1), nonblock: !!(fdflags & 4) };
           // the rights to read (bit 1) and write (bit 6) asked for, unless
           // all were
           if (rights !== -1n) {

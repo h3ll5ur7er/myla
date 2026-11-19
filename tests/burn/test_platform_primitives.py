@@ -158,7 +158,7 @@ fun main() {
     print(e(__open(args()[1], 2, 0)))
     print(e(__open(args()[1] + "/a\\0b", 1, 0)))
     print(e(__open(path, 0, 0)))
-    print(e(__open(path, 1 | 64, 0)))
+    print(e(__open(path, 1 | 256, 0)))
     // before the start, another whence: EINVAL
     let d = __open(path, 1, 0)
     print(e64(__seek(d, -1, 0)))

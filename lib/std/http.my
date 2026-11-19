@@ -4515,7 +4515,7 @@ fun file_response(dir: str, rel: Option<str>, dot_files: bool) -> Response {
                 Ok(c) => c,
                 Err(_) => { return not_found }
             }
-            if !served_under(led, root, dot_files) {
+            if !served_under(led, root, dot_files, style_m.WINDOWS) {
                 return not_found
             }
             kind = match fs_m.metadata(led) {
@@ -4538,27 +4538,31 @@ fun file_response(dir: str, rel: Option<str>, dot_files: bool) -> Response {
 // Whether the path `led`, without links (`fs.canonical`), is the served
 // directory `root` (one too) or below it, by its parts below it as
 // `served_segments` takes them (MYLA-841): not out of it, not a dot file's
-// unless `dot_files`, on Windows no device's name. Its spelling must be
-// the root's: on Windows a link that names the directory in another case
-// is refused.
-#test("/www/app.css", "/www", false)[true]
-#test("/www", "/www", false)[true]
-#test("/www2/app.css", "/www", false)[false]
-#test("/top.txt", "/www", false)[false]
-#test("/www/.env", "/www", false)[false]
-#test("/www/.env", "/www", true)[true]
-#test("/www/a/b.css", "/", false)[true]
-#test("/.git/x", "/", false)[false]
-fun served_under(led: str, root: str, dot_files: bool) -> bool {
+// unless `dot_files`, on Windows (`windows`) no device's name. Its
+// spelling must be the root's: on Windows a link that names the directory
+// in another case is refused.
+#test("/www/app.css", "/www", false, false)[true]
+#test("/www", "/www", false, false)[true]
+#test("/www2/app.css", "/www", false, false)[false]
+#test("/top.txt", "/www", false, false)[false]
+#test("/www/.env", "/www", false, false)[false]
+#test("/www/.env", "/www", true, false)[true]
+#test("/www/a/b.css", "/", false, false)[true]
+#test("/.git/x", "/", false, false)[false]
+#test("C:\\www\\a\\b.css", "C:\\www", false, true)[true]
+#test("C:\\www\\nul.txt", "C:\\www", false, true)[false]
+#test("C:\\WWW\\b.css", "C:\\www", false, true)[false]
+#test("C:\\b.css", "C:\\", false, true)[true]
+fun served_under(led: str, root: str, dot_files: bool, windows: bool) -> bool {
     if led == root {
         return true
     }
-    let sep = if style_m.WINDOWS { "\\" } else { "/" }
+    let sep = if windows { "\\" } else { "/" }
     let base = if root.ends_with(sep) { root } else { root + sep }
     if !led.starts_with(base) {
         return false
     }
-    return match served_segments(led[base.len():], style_m.WINDOWS, dot_files) {
+    return match served_segments(led[base.len():], windows, dot_files) {
         Some(s) => s.len() > 0,
         None => false,
     }
@@ -4688,9 +4692,14 @@ struct BodyFile {
 
 // `r`, whose body is the file `r.file`, as the server sends it (D260): the
 // file opened, `Content-Length` its size; 404 when it is no longer a
-// regular file or can't be read.
+// regular file or can't be read. It is opened first and what was opened
+// looked at (MYLA-842, as nginx does): without waiting, so a FIFO swapped
+// in since `file_response` looked is opened at once and refused, not
+// waited on with a worker held, and without following a link at the end,
+// so a link swapped in is refused too (`file_response` gives a link's
+// target, not the link).
 fun opened_file(r: Response) -> (Response, Option<BodyFile>) {
-    var f = match fs_m.open(r.file) {
+    var f = match fs_m.options().read(true).nonblocking(true).no_follow(true).open(r.file) {
         Ok(f) => f,
         Err(_) => { return (response(404, "not found"), None) }
     }

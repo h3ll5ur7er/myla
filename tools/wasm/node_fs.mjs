@@ -26,13 +26,19 @@ export class NodeFs {
   // With the access asked for (MYLA-336), `read` and `write` give it, and
   // `append` writes at the end. A handle keeps its own cursor (Node has no
   // lseek): a regular file is read and written at it, anything else where
-  // the system's cursor is, and can't seek (ESPIPE).
-  open(path, { create, trunc, excl, read, write, append }) {
+  // the system's cursor is, and can't seek (ESPIPE). `nofollow` and
+  // `nonblock` are O_NOFOLLOW and O_NONBLOCK (MYLA-842).
+  open(path, { create, trunc, excl, read, write, append, nofollow, nonblock }) {
     const c = fs.constants;
     let flags = !create ? "r" : excl ? "wx" : trunc ? "w" : c.O_WRONLY | c.O_CREAT;
     if (read !== undefined) {
       flags = (read && write ? c.O_RDWR : write ? c.O_WRONLY : c.O_RDONLY) |
         (create ? c.O_CREAT : 0) | (trunc ? c.O_TRUNC : 0) | (excl ? c.O_EXCL : 0) | (append ? c.O_APPEND : 0);
+    }
+    const extra = (nofollow ? c.O_NOFOLLOW : 0) | (nonblock ? c.O_NONBLOCK : 0);
+    if (extra) {
+      const named = { r: c.O_RDONLY, w: c.O_TRUNC | c.O_CREAT | c.O_WRONLY, wx: c.O_TRUNC | c.O_CREAT | c.O_WRONLY | c.O_EXCL };
+      flags = (typeof flags === "string" ? named[flags] : flags) | extra;
     }
     const fd = fs.openSync(path, flags);
     return { fd, pos: 0, seekable: fs.fstatSync(fd).isFile(), append: !!append };

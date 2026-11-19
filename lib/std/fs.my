@@ -335,6 +335,8 @@ const O_CREATE: int32 = 4
 const O_TRUNCATE: int32 = 8
 const O_APPEND: int32 = 16
 const O_EXCLUSIVE: int32 = 32
+const O_NONBLOCKING: int32 = 64
+const O_NO_FOLLOW: int32 = 128
 
 // An open file: a descriptor of the platform, read and written at its
 // cursor. It is unbuffered: each `read` and `write` is a system call, so put
@@ -445,6 +447,24 @@ impl OpenOptions {
     #test(options(), true)[OpenOptions { bits: 32, perms: 0o644 }]
     fun create_new(self, on: bool) -> OpenOptions {
         return OpenOptions { bits: with_bit(self.bits, O_EXCLUSIVE, on), perms: self.perms }
+    }
+
+    // Open without waiting for what the path names to be ready (MYLA-842):
+    // a FIFO opens at once, with no writer yet, where an open would wait
+    // for one (O_NONBLOCK; a regular file reads and writes as ever).
+    // Windows has no FIFOs in its file system: nothing changes there.
+    #test(options(), true)[OpenOptions { bits: 64, perms: 0o644 }]
+    fun nonblocking(self, on: bool) -> OpenOptions {
+        return OpenOptions { bits: with_bit(self.bits, O_NONBLOCKING, on), perms: self.perms }
+    }
+
+    // Don't follow a symbolic link at the path's end (MYLA-842): a link
+    // there fails the open with `Other(40)` (Linux's ELOOP) on every target
+    // (O_NOFOLLOW; on Windows the reparse point opened itself and refused
+    // when it is a link). The links before the end are followed.
+    #test(options(), true)[OpenOptions { bits: 128, perms: 0o644 }]
+    fun no_follow(self, on: bool) -> OpenOptions {
+        return OpenOptions { bits: with_bit(self.bits, O_NO_FOLLOW, on), perms: self.perms }
     }
 
     // The permissions of a file `open` creates (less the umask; unused on
