@@ -511,6 +511,11 @@ def build(out: str, myla: str, jobs: int) -> int:
          [step(["./prog.exe"], "".join(f'[{n}] ["&echo INJECTED"] []\n' for n in names))],
          {"prog.exe": "bin/batch-names.exe", "e.bat": batch, "E.CMD": batch})
     case("files/long-paths", [step(["bin/long-paths.exe"], tw.LONG_PATHS_OUT)])
+    # MYLA-841, MYLA-842: junctions and a symbolic link made by mklink, read,
+    # resolved, opened without following and served
+    program("bin/links.exe", tw.WINDOWS_LINKS)
+    case("files/links", [step(["bin/links.exe"], tw.WINDOWS_LINKS_OUT)],
+         windows_only="Wine's mklink makes no link, and Wine shows a Unix link as what it names")
     # what a child of 16 workers commits (its rings of ready frames are
     # reserved, MYLA-798: they were 128 MiB of it)
     case("process/a-child-s-commit",

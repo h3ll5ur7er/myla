@@ -964,7 +964,13 @@ class TimeLimits(unittest.TestCase):
             # (the condition waited for, at most 30 s: 10 s once weren't
             # enough under a full run's load, MYLA-745; the sockets left
             # say which connection the server kept)
-            self.assertEqual(wait_for_sockets(self.server_pid, 1, 30), 1, socket_states(self.server_pid))
+            if TEST_TARGET == "x86_64-windows":
+                # (Wine keeps a socket parked on the reactor in its server,
+                # not always among the program's descriptors, MYLA-833: so
+                # the time the server takes, write_ms and its keeper's look)
+                time.sleep(2)
+            else:
+                self.assertEqual(wait_for_sockets(self.server_pid, 1, 30), 1, socket_states(self.server_pid))
             for s in hold:
                 got, _ = end_of(s, 5)
                 self.assertLess(len(got), 8 << 20, "closed before the whole response")
@@ -1043,8 +1049,13 @@ class TimeLimits(unittest.TestCase):
         # end, then checks what it opened: the FIFO and the link are 404 at
         # once, on a one-worker server, and a regular file is served.
         def check(port, d):
-            for name, want in (("fifo", b"HTTP/1.1 404 Not Found\r\n"), ("link", b"HTTP/1.1 404 Not Found\r\n"),
-                               ("a.txt", b"HTTP/1.1 200 OK\r\n")):
+            cases = [("fifo", b"HTTP/1.1 404 Not Found\r\n"), ("link", b"HTTP/1.1 404 Not Found\r\n"),
+                     ("a.txt", b"HTTP/1.1 200 OK\r\n")]
+            if TEST_TARGET == "x86_64-windows":
+                # Wine shows a Unix link as what it names (the Windows
+                # runner's `files/links` opens a link on Windows itself)
+                cases = [c for c in cases if c[0] != "link"]
+            for name, want in cases:
                 path = urllib.parse.quote(os.path.join(d, name)).encode()
                 with socket.create_connection(("127.0.0.1", port), timeout=3) as s:
                     t0 = time.monotonic()
