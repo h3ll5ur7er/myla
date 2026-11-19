@@ -41,4 +41,6 @@ The same job's "Rates" step then ran the case 30 of 30 on 1, 4 and 16 workers (0
 
 ## Proposals
 
+Accepted by the owner on 2026-11-19 as D297.
+
 - Built: `max_requests` counts answers sent; an answer that couldn't be sent gives its place back, and a request that comes while those being answered would fill the limit waits for them (1 ms looks at the tally). Alternatives: (a) count requests read, sent or not (BASE): a client that sends a request again after a failed answer finds no server; (b) refuse the extra request instead of waiting (`take`'s false): the request sent again after a failed answer was refused too, as `ToTheLimit` showed (`connection closed`).

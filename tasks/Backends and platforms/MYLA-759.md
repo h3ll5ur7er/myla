@@ -50,4 +50,6 @@ So it isn't where its workers stop: the first program of a Wine server starts th
 
 ## Proposals
 
+Not taken as proposed: the owner decided D296 on 2026-11-19 instead (tests run on native runners, Wine for local experiments only, [[MYLA-926]]). The relay stays for local runs.
+
 - Built: every test run of a Windows program goes behind `_wine_run.py` (a Python process `exec`ing Wine, its output copied where it is a pipe). Alternatives: (a) only the setup's fix (BASE): enough while a run's server never stops, which nothing enforces; (b) check before each run that the prefix's services are up and start them quietly if not: racy, and a run per program more; (c) temporary files for the output instead of pipes: breaks the tests that read a program's output as it comes.

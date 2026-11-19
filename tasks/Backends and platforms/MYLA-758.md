@@ -43,6 +43,8 @@ In two halves, because aarch64's seed can't bootstrap the second (D207, below).
 
 ## Proposals
 
+Accepted by the owner on 2026-11-19 as D305 (one Linux layer) and D306 (`copies`).
+
 1. **A target's copies are named by a field of their own, `Target.copies`** (built). Alternatives: *(a)* derive the ending from the architecture's name (`"_" + arch`), which gives `_x86_64`, not `_windows`, for Windows and `_wasm32` for wasm32, so the existing files would have to be renamed; *(b)* keep a `platform_file` for aarch64 that names no file, which `for_target` would try to read on every build; *(c)* name the copies after the platform module, as D223 does, which aarch64 can't do once it has none. Proposed row (refining D223): *"A target's own copy of a module ends as the target's record says (`copies`: `path_windows.my` on Windows, `linux_calls_aarch64.my` on aarch64), not after its platform module, which a target may share (MYLA-758)."*
 2. **What differs between the architectures, beyond the numbers** (built: six constants and one function in std.linux_calls). The alternative was to keep the largest `struct stat` (144 bytes) on both, which saves one constant at the cost of 16 bytes per call on aarch64. I took the exact sizes.
 3. **The order of the halves** (D207 settles it): the second half waits for a `Stage:` commit. If the owner wants one commit instead, wave 2's `Stage:` commit can go between the two.

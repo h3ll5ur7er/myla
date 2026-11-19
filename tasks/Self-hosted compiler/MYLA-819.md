@@ -32,6 +32,8 @@ Chosen over a subreaper in a small parent of each case (a process more per case,
 
 ## Proposals (Linux)
 
+Accepted by the owner on 2026-11-19 as D300 (Windows) and D304 (Linux).
+
 - **A watcher per run** (built), as above. Alternatives: a subreaper parent per case; the case's PDEATHSIG caught by a runtime handler that kills its group.
 - Not done, a small race noted: a runner killed between starting a case and the case's `setpgid`/`prctl` (the first statements of its `reporting`) leaves that case running without a group or a parent-death signal. Closing it needs the spawn to set both before `exec` (a spawn option of the platform's).
 
