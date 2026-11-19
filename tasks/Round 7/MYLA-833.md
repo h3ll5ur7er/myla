@@ -23,6 +23,8 @@ The lot ([[lib/std/rt.my]]'s `sock_park`, and the interpreter's lot in [[selfhos
 
 ## Proposals
 
+Accepted by the owner on 2026-11-19 as D308.
+
 - **The room counts bytes, `workers` × `max_body_bytes`, as D270's** (built). I first built a room of `workers` responses: the full run's load showed why not. With 2 workers and 4 echoes of 4 MB, two were parked and two sent by the workers themselves, which waited for a client that read the parked ones first; the parked ones had no worker to go on with them, so the held ones timed out and were cut (`test_a_body_dribbled_costs_its_pieces_not_its_size`: 0 of 5 beside 4 busy processes; 5 of 5 with the room in bytes, 2026-11-19). Alternatives: *(b)* no room: every response parked, so memory grows with the slow readers; *(c)* a pool of sender tasks (the task's alternative): a fixed pool still held by as many slow readers. Past the room the starvation can still happen ([[MYLA-927]]).
 - **A parked response counts among the connections `max_connections` bounds**, as a request begun does; with deadlines of `write_ms` (30 s) it comes after idle ones (5 s) when the one whose time runs out first is closed.
 - Proposed row: *"A response its socket doesn't take at once waits parked until the socket can send more, holding no worker, its time limit `write_ms` for each 64 KiB; the bytes of those that wait so stay within `workers` × `max_body_bytes`, as the request bodies kept parked do, past which a worker sends one itself ([[MYLA-833]], D269, D270)."*

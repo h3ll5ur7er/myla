@@ -46,6 +46,8 @@ Accepted by the owner on 2026-11-19 as D300 (Windows) and D304 (Linux).
 
 ## Proposals (Windows)
 
+Accepted by the owner on 2026-11-19 as D310.
+
 - `myla test` on Windows calls `own_job()` at its start (`selfhost/driver.my`), so that killing it takes the harness and its cases along, as `PR_SET_PDEATHSIG` does on Linux; the runner (the harness) could too. Left to the Interpreter lane, whose files those are.
 
 ## `myla test` in a job of its own (wave 2 of round 7's follow-ups, 2026-11-19)

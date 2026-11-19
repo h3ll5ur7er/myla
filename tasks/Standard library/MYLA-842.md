@@ -23,6 +23,8 @@ Reproduction (a race, so a loop): serve a directory with `a.txt`; in another pro
 
 ## Proposals
 
+Accepted by the owner on 2026-11-19 as D309.
+
 - **A link at the end is an error on every target** (built), Windows' open of the reparse point itself turned into ELOOP's `Other(40)`. The alternative, Windows' own behaviour (the link opened, its metadata `Symlink`), would make the same program see a file on one target and an error on another; std.http refuses either.
 - No decision row needed: D260 already says no FIFOs and no links out of the root; this keeps it at the open.
 

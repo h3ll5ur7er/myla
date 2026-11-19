@@ -22,6 +22,8 @@ Reproduction: a served directory `www/` with `app.css` and `www/inlink.css -> ap
 
 ## Proposals
 
+Accepted by the owner on 2026-11-19 as D307.
+
 - **One primitive, `__read_link`, and the canonical path in Myla** (built). Alternatives: *(a)* a canonical-path primitive: Linux has no `realpath` call (it would be `open(O_PATH)` and `/proc/self/fd`, which a sandbox may lack), WASI none at all, so it would be Myla over `readlink` there anyway; Windows' `GetFinalPathNameByHandleW` would give the volume's own spelling (case and 8.3 names made long), which `canonical` doesn't: a link that names the served directory in another case is refused on Windows (a refusal, never a file out of the root). *(b)* `GetFinalPathNameByHandleW` for Windows' `read_link`: it gives where a whole path ends, not what one link holds.
 - **Links out of the root stay 404, with no option** (built). An option to serve them would let a link someone made under the root publish anything the server can read; nginx's `disable_symlinks if_not_owner` is the nearest thing and needs owners Myla doesn't read.
 - Proposed row, changing D284: *"`static_files` follows a symbolic link below its root when where it leads (`fs.canonical`) is under where the root leads and the path from there passes the root's rules (no dot file, no device's name); a link out of the root stays 404, with no option ([[MYLA-841]], D260; changes D284, which refused every link)."*
