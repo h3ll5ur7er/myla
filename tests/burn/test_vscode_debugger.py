@@ -37,7 +37,7 @@ class TestDebugAdapter(unittest.TestCase):
         env = dict(os.environ, MYLA_CLI=cli)
         env.pop("MYLA_DAP_BUNDLE", None)
         proc = subprocess.run(
-            ["node", "--experimental-strip-types", "--no-warnings", "--test",
+            ["node", "--experimental-strip-types", "--no-warnings", "--test", "--test-reporter=tap",
              os.path.join("test", "integration", "adapter.test.ts")],
             cwd=_EXTENSION, env=env, capture_output=True, text=True, timeout=600)
         self.assertEqual(proc.returncode, 0, proc.stdout[-6000:] + proc.stderr[-2000:])

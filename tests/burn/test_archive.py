@@ -863,7 +863,10 @@ class ArchiveTest(unittest.TestCase):
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_decompression_bomb_natively(self) -> None:
         # 1 GiB of zeros in 1 MB of gzip: max_output stops it at 1 MiB, in a
-        # process that may not take 256 MiB
+        # process that may not take 256 MiB. Its workers are pinned to 4: each
+        # maps about 24 MiB of address space as it starts, an 8 MiB stack and
+        # a 16 MiB heap chunk (MYLA-928), so with 16 workers or more (one per
+        # CPU) the limit ran out before max_output did
         c = zlib.compressobj(9, zlib.DEFLATED, 31)
         zeros = bytes(1 << 20)
         bomb = b"".join(c.compress(zeros) for _ in range(1024)) + c.flush()
@@ -873,7 +876,7 @@ class ArchiveTest(unittest.TestCase):
             resource.setrlimit(resource.RLIMIT_AS, (256 << 20, 256 << 20))
         for exe in (self.native, self.checked):
             proc = subprocess.run([exe, "gunzip-limit", str(1 << 20)], input=bomb, capture_output=True, timeout=60,
-                                  preexec_fn=limited)
+                                  preexec_fn=limited, env=dict(os.environ, MYLA_THREADS="4"))
             self.assertEqual((proc.returncode, proc.stderr), (1, b"error: output longer than max_output\n"))
             small = gzip.compress(bytes(3 << 20))
             proc = subprocess.run([exe, "gunzip-limit", str(3 << 20)], input=small, capture_output=True, timeout=60)
