@@ -1589,6 +1589,68 @@ fun main() {
 """
 LONG_PATHS_OUT = "true\nok\nok\ndeep\ndeep\nf.txt\nok\ntrue false\nok\nok\nfalse\n"
 
+# MYLA-841, MYLA-842: links on Windows itself, which Wine doesn't make (its
+# mklink makes none): a junction in the served directory and one out of
+# it, a symbolic link to a file (mklink, with the runner's privilege);
+# what read_link, canonical, a no_follow open and static_files make of
+# them. The Windows runner's case `files/links`.
+WINDOWS_LINKS = r"""import std.fs as fs
+import std.http as http
+import std.process as process
+from std.process import Stdio, ExitStatus
+from std.fs import IoError
+
+// a link made by cmd's mklink (`/J` a junction; without it a symbolic
+// link, which needs the privilege a runner's administrator has)
+fun made(a: [str]) -> bool {
+    var c = process.command("cmd").arg("/c").arg("mklink")
+    for x in a {
+        c = c.arg(x)
+    }
+    return match c.stdout_from(Stdio.Null).stderr_from(Stdio.Null).output() {
+        Ok(out) => out.status == ExitStatus.Exited(0)
+        Err(e) => false
+    }
+}
+
+fun text(r: Result<str, IoError>) -> str {
+    return match r {
+        Ok(s) => s
+        Err(e) => fs.io_error_name(e)
+    }
+}
+
+fun main() {
+    let cwd = text(fs.current_dir())
+    let a = fs.make_dir_all("www\\sub")
+    let b = fs.write_to_file("www\\app.css", "body {}")
+    let c = fs.write_to_file("www\\sub\\a.txt", "a")
+    let d = fs.write_to_file("top.txt", "TOP SECRET")
+    print(made(["/J", "www\\inj", cwd + "\\www\\sub"]))
+    print(made(["/J", "www\\outj", cwd]))
+    print(made(["www\\in.css", "app.css"]))
+    print(fs.is_symlink("www\\inj") && fs.is_symlink("www\\in.css"))
+    print(text(fs.read_link("www\\inj")) == cwd + "\\www\\sub")
+    print(text(fs.read_link("www\\in.css")))
+    print(text(fs.read_link("www\\app.css")))
+    print(text(fs.canonical("www\\inj\\a.txt")) == cwd + "\\www\\sub\\a.txt")
+    print(text(fs.canonical("www\\in.css")) == cwd + "\\www\\app.css")
+    print(text(fs.canonical("www/outj/www/inj/../app.css")) == cwd + "\\www\\app.css")
+    match fs.options().read(true).no_follow(true).open("www\\in.css") {
+        Ok(f) => print("opened a link")
+        Err(e) => print(fs.io_error_name(e))
+    }
+    var app = http.router("")
+    app.static_files("/s", "www")
+    let h = app.handler()
+    for p in ["/s/inj/a.txt", "/s/in.css", "/s/outj/top.txt", "/s/app.css"] {
+        let r = h(http.request("GET", p))
+        print(f"{p} {r.status} {r.text()}")
+    }
+}
+"""
+WINDOWS_LINKS_OUT = 'true\ntrue\ntrue\ntrue\ntrue\napp.css\nInvalidInput\ntrue\ntrue\ntrue\nOther(40)\n/s/inj/a.txt 200 a\n/s/in.css 200 body {}\n/s/outj/top.txt 404 not found\n/s/app.css 200 body {}\n'
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
@@ -2034,6 +2096,11 @@ HOST_TESTS = ('import std.path as path\nimport std.test as test\nfrom std.proces
               # MYLA-729: the interpreter's case root under %TEMP%, joined with `\`
               '#test()[true]\nfun under_temp() -> bool {\n    let d = test.temp_dir()\n'
               '    return d.starts_with(env("TEMP").unwrap_or("?") + "\\\\myla-test-")\n}\n')
+# MYLA-819: a case that starts a child and waits for it, which `myla test`
+# killed must take along
+HOST_HOLDS = ('import std.process as process\nfrom std.process import Stdio\n\n'
+              '#test\nfun holds() {\n'
+              '    let r = process.command("./helper.exe").arg("sleep").arg("60126").stdout_from(Stdio.Null).output()\n}\n')
 # what only Windows' std.platform declares: checked against Linux's, an error
 HOST_CHECKED = 'import std.platform as platform\n\nfun never() {\n    platform.windows_start()\n}\n\nfun main() {}\n'
 
@@ -2100,7 +2167,11 @@ class HostModules(unittest.TestCase):
         for exe, src in (("myla.exe", "selfhost/main.my"), ("myla-lsp.exe", "tools/lsp/main.my")):
             subprocess.run([selfhost_tool("main"), "build", src, "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT,
                             "-o", os.path.join(cls.tmp, exe)], cwd=_REPO, check=True, timeout=600)
-        for name, text in (("p.my", HOST_PATHS), ("t.my", HOST_TESTS), ("c.my", HOST_CHECKED)):
+        with open(os.path.join(cls.tmp, "helper.my"), "w", encoding="utf-8") as fh:
+            fh.write(HELPER)
+        subprocess.run([selfhost_tool("main"), "build", "helper.my", "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT,
+                        "-o", "helper.exe"], cwd=cls.tmp, check=True, timeout=600)
+        for name, text in (("p.my", HOST_PATHS), ("t.my", HOST_TESTS), ("c.my", HOST_CHECKED), ("k.my", HOST_HOLDS)):
             with open(os.path.join(cls.tmp, name), "w", encoding="utf-8") as fh:
                 fh.write(text)
 
@@ -2121,6 +2192,34 @@ class HostModules(unittest.TestCase):
 
     def test_check(self):
         self.assertEqual(self.myla("check", "c.my"), ("ok\n", "", 0))
+
+    def test_killed_it_takes_what_its_cases_started_along(self):
+        # MYLA-819: `myla test` is in a job object of its own (`own_job`,
+        # driver.my's `test_in_own_job`), so killed it takes what it
+        # started along, here a case's child, as PR_SET_PDEATHSIG and
+        # std.test's watcher do on Linux. Without the job the child stayed.
+        proc = subprocess.Popen([*wine(), os.path.join(self.tmp, "myla.exe"), "test", "k.my", "--timeout", "0"],
+                                cwd=self.tmp, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            started = ""
+            for _ in range(300):
+                started = subprocess.run(["pgrep", "-f", "helper.exe sleep 60126"], capture_output=True, text=True).stdout
+                if started:
+                    break
+                time.sleep(0.1)
+            self.assertNotEqual(started, "", "the case's child never started")
+        finally:
+            proc.kill()
+            proc.wait()
+        left = ""
+        for _ in range(100):
+            left = subprocess.run(["pgrep", "-f", "helper.exe sleep 60126"], capture_output=True, text=True).stdout
+            if not left:
+                break
+            time.sleep(0.1)
+        if left:
+            subprocess.run(["pkill", "-f", "helper.exe sleep 60126"])
+        self.assertEqual(left, "", "the case's child outlived a killed `myla test`")
 
     def test_repl(self):
         out, err, code = self.myla("repl", stdin=b'import std.path as path\npath.parent("a\\\\b")\n')

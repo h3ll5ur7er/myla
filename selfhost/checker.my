@@ -1254,15 +1254,16 @@ pub fun is_notify_primitive(name: str) -> bool {
 }
 
 // The platform primitives of MYLA-336: entropy, file descriptors and
-// children with pipes, MYLA-334's wall clock and MYLA-378's stat of a path,
-// each a function of std.rt (`__open` is `std.rt.open`) over std.platform,
+// children with pipes, MYLA-334's wall clock, MYLA-378's stat of a path and
+// MYLA-841's link read, each a function of std.rt (`__open` is `std.rt.open`) over std.platform,
 // and in the interpreter the host's own.
 #test("__open")[true]
 #test("__wall_ns")[true]
 #test("__path_stat")[true]
+#test("__read_link")[true]
 #test("__read")[false]
 pub fun is_platform_primitive(name: str) -> bool {
-    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__path_stat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || name == "__poll_write" || is_net_primitive(name) || is_term_primitive(name)
+    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__path_stat" || name == "__read_link" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || name == "__poll_write" || is_net_primitive(name) || is_term_primitive(name)
 }
 
 // The terminal and signal primitives of MYLA-350 (std.term's and
@@ -1307,7 +1308,7 @@ pub fun is_net_primitive(name: str) -> bool {
 }
 
 // A lot's primitives (MYLA-468): `__sock_lot(n)`, `__sock_park(lot, h,
-// deadline, tag)`, `__sock_ready(lot)`, `__sock_expired(lot, now)`,
+// deadline, tag, events)` (MYLA-833: 1 until readable, 2 until writable), `__sock_ready(lot)`, `__sock_expired(lot, now)`,
 // `__sock_tag(h)`, `__sock_lot_close(lot)`.
 #test("__sock_lot_close")[true]
 #test("__sock_poll")[false]
@@ -1320,6 +1321,7 @@ pub fun is_lot_primitive(name: str) -> bool {
 #test("__sock_close")[("h: int", [Type.TInt(32, true)], Type.TInt(32, true))]
 #test("__net_config")[("which: int", [Type.TInt(32, true)], Type.TStr)]
 #test("__sock_tag")[("h: int", [Type.TInt(32, true)], Type.TInt(64, true))]
+#test("__sock_park")[("lot: int, h: int, deadline: int64, tag: int64, events: int", [Type.TInt(32, true), Type.TInt(32, true), Type.TInt(64, true), Type.TInt(64, true), Type.TInt(32, true)], Type.TInt(32, true))]
 fun net_primitive_sig(name: str) -> (str, [Type], Type) {
     let i = t_int()
     let s = Type.TStr
@@ -1337,7 +1339,7 @@ fun net_primitive_sig(name: str) -> (str, [Type], Type) {
     if name == "__sock_poll" { return ("h: int, events: int, timeout_ms: int", [i, i, i], i) }
     let w = Type.TInt(64, true)
     if name == "__sock_lot" { return ("n: int64", [w], i) }
-    if name == "__sock_park" { return ("lot: int, h: int, deadline: int64, tag: int64", [i, i, w, w], i) }
+    if name == "__sock_park" { return ("lot: int, h: int, deadline: int64, tag: int64, events: int", [i, i, w, w, i], i) }
     if name == "__sock_ready" || name == "__sock_lot_close" { return ("lot: int", [i], i) }
     if name == "__sock_expired" { return ("lot: int, now: int64", [i, w], i) }
     if name == "__sock_tag" { return ("h: int", [i], w) }
@@ -11665,7 +11667,8 @@ impl Checker {
     // MYLA-336's primitives (`is_platform_primitive`): `__random_bytes(n)`,
     // `__open(path, flags, mode)`, `__seek(fd, offset, whence)`,
     // `__fstat(fd)`, `__spawn_piped(program, argv, opts)`, `__try_reap(pid)`,
-    // MYLA-334's `__wall_ns()` and MYLA-378's `__path_stat(path, follow)`
+    // MYLA-334's `__wall_ns()`, MYLA-378's `__path_stat(path, follow)` and
+    // MYLA-841's `__read_link(path)`
     fun infer_platform_primitive(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         let i64 = Type.TInt(64, true)
         let strs = Type.TList(Type.TStr)
@@ -11697,6 +11700,10 @@ impl Checker {
             want = [Type.TStr, Type.TBool]
             shape = "path: str, follow: bool"
             result = Type.TList(i64)
+        } else if name == "__read_link" {
+            want = [Type.TStr]
+            shape = "path: str"
+            result = Type.TStr
         } else if name == "__spawn_piped" {
             want = [Type.TStr, strs, strs]
             shape = "program: str, argv: [str], opts: [str]"

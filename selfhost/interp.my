@@ -188,7 +188,7 @@ struct FdWait { fd: int32, fd2: int32, task: int32, events: int32 }
 // ready, in the order they became so; the id of the notifier notified once
 // for each. Its handle is its index + 1.
 struct ILot { nid: int64, parked: [IParked], ready: [int32], open: bool }
-struct IParked { h: int32, deadline: int64 }
+struct IParked { h: int32, deadline: int64, events: int32 }
 
 // How often the sockets parked on lots are looked at (`wake_parked`): a
 // look's share of the time at most 1/LOOK_SHARE, the time between two
@@ -2178,8 +2178,8 @@ impl Interp {
         return true
     }
 
-    // The sockets parked on the lots that became readable moved to their
-    // lots' ready lists, each lot's notifier notified once for each; whether
+    // The sockets parked on the lots that became ready (readable, or
+    // writable for one parked so, MYLA-833) moved to their lots' ready lists, each lot's notifier notified once for each; whether
     // any did. A look is a poll a socket, a system call each, so they are
     // looked at once a millisecond at most, and at most 1/LOOK_SHARE of the
     // time: after a look that took t, not before LOOK_SHARE * t, up to
@@ -2198,7 +2198,7 @@ impl Interp {
                 var hits: [int32] = []
                 var k = 0
                 for q in self.lots[li].parked {
-                    if __sock_poll(q.h, 1, 0) != 0 { hits.push(k) }
+                    if __sock_poll(q.h, q.events, 0) != 0 { hits.push(k) }
                     k = k + 1
                 }
                 let due = hits.len()
@@ -2231,8 +2231,9 @@ impl Interp {
     }
 
     // `__sock_lot` and the other primitives of a lot (MYLA-468), as std.rt's
-    // natively: a socket parked waits with no task, and once readable is
-    // ready on its lot, its notifier notified.
+    // natively: a socket parked waits with no task, and once readable (or
+    // writable, as its parking's `events` say) is ready on its lot, its
+    // notifier notified.
     fun lot_primitive(var self, nm: str, args: [Expr]) -> Value {
         var ints: [int64] = []
         for a in args { ints.push(as_int(self.eval(a))) }
@@ -2246,7 +2247,7 @@ impl Interp {
         if li < 0 || li >= self.lots.len() || !self.lots[li].open { return Value.VInt(-1) }
         if nm == "__sock_park" {
             let h = ints[1] as int32
-            let q = IParked { h: h, deadline: ints[2] }
+            let q = IParked { h: h, deadline: ints[2], events: if ints[4] == 2 { 2 } else { 1 } }
             self.sock_tags[h] = ints[3]
             // after the last parked whose deadline isn't later
             var at = self.lots[li].parked.len()
@@ -5807,6 +5808,7 @@ impl Interp {
             for x in __path_stat(path, follow) { out.push(Value.VInt(x)) }
             return Value.VList(out)
         }
+        if c == B_READ_LINK { return Value.VStr(__read_link(as_str(self.eval(args[0])))) }
         if c == B_SPAWN_PIPED {
             let prog = as_str(self.eval(args[0]))
             var argv: [str] = []
@@ -6292,6 +6294,7 @@ const B_APPEND_BYTE: int32 = 79
 const B_BUILD: int32 = 80
 const B_TASKS_WAITING: int32 = 81
 const B_TEST_TOOL: int32 = 82
+const B_READ_LINK: int32 = 83
 
 // Each builtin's name and its code (`Interp.bcodes`).
 fun builtin_codes() -> [str: int32] {
@@ -6347,6 +6350,7 @@ fun builtin_codes() -> [str: int32] {
     m["__str_to_bytes"] = B_STR_TO_BYTES
     m["__bytes_to_str"] = B_BYTES_TO_STR
     m["__path_stat"] = B_PATH_STAT
+    m["__read_link"] = B_READ_LINK
     m["__spawn_piped"] = B_SPAWN_PIPED
     m["__try_reap"] = B_TRY_REAP
     m["__close"] = B_CLOSE

@@ -1,10 +1,11 @@
 """Burn test: every platform module offers the same interface, in Myla's
 terms (MYLA-701, D209).
 
-`std.platform` is one module per target (`lib/std/platform.my` for x86-64
-Linux, its numbers std.linux_calls', MYLA-758; `platform_aarch64.my`,
-`platform_wasm.my`, `platform_windows.my`), which the loader takes for
-`std/platform.my` on its target. std.rt and the library
+`std.platform` is one module per system (`lib/std/platform.my` for Linux, on
+x86-64 and aarch64 alike, MYLA-758; `platform_wasm.my`, `platform_windows.my`),
+which the loader takes for `std/platform.my` on its target; Linux's numbers
+are std.linux_calls', a module with a copy per architecture
+(`linux_calls_aarch64.my`). std.rt and the library
 above it are written once against it, so each must give the same functions
 with the same types, and the same constants: the cause codes a failure gives
 (std.ioerror's, which `from_cause` reads), the kinds of a file
@@ -38,11 +39,11 @@ from ._native import CAN_BUILD_NATIVE, SKIP_REASON, run_argv, target_flags, writ
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 STD = os.path.join(STDLIB_ROOT, "std")
-MODULES = {"x86_64-linux": "platform.my", "aarch64-linux": "platform_aarch64.my", "wasm32-wasi": "platform_wasm.my",
+MODULES = {"x86_64-linux": "platform.my", "aarch64-linux": "platform.my", "wasm32-wasi": "platform_wasm.my",
            "x86_64-windows": "platform_windows.my"}
 # where a Linux target's module takes what tells the architectures apart
 # (its `TARGET` is the copy's `TARGET_NAME`)
-CALLS = {"x86_64-linux": "linux_calls.my"}
+CALLS = {"x86_64-linux": "linux_calls.my", "aarch64-linux": "linux_calls_aarch64.my"}
 # the constants that tell the targets apart
 PER_TARGET = {"TARGET", "RETURNS_MEMORY", "HUGE_PAGES", "HEAP_COMMIT", "PROCESSES", "SOCKETS"}
 # a target's own entry points, which its back end calls by name

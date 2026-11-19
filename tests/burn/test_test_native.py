@@ -925,8 +925,9 @@ class TestAarch64(unittest.TestCase):
 
     def test_its_platform_module_however_the_paths_are_written(self):
         # S3 (MYLA-397): the harness is the target's std.platform under any
-        # spelling of the file and of the library's root
-        rel = os.path.join("lib", "std", "platform_aarch64.my")
+        # spelling of the file and of the library's root (Linux's one module,
+        # with aarch64's std.linux_calls, MYLA-758)
+        rel = os.path.join("lib", "std", "platform.my")
         n = _case_count(os.path.join(_REPO, rel))
         lib = os.path.join(_REPO, "lib")
         for argv, env in ((["./" + rel, "--stdlib", "lib"], None),
@@ -940,8 +941,8 @@ class TestAarch64(unittest.TestCase):
                 self.assertTrue(proc.stdout.endswith(f"\n{n}/{n} passed.\n"), proc.stdout)
         # MYLA-545: a root or a file written with a leading `..`
         up = os.path.join(os.pardir, os.path.basename(_REPO), rel)
-        for argv, cwd in ((["platform_aarch64.my", "--stdlib", ".."], os.path.join(_REPO, "lib", "std")),
-                          ([os.path.join("std", "platform_aarch64.my"), "--stdlib", os.path.join(os.pardir, "lib")], lib),
+        for argv, cwd in ((["platform.my", "--stdlib", ".."], os.path.join(_REPO, "lib", "std")),
+                          ([os.path.join("std", "platform.my"), "--stdlib", os.path.join(os.pardir, "lib")], lib),
                           ([up, "--stdlib", "lib"], _REPO)):
             with self.subTest(argv=argv, cwd=cwd):
                 proc = _tool(["test", *argv, "--target", "aarch64-linux"], cwd)
