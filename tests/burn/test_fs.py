@@ -462,6 +462,62 @@ lf/**: lf true
 **/dangling/**: dangling true
 """
 
+# Where links lead (MYLA-841), in the tree `test_where_links_lead` makes:
+# `t/lf` names `f.txt`, `t/la` the directory `a`, `t/a/up` its parent,
+# `t/abs` `t/f.txt` by its absolute path, `t/chain` the link `lf`, `t/back`
+# `a/../f.txt`, `t/dangling` nothing and `t/loop` itself. A path is shown
+# from the working directory (`./`), which `canonical` gives absolute.
+WHERE_LINKS_LEAD = """import std.fs as fs
+from std.fs import IoError
+
+fun shown(r: Result<str, IoError>, cwd: str) -> str {
+    return match r {
+        Ok(p) => if p == cwd { "." } else if p.starts_with(cwd + "/") { "." + p[cwd.len():] } else { p }
+        Err(e) => fs.io_error_name(e)
+    }
+}
+
+fun main() {
+    let cwd = match fs.current_dir() {
+        Ok(d) => d
+        Err(e) => "?"
+    }
+    for p in ["t/lf", "t/a/up", "t/abs", "t/chain", "t/dangling", "t/f.txt", "t/a", "t/missing"] {
+        print(f"{p}: {shown(fs.read_link(p), cwd)}")
+    }
+    for p in ["t/lf", "t/la/x.txt", "t/la/up/lf", "t/a/up/la/up/f.txt", "t/abs", "t/chain", "t/back", "t/la/",
+              "t/./la/../f.txt", "t/dangling", "t/loop", "t/lf/x", "t/missing/..", "/", "."] {
+        print(f"{p} -> {shown(fs.canonical(p), cwd)}")
+    }
+    print(fs.canonical(cwd + "/t/la/up/lf") == fs.canonical("t/f.txt"))
+}
+"""
+WHERE_LINKS_LEAD_OUTPUT = """t/lf: f.txt
+t/a/up: ..
+t/abs: ./t/f.txt
+t/chain: lf
+t/dangling: nothing
+t/f.txt: InvalidInput
+t/a: InvalidInput
+t/missing: NotFound
+t/lf -> ./t/f.txt
+t/la/x.txt -> ./t/a/x.txt
+t/la/up/lf -> ./t/f.txt
+t/a/up/la/up/f.txt -> ./t/f.txt
+t/abs -> ./t/f.txt
+t/chain -> ./t/f.txt
+t/back -> ./t/f.txt
+t/la/ -> ./t/a
+t/./la/../f.txt -> ./t/f.txt
+t/dangling -> NotFound
+t/loop -> Other(40)
+t/lf/x -> NotADirectory
+t/missing/.. -> NotFound
+/ -> /
+. -> .
+true
+"""
+
 # Seeks past the ends of an offset (MYLA-426): a sum past int64's range or
 # below 0 is EINVAL and leaves the cursor; past the end is allowed and a
 # write there leaves a hole. Node's WASI shim lost precision and moved the
@@ -910,6 +966,29 @@ class DirectoryParity(unittest.TestCase):
         for impl, result in self.run_all("links", LINKS, prepare).items():
             with self.subTest(implementation=impl):
                 self.assertEqual(result, (LINKS_OUTPUT, "", 0))
+
+    def test_where_links_lead(self) -> None:
+        # MYLA-841: what a link holds (`read_link`) and where a path leads
+        # through links (`canonical`); the working directory is link-free,
+        # as getcwd gives it
+        def prepare(work: str) -> None:
+            t = os.path.join(work, "t")
+            os.makedirs(os.path.join(t, "a"))
+            with open(os.path.join(t, "f.txt"), "w") as fh:
+                fh.write("abc")
+            open(os.path.join(t, "a", "x.txt"), "w").close()
+            os.symlink("f.txt", os.path.join(t, "lf"))
+            os.symlink("a", os.path.join(t, "la"))
+            os.symlink("..", os.path.join(t, "a", "up"))
+            os.symlink(os.path.join(os.path.realpath(work), "t", "f.txt"), os.path.join(t, "abs"))
+            os.symlink("lf", os.path.join(t, "chain"))
+            os.symlink("a/../f.txt", os.path.join(t, "back"))
+            os.symlink("nothing", os.path.join(t, "dangling"))
+            os.symlink("loop", os.path.join(t, "loop"))
+
+        for impl, result in self.run_all("where", WHERE_LINKS_LEAD, prepare).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, (WHERE_LINKS_LEAD_OUTPUT, "", 0))
 
     def test_many_long_names(self) -> None:
         names = [f"{i:03d}" + "x" * (i - 3) if i >= 3 else "n" * i for i in range(1, 256)]

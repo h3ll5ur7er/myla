@@ -13,6 +13,8 @@ The file system: whole files, files read and written a piece at a time, metadata
 | `exists(path: str) -> bool` | Whether the path names anything (symbolic links followed, so a dangling one doesn't count) |
 | `is_dir(path: str) -> bool`, `is_file(path: str) -> bool` | Whether it names a directory, a regular file (links followed) |
 | `is_symlink(path: str) -> bool` | Whether it names a symbolic link itself, a dangling one too ([[MYLA-363]]) |
+| `read_link(path: str) -> Result<str, IoError>` | What the symbolic link holds: the path it leads to as written in it (relative to the link's directory, or absolute), not followed; a path that is no link is `InvalidInput`, a missing one `NotFound` ([[MYLA-841]]) |
+| `canonical(path: str) -> Result<str, IoError>` | The absolute path of what it names without a symbolic link, `.` or `..` (realpath(3)): each link on the way followed, a relative one from its own directory; a missing part is `NotFound`, a part that isn't a directory before the end `NotADirectory`, more than 40 links (a loop) `Other(40)` (ELOOP) on every target ([[MYLA-841]]) |
 | `current_dir() -> Result<str, IoError>` | The working directory: an absolute path without symbolic links, as the kernel gives it; a directory that was removed is `NotFound` ([[MYLA-98]]) |
 | `remove_file(path: str) -> Result<(), IoError>` | Removes a file, or a symbolic link itself; a directory is `IsADirectory` ([[MYLA-96]]) |
 | `remove_dir(path: str) -> Result<(), IoError>` | Removes an empty directory; one that isn't is `NotEmpty` |
@@ -160,7 +162,7 @@ On x86-64 Windows ([[MYLA-704]]) std.fs works over kernel32 through std.platform
 - A `File` opened to append writes at the end whatever its cursor (`FILE_APPEND_DATA` without `FILE_WRITE_DATA`). Seeking a pipe or the console is ESPIPE's `Other(29)`.
 - The temporary files and directories go under `%TMPDIR%`, `%TEMP%` or `%TMP%`, else the working directory (D227), their names joined with `\` and made of random bytes from `BCryptGenRandom` ([[MYLA-722]]).
 
-A symbolic link is a reparse point (a symbolic link's or a junction's tag) and `Symlink` as on Linux; Wine shows a Unix link as what it names, so the suites check links on Windows itself ([[MYLA-708]]).
+A symbolic link is a reparse point (a symbolic link's or a junction's tag) and `Symlink` as on Linux; Wine shows a Unix link as what it names, so the suites check links on Windows itself ([[MYLA-708]]). `read_link` reads the reparse point's data (`FSCTL_GET_REPARSE_POINT`): a symbolic link's or a junction's print name (`C:\www\app.css`, `..\app.css`), else its substitute name without `\??\`. `canonical` gives Windows' own path, as `current_dir` does (`C:\www\app.css`, `\\server\share\x`; `\x` is on the working directory's drive), each name spelled as written: it follows links itself, so a link that names a directory in another case leads to another spelling of the same directory.
 
 ## Measurements
 

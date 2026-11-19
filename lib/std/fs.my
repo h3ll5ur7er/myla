@@ -678,6 +678,188 @@ fun kind_of(k: int64) -> FileKind {
     return FileKind.Other
 }
 
+// --- Where a symbolic link leads (MYLA-841) ----------------------------------------
+
+// What the symbolic link `path` holds: the path it leads to as written in
+// it (relative to the link's directory, or absolute), without following it
+// (readlink(2); on Windows a symbolic link's or a junction's target, D215's
+// UTF-8). A path that names no link is `InvalidInput`, a missing one
+// `NotFound`.
+pub fun read_link(path: str) -> Result<str, IoError> {
+    let target = __read_link(path)
+    let err = __io_errno()
+    if err != 0 {
+        return Err(from_cause(err))
+    }
+    return Ok(target)
+}
+
+// The absolute path of what `path` names, without a symbolic link, `.` or
+// `..` (realpath(3), MYLA-841): a relative path taken from the working
+// directory, each link on the way read and followed (a relative one from
+// its own directory), `..` after a link taken off what the link led to.
+// Everything on the way must be there: a missing part is `NotFound`, a
+// part that isn't a directory before the end `NotADirectory`, more than
+// LINKS_MAX links (a loop) `Other(40)`, Linux's ELOOP, on every target. On
+// Windows it is Windows' own path, as `current_dir` gives it (`C:\www\a.css`,
+// `\\server\share\a.css`; `\x` on the working directory's drive), its
+// names spelled as written: a link that names a directory in another case
+// leads to another spelling of it.
+pub fun canonical(path: str) -> Result<str, IoError> {
+    let win = style.WINDOWS
+    if path == "" {
+        return Err(IoError.NotFound)
+    }
+    var full = path
+    if !rooted(path, win) {
+        full = joined(current_dir()?, path)
+    } else if win && is_sep(path[0]) && (path.len() == 1 || !is_sep(path[1])) {
+        // `\x`: on the working directory's drive
+        let cwd = current_dir()?
+        if cwd.len() >= 2 && cwd[1] == ':' {
+            full = cwd[:2] + path
+        }
+    }
+    let start = split_root(full, win)
+    var root = start.0
+    var done: [str] = []
+    var rest = pushed_back([], start.1, win)
+    var links = 0
+    while rest.len() > 0 {
+        let part = rest.pop()
+        if part == "" || part == "." {
+            continue
+        }
+        if part == ".." {
+            if done.len() > 0 {
+                let up = done.pop()
+            }
+            continue
+        }
+        done.push(part)
+        let at = spelled(root, done, win)
+        let m = symlink_metadata(at)?
+        if m.kind == FileKind.Symlink {
+            links += 1
+            if links > LINKS_MAX {
+                return Err(from_cause(LINK_LOOP))
+            }
+            let target = read_link(at)?
+            let gone = done.pop()
+            if rooted(target, win) {
+                let r = split_root(target, win)
+                root = r.0
+                done = []
+                rest = pushed_back(rest, r.1, win)
+            } else {
+                rest = pushed_back(rest, target, win)
+            }
+        } else if m.kind != FileKind.Dir && rest.len() > 0 {
+            return Err(IoError.NotADirectory)
+        }
+    }
+    return Ok(spelled(root, done, win))
+}
+
+// The most symbolic links `canonical` follows (Linux's MAXSYMLINKS), and
+// the cause past them (OTHER plus ELOOP, as std.ioerror numbers it).
+const LINKS_MAX: int32 = 40
+const LINK_LOOP: int32 = 296
+
+// Whether `p` starts at a root: `/`, and on Windows (`win`) `\`, a drive
+// (`C:`) or a share.
+#test("/a", false)[true]
+#test("a/b", false)[false]
+#test("\\a", false)[false]
+#test("C:\\a", true)[true]
+#test("c:a", true)[true]
+#test("\\a", true)[true]
+#test("a\\b", true)[false]
+fun rooted(p: str, win: bool) -> bool {
+    if p.len() > 0 && (p[0] == '/' || (win && p[0] == '\\')) {
+        return true
+    }
+    return win && p.len() >= 2 && p[1] == ':' && ((p[0] | 32) >= 'a' && (p[0] | 32) <= 'z')
+}
+
+// The root of the rooted path `p` and the rest after it: `/`, and on
+// Windows (`win`) a drive's (`C:\`, also for `C:x` and `\\?\C:\`) or a
+// share's (`\\server\share\`, also for `\\?\UNC\server\share\`), its
+// separators Windows'.
+#test("/a/b", false)[("/", "a/b")]
+#test("//a", false)[("/", "/a")]
+#test("C:\\a\\b", true)[("C:\\", "a\\b")]
+#test("c:/a", true)[("c:\\", "a")]
+#test("C:", true)[("C:\\", "")]
+#test("\\\\srv\\share\\a", true)[("\\\\srv\\share\\", "a")]
+#test("//srv/share", true)[("\\\\srv\\share\\", "")]
+#test("\\\\?\\C:\\a", true)[("C:\\", "a")]
+#test("\\\\?\\UNC\\srv\\share\\a", true)[("\\\\srv\\share\\", "a")]
+#test("\\a", true)[("\\", "a")]
+fun split_root(p: str, win: bool) -> (str, str) {
+    if !win {
+        return ("/", p[1:])
+    }
+    if p.len() >= 2 && p[1] == ':' {
+        let rest = if p.len() > 2 && is_sep(p[2]) { p[3:] } else { p[2:] }
+        return (p[:2] + "\\", rest)
+    }
+    if p.len() >= 2 && is_sep(p[0]) && is_sep(p[1]) {
+        if p.len() >= 7 && p[2] == '?' && is_sep(p[3]) && p[5] == ':' {
+            return split_root(p[4:], win)
+        }
+        let end = share_end(p)
+        let start = if end > 2 && p[2] == '?' { 8 } else { 2 }
+        var share = StringBuilder()
+        share.append("\\\\", 0, 2)
+        for i in start..end {
+            share.append_byte(if is_sep(p[i]) { '\\' } else { p[i] })
+        }
+        share.append_byte('\\')
+        let rest = if end < p.len() { p[end + 1:] } else { "" }
+        return (share.build(), rest)
+    }
+    return ("\\", p[1:])
+}
+
+// `rest`, the parts still to resolve last first, with the parts of `p`
+// (split on `/`, and on Windows on `\` too) put before them.
+#test(["c"], "a/b", false)[["c", "b", "a"]]
+#test([], "a\\b", true)[["b", "a"]]
+#test([], "a\\b", false)[["a\\b"]]
+fun pushed_back(rest: [str], p: str, win: bool) -> [str] {
+    var out = rest
+    var end = p.len()
+    var i = p.len() - 1
+    while i >= -1 {
+        if i < 0 || p[i] == '/' || (win && p[i] == '\\') {
+            out.push(p[i + 1:end])
+            end = i
+        }
+        i -= 1
+    }
+    return out
+}
+
+// The path of `root` and the parts `done` after it, joined with the
+// system's separator.
+#test("/", ["a", "b"], false)["/a/b"]
+#test("/", [], false)["/"]
+#test("C:\\", ["a", "b"], true)["C:\\a\\b"]
+fun spelled(root: str, done: [str], win: bool) -> str {
+    var sb = StringBuilder()
+    sb.append(root, 0, root.len())
+    var first = true
+    for part in done {
+        if !first {
+            sb.append_byte(if win { '\\' } else { '/' })
+        }
+        sb.append(part, 0, part.len())
+        first = false
+    }
+    return sb.build()
+}
+
 // --- Temporary files and directories (MYLA-339) ---------------------------------
 //
 // A new name is a prefix and 16 hexadecimal digits from the system's
@@ -1030,6 +1212,41 @@ fun metadata_of_paths() -> Result<(), IoError> {
     w.close()?
     assert(metadata(dir + "/f")?.size == 8, "and the path's metadata")
     return Ok(())
+}
+
+// Where a path leads with no link on the way (MYLA-841): absolute, without
+// `.` or `..`; a missing part `NotFound` (one that `..` would take off
+// too), a file before the end `NotADirectory`; `read_link` of what is no
+// link `InvalidInput`. tests/burn/test_fs.py follows links.
+#test
+fun canonical_paths() -> Result<(), IoError> {
+    let dir = canonical(make_temp_dir()?)?
+    defer { let gone = remove_dir_all(dir) }
+    make_dir(joined(dir, "a"))?
+    write_to_file(joined(dir, "f"), "x")?
+    assert(canonical(dir + "/a/../f")? == joined(dir, "f"), "`..` taken off")
+    assert(canonical(dir + "/./a/")? == joined(dir, "a"), "`.` and a trailing separator")
+    assert(canonical(dir + "/a/../../" + dir_name(dir) + "/f")? == joined(dir, "f"), "up and back")
+    assert(error_of(canonical(dir + "/nothing/../f")) == "NotFound", "a missing part")
+    assert(error_of(canonical(dir + "/f/x")) == "NotADirectory", "a file before the end")
+    assert(error_of(canonical(dir + "/f/")) == "NotADirectory", "a file as a directory")
+    assert(error_of(canonical("")) == "NotFound", "no path")
+    assert(canonical(".")? == canonical(current_dir()?)?, "the working directory")
+    assert(error_of(read_link(dir + "/f")) == "InvalidInput", "a file is no link")
+    assert(error_of(read_link(dir + "/a")) == "InvalidInput", "nor a directory")
+    assert(error_of(read_link(dir + "/nothing")) == "NotFound", "nothing")
+    return Ok(())
+}
+
+// The last part of the path `p` (after its last separator).
+#test("/a/b")["b"]
+#test("C:\\a\\b")["b"]
+fun dir_name(p: str) -> str {
+    var i = p.len() - 1
+    while i >= 0 && !is_sep(p[i]) {
+        i -= 1
+    }
+    return p[i + 1:]
 }
 
 // Temporary names are new each time, under the root, and taken ones are

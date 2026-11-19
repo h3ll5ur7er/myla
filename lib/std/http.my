@@ -3862,12 +3862,14 @@ impl Router {
 
     // The regular files below the directory `dir` at `prefix` (`/assets`
     // serves `dir/app.css` as `/assets/app.css`), for GET, each sent from
-    // the file as it is read (D260, MYLA-795). Anything else is 404: a path
-    // that leaves `dir`, a symbolic link below it, a directory, a FIFO or a
-    // device, a file that can't be read, a dot file's (`.env`, `.git/`)
-    // unless `dot_files`, and on Windows a device's name (`nul`, `con.txt`),
-    // a name ending in a dot or a space, one with `:` and the like, or a
-    // short name's (`~1`); `served_segments` has the rules.
+    // the file as it is read (D260, MYLA-795). A symbolic link below `dir`
+    // is followed when where it leads stays under `dir` (MYLA-841). Anything
+    // else is 404: a path that leaves `dir`, a link that leads out of it, a
+    // directory, a FIFO or a device, a file that can't be read, a dot file's
+    // (`.env`, `.git/`) unless `dot_files`, a link's too, and on Windows a
+    // device's name (`nul`, `con.txt`), a name ending in a dot or a space,
+    // one with `:` and the like, or a short name's (`~1`);
+    // `served_segments` has the rules.
     fun static_files(var self, prefix: str, dir: str, dot_files: bool = false) {
         let d = dir
         self.add_route("GET", prefix + "/{%file:path}", (req: Request) => file_response(d, req.param("%file"), dot_files), true)
@@ -4138,8 +4140,11 @@ fun all_digits(s: str) -> bool {
 // sent from the file (`Response.file`) with a content type by its
 // extension; 404 when `served_segments` refuses the path, or when one of
 // its parts below `dir` isn't what the path makes it, a directory and then
-// a regular file, without following a symbolic link: a link, a FIFO, a
-// device, a socket or nothing. A FIFO is never opened, so it can't hold a
+// a regular file: a FIFO, a device, a socket or nothing. A symbolic link
+// is followed when where it leads (`fs.canonical`) is under where `dir`
+// leads and `served_segments` takes the path from there (MYLA-841: a link
+// to `.env` is refused as `.env` is), and the walk goes on from there;
+// any other link is 404. A FIFO is never opened here, so it can't hold a
 // worker.
 fun file_response(dir: str, rel: Option<str>, dot_files: bool) -> Response {
     let not_found = response(404, "not found")
@@ -4155,12 +4160,34 @@ fun file_response(dir: str, rel: Option<str>, dot_files: bool) -> Response {
         return not_found
     }
     var at = dir
+    // where `dir` leads, once a link needs it
+    var root = ""
     var i = 0
     while i < segs.len() {
         at = at + "/" + segs[i]
-        let kind = match fs_m.symlink_metadata(at) {
+        var kind = match fs_m.symlink_metadata(at) {
             Ok(m) => m.kind,
             Err(_) => { return not_found }
+        }
+        if kind == fs_m.FileKind.Symlink {
+            if root == "" {
+                root = match fs_m.canonical(dir) {
+                    Ok(c) => c,
+                    Err(_) => { return not_found }
+                }
+            }
+            let led = match fs_m.canonical(at) {
+                Ok(c) => c,
+                Err(_) => { return not_found }
+            }
+            if !served_under(led, root, dot_files) {
+                return not_found
+            }
+            kind = match fs_m.metadata(led) {
+                Ok(m) => m.kind,
+                Err(_) => { return not_found }
+            }
+            at = led
         }
         let want = if i == segs.len() - 1 { fs_m.FileKind.File } else { fs_m.FileKind.Dir }
         if kind != want {
@@ -4171,6 +4198,35 @@ fun file_response(dir: str, rel: Option<str>, dot_files: bool) -> Response {
     var r = response(200, "").with_header("Content-Type", content_type(segs[^1]))
     r.file = at
     return r
+}
+
+// Whether the path `led`, without links (`fs.canonical`), is the served
+// directory `root` (one too) or below it, by its parts below it as
+// `served_segments` takes them (MYLA-841): not out of it, not a dot file's
+// unless `dot_files`, on Windows no device's name. Its spelling must be
+// the root's: on Windows a link that names the directory in another case
+// is refused.
+#test("/www/app.css", "/www", false)[true]
+#test("/www", "/www", false)[true]
+#test("/www2/app.css", "/www", false)[false]
+#test("/top.txt", "/www", false)[false]
+#test("/www/.env", "/www", false)[false]
+#test("/www/.env", "/www", true)[true]
+#test("/www/a/b.css", "/", false)[true]
+#test("/.git/x", "/", false)[false]
+fun served_under(led: str, root: str, dot_files: bool) -> bool {
+    if led == root {
+        return true
+    }
+    let sep = if style_m.WINDOWS { "\\" } else { "/" }
+    let base = if root.ends_with(sep) { root } else { root + sep }
+    if !led.starts_with(base) {
+        return false
+    }
+    return match served_segments(led[base.len():], style_m.WINDOWS, dot_files) {
+        Some(s) => s.len() > 0,
+        None => false,
+    }
 }
 
 // The segments of the path `rel` below a served directory (D260): split on

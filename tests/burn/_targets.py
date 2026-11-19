@@ -142,7 +142,8 @@ SKIP: dict[str, dict[str, str]] = {
         # make of a Unix link: it shows one as what it names (MYLA-708 runs
         # these on Windows)
         **{t: _WINE_LINKS for t in ["test_platform_primitives.Paths",
-                                    "test_fs.DirectoryParity.test_symbolic_links"]},
+                                    "test_fs.DirectoryParity.test_symbolic_links",
+                                    "test_fs.DirectoryParity.test_where_links_lead"]},
         "test_fs.DirectoryParity.test_current_dir_removed":
             "Windows can't remove a working directory, and Wine starts a program whose one is gone in C:\\windows",
         # MYLA-705: Windows' children are Windows programs; Linux's tools
