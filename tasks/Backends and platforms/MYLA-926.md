@@ -14,6 +14,13 @@ Python stays the harness for now: it is 3 to 9 percent of a suite's CPU time (20
 
 **Step 2: Windows.** Run the burn suites on `windows-latest` against `myla.exe` (the `bootstrap-windows` job builds it; the image has LLVM and Python). Port each POSIX-only test, or mark it Linux-only with its reason (`/proc`, signals, ptys, `fcntl`, `strace`), never skip one silently. Keep `scripts/windows-runner.py`'s cases as the Windows-only layer. Then drop the Wine job and Wine from the Linux jobs' apt.
 
+Windows' loopback is not Linux's, which three of test_net's tests assume. Seen on the owner's workstation in WSL2 with `networkingMode=mirrored` (2026-11-19, `d7e65c1`), where localhost goes through Windows' network stack:
+- `Primitives.test_each_on_its_own`: an `accept` right after the client's connect completed said would-block, and a datagram sent to itself wasn't there yet when read at once.
+- `Tcp.test_a_listeners_backlog`: all 200 connects completed with the default backlog, not Linux's 128 + 1 (200 is Windows' own backlog); 164 and 185 in another run.
+- `Tcp.test_a_blocking_read_that_holds_the_only_worker_says_so` (built): no warning within 30 s.
+
+On `windows-latest` these need to wait for what they read (a poll of the listener or the socket first) or key their counts on the platform.
+
 Each step drops the emulated job only once the native one has been green beside it for a while, so no coverage is lost on the way.
 
 - [ ] aarch64: the burn suite on `ubuntu-24.04-arm`, host-architecture keys for the x86-64-only tests
