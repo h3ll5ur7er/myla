@@ -2,7 +2,7 @@
 id: MYLA-863
 title: "Windows: SOCKETS' 20th HTTP request once got no answer (net/sockets-and-children, 16 workers)"
 type: bug
-status: review
+status: in-progress
 priority: medium
 labels: [platforms, windows, http, concurrency]
 ---
@@ -26,6 +26,27 @@ The same job's "Rates" step then ran the case 30 of 30 on 1, 4 and 16 workers (0
 - [x] `SOCKETS` now gives each request 30 s (MYLA-798): a recurrence says `ask N: timed out after … ms, K answered before` and ends the run with its count; find which side lost the request (a server-side count of requests read, in the program, would tell)
 - [ ] Reproduce: `windows-runner.py run --runs 30 --tally --only net/sockets-and-children` on Windows, or under Wine with load (SOCKETS itself not reproduced here, below; its mechanism reproduced at once by `test_http.ToTheLimit`; only the `windows` job runs real Windows)
 - [x] Fix, with a test
+
+## Again, on the owner's workstation: an answer lost after it was sent (2026-11-19)
+
+Native Windows, 24 CPUs, `windows-runner.py run --runs 30 --tally --only net/sockets-and-children`, each bundle built from its commit:
+
+| Bundle | 1 worker | 4 workers | 16 workers |
+|---|---|---|---|
+| master before PR #85 (`80bf233`, this task's fix in) | 30 of 30 | 30 of 30 | 29 of 30 (the miss ran to the 200 s limit) |
+| PR #85 (`d7e65c1`, MYLA-833's parked sends) | 30 of 30 | 30 of 30 | 27 of 30 |
+
+The full run of the bundle at `d7e65c1` had one more (step 3, run 2). Every miss on #85 printed `ask 19: timed out after 30003 ms, 19 answered before` / `269 of 270 right` / `the HTTP server: 20 handled, /p0@53248 … /p19@53248, 1 connections in turn, serve_n gave 20`: by this task's key, **20 handled with the client's 19, one connection, so an answer lost after it was sent**, not a request sent again. 1 of 30 against 3 of 30 doesn't tell whether MYLA-833 made it likelier. CI's 4-CPU `windows-latest` ran the case 39 times on `d7e65c1` without a miss (10 at 16 workers).
+
+The fix above (an answer counts only once sent) holds: the server counted 20 because its 20th send went. What differs for the 20th is that `serve_n` stops right after it and closes the connection (`lot.close`), so the answer's bytes and the close follow each other closely. Where they can go:
+
+- **The server's side:** the answer's bytes taken by an overlapped `WSASend` (`send_overlapped`, its bytes copied) and the socket closed before it ended: `sock_close` defers the close while `F_SENDING` (`ws_close_later`); a path that closes without it, or a flag already cleared, would drop the bytes.
+- **The client's side:** the bytes arrive with the connection's end (FIN), and the client's wait on the completion port isn't woken for them (a lost wake on the poller with 16 workers on many CPUs), so it waits its 30 s.
+
+To tell them apart, the next run's report should say whether the client's socket held the answer when it gave up: on a timeout, a non-blocking read of what is there (bytes: a lost wake; nothing: the server lost them). Or delay the server's close (sleep 100 ms after `serve_n`) and see whether the misses go: if they do, it's the send and the close close together.
+
+- [ ] The client's report on a timeout says what its socket held (or the server's close delayed, as an experiment), on a Windows machine of many CPUs (CI's 4 CPUs haven't shown it in 39 runs)
+- [ ] The cause fixed, with a case that fails before
 
 ## Evidence
 
