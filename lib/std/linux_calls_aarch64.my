@@ -64,6 +64,7 @@ pub const SYS_RECVMSG: int64 = 212
 pub const SYS_ACCEPT4: int64 = 242
 pub const SYS_IOCTL: int64 = 29
 pub const SYS_FCNTL: int64 = 25
+pub const SYS_READLINKAT: int64 = 78
 
 // A `struct stat`'s size and where its `st_mode` is.
 pub const STAT_SIZE: int64 = 128

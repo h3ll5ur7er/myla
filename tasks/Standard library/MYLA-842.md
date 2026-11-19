@@ -2,7 +2,7 @@
 id: MYLA-842
 title: "static_files checks a file before the server opens it: one swapped for a FIFO in between still blocks a worker"
 type: bug
-status: backlog
+status: in-progress
 priority: low
 labels: [stdlib, http, fs, security]
 ---

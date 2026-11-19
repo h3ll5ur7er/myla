@@ -1604,6 +1604,99 @@ pub fun path_stat(path: str, follow: bool, out: int64) -> int64 {
     return r
 }
 
+// DeviceIoControl's code that reads a reparse point's data, and the most
+// that data takes (MAXIMUM_REPARSE_DATA_BUFFER_SIZE); the error of a file
+// that is none (ERROR_NOT_A_REPARSE_POINT)
+const FSCTL_GET_REPARSE_POINT: int64 = 589992
+const REPARSE_ROOM: int64 = 16384
+const NOT_A_REPARSE_POINT: int64 = 4390
+
+// What the symbolic link `path` holds written to `buf` (room for `n`
+// bytes) as UTF-8 (MYLA-841): the reparse point itself opened
+// (FILE_FLAG_OPEN_REPARSE_POINT) and its data read (`DeviceIoControl`,
+// FSCTL_GET_REPARSE_POINT), what `link_text` makes of it. Its length, `n`
+// when it may not have fitted; INVALID_INPUT for a path that names no
+// link (no reparse point, or one of another tag).
+pub fun read_link(path: str, buf: int64, n: int64) -> int64 {
+    let h = open_handle(path, FILE_READ_ATTRIBUTES, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+    if h < 0 {
+        return h
+    }
+    let data = __alloc(REPARSE_ROOM)
+    let got = __alloc(8)
+    __store64(got, 0)
+    var len: int64 = 0
+    if ok(win_call(__rt_get("__imp_DeviceIoControl"), [h, FSCTL_GET_REPARSE_POINT, 0, 0, data, REPARSE_ROOM, got, 0])) {
+        len = link_text(data, __load64(got) & LOW32, buf, n)
+    } else {
+        let e = last_error()
+        len = if e == NOT_A_REPARSE_POINT { -INVALID_INPUT } else { -cause(e) }
+    }
+    __free(got)
+    __free(data)
+    let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+    return len
+}
+
+// The target of the reparse point whose data (REPARSE_DATA_BUFFER, `size`
+// bytes) is at `data`, written to `buf` (room for `n` bytes) as UTF-8: a
+// symbolic link's or a junction's print name (`C:\dir\x`, `..\x`), else
+// its substitute name without the NT prefix (`\??\C:\dir\x`, `\??\UNC\`
+// for `\\`); a WSL link's text as it is. Its length, `n` when it doesn't
+// fit; INVALID_INPUT for another tag or data too short for its names.
+fun link_text(data: int64, size: int64, buf: int64, n: int64) -> int64 {
+    let tag = __load64(data) & LOW32
+    if tag == TAG_LX_SYMLINK {
+        // the data's length at 4, a version at 8, the text from 12
+        let len = unit(data + 4) - 4
+        if len < 0 || 12 + len > size {
+            return -INVALID_INPUT
+        }
+        if len > n {
+            return n
+        }
+        __copy_bytes(buf, data + 12, len)
+        return len
+    }
+    // the names' offsets and lengths in bytes at 8, then the names, after
+    // a symbolic link's flags
+    var names: int64 = 16
+    if tag == TAG_SYMLINK {
+        names = 20
+    } else if tag != TAG_MOUNT_POINT {
+        return -INVALID_INPUT
+    }
+    var at = unit(data + 12)
+    var bytes = unit(data + 14)
+    if bytes == 0 {
+        at = unit(data + 8)
+        bytes = unit(data + 10)
+    }
+    if names + at + bytes > size {
+        return -INVALID_INPUT
+    }
+    var units = units_at(data + names + at, bytes / 2)
+    if units.len() >= 4 && units[0] == 92 && units[1] == 63 && units[2] == 63 && units[3] == 92 {
+        // `\??\UNC\server` is `\\server`, `\??\C:` is `C:`
+        if units.len() >= 8 && units[4] == 85 && units[5] == 78 && units[6] == 67 && units[7] == 92 {
+            var kept: [int] = [92]
+            for u in units[7:] {
+                kept.push(u)
+            }
+            units = kept
+        } else {
+            units = units[4:]
+        }
+    }
+    let text = utf8_of(units, 0, units.len())
+    let len = text.len() as int64
+    if len > n {
+        return n
+    }
+    __copy_bytes(buf, __addr_of(text) + 8, len)
+    return len
+}
+
 // `n` bytes of the system's entropy at `buf` (getrandom(2)'s on Linux): 0,
 // or minus the cause. They come from bcrypt (D212, MYLA-722):
 // `BCryptGenRandom` with no algorithm's handle and the system's preferred

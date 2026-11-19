@@ -64,6 +64,7 @@ export class NodeFs {
   rmdir(path) { fs.rmdirSync(path); }
   unlink(path) { fs.unlinkSync(path); }
   rename(a, b) { fs.renameSync(a, b); }
+  readlink(path) { return new Uint8Array(fs.readlinkSync(path, { encoding: "buffer" })); }
 }
 
 // A write of all of `u8` to the descriptor `fd`, again after EAGAIN (a

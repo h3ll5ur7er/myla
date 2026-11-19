@@ -2804,7 +2804,7 @@ impl Lot {
     // The socket `h` parked until it is readable, with `deadline` and `tag`:
     // how many sockets are parked then, or -1 once the lot is closed.
     fun park(self, h: int, deadline: int64, tag: int64) -> int {
-        return __sock_park(self.id, h, deadline, tag)
+        return __sock_park(self.id, h, deadline, tag, 1)
     }
 
     // Every connection on it closed (not the listener `l`, which is only

@@ -35,6 +35,7 @@ from .linux_calls import SYS_CLOCK_GETTIME, SYS_EPOLL_PWAIT, SYS_EPOLL_CTL, SYS_
 from .linux_calls import SYS_CHDIR, SYS_MEMFD_CREATE, SYS_LSEEK, SYS_RT_SIGACTION, SYS_GETPID, SYS_KILL, SYS_PIDFD_OPEN, SYS_GETRANDOM
 from .linux_calls import SYS_SOCKET, SYS_BIND, SYS_LISTEN, SYS_CONNECT, SYS_GETSOCKNAME, SYS_GETPEERNAME, SYS_SENDTO, SYS_RECVFROM
 from .linux_calls import SYS_SETSOCKOPT, SYS_GETSOCKOPT, SYS_SHUTDOWN, SYS_SENDMSG, SYS_RECVMSG, SYS_ACCEPT4, SYS_IOCTL, SYS_FCNTL
+from .linux_calls import SYS_READLINKAT
 
 // The target this module is the platform layer of, as `--target` names it:
 // the target a program built with it runs on (x86-64 Linux, std.linux_calls').
@@ -420,6 +421,17 @@ pub fun rename(from_path: str, to_path: str) -> int64 {
     let r = sys5(SYS_RENAMEAT2, AT_FDCWD, a, AT_FDCWD, b, 0)
     __free(b)
     __free(a)
+    return r
+}
+
+// What the symbolic link `path` holds written to `buf` (room for `n`
+// bytes), as it is written there (`readlinkat`, MYLA-841): its length, `n`
+// when it may not have fitted (the kernel cuts it short); INVALID_INPUT for
+// a path that names no link.
+pub fun read_link(path: str, buf: int64, n: int64) -> int64 {
+    let p = c_path(path)
+    let r = sys5(SYS_READLINKAT, AT_FDCWD, p, buf, n, 0)
+    __free(p)
     return r
 }
 

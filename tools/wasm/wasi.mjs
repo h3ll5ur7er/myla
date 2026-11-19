@@ -24,7 +24,8 @@
 // `fstat(handle)` and `stat(path, follow)` `{type, size, ino, nlink,
 // mtimeNs}` (type 3 a directory, 4 a regular file, 7 a symbolic link),
 // `readdir(path)` `[{name, type}]`, `mkdir`, `rmdir`, `unlink`,
-// `rename(from, to)`; a failure throws an error whose `code` is an errno's
+// `rename(from, to)`, `readlink(path)` the bytes a symbolic link holds
+// (EINVAL for a path that is no link, MYLA-841); a failure throws an error whose `code` is an errno's
 // name (`ENOENT`, …). The streams: `stdin(bytes)` how many it read (0 at the
 // end), `stdout(bytes)`, `stderr(bytes)`.
 
@@ -309,6 +310,15 @@ export class Wasi {
         path_create_directory: g(function (dirfd, p, len) { this.fs.mkdir(this.resolve(dirfd, p, len)); return 0; }),
         path_remove_directory: g(function (dirfd, p, len) { this.fs.rmdir(this.resolve(dirfd, p, len)); return 0; }),
         path_unlink_file: g(function (dirfd, p, len) { this.fs.unlink(this.resolve(dirfd, p, len)); return 0; }),
+        path_readlink: g(function (dirfd, p, len, buf, room, used) {
+          // as much as fits, its length (a caller that gets `room` asks
+          // again with more)
+          const target = this.fs.readlink(this.resolve(dirfd, p, len));
+          const n = Math.min(target.length, room);
+          this.bytes(buf, n).set(target.subarray(0, n));
+          this.view().setUint32(used, n, true);
+          return 0;
+        }),
         path_rename: g(function (fd1, p1, l1, fd2, p2, l2) {
           this.fs.rename(this.resolve(fd1, p1, l1), this.resolve(fd2, p2, l2));
           return 0;

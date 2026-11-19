@@ -2,7 +2,7 @@
 id: MYLA-841
 title: "std.fs: where a symbolic link leads, so static_files can follow one that stays under its root"
 type: feature
-status: backlog
+status: in-progress
 priority: low
 labels: [stdlib, fs, http]
 ---

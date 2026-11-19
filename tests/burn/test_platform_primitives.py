@@ -287,6 +287,35 @@ true
 0 1
 """
 
+# MYLA-841: what a symbolic link holds, as written in it, without following
+# it: relative, dangling, one up, one longer than its first room
+# (argv[2]); a file, nothing and a NUL in the path give "" with the cause.
+READ_LINK = HELPERS + """from std.process import args
+
+#allow(primitive)
+fun main() {
+    let dir = args()[1]
+    print(es(__read_link(dir + "/link")))
+    print(es(__read_link(dir + "/dangling")))
+    print(es(__read_link(dir + "/sub/up")))
+    print(es(__read_link(dir + "/f.txt")))
+    print(es(__read_link(dir + "/missing")))
+    print(es(__read_link(dir + "/a\\0b")))
+    let long = __read_link(dir + "/long")
+    print(e(long.len()))
+    print(long == args()[2])
+}
+"""
+READ_LINK_OUT = """f.txt 0
+nothing 0
+../f.txt 0
+ 11
+ 1
+ 11
+4001 0
+true
+"""
+
 # MYLA-369: a string's bytes as a list and back in one copy, and a builder
 # with a capacity.
 BYTES = """#allow(primitive)
@@ -592,6 +621,23 @@ class Paths(unittest.TestCase):
             self.assertEqual(interp, (PATHS_OUT, "", 0))
             self.assertEqual(native, interp)
 
+    def test_read_link(self):
+        long = "x" * 3995 + "/f.txt"
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "f.txt"), "w") as f:
+                f.write("hello")
+            os.mkdir(os.path.join(d, "sub"))
+            os.symlink("f.txt", os.path.join(d, "link"))
+            os.symlink("nothing", os.path.join(d, "dangling"))
+            os.symlink("../f.txt", os.path.join(d, "sub", "up"))
+            os.symlink(long, os.path.join(d, "long"))
+            with tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, READ_LINK)
+                interp = selfhost_run(path, [d, long])
+                native = build_and_run_full(Program(path), args=[d, long], argv0=path)
+            self.assertEqual(interp, (READ_LINK_OUT, "", 0))
+            self.assertEqual(native, interp)
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class Bytes(unittest.TestCase):
@@ -644,6 +690,7 @@ class Warnings(unittest.TestCase):
         "__seek": "print(__seek(0, 0, 1))",
         "__fstat": "print(__fstat(0).len())",
         "__path_stat": "print(__path_stat(\"/\", true).len())",
+        "__read_link": "print(__read_link(\"/\").len())",
         "__spawn_piped": "print(__spawn_piped(\"/bin/true\", [\"true\"], none).len())",
         "__try_reap": "print(__try_reap(1))",
         "__str_to_bytes": "print(__str_to_bytes(\"ab\").len())",
@@ -675,6 +722,7 @@ class Warnings(unittest.TestCase):
             "fun main() {\n    print(__spawn_piped(\"x\", [\"x\"]).len())\n}\n": "__spawn_piped() takes",
             "fun main() {\n    print(__path_stat(\"/\").len())\n}\n": "__path_stat() takes (path: str, follow: bool)",
             "fun main() {\n    print(__path_stat(\"/\", 1).len())\n}\n": "__path_stat() takes",
+            "fun main() {\n    print(__read_link(1).len())\n}\n": "__read_link() takes (path: str)",
             "fun main() {\n    print(__str_to_bytes([1u8]).len())\n}\n": "__str_to_bytes() takes (s: str)",
             "fun main() {\n    print(__bytes_to_str(\"x\"))\n}\n": "__bytes_to_str() takes (b: [uint8])",
         }

@@ -112,6 +112,7 @@ const SYS_GETCWD: int64 = 17
 const SYS_RENAMEAT2: int64 = 276
 const SYS_MKDIRAT: int64 = 34
 const SYS_UNLINKAT: int64 = 35
+const SYS_READLINKAT: int64 = 78
 const SYS_FUTEX: int64 = 98
 const SYS_NANOSLEEP: int64 = 101
 const SYS_SCHED_YIELD: int64 = 124
@@ -461,6 +462,17 @@ pub fun rename(from_path: str, to_path: str) -> int64 {
     let r = sys5(SYS_RENAMEAT2, AT_FDCWD, a, AT_FDCWD, b, 0)
     __free(b)
     __free(a)
+    return r
+}
+
+// What the symbolic link `path` holds written to `buf` (room for `n`
+// bytes), as it is written there (`readlinkat`, MYLA-841): its length, `n`
+// when it may not have fitted (the kernel cuts it short); INVALID_INPUT for
+// a path that names no link.
+pub fun read_link(path: str, buf: int64, n: int64) -> int64 {
+    let p = c_path(path)
+    let r = sys5(SYS_READLINKAT, AT_FDCWD, p, buf, n, 0)
+    __free(p)
     return r
 }
 

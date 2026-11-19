@@ -105,7 +105,8 @@ const W_ENVIRON_SIZES_GET: int64 = 17
 const W_ENVIRON_GET: int64 = 18
 const W_RANDOM_GET: int64 = 19
 const W_FD_SEEK: int64 = 20
-const W_MEMORY_GROW: int64 = 21
+const W_PATH_READLINK: int64 = 21
+const W_MEMORY_GROW: int64 = 22
 
 // what WASI preview 1 lacks
 const ENOSYS: int64 = -UNSUPPORTED
@@ -607,6 +608,19 @@ pub fun rename(from_path: str, to_path: str) -> int64 {
     let b = wasi_path(to_path)
     let ba = __addr_of(b)
     return on_path(W_PATH_RENAME, from_path, false, [PREOPEN, ba + 8, __load64(ba)])
+}
+
+// What the symbolic link `path` holds written to `buf` (room for `n`
+// bytes), as it is written there (`path_readlink`, MYLA-841): its length,
+// `n` when it may not have fitted; INVALID_INPUT for a path that names no
+// link.
+pub fun read_link(path: str, buf: int64, n: int64) -> int64 {
+    let used = scratch(6)
+    let r = on_path_lookup(W_PATH_READLINK, path, -1, [buf, n, used])
+    if r < 0 {
+        return r
+    }
+    return __load64(used) & LOW32
 }
 
 // The working directory (`PWD`, else `/`) written to `buf`: its length; as

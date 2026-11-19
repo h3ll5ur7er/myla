@@ -70,7 +70,7 @@ async fun main() {
     // parked with deadlines 300, 100, -1, 200 and tags 10..13
     let ds = [300i64, 100i64, -1i64, 200i64]
     for i in 0..4 {
-        print(__sock_park(lot, cs[i].1.handle, ds[i], 10i64 + i as int64))
+        print(__sock_park(lot, cs[i].1.handle, ds[i], 10i64 + i as int64, 1))
     }
     print(__sock_ready(lot))
     // the third and the first get bytes

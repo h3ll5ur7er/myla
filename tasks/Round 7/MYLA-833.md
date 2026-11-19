@@ -2,7 +2,7 @@
 id: MYLA-833
 title: "std.http: a response sent to a slow reader holds its worker; park it instead"
 type: bug
-status: todo
+status: in-progress
 priority: medium
 labels: [std, http, runtime]
 ---
