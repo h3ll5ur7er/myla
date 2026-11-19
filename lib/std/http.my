@@ -2573,9 +2573,11 @@ pub async fun post_async(url: str, body: str) -> Result<Response, HttpError> {
 // the reactor with no task and holds no worker (MYLA-468), and so is one
 // whose request has begun and waits for more of it, its parser kept
 // (MYLA-549), the bodies so kept within `workers` times `max_body_bytes`
-// (past it 503, MYLA-794); a keeper task closes those whose time runs out
-// (a request begun answered 408), and a wait while a response is sent has
-// its time limit. The handler's own time isn't limited.
+// (past it 503, MYLA-794), and so is one whose response its socket didn't
+// take at once, until it takes more (MYLA-833), `workers` of them at most
+// (past it the worker sends the response itself, within `write_ms`); a
+// keeper task closes those whose time runs out (a request begun answered
+// 408). The handler's own time isn't limited.
 pub struct ServerOptions {
     workers: int,
     max_connections: int,
@@ -2754,17 +2756,19 @@ fun earliest(a: int64, b: int64) -> int64 {
 }
 
 // How often the keeper looks for connections whose time ran out: a quarter
-// of the shortest of `idle_ms`, `keep_alive_ms` and `read_ms` (a request
-// begun waits parked too, MYLA-549), from 10 ms to a second (negative:
-// none limits a parked connection, no keeper).
+// of the shortest of `idle_ms`, `keep_alive_ms`, `read_ms` and `write_ms`
+// (a request begun waits parked too, MYLA-549, and a response being sent,
+// MYLA-833), from 10 ms to a second (negative: none limits a parked
+// connection, no keeper).
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: 60000, idle_ms: 5000, read_ms: 20000, write_ms: 30000 })[1000]
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: 300, read_ms: -1, write_ms: 1000 })[75]
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: 0, read_ms: -1, write_ms: -1 })[10]
-#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: 200, write_ms: 50 })[50]
-#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: -1, write_ms: 50 })[-1]
+#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: 200, write_ms: 60 })[15]
+#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: -1, write_ms: 400 })[100]
+#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: -1, write_ms: -1 })[-1]
 fun poll_ms(o: ServerOptions) -> int {
     var shortest = -1
-    for ms in [o.keep_alive_ms, o.idle_ms, o.read_ms] {
+    for ms in [o.keep_alive_ms, o.idle_ms, o.read_ms, o.write_ms] {
         if ms >= 0 && (shortest < 0 || ms < shortest) {
             shortest = ms
         }
@@ -2787,24 +2791,36 @@ fun poll_ms(o: ServerOptions) -> int {
 // its tag, which the worker that takes it up reads (`__sock_tag`). A
 // connection whose request has begun and waits for its next bytes is
 // parked too, with the request's time limit as its deadline, and what it
-// read in `pending` (MYLA-549).
+// read in `pending` (MYLA-549); and one whose response its socket didn't
+// take at once, parked until it can send more, with the response's time
+// limit, and the response in `sends` (MYLA-833). `tally` is the server's
+// count of requests, which a response dropped gives back.
 struct Lot {
     id: int,
     ready: task.Notifier,
     pending: Pending,
+    sends: Sends,
+    tally: Tally,
 }
 
-fun lot_made(o: ServerOptions) -> Lot {
+fun lot_made(o: ServerOptions, tally: Tally) -> Lot {
     let n = task.notifier()
     let pending = Pending { begun: [:], held: 0, room: body_room(o), order: [], first: 0, queued: [:] }
-    return Lot { id: __sock_lot(n.id), ready: n, pending: pending }
+    let sends = Sends { kept: [:], room: worker_count(o) }
+    return Lot { id: __sock_lot(n.id), ready: n, pending: pending, sends: sends, tally: tally }
 }
 
 impl Lot {
     // The socket `h` parked until it is readable, with `deadline` and `tag`:
     // how many sockets are parked then, or -1 once the lot is closed.
     fun park(self, h: int, deadline: int64, tag: int64) -> int {
-        return __sock_park(self.id, h, deadline, tag, 1)
+        return self.park_for(h, deadline, tag, 1)
+    }
+
+    // The socket `h` parked until it is readable (`events` 1) or until it
+    // can send (2), with `deadline` and `tag`: `park`'s.
+    fun park_for(self, h: int, deadline: int64, tag: int64, events: int) -> int {
+        return __sock_park(self.id, h, deadline, tag, events)
     }
 
     // Every connection on it closed (not the listener `l`, which is only
@@ -2889,6 +2905,13 @@ async fun park_begun_again(lot: Lot, l: TcpListener, h: int, deadline: int64, o:
 // if it has one, forgotten, and answered with `answer` first (`TimedOut`:
 // 408) as far as the socket takes it at once.
 async fun dropped(lot: Lot, h: int, answer: Option<HttpError>) {
+    if __sock_tag(h) == SENDING {
+        // its response not all sent (MYLA-833)
+        match await lot.sends.take(h) {
+            Some(s) => await send_ended(lot, s, false)
+            None => {}
+        }
+    }
     if __sock_tag(h) == BEGUN {
         let gone = await lot.pending.take(h)
         match answer {
@@ -2911,7 +2934,11 @@ async fun dropped(lot: Lot, h: int, answer: Option<HttpError>) {
 async fun evict(lot: Lot, l: TcpListener, o: ServerOptions) {
     let begun = await lot.pending.evicted(lot.id, o.idle_ms)
     if begun > 0 {
-        closed(begun)
+        if __sock_tag(begun) == SENDING {
+            await dropped(lot, begun, None)
+        } else {
+            closed(begun)
+        }
         return
     }
     var oldest = __sock_expired(lot.id, -1)
@@ -3218,8 +3245,237 @@ impl Pending {
 }
 
 // The tag of a connection parked with a request begun (its time's end is
-// in its `Begun`; another tag is that end, or -1 for none).
+// in its `Begun`; another tag is that end, or -1 for none), and of one
+// parked with a response being sent (in its `Sending`, MYLA-833).
 const BEGUN: int64 = -2
+const SENDING: int64 = -3
+
+// --- responses waiting parked for their clients (MYLA-833) ------------------------
+
+// A response being sent, kept while its socket takes no more (MYLA-833):
+// the pieces still to send (`pieces`, the first from `at`), the body's
+// file (`file`, `left` bytes of it still to read), how many bytes went
+// (`sent`) and how many had when its time limit last began again
+// (`stepped`), when that ends (`deadline`), and what is done once it all
+// went: the connection closed (`close`), the answer counted in the
+// server's tally (`counted`), else its next request served, with the
+// connection's time's end (`life_end`), its client's address (`peer`) and
+// the bytes of it read already (`unread`, a pipelining client's). `err` is
+// why it failed.
+struct Sending {
+    pieces: [str],
+    at: int,
+    file: Option<BodyFile>,
+    left: int64,
+    sent: int64,
+    stepped: int64,
+    deadline: int64,
+    close: bool,
+    counted: bool,
+    life_end: int64,
+    peer: Option<SocketAddr>,
+    unread: str,
+    err: HttpError,
+}
+
+// The response of the head and body `two` and the file `file` sent after
+// them (D260), about to be sent at `now`: the head and a small body in
+// one piece, as `Link.send_parts` sends them.
+fun sending(two: (str, str), file: Option<BodyFile>, now: int64, write_ms: int) -> Sending {
+    var pieces: [str] = []
+    if two.1.len() <= ONE_WRITE {
+        pieces.push(two.0 + two.1)
+    } else {
+        pieces.push(two.0)
+        pieces.push(two.1)
+    }
+    let left = match file {
+        Some(bf) => bf.size,
+        None => 0i64,
+    }
+    return Sending { pieces: pieces, at: 0, file: file, left: left, sent: 0, stepped: 0, deadline: after(now, write_ms), close: false, counted: false, life_end: -1, peer: None, unread: "", err: HttpError.Closed }
+}
+
+// What `Sending.go_on` did.
+const SENT_ALL: int = 0
+const SENT_MORE: int = 1
+const SENT_FAILED: int = 2
+
+impl Sending {
+    // As much of the response sent on the socket `h` as it takes now, at
+    // `now`, the file read on 64 KiB at a time: SENT_ALL once all of it
+    // went; SENT_MORE when the socket takes no more now, its time limit
+    // begun again (`deadline`, `write_ms` from now) when 64 KiB more went
+    // since it last began; SENT_FAILED, with `err`, when the socket failed,
+    // the file couldn't be read or ended sooner (`Truncated`), or the time
+    // limit passed with less than 64 KiB gone (`TimedOut`).
+    fun go_on(var self, h: int, now: int64, write_ms: int) -> int {
+        while true {
+            while self.pieces.len() > 0 {
+                let piece = self.pieces[0]
+                if self.at >= piece.len() {
+                    self.pieces = self.pieces[1:]
+                    self.at = 0
+                    continue
+                }
+                let r = __sock_send(h, piece, self.at)
+                if r < 0 {
+                    let err = __io_errno()
+                    if err != WOULD_BLOCK {
+                        self.err = io_error(from_cause(err))
+                        return SENT_FAILED
+                    }
+                    if self.sent - self.stepped >= WRITE_STEP as int64 {
+                        self.stepped = self.sent
+                        self.deadline = after(now, write_ms)
+                    } else if self.deadline >= 0 && now >= self.deadline {
+                        self.err = HttpError.TimedOut
+                        return SENT_FAILED
+                    }
+                    return SENT_MORE
+                }
+                self.at += r
+                self.sent += r as int64
+            }
+            if self.left <= 0 {
+                return SENT_ALL
+            }
+            let n = if self.left > WRITE_STEP as int64 { WRITE_STEP } else { self.left as int }
+            let chunk = match self.file {
+                Some(bf) => {
+                    var f = bf.f
+                    match f.read(n) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            self.err = io_error(e)
+                            return SENT_FAILED
+                        }
+                    }
+                }
+                None => [],
+            }
+            if chunk.len() == 0 {
+                self.err = HttpError.Truncated
+                return SENT_FAILED
+            }
+            self.left -= chunk.len() as int64
+            self.pieces.push(bytes_m.to_str(chunk))
+        }
+        unreachable()
+    }
+}
+
+// The responses of a server's parked connections that their sockets
+// didn't take at once (MYLA-833), by the connection's handle, which its
+// workers share: at most `room`, what its workers held before they were
+// parked (`workers` responses), past which a worker sends a response
+// itself, as before. A response is gone on with here (`resume`), so that
+// its bytes aren't copied out and back each time its socket takes more.
+actor Sends {
+    kept: [int: Sending],
+    room: int,
+}
+
+// What became of a parked response gone on with (`Sends.resume`).
+enum Resent {
+    // It isn't kept (its connection was closed for another, `evict`)
+    Lost,
+    // Not all sent: parked again until the deadline
+    Waits(int64),
+    // All of it sent (true), or it failed (`err`): taken
+    Ended(Sending, bool),
+}
+
+impl Sends {
+    // `s` kept for `h`: false, and not kept, when the room is full.
+    fun put(var self, h: int, s: Sending) -> bool {
+        if self.kept.len() >= self.room {
+            return false
+        }
+        self.kept[h] = s
+        return true
+    }
+
+    // The response of `h`, kept, gone on with at `now` (`Sending.go_on`):
+    // kept again, in place, while it isn't all sent, or taken, its pieces
+    // dropped.
+    fun resume(var self, h: int, now: int64, write_ms: int) -> Resent {
+        if !self.kept.contains(h) {
+            return Resent.Lost
+        }
+        var s = self.kept[h]
+        // (`s` the only holder of its pieces now: sent on in place)
+        self.kept.remove(h)
+        let how = s.go_on(h, now, write_ms)
+        if how == SENT_MORE {
+            let deadline = s.deadline
+            self.kept[h] = s
+            return Resent.Waits(deadline)
+        }
+        s.pieces = []
+        return Resent.Ended(s, how == SENT_ALL)
+    }
+
+    // The response of `h`, no longer kept, its pieces dropped.
+    fun take(var self, h: int) -> Option<Sending> {
+        if !self.kept.contains(h) {
+            return None
+        }
+        var s = self.kept[h]
+        self.kept.remove(h)
+        s.pieces = []
+        return Some(s)
+    }
+
+    // The files of every response kept, none kept any more (a server that
+    // stopped).
+    fun files(var self) -> [BodyFile] {
+        var out: [BodyFile] = []
+        for h in self.kept.keys() {
+            match self.kept[h].file {
+                Some(bf) => out.push(bf)
+                None => {}
+            }
+        }
+        self.kept = [:]
+        return out
+    }
+}
+
+// A response that was parked, ended (`ok`: all of it sent): its file
+// closed, and its answer counted (or its room given back, MYLA-863) when
+// the server counts them.
+async fun send_ended(lot: Lot, s: Sending, ok: bool) {
+    match s.file {
+        Some(bf) => {
+            var f = bf.f
+            let shut = f.close()
+        }
+        None => {}
+    }
+    if s.counted {
+        await lot.tally.answered(ok)
+    }
+}
+
+// The connection `h`, its response kept in the lot's `sends`, parked until
+// its socket can send more, within `deadline`, a parked connection closed
+// for it past max_connections (`evict`); closed, its response dropped,
+// once the lot is (a server that stopped).
+async fun park_sending(lot: Lot, l: TcpListener, h: int, deadline: int64, o: ServerOptions) {
+    let count = lot.park_for(h, deadline, SENDING, 2)
+    if count < 0 {
+        match await lot.sends.take(h) {
+            Some(s) => await send_ended(lot, s, false)
+            None => {}
+        }
+        closed(h)
+        return
+    }
+    if o.max_connections >= 0 && count > o.max_connections {
+        await evict(lot, l, o)
+    }
+}
 
 impl Link {
     // A request read on with `r` as far as its bytes have come (MYLA-549):
@@ -3321,15 +3577,38 @@ impl Link {
         head?
         return await self.send(parts.1, write_ms)
     }
+
+    // What `snd` has still to send sent by this worker (`send`,
+    // `send_file`): a response past the room for those parked (MYLA-833),
+    // as every response was sent before.
+    async fun send_rest(var self, snd: Sending, write_ms: int) -> Result<(), HttpError> {
+        var i = 0
+        for piece in snd.pieces {
+            let start = if i == 0 { snd.at } else { 0 }
+            let sent = await self.send(part(piece, start, piece.len()), write_ms)
+            sent?
+            i += 1
+        }
+        match snd.file {
+            Some(bf) => {
+                if snd.left > 0 {
+                    return await self.send_file(BodyFile { f: bf.f, size: snd.left }, write_ms)
+                }
+            }
+            None => {}
+        }
+        return Ok(())
+    }
 }
 
 // The connection `h`, taken up ready (its next request has begun, or it
 // ended), served request after request while they come at once (a
 // pipelining client's), then parked again until the next begins, or
 // parked with a request begun until more of it comes (and taken up where
-// it stopped, MYLA-549), or closed: a client that closes it, a request
-// that can't be read (answered with its status), one that asks to close,
-// the connection's time up, the server's limit reached. A response from a
+// it stopped, MYLA-549), or parked with its response until its socket takes
+// more (and taken up there, MYLA-833), or closed: a client that closes it,
+// a request that can't be read (answered with its status), one that asks
+// to close, the connection's time up, the server's limit reached. A response from a
 // little before the time's end says `Connection: close`, so that a
 // keep-alive client doesn't send a request the server won't read. Whether
 // the worker goes on, and the requests answered (their answers sent: one
@@ -3344,6 +3623,34 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
     // a request begun, taken up where it waited (MYLA-549)
     var begun: Option<Reading> = None
     var peer: Option<SocketAddr> = None
+    if life_end == SENDING {
+        // its response sent on where it is kept, and taken once it ends
+        // (MYLA-833)
+        match await lot.sends.resume(h, time.now_ms(), o.write_ms) {
+            Lost => {
+                closed(h)
+                return (true, answered)
+            }
+            Waits(deadline) => {
+                await park_sending(lot, l, h, deadline, o)
+                return (true, answered)
+            }
+            Ended(s, ok) => {
+                await send_ended(lot, s, ok)
+                if ok {
+                    answered += 1
+                }
+                if !ok || s.close {
+                    closed(h)
+                    return (true, answered)
+                }
+                life_end = s.life_end
+                peer = s.peer
+                link.w.buf = s.unread
+                link.w.pos = 0
+            }
+        }
+    }
     if life_end == BEGUN {
         // its next bytes read on where it is kept, unless they end it or a
         // worker goes on with it (MYLA-794)
@@ -3401,7 +3708,7 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
         let margin = if o.keep_alive_ms / 10 > 1000 { 1000 } else { o.keep_alive_ms / 10 }
         close_at = life_end - margin as int64
     }
-    if begun.is_none() {
+    if begun.is_none() && peer.is_none() {
         peer = match link.w.stream.peer_addr() {
             Ok(a) => Some(a)
             Err(_) => None
@@ -3488,6 +3795,17 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
                 resp = opened.0
                 body_file = opened.1
                 stream_file = !same_name(req.method, "HEAD") && !no_body_status(resp.status)
+                if !stream_file {
+                    // (its size was all a HEAD wanted)
+                    match body_file {
+                        Some(bf) => {
+                            var f = bf.f
+                            let shut = f.close()
+                        }
+                        None => {}
+                    }
+                    body_file = None
+                }
             }
             close = close || resp.headers.has_token("Connection", "close") || (close_at >= 0 && time.now_ms() >= close_at)
             let keep_10 = !close && req.version == "HTTP/1.0"
@@ -3496,14 +3814,24 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
         var sent: Result<(), HttpError> = Ok(())
         match parts {
             Ok(two) => {
-                sent = await link.send_parts(two, o.write_ms)
-                match body_file {
-                    Some(bf) => {
-                        if stream_file && sent_ok(sent) {
-                            sent = await link.send_file(bf, o.write_ms)
-                        }
+                // what the socket takes at once; the rest parked until it
+                // takes more, holding no worker (MYLA-833), unless the
+                // room for parked responses is full
+                var snd = sending(two, body_file, time.now_ms(), o.write_ms)
+                let how = snd.go_on(h, time.now_ms(), o.write_ms)
+                if how == SENT_MORE {
+                    snd.close = close
+                    snd.counted = counted
+                    snd.life_end = life_end
+                    snd.peer = peer
+                    snd.unread = part(link.w.buf, link.w.pos, link.w.buf.len())
+                    if await lot.sends.put(h, snd) {
+                        await park_sending(lot, l, h, snd.deadline, o)
+                        return (true, answered)
                     }
-                    None => {}
+                    sent = await link.send_rest(snd, o.write_ms)
+                } else if how == SENT_FAILED {
+                    sent = Err(snd.err)
                 }
             }
             Err(e) => {
@@ -3620,8 +3948,10 @@ async fun keeper(lot: Lot, tally: Tally, poll: int) -> Result<int, HttpError> {
         let now = time.now_ms()
         var h = __sock_expired(lot.id, now)
         while h > 0 {
-            if __sock_poll(h, 1, 0) > 0 {
-                let count = lot.park(h, -1, __sock_tag(h))
+            // (a response being sent waits for its socket to take more)
+            let events = if __sock_tag(h) == SENDING { 2 } else { 1 }
+            if __sock_poll(h, events, 0) > 0 {
+                let count = lot.park_for(h, -1, __sock_tag(h), events)
                 if count < 0 {
                     closed(h)
                 }
@@ -3669,7 +3999,7 @@ fun accept_fate(e: IoError) -> int {
 // answered, or the first one's error. The listener is parked on the lot
 // first; once they stopped, the connections still open are closed.
 async fun run_workers(l: TcpListener, o: ServerOptions, handler: async (Request) -> Response, tally: Tally) -> Result<int, HttpError> {
-    let lot = lot_made(o)
+    let lot = lot_made(o, tally)
     let parked = lot.park(l.handle, -1, -1)
     var fs: [async () -> Result<int, HttpError>] = []
     for i in 0..worker_count(o) {
@@ -3692,6 +4022,11 @@ async fun run_workers(l: TcpListener, o: ServerOptions, handler: async (Request)
                 }
             }
         }
+    }
+    // (the responses still parked: their files)
+    for bf in await lot.sends.files() {
+        var f = bf.f
+        let shut = f.close()
     }
     lot.close(l)
     if failed {

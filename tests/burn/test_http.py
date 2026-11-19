@@ -35,6 +35,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 
@@ -764,6 +765,12 @@ fun handle(r: Request) -> Response {
     if r.path() == "/echo" {
         return http.response(200, r.body)
     }
+    if r.path() == "/file" {
+        // the file `?p=` names, sent from the file (`Response.file`)
+        var f = http.response(200, "")
+        f.file = r.query_param("p").unwrap_or("")
+        return f
+    }
     return http.response(200, "ok")
 }
 
@@ -976,6 +983,56 @@ class TimeLimits(unittest.TestCase):
             for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "300", "300", "300"]).items():
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
+
+    def test_slow_readers_hold_no_worker(self):
+        # MYLA-833 (M8 of the review of 2026-11-17): a response larger than
+        # the socket takes held its worker while its client read slowly,
+        # for write_ms each 64 KiB: as many slow readers as workers held
+        # them all. A response that doesn't go out at once waits parked
+        # until its socket takes more, holding no worker: two slow readers
+        # of 8 MiB and two of a 3 MiB file beside a 4-worker server, and a
+        # request on a connection of its own is answered at once; each
+        # slow reader then gets its whole response, on a connection kept.
+        data = bytes((i * 7 + (i >> 9)) & 255 for i in range(3 * 1024 * 1024 + 123))
+
+        def check(port, big_file):
+            slow = []
+            for i in range(4):
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                s.settimeout(20)
+                s.connect(("127.0.0.1", port))
+                path = b"/big" if i % 2 == 0 else b"/file?p=" + urllib.parse.quote(big_file).encode()
+                s.sendall(b"GET " + path + b" HTTP/1.1\r\nHost: x\r\n\r\n")
+                slow.append(s)
+            time.sleep(0.3)
+            took = []
+            for _ in range(3):
+                out, t = quick_get(port, timeout=5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+                took.append(t)
+                time.sleep(0.2)
+            self.assertLess(max(took), 1.0, took)
+            for i, s in enumerate(slow):
+                r = recv_response(s)
+                head, _, body = r.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 200 OK\r\n"), head)
+                if i % 2 == 0:
+                    self.assertEqual((len(body), body.count(b"x")), (8 << 20, 8 << 20), head)
+                else:
+                    self.assertEqual((len(body), body == data), (len(data), True), head[-200:])
+                s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                out, _ = end_of(s, 5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n") and out.endswith(b"\r\n\r\nok"), out)
+                s.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            big_file = os.path.join(tmp, "big.bin")
+            with open(big_file, "wb") as f:
+                f.write(data)
+            for name, (argv, exe) in self.forms(tmp, ["10000", "4", "-", "5000", "5000", "5000"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, lambda port: check(port, big_file))
 
     def test_a_request_that_came_while_the_server_was_busy(self):
         # MYLA-756: a parked connection whose request came before its idle

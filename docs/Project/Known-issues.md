@@ -41,7 +41,6 @@ The targets are x86-64 and aarch64 Linux, wasm32 on WASI and x86-64 Windows; mac
 
 ## Standard library
 
-- **std.http:** a response being sent holds its worker for as long as its client reads 64 KiB within each `write_ms`: 64 slow readers of 8 MB hold every worker of a default server ([[MYLA-833]]).
 - **std.json and the router:** `static_files` looks at a file before the server opens it, so one swapped for a FIFO in between still blocks a worker ([[MYLA-842]]).
 - **Numerics:** a few subnormal floats print a farther one of their shortest digits than Python's repr does, though both read back ([[MYLA-910]]).
 
