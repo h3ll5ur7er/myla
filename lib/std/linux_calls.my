@@ -1,0 +1,89 @@
+// std.linux_calls — what Linux's platform layer, std.platform, differs in
+// between the architectures (MYLA-758, D223): the system calls' numbers, the
+// layouts of two records, two flags and the target's name; x86-64's here.
+// aarch64 has a copy of its own, `linux_calls_aarch64.my`, which the
+// loader takes for this module there (`for_target`), as it takes
+// `path_windows.my` for `path.my` on Windows. std.platform makes the same
+// calls on both: the generic ones (`openat`, `newfstatat`, `mkdirat`,
+// `unlinkat`, `renameat2`, `dup3`, `ppoll`, `epoll_pwait`, `clone` for a
+// fork), which are aarch64's only ones and x86-64's beside its older
+// `open`, `stat`, `mkdir`, `poll`, `fork` and the rest. Not for programs.
+
+// The target std.platform is the layer of, as `--target` names it.
+pub const TARGET_NAME: str = "x86_64-linux"
+
+// The system calls' numbers: x86-64's own table.
+pub const SYS_READ: int64 = 0
+pub const SYS_WRITE: int64 = 1
+pub const SYS_OPENAT: int64 = 257
+pub const SYS_CLOSE: int64 = 3
+pub const SYS_NEWFSTATAT: int64 = 262
+pub const SYS_FSTAT: int64 = 5
+pub const SYS_PPOLL: int64 = 271
+pub const SYS_MMAP: int64 = 9
+pub const SYS_MUNMAP: int64 = 11
+pub const SYS_MADVISE: int64 = 28
+pub const SYS_WRITEV: int64 = 20
+pub const SYS_PIPE2: int64 = 293
+pub const SYS_DUP3: int64 = 292
+pub const SYS_CLONE: int64 = 56
+pub const SYS_EXECVE: int64 = 59
+pub const SYS_EXIT: int64 = 60
+pub const SYS_WAIT4: int64 = 61
+pub const SYS_GETCWD: int64 = 79
+pub const SYS_RENAMEAT2: int64 = 316
+pub const SYS_MKDIRAT: int64 = 258
+pub const SYS_UNLINKAT: int64 = 263
+pub const SYS_FUTEX: int64 = 202
+pub const SYS_NANOSLEEP: int64 = 35
+pub const SYS_SCHED_YIELD: int64 = 24
+pub const SYS_CLOCK_GETTIME: int64 = 228
+pub const SYS_EPOLL_PWAIT: int64 = 281
+pub const SYS_EPOLL_CTL: int64 = 233
+pub const SYS_EVENTFD2: int64 = 290
+pub const SYS_EPOLL_CREATE1: int64 = 291
+pub const SYS_SCHED_GETAFFINITY: int64 = 204
+pub const SYS_GETDENTS64: int64 = 217
+pub const SYS_EXIT_GROUP: int64 = 231
+pub const SYS_CHDIR: int64 = 80
+pub const SYS_MEMFD_CREATE: int64 = 319
+pub const SYS_LSEEK: int64 = 8
+pub const SYS_RT_SIGACTION: int64 = 13
+pub const SYS_GETPID: int64 = 39
+pub const SYS_KILL: int64 = 62
+pub const SYS_PIDFD_OPEN: int64 = 434
+pub const SYS_GETRANDOM: int64 = 318
+pub const SYS_SOCKET: int64 = 41
+pub const SYS_BIND: int64 = 49
+pub const SYS_LISTEN: int64 = 50
+pub const SYS_CONNECT: int64 = 42
+pub const SYS_GETSOCKNAME: int64 = 51
+pub const SYS_GETPEERNAME: int64 = 52
+pub const SYS_SENDTO: int64 = 44
+pub const SYS_RECVFROM: int64 = 45
+pub const SYS_SETSOCKOPT: int64 = 54
+pub const SYS_GETSOCKOPT: int64 = 55
+pub const SYS_SHUTDOWN: int64 = 48
+pub const SYS_SENDMSG: int64 = 46
+pub const SYS_RECVMSG: int64 = 47
+pub const SYS_ACCEPT4: int64 = 288
+pub const SYS_IOCTL: int64 = 16
+pub const SYS_FCNTL: int64 = 72
+
+// A `struct stat`'s size and where its `st_mode` is.
+pub const STAT_SIZE: int64 = 144
+pub const STAT_MODE: int64 = 24
+// An `epoll_event`'s size and where its data begins (packed on x86-64).
+pub const EVENT_SIZE: int64 = 12
+pub const EVENT_DATA: int64 = 4
+// `openat`'s O_DIRECTORY.
+pub const O_DIRECTORY: int64 = 65536
+// `rt_sigaction`'s SA_RESTORER: x86-64's kernel returns from a handler
+// through the code it is given, the runtime's `__sig_restorer`
+// (`rt_sigreturn`).
+pub const SA_RESTORER: int64 = 67108864
+
+// The code a signal's handler returns through, with SA_RESTORER.
+pub fun sig_restorer() -> int64 {
+    return __rt_addr("__sig_restorer")
+}

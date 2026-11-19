@@ -524,8 +524,11 @@ fun forged(n: int) -> int {
 
 # D259 (MYLA-792): a case's time limit, alike on both runners: a loop, a
 # sleep, a task spinning beside the case's, a deferred block that doesn't
-# run (natively the child is killed); the case after them runs
+# run (natively the child is killed), a child process waited for or written
+# to (MYLA-818: the interpreter waited in the system call); the case after
+# them runs
 _TIMEOUT = """import std.task as task
+import std.process as process
 
 #test
 fun spins() {
@@ -556,6 +559,38 @@ async fun spins_in_a_task() {
 }
 
 #test
+fun waits_for_a_child() {
+    let r = process.command("sh").arg("-c").arg("sleep 316").output()
+}
+
+#test
+fun waits_for_its_child() {
+    match process.command("sh").arg("-c").arg("sleep 315").spawn() {
+        Ok(c) => {
+            var child = c
+            let st = child.wait()
+        },
+        Err(e) => {},
+    }
+}
+
+#test
+fun writes_to_a_child() {
+    match process.command("sleep").arg("314").stdin_from(process.Stdio.Piped).spawn() {
+        Ok(c) => {
+            var child = c
+            if let Some(w) = child.take_stdin() {
+                var input = w
+                var big: [uint8] = []
+                for k in 0..200000 { big.push(0u8) }
+                let r = input.write(big)
+            }
+        },
+        Err(e) => {},
+    }
+}
+
+#test
 fun quick() {}
 """
 
@@ -563,10 +598,16 @@ _TIMEOUT_WANT = """FAIL  spins: timed out after 1 s
       | before
 FAIL  sleeps: timed out after 1 s
 FAIL  spins_in_a_task: timed out after 1 s
+FAIL  waits_for_a_child: timed out after 1 s
+FAIL  waits_for_its_child: timed out after 1 s
+FAIL  writes_to_a_child: timed out after 1 s
 PASS  quick
 
-1/4 passed.
+1/7 passed.
 """
+
+# The children `_TIMEOUT`'s cases start (a `pgrep -f` pattern)
+_TIMEOUT_CHILDREN = "sleep 31[456]"
 
 # D259: natively, what a case started goes with it (its process group)
 _STARTS_A_SLEEPER = """import std.process as process
@@ -721,6 +762,8 @@ class TestNative(unittest.TestCase):
                 with self.subTest(flags=flags):
                     proc = _myla(["test", path, "--timeout", "1", *flags], tmp)
                     self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (_TIMEOUT_WANT, "", 1))
+                    # what the cases started went with them
+                    self.assertEqual(subprocess.run(["pgrep", "-f", _TIMEOUT_CHILDREN], capture_output=True).returncode, 1)
             proc = _myla(["test", path, "--timeout", "x"], tmp)
             self.assertEqual(proc.returncode, 1)
             self.assertIn("--timeout takes whole seconds", proc.stderr)
@@ -742,14 +785,15 @@ class TestNative(unittest.TestCase):
             full["TMPDIR"] = scratch
             p = subprocess.Popen([selfhost_tool("main"), "test", spin, "--native", "--timeout", "0", "--stdlib", STDLIB_ROOT],
                                  cwd=tmp, env=full, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            # the harness and its child run (the child under the runner's scratch directory)
+            # the harness, its watcher of the groups (MYLA-819) and its child run
+            # (under the runner's scratch directory)
             harness = []
             for _ in range(600):
                 harness = subprocess.run(["pgrep", "-f", scratch], capture_output=True, text=True).stdout.split()
-                if len(harness) == 2:
+                if len(harness) == 3:
                     break
                 time.sleep(0.1)
-            self.assertEqual(len(harness), 2, harness)
+            self.assertEqual(len(harness), 3, harness)
             p.kill()
             p.wait()
             for _ in range(50):
@@ -757,6 +801,33 @@ class TestNative(unittest.TestCase):
                     break
                 time.sleep(0.1)
             self.assertEqual(subprocess.run(["pgrep", "-f", scratch], capture_output=True, text=True).stdout, "")
+
+    @unittest.skipUnless(os.path.exists("/proc"), "needs Linux")
+    def test_a_case_s_children_go_with_a_killed_run(self):
+        # MYLA-819: `myla test --native` killed while a case waits for a
+        # child; the runner and the case die with it, and the child goes too
+        # (nobody was left to kill the case's process group)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "sleeper.my", _STARTS_A_SLEEPER.replace("sleep 317", "sleep 318"))
+            p = subprocess.Popen([selfhost_tool("main"), "test", path, "--native", "--timeout", "0", "--stdlib", STDLIB_ROOT],
+                                 cwd=tmp, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                for _ in range(600):
+                    if subprocess.run(["pgrep", "-f", "sleep 318"], capture_output=True).returncode == 0:
+                        break
+                    time.sleep(0.1)
+                self.assertEqual(subprocess.run(["pgrep", "-f", "sleep 318"], capture_output=True).returncode, 0)
+            finally:
+                p.kill()
+                p.wait()
+            for _ in range(50):
+                if subprocess.run(["pgrep", "-f", "sleep 318"], capture_output=True).returncode == 1:
+                    break
+                time.sleep(0.1)
+            left = subprocess.run(["pgrep", "-f", "sleep 318"], capture_output=True, text=True).stdout.split()
+            for pid in left:
+                subprocess.run(["kill", "-9", pid], capture_output=True)
+            self.assertEqual(left, [])
 
     def test_the_runtime_s_own_cases(self):
         # std.rt is every native program's runtime: its cases run interpreted

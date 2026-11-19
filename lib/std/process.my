@@ -146,6 +146,9 @@ fun spawn_error_from_cause(code: int32) -> SpawnError {
 
 // Spawn `program` with the complete argument vector `argv` (argv[0] included),
 // wait for it, and collect its output. Shared by `run` and `Command.output`.
+// The run's cause is a failed spawn's, or that of a read of the child's
+// output or error that failed, once it ended (MYLA-862, the platform
+// modules' `run_with`): EIO's `Other(5)`, as `collect_async` gives.
 fun collect(program: str, argv: [str], opts: [str]) -> Result<Output, SpawnError> {
     if unfit(program, argv, opts) {
         return Err(SpawnError.InvalidInput)

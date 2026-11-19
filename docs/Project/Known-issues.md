@@ -10,7 +10,7 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 - The interpreter is about 500 times slower than native code (`fib(30)`: 3.7 s against 7 ms on `d5d80bc`, [[MYLA-317]]).
 - `--checked` int64 arithmetic is twice as slow by time in hot loops on x86-64 (`s += i * 3 - (i >> 1)`: 0.22 s against 0.11 s plain, 0.25 s with the trap inline on the same machine, where the review measured 0.62 s against 0.12 s): each check is now a `jo` to its trap after the function's return, one not-taken branch per operation ([[MYLA-551]]).
 - **Build, polymorphic recursion:** a finite program that wraps a type already 64 deep once more (`wrap([x])` of a 64-deep `x`) checks and runs, but `myla build` refuses it as 65 types deep ([[MYLA-624]]).
-- **Loading:** a hello world's check costs 21.4 M instructions and its run 24.9 M, since std.float is loaded only where a float method may be called (D258, [[MYLA-796]]); `tests/burn/test_check_cost.py` bounds both ([[MYLA-793]]). The wasm32 tools' checker (the playground's) overflows its stack at about 530 `&&` in one expression, under the parse limit of 2,048 ([[MYLA-826]]).
+- **Loading:** a hello world's check costs 21.4 M instructions and its run 24.9 M, since std.float is loaded only where a float method may be called (D258, [[MYLA-796]]); `tests/burn/test_check_cost.py` bounds both ([[MYLA-793]]).
 
 ## Backends and platforms
 
@@ -42,8 +42,8 @@ The targets are x86-64 and aarch64 Linux, wasm32 on WASI and x86-64 Windows; mac
 ## Standard library
 
 - **std.http:** a response being sent holds its worker for as long as its client reads 64 KiB within each `write_ms`: 64 slow readers of 8 MB hold every worker of a default server ([[MYLA-833]]).
-- **std.json and the router:** a number costs microseconds of bignum arithmetic, so 300 kB of `1e-300` take a thousand times as long to parse as 300 kB of strings, which `http.json_body` lets a client send ([[MYLA-843]]); `static_files` looks at a file before the server opens it, so one swapped for a FIFO in between still blocks a worker ([[MYLA-842]]).
-- **Numerics:** printing a float of a random exponent costs up to 7.4 M instructions, its shortest digits found by reading candidates back with big integers ([[MYLA-849]]); a NaN map key's `cannot hash NaN` points into `std/hash.my`, not at the program's line ([[MYLA-850]]).
+- **std.json and the router:** `static_files` looks at a file before the server opens it, so one swapped for a FIFO in between still blocks a worker ([[MYLA-842]]).
+- **Numerics:** a few subnormal floats print a farther one of their shortest digits than Python's repr does, though both read back ([[MYLA-910]]).
 
 ## Documentation and repository
 

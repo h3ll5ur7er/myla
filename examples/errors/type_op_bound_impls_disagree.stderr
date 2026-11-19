@@ -1,0 +1,5 @@
+type error: type 'B<str>' does not satisfy the bound 'D: Index<int32, int32>' required by 'first': it implements 'Index<int32, str>'
+  --> examples/errors/type_op_bound_impls_disagree.my:21:16
+   |
+21 |     print(first(B { v: 1 }, B { v: "a" }))
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

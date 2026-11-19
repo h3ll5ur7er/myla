@@ -21,6 +21,7 @@ from .ast import Pattern, PatternKind, Decl, DeclKind, Block, ExprOrBlock, ElseT
 from .ast import BindElem, FieldInit, MapEntry, MatchArm, FieldPat, Param
 from .ast import TypeParam, Field, Variant, Attribute, ImportPath, ImportItem
 from .ast import FunData, Program, unread_block
+from .target import host, Arch
 
 // A token's start (`peek_pos`).
 struct TokPos { line: int32, column: int32 }
@@ -60,10 +61,26 @@ const MAX_NESTING: int32 = 256
 // deeper each, a tree as deep as they are long, which the checker and the
 // rest walk recursively, so past it a parse error, not a stack overflow
 // (MYLA-545). It holds for the tools of both Linux targets with room: the
-// checker built for aarch64 overflowed its 120 MiB at 4,187 `&&`, 1,388
-// method calls and 1,593 `|> f` (x86-64's at 12,625, 4,144 and 4,781; M10
-// of the review of 2026-11-17, where 8,192 let 6,000 `|> id` through).
+// checker built for x86-64 overflowed its 120 MiB at 12,507 `&&`, 4,122
+// method calls and 4,778 `|> f`, aarch64's at 11,198, 3,893 and 4,507
+// (MYLA-826; at 4,178, 1,383 and 1,582 before its frames shared their
+// cells; M10 of the review of 2026-11-17, where 8,192 let 6,000 `|> id`
+// through).
 const MAX_CHAIN: int32 = 2048
+
+// `MAX_CHAIN` in the tools built for wasm32, the playground's (MYLA-826):
+// there the engine's own call stack (V8's, about 1 MB in Node and in a
+// browser alike) ran out at 532 `&&` and 612 `else if` arms, and the 8 MiB
+// shadow stack at 273 method calls and 316 `|> f`, so 256 leaves them twice
+// the room the Linux tools have. Less than `MAX_CHAIN` (`chained_by`).
+const MAX_CHAIN_WASM: int32 = 256
+
+// How far an expression may chain in the tools running here: `MAX_CHAIN`,
+// or `MAX_CHAIN_WASM` in those built for wasm32 (MYLA-826).
+fun chain_limit() -> int32 {
+    if host().arch == Arch.Wasm32 { return MAX_CHAIN_WASM }
+    return MAX_CHAIN
+}
 
 // What a call and a `|>` count towards `MAX_CHAIN` (an operator, cast,
 // index, field or `else if` arm counts 1): a level of each takes the
@@ -646,8 +663,11 @@ impl Parser {
     // a `|>` 3; M10 of the review of 2026-11-17).
     fun chained_by(var self, op: Token, weight: int32) {
         self.chain += weight
-        if self.chain > MAX_CHAIN {
-            self.fail_at(op, format("more than {} operators, calls, fields and 'else if' arms in one expression (a call counts two, a '|>' three): split it with a 'let' or a 'match'", MAX_CHAIN))
+        if self.chain > MAX_CHAIN_WASM {
+            let limit = chain_limit()
+            if self.chain > limit {
+                self.fail_at(op, format("more than {} operators, calls, fields and 'else if' arms in one expression (a call counts two, a '|>' three): split it with a 'let' or a 'match'", limit))
+            }
         }
     }
 

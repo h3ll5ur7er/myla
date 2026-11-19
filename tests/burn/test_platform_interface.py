@@ -2,8 +2,9 @@
 terms (MYLA-701, D209).
 
 `std.platform` is one module per target (`lib/std/platform.my` for x86-64
-Linux, `platform_aarch64.my`, `platform_wasm.my`, `platform_windows.my`), which the
-loader takes for `std/platform.my` on its target. std.rt and the library
+Linux, its numbers std.linux_calls', MYLA-758; `platform_aarch64.my`,
+`platform_wasm.my`, `platform_windows.my`), which the loader takes for
+`std/platform.my` on its target. std.rt and the library
 above it are written once against it, so each must give the same functions
 with the same types, and the same constants: the cause codes a failure gives
 (std.ioerror's, which `from_cause` reads), the kinds of a file
@@ -39,6 +40,9 @@ from ._tools import STDLIB_ROOT, selfhost_tool
 STD = os.path.join(STDLIB_ROOT, "std")
 MODULES = {"x86_64-linux": "platform.my", "aarch64-linux": "platform_aarch64.my", "wasm32-wasi": "platform_wasm.my",
            "x86_64-windows": "platform_windows.my"}
+# where a Linux target's module takes what tells the architectures apart
+# (its `TARGET` is the copy's `TARGET_NAME`)
+CALLS = {"x86_64-linux": "linux_calls.my"}
 # the constants that tell the targets apart
 PER_TARGET = {"TARGET", "RETURNS_MEMORY", "HUGE_PAGES", "HEAP_COMMIT", "PROCESSES", "SOCKETS"}
 # a target's own entry points, which its back end calls by name
@@ -107,7 +111,11 @@ class Declarations(unittest.TestCase):
                     self.assertEqual(got[c][0], ty, c)
                     if c not in PER_TARGET:
                         self.assertEqual(got[c][1], value, c)
-                self.assertEqual(got["TARGET"][1], f'"{target}"')
+                name = got["TARGET"][1]
+                if target in CALLS:
+                    self.assertEqual(name, "TARGET_NAME")
+                    name = interface(CALLS[target])[1]["TARGET_NAME"][1]
+                self.assertEqual(name, f'"{target}"')
 
     def test_no_errno_crosses_the_interface(self):
         # what MYLA-265 found: Linux's errnos, records and mode bits above
@@ -162,12 +170,13 @@ def bindings_program() -> str:
 class TargetCopies(unittest.TestCase):
     """The modules besides std.platform a target has a copy of its own of
     (`for_target`, MYLA-704): Windows' std.path, std.path_style and
-    std.system_error (MYLA-716), which the loader takes for the target's,
-    offer what the others' do."""
+    std.system_error (MYLA-716), and aarch64's std.linux_calls (MYLA-758),
+    which the loader takes for the target's, offer what the others' do."""
 
     def test_each_copy_has_the_same_functions_and_constants(self):
         for name, copy in (("path.my", "path_windows.my"), ("path_style.my", "path_style_windows.my"),
-                           ("system_error.my", "system_error_windows.my")):
+                           ("system_error.my", "system_error_windows.my"),
+                           ("linux_calls.my", "linux_calls_aarch64.my")):
             with self.subTest(module=name):
                 want_funs, want_consts = interface(name)
                 got_funs, got_consts = interface(copy)

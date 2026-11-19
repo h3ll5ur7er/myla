@@ -3492,13 +3492,19 @@ pub fun frame_size(f: IrFunc) -> int32 {
 // came in registers has a cell, as a local has; a slot living in a register
 // all its life (`inreg`) has none.
 fun slot_positions(f: IrFunc, words: bool, inreg: [bool]) -> ([int32], int32) {
+    return cell_positions(f, words, inreg, false)
+}
+
+// `slot_positions`, each slot at least a word with `word_min`: aarch64's
+// and wasm32's frames (MYLA-826), whose stores to a slot are a word's.
+pub fun cell_positions(f: IrFunc, words: bool, inreg: [bool], word_min: bool) -> ([int32], int32) {
     var pos: [int32] = []
     var cursor = 0
     var k = 0
     for s in f.slots {
         if no_cell(s, k, words, inreg) || s.scope > 0 { pos.push(-1) } else {
             pos.push(cursor)
-            cursor = cursor + (s.size + 7) / 8 * 8
+            cursor = cursor + slot_bytes(s, word_min)
         }
         k = k + 1
     }
@@ -3511,7 +3517,7 @@ fun slot_positions(f: IrFunc, words: bool, inreg: [bool]) -> ([int32], int32) {
     }
     k = 0
     for s in f.slots {
-        if s.scope > 0 && !no_cell(s, k, words, inreg) { own[s.scope] = own[s.scope] + (s.size + 7) / 8 * 8 }
+        if s.scope > 0 && !no_cell(s, k, words, inreg) { own[s.scope] = own[s.scope] + slot_bytes(s, word_min) }
         k = k + 1
     }
     // a scope's area starts where its parent's locals end (a scope's index
@@ -3533,11 +3539,22 @@ fun slot_positions(f: IrFunc, words: bool, inreg: [bool]) -> ([int32], int32) {
         let s = f.slots[k]
         if s.scope > 0 && !no_cell(s, k, words, inreg) {
             pos[k] = fill[s.scope]
-            fill[s.scope] = fill[s.scope] + (s.size + 7) / 8 * 8
+            fill[s.scope] = fill[s.scope] + slot_bytes(s, word_min)
         }
         k = k + 1
     }
     return pos, extent
+}
+
+// The bytes slot `s` takes in a frame: its size in words, at least one with
+// `word_min`.
+#test(Slot { name: "x", ty: Type.TStr, size: 0, word: -1, owns: false, inline: false, scope: 0 }, true)[8]
+#test(Slot { name: "x", ty: Type.TStr, size: 0, word: -1, owns: false, inline: false, scope: 0 }, false)[0]
+#test(Slot { name: "x", ty: Type.TStr, size: 12, word: -1, owns: false, inline: false, scope: 0 }, false)[16]
+fun slot_bytes(s: Slot, word_min: bool) -> int32 {
+    let n = (s.size + 7) / 8 * 8
+    if word_min && n == 0 { return 8 }
+    return n
 }
 
 // An async function's frame begins `[resume fn][caller frame][state][task]

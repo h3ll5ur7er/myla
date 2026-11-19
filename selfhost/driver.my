@@ -15,7 +15,7 @@
 from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
-from .loader import load_program_opts, LoadOptions, for_target, for_host, file_of, Loaded, type_errors, warning_reports, in_stdlib, normalize, is_std_module, std_tree_root, same_dir
+from .loader import load_program_opts, LoadOptions, for_target, for_host, copied_modules, file_of, Loaded, type_errors, warning_reports, in_stdlib, normalize, is_std_module, std_tree_root, same_dir
 from .stdroot import EMBEDDED_ROOT
 from .target import Target, Os, parse_target, host, toolchain, with_files, with_libs, missing_tool, unsupported
 from .diag import render, Report
@@ -25,7 +25,7 @@ from .dwarf import read_gdb_script
 from .interp import new_interp, RtError, TestRun, TestOptions, sched_from_env, time_from_env
 from .harness import harness_source, Harness, runner_case
 from std.test import cut_run, case_outcome, case_lines, record_head, output_within, timed_out
-from std.process import command, env
+from std.process import command, env, exit
 from std.time import now_ns
 from std.fs import make_dir_all, remove_dir_all, exists, read_to_string, current_dir, temp_root
 import std.path_style as style // `WINDOWS`: the separator of the machine the tools run on
@@ -262,8 +262,8 @@ pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, targ
     // where `for_target` reads the module, however the file and the root
     // are written (S3); so is a target's own copy of another module
     // (`system_error_windows.my`, which std.rt imports as std.system_error)
-    let entry = harness_entry(file, opts.stdlib_root, target.platform_file)
-    if entry != file { nopts.overrides[copy_key(entry, opts.stdlib_root, target.platform_file)] = h.source }
+    let entry = harness_entry(file, opts.stdlib_root, target.platform_file, target.copies)
+    if entry != file { nopts.overrides[copy_key(entry, opts.stdlib_root, target.copies)] = h.source }
     else { nopts.overrides[file] = h.source }
     // built checked: overflow traps under `myla test`, natively too (D175)
     if cmd_build(entry, out, nopts, false, true, target) != 0 {
@@ -321,28 +321,35 @@ pub fun scratch_sep() -> str {
 }
 
 // The file a harness of `file`'s cases is built from for a target whose
-// platform module is `std/<own>` ("": `std/platform.my`): the standard
+// platform module is `std/<own>` ("": `std/platform.my`) and whose own
+// copies of modules end in `copies` (`Target.copies`): the standard
 // library's `std/platform.my` when `file` is that module (`for_target`
 // gives that path `file`'s text, the harness here), and so `std/<name>.my`
 // when `file` is the target's own copy of a module (`std/path_windows.my`,
-// `std/system_error_windows.my`: MYLA-704, MYLA-716); else `file`
-// (MYLA-397).
-#test("lib/std/platform_wasm.my", "lib", "platform_wasm.my")["lib/std/platform.my"]
-#test("lib/./std/platform_aarch64.my", "lib", "platform_aarch64.my")["lib/std/platform.my"]
-#test("lib/std/platform_wasm.my", "lib", "platform_aarch64.my")["lib/std/platform_wasm.my"]
-#test("lib/std/platform.my", "lib", "")["lib/std/platform.my"]
-#test("lib/std/platform_wasm.my", "", "platform_wasm.my")["lib/std/platform_wasm.my"]
-#test("tests/platform_wasm.my", "lib", "platform_wasm.my")["tests/platform_wasm.my"]
-#test("lib/std/system_error_windows.my", "lib", "platform_windows.my")["lib/std/system_error.my"]
-#test("lib/std/path_windows.my", "lib", "platform_windows.my")["lib/std/path.my"]
-#test("lib/std/system_error_windows.my", "lib", "platform_wasm.my")["lib/std/system_error_windows.my"]
-#test("lib/std/system_error.my", "lib", "platform_windows.my")["lib/std/system_error.my"]
-fun harness_entry(file: str, stdlib_root: str, own: str) -> str {
-    if own == "" || stdlib_root == "" { return file }
+// `std/system_error_windows.my`, `std/linux_calls_aarch64.my`: MYLA-704,
+// MYLA-716, MYLA-758); else `file` (MYLA-397).
+#test("lib/std/platform_wasm.my", "lib", "platform_wasm.my", "_wasm.my")["lib/std/platform.my"]
+#test("lib/./std/platform_wasm.my", "lib", "platform_wasm.my", "_wasm.my")["lib/std/platform.my"]
+#test("lib/std/platform_wasm.my", "lib", "", "_aarch64.my")["lib/std/platform_wasm.my"]
+#test("lib/std/platform.my", "lib", "", "")["lib/std/platform.my"]
+#test("lib/std/platform.my", "lib", "", "_aarch64.my")["lib/std/platform.my"]
+#test("lib/std/linux_calls_aarch64.my", "lib", "", "_aarch64.my")["lib/std/linux_calls.my"]
+#test("lib/std/platform_wasm.my", "", "platform_wasm.my", "_wasm.my")["lib/std/platform_wasm.my"]
+#test("tests/platform_wasm.my", "lib", "platform_wasm.my", "_wasm.my")["tests/platform_wasm.my"]
+#test("lib/std/system_error_windows.my", "lib", "platform_windows.my", "_windows.my")["lib/std/system_error.my"]
+#test("lib/std/path_windows.my", "lib", "platform_windows.my", "_windows.my")["lib/std/path.my"]
+#test("lib/std/system_error_windows.my", "lib", "platform_wasm.my", "_wasm.my")["lib/std/system_error_windows.my"]
+#test("lib/std/system_error.my", "lib", "platform_windows.my", "_windows.my")["lib/std/system_error.my"]
+fun harness_entry(file: str, stdlib_root: str, own: str, copies: str) -> str {
+    if stdlib_root == "" { return file }
+    if own != "" && absolute(file) == absolute(stdlib_root + "/std/" + own) {
+        return stdlib_root + "/std/platform.my"
+    }
+    if copies == "" { return file }
     // (the modules a target may have a copy of its own of: std.loader's
     // `for_target`)
-    for name in ["platform", "path", "path_style", "system_error"] {
-        if absolute(file) == absolute(stdlib_root + "/std/" + name + own[8:]) {
+    for name in copied_modules() {
+        if absolute(file) == absolute(stdlib_root + "/std/" + name + copies) {
             return stdlib_root + "/std/" + name + ".my"
         }
     }
@@ -350,20 +357,22 @@ fun harness_entry(file: str, stdlib_root: str, own: str) -> str {
 }
 
 // Where `for_target` reads the target's copy of the module `entry` that
-// `harness_entry` gave (`std/<name>.my`), for a target whose platform
-// module is `std/<own>`: `std/<name>` and `own`'s ending.
-#test("lib/std/platform.my", "lib", "platform_wasm.my")["lib/std/platform_wasm.my"]
-#test("lib/std/system_error.my", "lib", "platform_windows.my")["lib/std/system_error_windows.my"]
-fun copy_key(entry: str, stdlib_root: str, own: str) -> str {
+// `harness_entry` gave (`std/<name>.my`), for a target whose own copies of
+// modules end in `copies`: `std/<name>` and that ending (`std/platform.my`'s
+// is the target's platform module, `std/platform<copies>`, where it has one).
+#test("lib/std/platform.my", "lib", "_wasm.my")["lib/std/platform_wasm.my"]
+#test("lib/std/system_error.my", "lib", "_windows.my")["lib/std/system_error_windows.my"]
+#test("lib/std/linux_calls.my", "lib", "_aarch64.my")["lib/std/linux_calls_aarch64.my"]
+fun copy_key(entry: str, stdlib_root: str, copies: str) -> str {
     let base = entry[stdlib_root.len() + 5:entry.len() - 3]
-    return stdlib_root + "/std/" + base + own[8:]
+    return stdlib_root + "/std/" + base + copies
 }
 
 // Whether `file` is the host's own platform module, `std/platform.my`,
 // tested for a target with one of its own, `std/<own>`, which takes that
 // module's place there (`for_target`).
 #test("lib/std/platform.my", "lib", "platform_wasm.my")[true]
-#test("lib/./std/platform.my", "lib/", "platform_aarch64.my")[true]
+#test("lib/./std/platform.my", "lib/", "platform_windows.my")[true]
 #test("lib/std/platform.my", "lib", "")[false]
 #test("lib/std/platform_wasm.my", "lib", "platform_wasm.my")[false]
 fun hosts_platform(file: str, stdlib_root: str, own: str) -> bool {
@@ -558,7 +567,12 @@ fun report_lines(text: str) -> [str] {
 }
 
 // `myla run <file> [args]`: interpret the program with argv
-// `[file, args...]`; the exit status.
+// `[file, args...]`, and end the process with its status; 1, the status
+// to end with, when it doesn't load. The interpreter, the checker and the
+// program are left to the exit, which gives their memory back at once:
+// released value by value they cost an empty program's run a tenth of its
+// instructions (MYLA-817). Every caller (the CLI, the playground's
+// `play_main`, an instance per run) ends with the status anyway.
 pub fun cmd_interp(file: str, opts: LoadOptions, prog_args: [str]) -> int32 {
     match load_for_host(file, opts) {
         Ok(ch) => {
@@ -578,7 +592,7 @@ pub fun cmd_interp(file: str, opts: LoadOptions, prog_args: [str]) -> int32 {
                     None => {},
                 }
             }
-            return code
+            exit(code)
         },
         Err(e) => {
             eprintln(e)
