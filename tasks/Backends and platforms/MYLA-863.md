@@ -45,7 +45,8 @@ The fix above (an answer counts only once sent) holds: the server counted 20 bec
 
 To tell them apart, the next run's report should say whether the client's socket held the answer when it gave up: on a timeout, a non-blocking read of what is there (bytes: a lost wake; nothing: the server lost them). Or delay the server's close (sleep 100 ms after `serve_n`) and see whether the misses go: if they do, it's the send and the close close together.
 
-- [ ] The client's report on a timeout says what its socket held (or the server's close delayed, as an experiment), on a Windows machine of many CPUs (CI's 4 CPUs haven't shown it in 39 runs)
+- [x] The client's report says what its socket held: `SOCKETS`' `probe` looks at the kept connection once a request has waited 10 s (cancelled when the answer comes), and prints one of: `closed` or `its handle reused` (the client saw the end and asked again on a new connection), `not readable` (neither the answer nor the end came), `a receive took 0 bytes` (the end came without the answer), `a receive took N bytes, 'HTTP/1.1 200 OK'` (the answer came and the client wasn't woken). Each reading checked natively with a reduced program (a server that answers, says nothing, closes, and a raw connection given an answer's head or its end); a normal answer still takes 0 ms.
+- [ ] A run of it on a Windows machine of many CPUs (CI's 4 CPUs haven't shown the miss in 39 runs)
 - [ ] The cause fixed, with a case that fails before
 
 ## Evidence

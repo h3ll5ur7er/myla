@@ -1050,16 +1050,100 @@ async fun handle_seen(seen: Served, r: Request) -> Response {
     return handle(r)
 }
 
+// What the client's socket `h` holds once request `i` has waited 10 s for
+// its answer, which takes milliseconds (MYLA-863: the server counted an
+// answer the client never got). Cancelled, and nothing, once the answer
+// comes. `was` is the socket's local address before the request
+// (`local_of`): a client that saw its connection end sends a GET again on
+// a new one, so a socket closed, or a handle now naming another socket (a
+// value Windows may reuse), says the end came first. Readiness comes from
+// WSAPoll on the socket itself, not from the poller, and Windows waits for
+// a socket's bytes with a read of none, which leaves them in the socket,
+// so a receive here sees what came:
+// - bytes, the answer's head: they came and the client wasn't woken for
+//   them (the poller);
+// - `0` bytes: the server's end came without the answer (the server);
+// - not readable: neither its answer nor its end came (the server, its
+//   send or its close).
+// The receive takes what it reads, and only once the request has failed
+// anyway; a socket that isn't readable isn't read (it may block).
+#allow(primitive)
+async fun probe(h: int, was: str, i: int) -> str {
+    await task.sleep(10000)
+    if task.cancelled() {
+        return ""
+    }
+    if h < 0 {
+        return f"ask {i} after 10 s: no connection kept from the request before"
+    }
+    let at = f"ask {i} after 10 s: the kept connection (port {port_of(was)})"
+    let now = local_of(h)
+    if now == "" {
+        return f"{at} closed: the client saw its end and asked again on a new one"
+    }
+    if now != was {
+        return f"{at} closed, its handle reused (port {port_of(now)}): the client saw its end and asked again"
+    }
+    let ready = __sock_poll(h, 1, 0)
+    if ready <= 0 {
+        return f"{at} not readable ({ready}, errno {__io_errno()}): neither the answer nor the end came"
+    }
+    let got = __sock_recv(h, 4096)
+    let e = __io_errno()
+    if got.len() == 0 {
+        return f"{at} readable, a receive took 0 bytes (errno {e}): the end came without the answer"
+    }
+    var head = got
+    match got.find("\r\n") {
+        Some(k) => { head = got[0:k] }
+        None => {}
+    }
+    return f"{at} readable, a receive took {got.len()} bytes, '{head}': the answer came and the client wasn't woken"
+}
+
+// The local address record of the socket `h` ("" when it isn't open).
+#allow(primitive)
+fun local_of(h: int) -> str {
+    if h < 0 {
+        return ""
+    }
+    let rec = __sock_addr(h, 0)
+    if rec.len() < 3 {
+        return ""
+    }
+    return rec
+}
+
+// The port of an address record (its second and third bytes), -1 for none.
+fun port_of(rec: str) -> int {
+    if rec.len() < 3 {
+        return -1
+    }
+    return (rec[1] as int) * 256 + (rec[2] as int)
+}
+
+// The handle of the connection `c` keeps for its next request, -1 for none.
+fun kept_handle(c: http.Client) -> int {
+    return match c.conn {
+        Some(w) => w.stream.handle
+        None => -1
+    }
+}
+
 // Its own HTTP server asked `n` times: the answers that were right. Each
 // request has 30 s: one the server never answers is `timed out` then, with
 // how long it took and how many came back before, and the run ends with
 // its count (MYLA-798: on Windows the 20th once had no answer, and the run
-// waited 200 s, ending its wait as `connection failed: Cancelled`).
+// waited 200 s, ending its wait as `connection failed: Cancelled`). A
+// request still waiting after 10 s says what its socket held then
+// (`probe`, MYLA-863).
 async fun ask(port: int, n: int) -> int {
     var c = http.client()
     var right = 0
     for i in 0..n {
         let t0 = time.now_ms()
+        let h = kept_handle(c)
+        async let look = probe(h, local_of(h), i)
         match await c.send_async(http.request("GET", f"http://127.0.0.1:{port}/p{i}").with_timeout(30000)) {
             Ok(r) => {
                 if r.status == 200 && r.text() == f"hello GET /p{i}" {
@@ -1071,6 +1155,11 @@ async fun ask(port: int, n: int) -> int {
             Err(e) => {
                 let no = failed(f"ask {i}: {e} after {time.now_ms() - t0} ms, {right} answered before")
             }
+        }
+        task.cancel(look)
+        let seen = await look
+        if seen != "" {
+            let no = failed(seen)
         }
     }
     c.close()
