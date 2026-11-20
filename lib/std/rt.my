@@ -447,15 +447,16 @@ fun fd_handle(fd: int64) -> int64 {
 // `__open(path, flags, mode)`: the file at `path` opened, a handle for its
 // descriptor (closed on exec), or -1 with the cause. `flags`: 1 read, 2
 // write (both: read and write), 4 create, 8 truncate, 16 append, 32 exclusive (with
-// create: ALREADY_EXISTS when the file is there); without 1 or 2, or with
-// another bit, INVALID_INPUT. `mode`: the permissions of a file it creates, less the umask
+// create: ALREADY_EXISTS when the file is there), 64 not waiting (a FIFO
+// opens at once), 128 no symbolic link at the end (MYLA-842); without 1 or
+// 2, or with another bit, INVALID_INPUT. `mode`: the permissions of a file it creates, less the umask
 // (none on wasm32).
 pub fun open(path: str, flags: int, mode: int) -> int {
     __set_io_errno(0)
     if nul_in(path) {
         return -1
     }
-    if (flags & 3) == 0 || (flags & -64) != 0 {
+    if (flags & 3) == 0 || (flags & -256) != 0 {
         __set_io_errno(os.INVALID_INPUT)
         return -1
     }
@@ -520,6 +521,43 @@ pub fun path_stat(path: str, follow: bool) -> [int64] {
     __free(out)
     return st
 }
+
+// `__read_link(path)` (MYLA-841): what the symbolic link `path` holds, the
+// path it leads to as written in it (relative to the link's directory or
+// absolute), without following it; "" with the cause: INVALID_INPUT for a
+// path that names no link (or has a NUL), NOT_FOUND for none. A target
+// longer than the first room (1 KiB) is read again with twice the room, up to
+// LINK_ROOM_MAX (past it: OTHER plus ENAMETOOLONG).
+pub fun read_link(path: str) -> str {
+    __set_io_errno(0)
+    if nul_in(path) {
+        return ""
+    }
+    var room: int64 = 1024
+    while true {
+        let cell = __alloc(room + 8)
+        let r = os.read_link(path, cell + 8, room)
+        if r >= 0 && r < room {
+            __store64(cell, r)
+            return __str_of(cell)
+        }
+        __free(cell)
+        if r < 0 {
+            record(r)
+            return ""
+        }
+        if room >= LINK_ROOM_MAX {
+            __set_io_errno(os.OTHER + 36)
+            return ""
+        }
+        room = room * 2
+    }
+    unreachable()
+}
+
+// The most bytes of a link's target `read_link` takes (Windows' reparse
+// data is 16 KiB at most, three bytes of UTF-8 to each of its units).
+const LINK_ROOM_MAX: int64 = 65536
 
 // --- entropy (MYLA-336) --------------------------------------------------------
 
@@ -5044,7 +5082,7 @@ fun watch_free(w: int64) {
 
 // --- lots: sockets parked with no task (MYLA-468) --------------------------------
 // A lot is a set of sockets parked on the reactor, each waiting to become
-// readable with no frame: a watch whose frame is 0 and whose `other` is its
+// readable (or writable, MYLA-833) with no frame: a watch whose frame is 0 and whose `other` is its
 // parking, `[lot][handle][descriptor][deadline][next][previous][watch]`
 // (PARKING bytes). A socket ready leaves the watches for the lot's ready
 // list, and the lot's notifier (a `std.task.Notifier`'s id) is notified
@@ -5071,13 +5109,14 @@ pub fun sock_lot(n: int64) -> int {
     return handle_new(H_LOT, rec) as int
 }
 
-// `__sock_park(lot, h, deadline, tag)`: the socket `h` parked on `lot` until
-// it is readable (or its input ended), with `deadline` (a time of the
-// parker's clock, `std.time.now_ms` in std.http, negative for none) and
-// `tag` kept with it: how many sockets are parked on the lot then, or -1
-// with EBADF (`lot` or `h` not open). A socket the poller can't watch is
-// ready at once.
-pub fun sock_park(lot: int, h: int, deadline: int64, tag: int64) -> int {
+// `__sock_park(lot, h, deadline, tag, events)`: the socket `h` parked on
+// `lot` until it is readable (or its input ended), or with `events` 2
+// until it can send (MYLA-833: a response its client is slow to take),
+// with `deadline` (a time of the parker's clock, `std.time.now_ms` in
+// std.http, negative for none) and `tag` kept with it: how many sockets
+// are parked on the lot then, or -1 with EBADF (`lot` or `h` not open). A
+// socket the poller can't watch is ready at once.
+pub fun sock_park(lot: int, h: int, deadline: int64, tag: int64, events: int) -> int {
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
     let rec = handle_get(lot as int64, H_LOT)
@@ -5108,7 +5147,11 @@ pub fun sock_park(lot: int, h: int, deadline: int64, tag: int64) -> int {
     __store64(rec + 40, __load64(rec + 40) + 1)
     let count = __load64(rec + 40)
     __store64(watch_slot_made(fd) + 56, tag)
-    let w = watch_add(fd, 0, 1)
+    var ev: int64 = 1
+    if events == 2 {
+        ev = 2
+    }
+    let w = watch_add(fd, 0, ev)
     var fr: int64 = 0
     if w == 0 {
         fr = parking_ready(p)

@@ -1050,16 +1050,100 @@ async fun handle_seen(seen: Served, r: Request) -> Response {
     return handle(r)
 }
 
+// What the client's socket `h` holds once request `i` has waited 10 s for
+// its answer, which takes milliseconds (MYLA-863: the server counted an
+// answer the client never got). Cancelled, and nothing, once the answer
+// comes. `was` is the socket's local address before the request
+// (`local_of`): a client that saw its connection end sends a GET again on
+// a new one, so a socket closed, or a handle now naming another socket (a
+// value Windows may reuse), says the end came first. Readiness comes from
+// WSAPoll on the socket itself, not from the poller, and Windows waits for
+// a socket's bytes with a read of none, which leaves them in the socket,
+// so a receive here sees what came:
+// - bytes, the answer's head: they came and the client wasn't woken for
+//   them (the poller);
+// - `0` bytes: the server's end came without the answer (the server);
+// - not readable: neither its answer nor its end came (the server, its
+//   send or its close).
+// The receive takes what it reads, and only once the request has failed
+// anyway; a socket that isn't readable isn't read (it may block).
+#allow(primitive)
+async fun probe(h: int, was: str, i: int) -> str {
+    await task.sleep(10000)
+    if task.cancelled() {
+        return ""
+    }
+    if h < 0 {
+        return f"ask {i} after 10 s: no connection kept from the request before"
+    }
+    let at = f"ask {i} after 10 s: the kept connection (port {port_of(was)})"
+    let now = local_of(h)
+    if now == "" {
+        return f"{at} closed: the client saw its end and asked again on a new one"
+    }
+    if now != was {
+        return f"{at} closed, its handle reused (port {port_of(now)}): the client saw its end and asked again"
+    }
+    let ready = __sock_poll(h, 1, 0)
+    if ready <= 0 {
+        return f"{at} not readable ({ready}, errno {__io_errno()}): neither the answer nor the end came"
+    }
+    let got = __sock_recv(h, 4096)
+    let e = __io_errno()
+    if got.len() == 0 {
+        return f"{at} readable, a receive took 0 bytes (errno {e}): the end came without the answer"
+    }
+    var head = got
+    match got.find("\r\n") {
+        Some(k) => { head = got[0:k] }
+        None => {}
+    }
+    return f"{at} readable, a receive took {got.len()} bytes, '{head}': the answer came and the client wasn't woken"
+}
+
+// The local address record of the socket `h` ("" when it isn't open).
+#allow(primitive)
+fun local_of(h: int) -> str {
+    if h < 0 {
+        return ""
+    }
+    let rec = __sock_addr(h, 0)
+    if rec.len() < 3 {
+        return ""
+    }
+    return rec
+}
+
+// The port of an address record (its second and third bytes), -1 for none.
+fun port_of(rec: str) -> int {
+    if rec.len() < 3 {
+        return -1
+    }
+    return (rec[1] as int) * 256 + (rec[2] as int)
+}
+
+// The handle of the connection `c` keeps for its next request, -1 for none.
+fun kept_handle(c: http.Client) -> int {
+    return match c.conn {
+        Some(w) => w.stream.handle
+        None => -1
+    }
+}
+
 // Its own HTTP server asked `n` times: the answers that were right. Each
 // request has 30 s: one the server never answers is `timed out` then, with
 // how long it took and how many came back before, and the run ends with
 // its count (MYLA-798: on Windows the 20th once had no answer, and the run
-// waited 200 s, ending its wait as `connection failed: Cancelled`).
+// waited 200 s, ending its wait as `connection failed: Cancelled`). A
+// request still waiting after 10 s says what its socket held then
+// (`probe`, MYLA-863).
 async fun ask(port: int, n: int) -> int {
     var c = http.client()
     var right = 0
     for i in 0..n {
         let t0 = time.now_ms()
+        let h = kept_handle(c)
+        async let look = probe(h, local_of(h), i)
         match await c.send_async(http.request("GET", f"http://127.0.0.1:{port}/p{i}").with_timeout(30000)) {
             Ok(r) => {
                 if r.status == 200 && r.text() == f"hello GET /p{i}" {
@@ -1071,6 +1155,11 @@ async fun ask(port: int, n: int) -> int {
             Err(e) => {
                 let no = failed(f"ask {i}: {e} after {time.now_ms() - t0} ms, {right} answered before")
             }
+        }
+        task.cancel(look)
+        let seen = await look
+        if seen != "" {
+            let no = failed(seen)
         }
     }
     c.close()
@@ -1589,6 +1678,68 @@ fun main() {
 """
 LONG_PATHS_OUT = "true\nok\nok\ndeep\ndeep\nf.txt\nok\ntrue false\nok\nok\nfalse\n"
 
+# MYLA-841, MYLA-842: links on Windows itself, which Wine doesn't make (its
+# mklink makes none): a junction in the served directory and one out of
+# it, a symbolic link to a file (mklink, with the runner's privilege);
+# what read_link, canonical, a no_follow open and static_files make of
+# them. The Windows runner's case `files/links`.
+WINDOWS_LINKS = r"""import std.fs as fs
+import std.http as http
+import std.process as process
+from std.process import Stdio, ExitStatus
+from std.fs import IoError
+
+// a link made by cmd's mklink (`/J` a junction; without it a symbolic
+// link, which needs the privilege a runner's administrator has)
+fun made(a: [str]) -> bool {
+    var c = process.command("cmd").arg("/c").arg("mklink")
+    for x in a {
+        c = c.arg(x)
+    }
+    return match c.stdout_from(Stdio.Null).stderr_from(Stdio.Null).output() {
+        Ok(out) => out.status == ExitStatus.Exited(0)
+        Err(e) => false
+    }
+}
+
+fun text(r: Result<str, IoError>) -> str {
+    return match r {
+        Ok(s) => s
+        Err(e) => fs.io_error_name(e)
+    }
+}
+
+fun main() {
+    let cwd = text(fs.current_dir())
+    let a = fs.make_dir_all("www\\sub")
+    let b = fs.write_to_file("www\\app.css", "body {}")
+    let c = fs.write_to_file("www\\sub\\a.txt", "a")
+    let d = fs.write_to_file("top.txt", "TOP SECRET")
+    print(made(["/J", "www\\inj", cwd + "\\www\\sub"]))
+    print(made(["/J", "www\\outj", cwd]))
+    print(made(["www\\in.css", "app.css"]))
+    print(fs.is_symlink("www\\inj") && fs.is_symlink("www\\in.css"))
+    print(text(fs.read_link("www\\inj")) == cwd + "\\www\\sub")
+    print(text(fs.read_link("www\\in.css")))
+    print(text(fs.read_link("www\\app.css")))
+    print(text(fs.canonical("www\\inj\\a.txt")) == cwd + "\\www\\sub\\a.txt")
+    print(text(fs.canonical("www\\in.css")) == cwd + "\\www\\app.css")
+    print(text(fs.canonical("www/outj/www/inj/../app.css")) == cwd + "\\www\\app.css")
+    match fs.options().read(true).no_follow(true).open("www\\in.css") {
+        Ok(f) => print("opened a link")
+        Err(e) => print(fs.io_error_name(e))
+    }
+    var app = http.router("")
+    app.static_files("/s", "www")
+    let h = app.handler()
+    for p in ["/s/inj/a.txt", "/s/in.css", "/s/outj/top.txt", "/s/app.css"] {
+        let r = h(http.request("GET", p))
+        print(f"{p} {r.status} {r.text()}")
+    }
+}
+"""
+WINDOWS_LINKS_OUT = 'true\ntrue\ntrue\ntrue\ntrue\napp.css\nInvalidInput\ntrue\ntrue\ntrue\nOther(40)\n/s/inj/a.txt 200 a\n/s/in.css 200 body {}\n/s/outj/top.txt 404 not found\n/s/app.css 200 body {}\n'
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
@@ -2034,6 +2185,11 @@ HOST_TESTS = ('import std.path as path\nimport std.test as test\nfrom std.proces
               # MYLA-729: the interpreter's case root under %TEMP%, joined with `\`
               '#test()[true]\nfun under_temp() -> bool {\n    let d = test.temp_dir()\n'
               '    return d.starts_with(env("TEMP").unwrap_or("?") + "\\\\myla-test-")\n}\n')
+# MYLA-819: a case that starts a child and waits for it, which `myla test`
+# killed must take along
+HOST_HOLDS = ('import std.process as process\nfrom std.process import Stdio\n\n'
+              '#test\nfun holds() {\n'
+              '    let r = process.command("./helper.exe").arg("sleep").arg("60126").stdout_from(Stdio.Null).output()\n}\n')
 # what only Windows' std.platform declares: checked against Linux's, an error
 HOST_CHECKED = 'import std.platform as platform\n\nfun never() {\n    platform.windows_start()\n}\n\nfun main() {}\n'
 
@@ -2100,7 +2256,11 @@ class HostModules(unittest.TestCase):
         for exe, src in (("myla.exe", "selfhost/main.my"), ("myla-lsp.exe", "tools/lsp/main.my")):
             subprocess.run([selfhost_tool("main"), "build", src, "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT,
                             "-o", os.path.join(cls.tmp, exe)], cwd=_REPO, check=True, timeout=600)
-        for name, text in (("p.my", HOST_PATHS), ("t.my", HOST_TESTS), ("c.my", HOST_CHECKED)):
+        with open(os.path.join(cls.tmp, "helper.my"), "w", encoding="utf-8") as fh:
+            fh.write(HELPER)
+        subprocess.run([selfhost_tool("main"), "build", "helper.my", "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT,
+                        "-o", "helper.exe"], cwd=cls.tmp, check=True, timeout=600)
+        for name, text in (("p.my", HOST_PATHS), ("t.my", HOST_TESTS), ("c.my", HOST_CHECKED), ("k.my", HOST_HOLDS)):
             with open(os.path.join(cls.tmp, name), "w", encoding="utf-8") as fh:
                 fh.write(text)
 
@@ -2121,6 +2281,34 @@ class HostModules(unittest.TestCase):
 
     def test_check(self):
         self.assertEqual(self.myla("check", "c.my"), ("ok\n", "", 0))
+
+    def test_killed_it_takes_what_its_cases_started_along(self):
+        # MYLA-819: `myla test` is in a job object of its own (`own_job`,
+        # driver.my's `test_in_own_job`), so killed it takes what it
+        # started along, here a case's child, as PR_SET_PDEATHSIG and
+        # std.test's watcher do on Linux. Without the job the child stayed.
+        proc = subprocess.Popen([*wine(), os.path.join(self.tmp, "myla.exe"), "test", "k.my", "--timeout", "0"],
+                                cwd=self.tmp, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            started = ""
+            for _ in range(300):
+                started = subprocess.run(["pgrep", "-f", "helper.exe sleep 60126"], capture_output=True, text=True).stdout
+                if started:
+                    break
+                time.sleep(0.1)
+            self.assertNotEqual(started, "", "the case's child never started")
+        finally:
+            proc.kill()
+            proc.wait()
+        left = ""
+        for _ in range(100):
+            left = subprocess.run(["pgrep", "-f", "helper.exe sleep 60126"], capture_output=True, text=True).stdout
+            if not left:
+                break
+            time.sleep(0.1)
+        if left:
+            subprocess.run(["pkill", "-f", "helper.exe sleep 60126"])
+        self.assertEqual(left, "", "the case's child outlived a killed `myla test`")
 
     def test_repl(self):
         out, err, code = self.myla("repl", stdin=b'import std.path as path\npath.parent("a\\\\b")\n')

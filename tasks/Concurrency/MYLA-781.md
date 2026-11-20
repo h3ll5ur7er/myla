@@ -30,4 +30,6 @@ A likely cause, to confirm first: the sibling's `await` of the actor call comple
 
 ## Proposals
 
+Accepted by the owner on 2026-11-19 as D299.
+
 - Keeping t15's shape (a failure outside the actor) can't be made exact: nothing a program does happens after its failure, so a sibling that doesn't depend on the failing task always races it. A longer loop (10 or 100 times) would make it rarer, not gone, and past `STOP_WAIT_MS` the program ends without the sibling. Recommended: the failure in the actor's method, as built.

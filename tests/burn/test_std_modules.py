@@ -11,8 +11,9 @@ adding its cases, and each run must report every case of the file (one per
 whose cases run in the interpreter only (natively it is the code the harness
 runs on), and the other targets' platform modules, which only their own
 targets can run: on a target, its own platform module runs (`platform_wasm`
-on wasm32, `platform_aarch64` on aarch64, `platform_windows` on Windows),
-which is its `std.platform`, built as that module (MYLA-397). Interpreted,
+on wasm32, `platform_windows` on Windows; on aarch64 Linux's own `platform`,
+with aarch64's std.linux_calls, MYLA-758), which is its `std.platform`,
+built as that module (MYLA-397). Interpreted,
 every platform module runs (MYLA-418: the 36 cases of the foreign two ran
 nowhere, MYLA-325).
 """
@@ -28,8 +29,8 @@ from ._targets import program_excuse
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 NOT_NATIVE = {"rt"}
-PLATFORMS = {"platform", "platform_aarch64", "platform_wasm", "platform_windows"}   # `platform` is the host's (D161)
-OWN_PLATFORM = {"": "platform", "aarch64-linux": "platform_aarch64", "wasm32-wasi": "platform_wasm",
+PLATFORMS = {"platform", "platform_wasm", "platform_windows"}   # `platform` is the host's (D161)
+OWN_PLATFORM = {"": "platform", "aarch64-linux": "platform", "wasm32-wasi": "platform_wasm",
                 "x86_64-windows": "platform_windows"}
 _RUN_MJS = os.path.join(os.path.dirname(STDLIB_ROOT), "tools", "wasm", "run.mjs")
 
@@ -74,7 +75,7 @@ class StdModuleCases(unittest.TestCase):
         # each target's own platform module, and only that one (MYLA-397)
         self.assertIn("platform_wasm", _modules("wasm32-wasi"))
         self.assertNotIn("platform", _modules("wasm32-wasi"))
-        self.assertIn("platform_aarch64", _modules("aarch64-linux"))
+        self.assertIn("platform", _modules("aarch64-linux"))
         self.assertNotIn("platform_wasm", _modules("aarch64-linux"))
         self.assertIn("platform_windows", _modules("x86_64-windows"))
         self.assertNotIn("platform_windows", _modules())

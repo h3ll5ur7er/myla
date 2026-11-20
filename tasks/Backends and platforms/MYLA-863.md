@@ -2,7 +2,7 @@
 id: MYLA-863
 title: "Windows: SOCKETS' 20th HTTP request once got no answer (net/sockets-and-children, 16 workers)"
 type: bug
-status: review
+status: in-progress
 priority: medium
 labels: [platforms, windows, http, concurrency]
 ---
@@ -27,6 +27,28 @@ The same job's "Rates" step then ran the case 30 of 30 on 1, 4 and 16 workers (0
 - [ ] Reproduce: `windows-runner.py run --runs 30 --tally --only net/sockets-and-children` on Windows, or under Wine with load (SOCKETS itself not reproduced here, below; its mechanism reproduced at once by `test_http.ToTheLimit`; only the `windows` job runs real Windows)
 - [x] Fix, with a test
 
+## Again, on the owner's workstation: an answer lost after it was sent (2026-11-19)
+
+Native Windows, 24 CPUs, `windows-runner.py run --runs 30 --tally --only net/sockets-and-children`, each bundle built from its commit:
+
+| Bundle | 1 worker | 4 workers | 16 workers |
+|---|---|---|---|
+| master before PR #85 (`80bf233`, this task's fix in) | 30 of 30 | 30 of 30 | 29 of 30 (the miss ran to the 200 s limit) |
+| PR #85 (`d7e65c1`, MYLA-833's parked sends) | 30 of 30 | 30 of 30 | 27 of 30 |
+
+The full run of the bundle at `d7e65c1` had one more (step 3, run 2). Every miss on #85 printed `ask 19: timed out after 30003 ms, 19 answered before` / `269 of 270 right` / `the HTTP server: 20 handled, /p0@53248 … /p19@53248, 1 connections in turn, serve_n gave 20`: by this task's key, **20 handled with the client's 19, one connection, so an answer lost after it was sent**, not a request sent again. 1 of 30 against 3 of 30 doesn't tell whether MYLA-833 made it likelier. CI's 4-CPU `windows-latest` ran the case 39 times on `d7e65c1` without a miss (10 at 16 workers).
+
+The fix above (an answer counts only once sent) holds: the server counted 20 because its 20th send went. What differs for the 20th is that `serve_n` stops right after it and closes the connection (`lot.close`), so the answer's bytes and the close follow each other closely. Where they can go:
+
+- **The server's side:** the answer's bytes taken by an overlapped `WSASend` (`send_overlapped`, its bytes copied) and the socket closed before it ended: `sock_close` defers the close while `F_SENDING` (`ws_close_later`); a path that closes without it, or a flag already cleared, would drop the bytes.
+- **The client's side:** the bytes arrive with the connection's end (FIN), and the client's wait on the completion port isn't woken for them (a lost wake on the poller with 16 workers on many CPUs), so it waits its 30 s.
+
+To tell them apart, the next run's report should say whether the client's socket held the answer when it gave up: on a timeout, a non-blocking read of what is there (bytes: a lost wake; nothing: the server lost them). Or delay the server's close (sleep 100 ms after `serve_n`) and see whether the misses go: if they do, it's the send and the close close together.
+
+- [x] The client's report says what its socket held: `SOCKETS`' `probe` looks at the kept connection once a request has waited 10 s (cancelled when the answer comes), and prints one of: `closed` or `its handle reused` (the client saw the end and asked again on a new connection), `not readable` (neither the answer nor the end came), `a receive took 0 bytes` (the end came without the answer), `a receive took N bytes, 'HTTP/1.1 200 OK'` (the answer came and the client wasn't woken). Each reading checked natively with a reduced program (a server that answers, says nothing, closes, and a raw connection given an answer's head or its end); a normal answer still takes 0 ms.
+- [ ] A run of it on a Windows machine of many CPUs (CI's 4 CPUs haven't shown the miss in 39 runs)
+- [ ] The cause fixed, with a case that fails before
+
 ## Evidence
 
 **SOCKETS itself, not reproduced here** (BASE `3add216`, 2026-11-18): under Wine 9.0, 600 of 600 runs right (`./prog.exe 200 50` on 1, 4 and 16 workers, 50 runs each, 4 at once with a prefix each, load average 60 to 100); natively, 400 of 400 on 16 workers beside them.
@@ -40,5 +62,7 @@ The same job's "Rates" step then ran the case 30 of 30 on 1, 4 and 16 workers (0
 **Suites** (2026-11-18, this branch): `scripts/test.sh` 1,859 tests OK; `scripts/test-target.py` x86_64-windows 39 of 39 suites, aarch64-linux 38 of 39 then 39 (test_children_run_in_parallel, [[MYLA-745]]), wasm32-wasi 39 of 39; `tests.burn.test_windows` and `test_windows_runner` 73 tests OK under Wine; `scripts/windows-runner.py run --wine --runs 3`: 153 passed, 0 failed, 17 skipped of 170 cases (round 7's integration: 152 of 170, t15 failing); the bootstrap's fixed point, `scripts/check-seed.sh` and its Windows run.
 
 ## Proposals
+
+Accepted by the owner on 2026-11-19 as D297.
 
 - Built: `max_requests` counts answers sent; an answer that couldn't be sent gives its place back, and a request that comes while those being answered would fill the limit waits for them (1 ms looks at the tally). Alternatives: (a) count requests read, sent or not (BASE): a client that sends a request again after a failed answer finds no server; (b) refuse the extra request instead of waiting (`take`'s false): the request sent again after a failed answer was refused too, as `ToTheLimit` showed (`connection closed`).

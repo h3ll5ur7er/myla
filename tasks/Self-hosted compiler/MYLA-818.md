@@ -43,5 +43,7 @@ In [[selfhost/interp.my]], only while a case runs with a time limit (`case_deadl
 
 ## Proposals
 
+Accepted by the owner on 2026-11-19 as D303.
+
 - **The children a case leaves are killed at every case's end**, not only past the limit: the interpreted equivalent of D272's "killed when the case ends", so a case that starts a child and passes doesn't leave it either. Alternatives: kill them only when the case timed out (closer to the task's words, but a passing case's leftover outlives `myla test` interpreted and not natively); leave them (as before).
 - **Descendants by /proc, not a process group**: the interpreter can't put a child in a group of its own without a new option of the spawn primitives (setpgid between fork and exec, the Linux platform's), which wave 1 doesn't add (D207). A new `opts` letter for "a group of its own" would let the interpreter kill the group as natively; until then /proc covers Linux, and Windows kills the child alone (its job objects are [[MYLA-819]]'s Windows part).

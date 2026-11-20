@@ -366,15 +366,14 @@ pub fun load_options(stdlib_root: str) -> LoadOptions {
     return LoadOptions { stdlib_root: stdlib_root, packages: [], root: "", overrides: [:], runtime: false }
 }
 
-// `opts` for the target `t`: aarch64 Linux takes the standard library's
-// `std/platform_aarch64.my` for its `std/platform.my` (MYLA-163), wasm32 on
-// WASI `std/platform_wasm.my` (MYLA-158), the file the target's record
-// names (`Target.platform_file`, "" for x86-64 Linux's own, MYLA-700): the
-// smallest form of choosing a module per target (MYLA-245). The copy the
-// tools carry is chosen too, for the runtime a library without its own
-// takes from them (MYLA-268), and a library without the target's file takes
-// theirs. A module may have a copy for a target too, its name ending as the
-// record's `copies` says (D223):
+// `opts` for the target `t`: wasm32 on WASI takes the standard library's
+// `std/platform_wasm.my` for its `std/platform.my` (MYLA-158), the file the
+// target's record names (`Target.platform_file`, "" for Linux's own on both
+// architectures, MYLA-700, MYLA-758): the smallest form of choosing a
+// module per target (MYLA-245). The copy the tools carry is chosen too, for
+// the runtime a library without its own takes from them (MYLA-268), and a
+// library without the target's file takes theirs. A module may have a copy
+// for a target too, its name ending as the record's `copies` says (D223):
 // x86-64 Windows takes `std/path_windows.my` for `std/path.my` and
 // `std/path_style_windows.my` for `std/path_style.my` (MYLA-704, Windows'
 // paths, D215), and `std/system_error_windows.my` for `std/system_error.my`

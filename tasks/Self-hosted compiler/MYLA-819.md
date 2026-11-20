@@ -2,7 +2,7 @@
 id: MYLA-819
 title: "A test child's own children outlive a killed harness, and on Windows a timed-out case"
 type: bug
-status: in-progress
+status: review
 priority: low
 labels: [testing, harness, windows]
 ---
@@ -12,8 +12,8 @@ Found by [[MYLA-792]] (D259). Natively each case runs in a child of the harness.
 - **Windows:** there are no process groups: past the time limit the harness kills the case's process only (`Child.kill`, TerminateProcess), and a case's children are left; nothing ties the harness to `myla test` either.
 
 - [x] Linux: a case's group is killed when the harness dies too (a subreaper, `PR_SET_CHILD_SUBREAPER`, in a small parent that outlives the harness, or the case's PDEATHSIG handled by a handler of the runtime's that kills its group)
-- [ ] Windows: each case in a job object killed with the job (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), the harness in one of `myla test`'s (each case: done; the harness in one of `myla test`'s needs `myla test` itself, `selfhost/driver.my`, to call `own_job` on Windows: proposed below)
-- [ ] Tests on both (Linux: done; Windows: the job object's, under Wine; a timed-out case's children only the `windows-latest` job can show)
+- [x] Windows: each case in a job object killed with the job (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), the harness in one of `myla test`'s (each case: done; `myla test` itself in a job of its own: wave 2 of round 7's follow-ups, below)
+- [x] Tests on both (Linux: done; Windows: the job object's, and `myla test` killed, under Wine; a timed-out case's children only the `windows-latest` job can show)
 
 ## What changed (Linux)
 
@@ -28,9 +28,11 @@ Chosen over a subreaper in a small parent of each case (a process more per case,
 
 ## Left open
 
-- **Windows**: each case's job object is the Concurrency and Windows lane's (below); `myla test` itself in a job object of its own is still open. On Windows (and wasm32) `start_watcher` starts nothing.
+- **Windows**: each case's job object is the Concurrency and Windows lane's (below); `myla test` itself in a job object of its own came with wave 2 (below). On Windows (and wasm32) `start_watcher` starts nothing.
 
 ## Proposals (Linux)
+
+Accepted by the owner on 2026-11-19 as D300 (Windows) and D304 (Linux).
 
 - **A watcher per run** (built), as above. Alternatives: a subreaper parent per case; the case's PDEATHSIG caught by a runtime handler that kills its group.
 - Not done, a small race noted: a runner killed between starting a case and the case's `setpgid`/`prctl` (the first statements of its `reporting`) leaves that case running without a group or a parent-death signal. Closing it needs the spawn to set both before `exec` (a spawn option of the platform's).
@@ -44,4 +46,12 @@ Chosen over a subreaper in a small parent of each case (a process more per case,
 
 ## Proposals (Windows)
 
+Accepted by the owner on 2026-11-19 as D310.
+
 - `myla test` on Windows calls `own_job()` at its start (`selfhost/driver.my`), so that killing it takes the harness and its cases along, as `PR_SET_PDEATHSIG` does on Linux; the runner (the harness) could too. Left to the Interpreter lane, whose files those are.
+
+## `myla test` in a job of its own (wave 2 of round 7's follow-ups, 2026-11-19)
+
+- [[selfhost/driver.my]] `test_in_own_job` calls std.platform's `own_job` (false, and nothing, off Windows) at the start of `cmd_test` and `cmd_test_native`, and [[selfhost/project_cmd.my]] `project_test` calls it too (a project's `myla test`; outside the lane's files by one line). What `myla test` starts from then on is in its job (a native harness and its cases, each case nested in a job of its own; the children of interpreted cases), so killing it takes them along, as `PR_SET_PDEATHSIG` and the watcher do on Linux. The harness itself doesn't need one of its own: it is in `myla test`'s.
+- **Evidence** (Wine 9.0): `test_windows.HostModules.test_killed_it_takes_what_its_cases_started_along`: `myla.exe test k.my --timeout 0`, a case waiting for `helper.exe sleep 60126`, `myla.exe` killed once the helper runs. Without the call (HEAD's driver.my): fails, `'13862\n' != ''`, the helper left. With it: passes; HostModules' 8 tests pass. `build/myla test selfhost/driver.my` 43/43, `project_cmd.my` 6/6.
+- **Only Windows itself shows** a native harness's cases going with a killed `myla test` (Wine has no LLVM for Windows to build a harness, `test_a_native_harness_is_built_under_temp`).

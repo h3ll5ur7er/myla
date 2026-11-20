@@ -64,6 +64,7 @@ pub const SYS_RECVMSG: int64 = 212
 pub const SYS_ACCEPT4: int64 = 242
 pub const SYS_IOCTL: int64 = 29
 pub const SYS_FCNTL: int64 = 25
+pub const SYS_READLINKAT: int64 = 78
 
 // A `struct stat`'s size and where its `st_mode` is.
 pub const STAT_SIZE: int64 = 128
@@ -71,8 +72,9 @@ pub const STAT_MODE: int64 = 16
 // An `epoll_event`'s size and where its data begins (not packed on aarch64).
 pub const EVENT_SIZE: int64 = 16
 pub const EVENT_DATA: int64 = 8
-// `openat`'s O_DIRECTORY (0x4000 here).
+// `openat`'s O_DIRECTORY (0x4000 here), and its O_NOFOLLOW (0x8000).
 pub const O_DIRECTORY: int64 = 16384
+pub const O_NOFOLLOW: int64 = 32768
 // `rt_sigaction`'s SA_RESTORER: none, as aarch64's kernel returns from a
 // handler through a trampoline of its own (the vDSO's).
 pub const SA_RESTORER: int64 = 0

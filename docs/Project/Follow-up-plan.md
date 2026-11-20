@@ -158,6 +158,8 @@ What round 7 left open, grouped by the files it touches so that lanes running si
 
 The concurrency lane is merged on its own as soon as it is done; the other four together after it, the Linux platform last, as it reshapes two whole modules. Each lane's new tasks take ids from its own range of 886 to 925.
 
-**Wave 2**, after wave 1: HTTP and files, [[MYLA-833]] (a slow reader parked), [[MYLA-841]] (where a link leads) and [[MYLA-842]]. Both 833 and 841 need a new primitive, so this lane alone stages the seeds (D207). 841's primitive goes into the one Linux module that wave 1 makes.
+**Wave 2**, after wave 1 (PRs #83 and #84): one lane, HTTP and files: [[MYLA-833]] (a slow reader parked), [[MYLA-841]] (where a link leads) and [[MYLA-842]] (the check and the open as two steps). Both 833 and 841 need a new primitive, so this lane alone stages the seeds (D207), once for both; 841's primitive goes into the one Linux module wave 1 made. After that `Stage:` commit it lands [[MYLA-758]]'s second half (`platform_aarch64.my` removed, branch `myla-758-second-half`), which aarch64's seed couldn't bootstrap before, and [[MYLA-819]]'s last part (`myla test` itself in a job object on Windows, `selfhost/driver.my`).
+
+**Then, the native runners** ([[MYLA-926]], D296): CI's tests on `ubuntu-24.04-arm` and `windows-latest` instead of qemu and Wine, which stay for local experiments only.
 
 Not in a wave: [[MYLA-885]] (the poller in Myla's terms) would rewrite the poller in every platform module, after both platform lanes; [[MYLA-799]] (the website) waits for its agent. The tasks round 7 left in `review` wait for the owner's sign-off.

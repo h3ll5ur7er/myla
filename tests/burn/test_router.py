@@ -147,8 +147,9 @@ async fun main() {
 
 
 # std.http's static files (D260, MYLA-795): only regular files under the
-# resolved root, no dot files by default, no symbolic links below the root,
-# no FIFO (which would block the worker that opened it) or device; `..` taken
+# resolved root, no dot files by default, no symbolic link that leads out of
+# the root (one that stays in it is followed, MYLA-841, but not to a dot
+# file or a FIFO), no FIFO (which would block the worker that opened it) or device; `..` taken
 # off lexically, never past the root. argv[1] is the root, argv[2] a file
 # outside it.
 POLICY = """import std.http as http
@@ -166,6 +167,8 @@ fun main() {
               "/assets/sub%2f..%2f..%2foutside.txt", "/assets/..%5coutside.txt", "/assets/.env",
               "/assets/.git/config", "/dots/.env", "/dots/.git/config", "/dots/../outside.txt",
               "/assets/leak.txt", "/assets/dirlink/outside.txt", "/assets/inlink.css", "/assets/fifo",
+              "/assets/linkdir/a.txt", "/assets/round.css", "/assets/dotlink.css", "/dots/dotlink.css",
+              "/assets/fifolink", "/assets/linkdir/../app.css", "/assets/selflink/sub/a.txt",
               "/assets/sub", "/assets/", "/assets/missing.css", "/assets/app.css%00.png"] {
         let r = h(http.request("GET", p))
         print(f"{p} {r.status} {r.text()}")
@@ -189,13 +192,23 @@ POLICY_WANT = """/assets/app.css 200 body {}
 /dots/../outside.txt 404 not found
 /assets/leak.txt 404 not found
 /assets/dirlink/outside.txt 404 not found
-/assets/inlink.css 404 not found
+/assets/inlink.css 200 body {}
 /assets/fifo 404 not found
+/assets/linkdir/a.txt 200 a
+/assets/round.css 200 body {}
+/assets/dotlink.css 404 not found
+/dots/dotlink.css 200 SECRET=1
+/assets/fifolink 404 not found
+/assets/linkdir/../app.css 200 body {}
+/assets/selflink/sub/a.txt 200 a
 /assets/sub 404 not found
 /assets/ 404 not found
 /assets/missing.css 404 not found
 /assets/app.css%00.png 404 not found
 """
+# the lines of POLICY_WANT that a link below the root serves (MYLA-841)
+LINKED = {"/assets/inlink.css", "/assets/linkdir/a.txt", "/assets/round.css", "/dots/dotlink.css",
+          "/assets/selflink/sub/a.txt"}
 
 # A file served over loopback is sent as it is read (D260): its bytes, its
 # length for HEAD, and a FIFO in the directory answered 404 at once.
@@ -293,6 +306,11 @@ def make_root(top: str) -> str:
         os.symlink(os.path.join(top, "outside.txt"), os.path.join(root, "leak.txt"))
         os.symlink(os.path.join(top, "out"), os.path.join(root, "dirlink"))
         os.symlink("app.css", os.path.join(root, "inlink.css"))
+        os.symlink("sub", os.path.join(root, "linkdir"))
+        os.symlink(os.path.join("..", "www", "app.css"), os.path.join(root, "round.css"))
+        os.symlink(".env", os.path.join(root, "dotlink.css"))
+        os.symlink("fifo", os.path.join(root, "fifolink"))
+        os.symlink(".", os.path.join(root, "selflink"))
     os.mkfifo(os.path.join(root, "fifo"))
     return root
 
@@ -302,7 +320,12 @@ class StaticFiles(unittest.TestCase):
     def test_policy_in_the_interpreter_and_natively(self) -> None:
         with tempfile.TemporaryDirectory() as top:
             root = make_root(top)
-            self.assertEqual(run_source_both_now(POLICY, [root]), (POLICY_WANT, "", 0))
+            want = POLICY_WANT
+            if TEST_TARGET == "x86_64-windows":
+                # no links there (`make_root`): what a link would serve isn't there
+                want = "".join(f"{line.split(' ')[0]} 404 not found\n" if line.split(" ")[0] in LINKED else line + "\n"
+                               for line in POLICY_WANT.splitlines())
+            self.assertEqual(run_source_both_now(POLICY, [root]), (want, "", 0))
 
     @unittest.skipIf(NO_SOCKETS, NO_SOCKETS_WHY)
     def test_streamed_over_loopback(self) -> None:

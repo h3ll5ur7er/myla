@@ -35,6 +35,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 
@@ -764,6 +765,12 @@ fun handle(r: Request) -> Response {
     if r.path() == "/echo" {
         return http.response(200, r.body)
     }
+    if r.path() == "/file" {
+        // the file `?p=` names, sent from the file (`Response.file`)
+        var f = http.response(200, "")
+        f.file = r.query_param("p").unwrap_or("")
+        return f
+    }
     return http.response(200, "ok")
 }
 
@@ -957,7 +964,13 @@ class TimeLimits(unittest.TestCase):
             # (the condition waited for, at most 30 s: 10 s once weren't
             # enough under a full run's load, MYLA-745; the sockets left
             # say which connection the server kept)
-            self.assertEqual(wait_for_sockets(self.server_pid, 1, 30), 1, socket_states(self.server_pid))
+            if TEST_TARGET == "x86_64-windows":
+                # (Wine keeps a socket parked on the reactor in its server,
+                # not always among the program's descriptors, MYLA-833: so
+                # the time the server takes, write_ms and its keeper's look)
+                time.sleep(2)
+            else:
+                self.assertEqual(wait_for_sockets(self.server_pid, 1, 30), 1, socket_states(self.server_pid))
             for s in hold:
                 got, _ = end_of(s, 5)
                 self.assertLess(len(got), 8 << 20, "closed before the whole response")
@@ -976,6 +989,93 @@ class TimeLimits(unittest.TestCase):
             for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "300", "300", "300"]).items():
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
+
+    def test_slow_readers_hold_no_worker(self):
+        # MYLA-833 (M8 of the review of 2026-11-17): a response larger than
+        # the socket takes held its worker while its client read slowly,
+        # for write_ms each 64 KiB: as many slow readers as workers held
+        # them all. A response that doesn't go out at once waits parked
+        # until its socket takes more, holding no worker: two slow readers
+        # of 8 MiB and two of a 3 MiB file beside a 4-worker server, and a
+        # request on a connection of its own is answered at once; each
+        # slow reader then gets its whole response, on a connection kept.
+        data = bytes((i * 7 + (i >> 9)) & 255 for i in range(3 * 1024 * 1024 + 123))
+
+        def check(port, big_file):
+            slow = []
+            for i in range(4):
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                s.settimeout(20)
+                s.connect(("127.0.0.1", port))
+                path = b"/big" if i % 2 == 0 else b"/file?p=" + urllib.parse.quote(big_file).encode()
+                s.sendall(b"GET " + path + b" HTTP/1.1\r\nHost: x\r\n\r\n")
+                slow.append(s)
+            time.sleep(0.3)
+            took = []
+            for _ in range(3):
+                out, t = quick_get(port, timeout=5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+                took.append(t)
+                time.sleep(0.2)
+            self.assertLess(max(took), 1.0, took)
+            for i, s in enumerate(slow):
+                r = recv_response(s)
+                head, _, body = r.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 200 OK\r\n"), head)
+                if i % 2 == 0:
+                    self.assertEqual((len(body), body.count(b"x")), (8 << 20, 8 << 20), head)
+                else:
+                    self.assertEqual((len(body), body == data), (len(data), True), head[-200:])
+                s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                out, _ = end_of(s, 5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n") and out.endswith(b"\r\n\r\nok"), out)
+                s.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            big_file = os.path.join(tmp, "big.bin")
+            with open(big_file, "wb") as f:
+                f.write(data)
+            for name, (argv, exe) in self.forms(tmp, ["10000", "4", "-", "5000", "5000", "5000"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, lambda port: check(port, big_file))
+
+    def test_what_the_server_opens_is_what_it_checks(self):
+        # MYLA-842: a response's file was looked at by `static_files` and
+        # opened later, when it was sent, and only then checked: a FIFO
+        # swapped in meanwhile blocked the worker in its open until
+        # something wrote to it, and a link was followed. The server opens
+        # the file without waiting and without following a link at the
+        # end, then checks what it opened: the FIFO and the link are 404 at
+        # once, on a one-worker server, and a regular file is served.
+        def check(port, d):
+            cases = [("fifo", b"HTTP/1.1 404 Not Found\r\n"), ("link", b"HTTP/1.1 404 Not Found\r\n"),
+                     ("a.txt", b"HTTP/1.1 200 OK\r\n")]
+            if TEST_TARGET == "x86_64-windows":
+                # Wine shows a Unix link as what it names (the Windows
+                # runner's `files/links` opens a link on Windows itself)
+                cases = [c for c in cases if c[0] != "link"]
+            for name, want in cases:
+                path = urllib.parse.quote(os.path.join(d, name)).encode()
+                with socket.create_connection(("127.0.0.1", port), timeout=3) as s:
+                    t0 = time.monotonic()
+                    s.sendall(b"GET /file?p=" + path + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    out, _ = end_of(s, 3)
+                    self.assertTrue(out.startswith(want), (name, out))
+                    self.assertLess(time.monotonic() - t0, 2, name)
+                    if name == "a.txt":
+                        self.assertTrue(out.endswith(b"\r\n\r\nhello"), out)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = os.path.join(tmp, "www")
+            os.mkdir(d)
+            with open(os.path.join(d, "a.txt"), "w") as f:
+                f.write("hello")
+            os.mkfifo(os.path.join(d, "fifo"))
+            os.symlink("a.txt", os.path.join(d, "link"))
+            for name, (argv, exe) in self.forms(tmp, ["4000", "1", "-", "5000", "5000", "5000"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, lambda port: check(port, d), {"MYLA_THREADS": "1"})
 
     def test_a_request_that_came_while_the_server_was_busy(self):
         # MYLA-756: a parked connection whose request came before its idle

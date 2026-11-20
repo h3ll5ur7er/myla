@@ -1367,9 +1367,13 @@ pub fun file_size(fd: int64) -> int64 {
 }
 
 // The file at `path` opened with std.rt's portable `flags` (1 read, 2
-// write, 4 create, 8 truncate, 16 append, 32 exclusive; at least one of the
-// first two): its descriptor. `mode` isn't used: Windows has no permission
-// bits, and a new file isn't read-only (D218).
+// write, 4 create, 8 truncate, 16 append, 32 exclusive, 64 not waiting,
+// 128 no link at the end; at least one of the first two): its descriptor.
+// Not waiting changes nothing (a FIFO isn't a file here); with no link at
+// the end the reparse point is opened itself (FILE_FLAG_OPEN_REPARSE_POINT)
+// and a link refused as Linux's O_NOFOLLOW refuses one, ELOOP's `Other`
+// (MYLA-842). `mode` isn't used: Windows has no permission bits, and a new
+// file isn't read-only (D218).
 pub fun open_file(path: str, flags: int64, mode: int64) -> int64 {
     var access: int64 = 0
     if (flags & 1) != 0 {
@@ -1382,8 +1386,30 @@ pub fun open_file(path: str, flags: int64, mode: int64) -> int64 {
             access |= GENERIC_WRITE
         }
     }
-    return open_handle(path, access, disposition_of(flags), 0)
+    if (flags & 128) == 0 {
+        return open_handle(path, access, disposition_of(flags), 0)
+    }
+    let h = open_handle(path, access, disposition_of(flags), FILE_FLAG_OPEN_REPARSE_POINT)
+    if h < 0 {
+        return h
+    }
+    let out = __alloc(32)
+    let r = handle_stat(h, out, false)
+    let kind = __load64(out + 8)
+    __free(out)
+    if r < 0 || kind == KIND_SYMLINK {
+        let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+        if r < 0 {
+            return r
+        }
+        return -LINK_AT_END
+    }
+    return h
 }
+
+// What an open with no link at the end gives for one: Linux's ELOOP's
+// `Other`, as std.ioerror numbers it.
+const LINK_AT_END: int64 = 296
 
 // How CreateFile2 opens a file for the portable `flags`: exclusive with
 // create CREATE_NEW, create and truncate CREATE_ALWAYS, create alone
@@ -1602,6 +1628,99 @@ pub fun path_stat(path: str, follow: bool, out: int64) -> int64 {
     let r = handle_stat(h, out, true)
     let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
     return r
+}
+
+// DeviceIoControl's code that reads a reparse point's data, and the most
+// that data takes (MAXIMUM_REPARSE_DATA_BUFFER_SIZE); the error of a file
+// that is none (ERROR_NOT_A_REPARSE_POINT)
+const FSCTL_GET_REPARSE_POINT: int64 = 589992
+const REPARSE_ROOM: int64 = 16384
+const NOT_A_REPARSE_POINT: int64 = 4390
+
+// What the symbolic link `path` holds written to `buf` (room for `n`
+// bytes) as UTF-8 (MYLA-841): the reparse point itself opened
+// (FILE_FLAG_OPEN_REPARSE_POINT) and its data read (`DeviceIoControl`,
+// FSCTL_GET_REPARSE_POINT), what `link_text` makes of it. Its length, `n`
+// when it may not have fitted; INVALID_INPUT for a path that names no
+// link (no reparse point, or one of another tag).
+pub fun read_link(path: str, buf: int64, n: int64) -> int64 {
+    let h = open_handle(path, FILE_READ_ATTRIBUTES, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+    if h < 0 {
+        return h
+    }
+    let data = __alloc(REPARSE_ROOM)
+    let got = __alloc(8)
+    __store64(got, 0)
+    var len: int64 = 0
+    if ok(win_call(__rt_get("__imp_DeviceIoControl"), [h, FSCTL_GET_REPARSE_POINT, 0, 0, data, REPARSE_ROOM, got, 0])) {
+        len = link_text(data, __load64(got) & LOW32, buf, n)
+    } else {
+        let e = last_error()
+        len = if e == NOT_A_REPARSE_POINT { -INVALID_INPUT } else { -cause(e) }
+    }
+    __free(got)
+    __free(data)
+    let c = __syscall(__rt_get("__imp_CloseHandle"), h, 0, 0)
+    return len
+}
+
+// The target of the reparse point whose data (REPARSE_DATA_BUFFER, `size`
+// bytes) is at `data`, written to `buf` (room for `n` bytes) as UTF-8: a
+// symbolic link's or a junction's print name (`C:\dir\x`, `..\x`), else
+// its substitute name without the NT prefix (`\??\C:\dir\x`, `\??\UNC\`
+// for `\\`); a WSL link's text as it is. Its length, `n` when it doesn't
+// fit; INVALID_INPUT for another tag or data too short for its names.
+fun link_text(data: int64, size: int64, buf: int64, n: int64) -> int64 {
+    let tag = __load64(data) & LOW32
+    if tag == TAG_LX_SYMLINK {
+        // the data's length at 4, a version at 8, the text from 12
+        let len = unit(data + 4) - 4
+        if len < 0 || 12 + len > size {
+            return -INVALID_INPUT
+        }
+        if len > n {
+            return n
+        }
+        __copy_bytes(buf, data + 12, len)
+        return len
+    }
+    // the names' offsets and lengths in bytes at 8, then the names, after
+    // a symbolic link's flags
+    var names: int64 = 16
+    if tag == TAG_SYMLINK {
+        names = 20
+    } else if tag != TAG_MOUNT_POINT {
+        return -INVALID_INPUT
+    }
+    var at = unit(data + 12)
+    var bytes = unit(data + 14)
+    if bytes == 0 {
+        at = unit(data + 8)
+        bytes = unit(data + 10)
+    }
+    if names + at + bytes > size {
+        return -INVALID_INPUT
+    }
+    var units = units_at(data + names + at, bytes / 2)
+    if units.len() >= 4 && units[0] == 92 && units[1] == 63 && units[2] == 63 && units[3] == 92 {
+        // `\??\UNC\server` is `\\server`, `\??\C:` is `C:`
+        if units.len() >= 8 && units[4] == 85 && units[5] == 78 && units[6] == 67 && units[7] == 92 {
+            var kept: [int] = [92]
+            for u in units[7:] {
+                kept.push(u)
+            }
+            units = kept
+        } else {
+            units = units[4:]
+        }
+    }
+    let text = utf8_of(units, 0, units.len())
+    let len = text.len() as int64
+    if len > n {
+        return n
+    }
+    __copy_bytes(buf, __addr_of(text) + 8, len)
+    return len
 }
 
 // `n` bytes of the system's entropy at `buf` (getrandom(2)'s on Linux): 0,
