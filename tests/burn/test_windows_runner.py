@@ -87,6 +87,28 @@ class Programs(unittest.TestCase):
         self.assertEqual(r.program("./hello.exe", "/w"), os.path.join("/w", "hello.exe"))
 
 
+class BuildDirectory(unittest.TestCase):
+    # `build OUT` empties OUT first: only a bundle it made before (its
+    # cases.json) or an empty directory, never a checkout given by mistake
+    def test_a_directory_that_isn_t_a_bundle_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            keep = os.path.join(d, "README.md")
+            with open(keep, "w") as fh:
+                fh.write("a checkout\n")
+            with self.assertRaises(SystemExit) as e:
+                runner.build(d, "myla", 1)
+            self.assertIn("isn't a bundle", str(e.exception))
+            self.assertTrue(os.path.exists(keep))
+
+    def test_an_old_bundle_or_an_empty_directory_may_be_emptied(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertTrue(runner.may_empty(d))
+            with open(os.path.join(d, "cases.json"), "w") as fh:
+                fh.write("{}")
+            self.assertTrue(runner.may_empty(d))
+        self.assertTrue(runner.may_empty(os.path.join(os.sep, "no", "such", "dir")))
+
+
 class Records(unittest.TestCase):
     """The Win32 structures as x86-64 Windows lays them out (fixed widths:
     a C long is 32 bits there, 64 here)."""

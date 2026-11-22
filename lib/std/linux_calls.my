@@ -69,6 +69,7 @@ pub const SYS_RECVMSG: int64 = 47
 pub const SYS_ACCEPT4: int64 = 288
 pub const SYS_IOCTL: int64 = 16
 pub const SYS_FCNTL: int64 = 72
+pub const SYS_READLINKAT: int64 = 267
 
 // A `struct stat`'s size and where its `st_mode` is.
 pub const STAT_SIZE: int64 = 144
@@ -76,8 +77,9 @@ pub const STAT_MODE: int64 = 24
 // An `epoll_event`'s size and where its data begins (packed on x86-64).
 pub const EVENT_SIZE: int64 = 12
 pub const EVENT_DATA: int64 = 4
-// `openat`'s O_DIRECTORY.
+// `openat`'s O_DIRECTORY, and its O_NOFOLLOW.
 pub const O_DIRECTORY: int64 = 65536
+pub const O_NOFOLLOW: int64 = 131072
 // `rt_sigaction`'s SA_RESTORER: x86-64's kernel returns from a handler
 // through the code it is given, the runtime's `__sig_restorer`
 // (`rt_sigreturn`).

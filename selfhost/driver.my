@@ -29,6 +29,7 @@ from std.process import command, env, exit
 from std.time import now_ns
 from std.fs import make_dir_all, remove_dir_all, exists, read_to_string, current_dir, temp_root
 import std.path_style as style // `WINDOWS`: the separator of the machine the tools run on
+from std.platform import own_job
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
@@ -179,9 +180,20 @@ fun step_failed(out: Output, label: str) -> bool {
     return false
 }
 
+// `myla test` in a job object of its own on Windows (std.platform's
+// `own_job`, MYLA-819): what it starts from then on is in the job (a native
+// harness, its cases, what they start, and what interpreted cases start),
+// which goes once its one handle closes, so killing `myla test` takes them
+// along, as PR_SET_PDEATHSIG and std.test's watcher do on Linux. Elsewhere
+// nothing (`own_job` is false there).
+pub fun test_in_own_job() {
+    let j = own_job()
+}
+
 // `myla test <file> [--only <text>] [--list]`: run (or list) the file's
 // own #test cases, printing the report; the exit status.
 pub fun cmd_test(file: str, opts: LoadOptions, sel: TestOptions) -> int32 {
+    test_in_own_job()
     match load_for_host(file, opts) {
         Ok(ch) => {
             var it = new_interp(ch.checker, [file])
@@ -199,6 +211,7 @@ pub fun cmd_test(file: str, opts: LoadOptions, sel: TestOptions) -> int32 {
 // natively through a harness (harness.my, D162, MYLA-307), the report the
 // interpreter's; the exit status.
 pub fun cmd_test_native(file: str, opts: LoadOptions, sel: TestOptions, target: Target) -> int32 {
+    test_in_own_job()
     let r = match native_tests(file, opts, sel, target) {
         Ok(r) => r,
         Err(e) => {

@@ -36,6 +36,8 @@ Files: `lib/std/json.my` (the Router/JSON lane's), and the linear algebra module
 
 ## Proposals
 
+Accepted by the owner on 2026-11-19 as D302.
+
 Built: **(a)**, `float64.from_json` (and so `float32.from_json`, which goes through it) reads `null` as NaN. The alternatives:
 
 - **(a) `null` reads as NaN** (built). A NaN float round-trips through `encode` and `decode`, as a vector's, matrix's or quaternion's component already does (D291), so every float of a document reads alike; an infinity, also written `null`, comes back as NaN. What it costs: a `null` where a document should have had a number reads silently as NaN, which shows at its first use (a NaN compares unequal, prints `nan`, and is a map key's runtime error). An `Option<float>` field keeps `null` as `None`, so `Some(NaN)` comes back `None`.

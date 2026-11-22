@@ -28,4 +28,6 @@ To reproduce: build `HELPER` for `x86_64-windows`, run it under Wine with `MYLA_
 
 ## Proposals
 
+Accepted by the owner on 2026-11-19 as D298.
+
 - Built: three names in every platform module, `HEAP_COMMIT` (the step, 0 where mapped memory is usable), `reserve_memory` and `commit_memory`, and a step of 256 KiB (64 calls of `VirtualAlloc` for a chunk at most). Alternatives: (a) Windows' `map_memory` reserving only, with std.rt committing everything it maps (big cells, rings): every caller would have to commit; (b) a smaller step (64 KiB, the allocation granularity): less committed by an idle worker, four times the calls; (c) commit on a fault, as the rings: fails for system calls writing into the heap.

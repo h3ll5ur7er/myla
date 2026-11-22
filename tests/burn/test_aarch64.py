@@ -1,6 +1,7 @@
 """The aarch64 Linux backend (MYLA-163): programs built with `--target
 aarch64-linux` (selfhost/ir_a64.my, selfhost/runtime_a64.my and
-lib/std/platform_aarch64.my), assembled by clang, linked by ld.lld and run
+lib/std/linux_calls_aarch64.my under lib/std/platform.my, MYLA-758),
+assembled by clang, linked by ld.lld and run
 under qemu-aarch64, give what the same programs built for x86-64 give
 (stdout, stderr and the exit code). The x86-64 build is the reference: its
 own tests hold it to the interpreter.

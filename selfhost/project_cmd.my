@@ -15,7 +15,7 @@ from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, curren
 from std.process import args, command, ExitStatus
 from .loader import LoadOptions
 from .target import Target
-from .driver import cmd_build, cmd_interp, own_tests, native_tests, emulator, load_for_host, decode, scratch_dir, scratch_sep
+from .driver import cmd_build, cmd_interp, own_tests, native_tests, emulator, load_for_host, decode, scratch_dir, scratch_sep, test_in_own_job
 from .interp import TestOptions, selected
 from .stdroot import EMBEDDED_ROOT
 from .test_programs import test_program_of, test_program_report
@@ -135,6 +135,8 @@ pub fun project_run(base: LoadOptions, prog_args: [str]) -> int32 {
 // total. When the project has a program and a `tests/`, the program is
 // built first to `build/<name>`, which `std.test.program()` names.
 pub fun project_test(base: LoadOptions, sel: TestOptions, native: bool, target: Target) -> int32 {
+    // (killed, it takes what it started along on Windows too, MYLA-819)
+    test_in_own_job()
     let h = match locate() {
         Ok(h) => h
         Err(msg) => {

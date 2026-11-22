@@ -6173,9 +6173,9 @@ fun wrap_ir(v: int64, t: Type) -> int64 {
 #test("main")[true]
 #test("std$list$sum")[true]
 #test("std$rt$map_lookup")[false]
-#test("std$platform_aarch64$write")[false]
+#test("std$platform_wasm$write")[false]
 fun checked_code(mangled: str) -> bool {
-    for prefix in ["std$rt$", "std$platform$", "std$platform_aarch64$", "std$platform_wasm$", "std$platform_windows$"] {
+    for prefix in ["std$rt$", "std$platform$", "std$platform_wasm$", "std$platform_windows$"] {
         if mangled.len() >= prefix.len() && mangled[:prefix.len()] == prefix { return false }
     }
     return true

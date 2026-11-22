@@ -46,4 +46,6 @@ Reproduction: `python3 -c 'print("fun main() {\n    let x = true\n    let t = x"
 
 ## Proposals
 
+Accepted by the owner on 2026-11-19 as D301.
+
 - **The wasm32 tools' chain limit (amends D279).** Built: 256 in the tools built for wasm32 (the playground's), 2,048 elsewhere; a program with a chain of 257 to 2,048 checks with the native tools and is the parse error in the playground's. Alternatives: (a) raise wasm32's shadow stack (`-z stack-size` in [[selfhost/target.my]], for every wasm32 program: about 48 MiB for 2,048 levels with room) and give Node a larger V8 stack in `run.mjs`: the CLI tools under Node would hold 2,048, the playground still not (a page can't raise V8's stack), so it would still need the lower limit; (b) keep 2,048 and accept a `stack overflow` past about 530 levels on wasm32, as before; (c) make the checker's walk cheaper a level ([[MYLA-902]]) so that 2,048 holds on V8's own stack, and drop `MAX_CHAIN_WASM` then.
