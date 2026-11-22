@@ -13,7 +13,7 @@ import os
 import subprocess
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, HOST_TARGET, SKIP_REASON
 from .test_selfhost_cli import _Layout
 
 GEO_MANIFEST = """\
@@ -216,7 +216,8 @@ class TestPathDependency(_Layout):
                          ("12\n20\nhi!\n../main.my\n", "", 0))
 
     def test_build_and_run_the_binary(self):
-        proc = self.run_in(self.app, "build", "-g")
+        # -g where the machine's target has it (x86-64 Linux's alone, Language/Targets)
+        proc = self.run_in(self.app, "build", *(["-g"] if HOST_TARGET == "x86_64-linux" else []))
         self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("", "", 0))
         run = subprocess.run([os.path.join(self.app, "build", "app"), "q"], capture_output=True, text=True)
         self.assertEqual(run.stdout, "12\n20\nhi!\n" + os.path.join(self.app, "build", "app") + "\nq\n")

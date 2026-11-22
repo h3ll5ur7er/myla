@@ -16,7 +16,7 @@ import tempfile
 import unittest
 
 from tests.burn._golden import golden
-from tests.burn._native import CAN_BUILD_NATIVE, READS_X86, SKIP_REASON, wine, wine_env
+from tests.burn._native import CAN_BUILD_NATIVE, HOST_TARGET, READS_X86, SKIP_REASON, wine, wine_env
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 from tests.burn._native import AS_CMD  # the machine's assembler (MYLA-926)
 
@@ -700,6 +700,7 @@ class TestWindowsDebugInfo(unittest.TestCase):
         self.assertEqual(got[len(want):].strip(b"\0"), b"")
 
     @unittest.skipUnless(shutil.which("gdb"), "gdb is not installed")
+    @unittest.skipUnless(HOST_TARGET == "x86_64-linux", "the machine's gdb reads x86-64 executables (an x86-64 host)")
     def test_gdb_reads_the_exe(self):
         session = gdb(self.build("-g"), "info line myla_add", "break main.my:7", "info scope myla_add",
                       "info auto-load python-scripts", printers=True)

@@ -20,7 +20,7 @@ import tempfile
 import time
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, HOST_TARGET, SKIP_REASON
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 from tests.burn.test_test_functions import _ASYNC, _ASYNC_WANT, _FUNCTIONS, _FUNCTIONS_WANT, _UNWINDING, _myla, _write
 
@@ -873,7 +873,7 @@ class TestNative(unittest.TestCase):
         # its place there is the target's own module's (S3's review)
         proc = _myla(["test", os.path.join("lib", "std", "platform.my"), "--target", "wasm32-wasi"], _REPO)
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("is std.platform for x86_64-linux; for wasm32-wasi it is", proc.stderr)
+        self.assertIn(f"is std.platform for {HOST_TARGET}; for wasm32-wasi it is", proc.stderr)
 
     def test_a_harness_that_does_not_build_is_kept(self):
         # a case calling `main`, which the harness blanks

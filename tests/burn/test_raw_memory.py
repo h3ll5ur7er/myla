@@ -15,7 +15,7 @@ import unittest
 
 from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
-from tests.burn._native import AS_CMD  # the machine's assembler (MYLA-926)
+from tests.burn._native import AS_CMD, HOST_TARGET  # the machine's assembler and target (MYLA-926)
 
 PROGRAM = """// MYLA-162's prototype: string concatenation and equality written in Myla
 // over raw memory, against the runtime's assembly (`+`, `==`).
@@ -227,8 +227,9 @@ class RawMemory(unittest.TestCase):
                 fh.write(source)
             asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,
                                  check=True).stdout
-            self.assertIn("call myla_std$rt$str_concat", asm)
-            self.assertIn("call myla_std$rt$str_eq", asm)
+            call = "bl" if HOST_TARGET == "aarch64-linux" else "call"   # the machine's call
+            self.assertIn(f"{call} myla_std$rt$str_concat", asm)
+            self.assertIn(f"{call} myla_std$rt$str_eq", asm)
 
 
 if __name__ == "__main__":
