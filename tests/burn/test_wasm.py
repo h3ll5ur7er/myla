@@ -226,7 +226,8 @@ class WasmParity(unittest.TestCase):
             build_wasm("selfhost/gen_main.my", gen)
             for extra, ref in (([], ["--target", "wasm32-wasi"]),
                                (["--target", "wasm32-wasi"], ["--target", "wasm32-wasi"]),
-                               (["--target", "x86_64-linux"], [])):
+                               # (named on both: the native one's own is the machine's, MYLA-926)
+                               (["--target", "x86_64-linux"], ["--target", "x86_64-linux"])):
                 with self.subTest(target=extra):
                     src = os.path.join(_REPO, "examples", "maps.my")
                     want = run([native_compiler(), src, STDLIB_ROOT] + ref)
