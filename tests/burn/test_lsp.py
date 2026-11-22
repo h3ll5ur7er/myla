@@ -23,6 +23,7 @@ import unittest
 
 from ._golden import answered_or_recorded, golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 from ._tools import STDLIB_ROOT, myla_tool, selfhost_tool
@@ -41,7 +42,7 @@ def _self_hosted_build() -> str:
                               STDLIB_ROOT], capture_output=True, text=True, check=True)
         with open(binary + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
-        subprocess.run(["as", "--64", "-o", binary + ".o", binary + ".s"], check=True)
+        subprocess.run([*AS_CMD, "-o", binary + ".o", binary + ".s"], check=True)
         subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
     return binary
 

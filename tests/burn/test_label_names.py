@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE
+from ._native import CAN_BUILD_NATIVE, HOST_TARGET
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 PROGRAM = """fun first(n: int) -> str {
@@ -153,7 +153,7 @@ class LabelsPerFunction(unittest.TestCase):
                                        "--target", target], capture_output=True, text=True, timeout=600)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
         if CAN_BUILD_NATIVE:
-            out = subprocess.run([os.path.join(self._tmp.name, "segv-x86_64-linux")], capture_output=True, text=True)
+            out = subprocess.run([os.path.join(self._tmp.name, "segv-" + HOST_TARGET)], capture_output=True, text=True)
             self.assertEqual((out.stdout, out.returncode), ("21\n2\n", 0))
 
 if __name__ == "__main__":

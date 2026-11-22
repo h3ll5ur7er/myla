@@ -23,6 +23,7 @@ from ._golden import golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
 from .test_selfhost_cli import _Layout
+from ._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -231,7 +232,7 @@ class PackageParity(_Layout):
         asm = os.path.join(out, "gen.s")
         with open(asm, "w", encoding="utf-8") as fh:
             fh.write(gen.stdout)
-        subprocess.run(["as", "--64", "-o", asm + ".o", asm], check=True)
+        subprocess.run([*AS_CMD, "-o", asm + ".o", asm], check=True)
         subprocess.run(["ld", "-o", os.path.join(out, "gen"), asm + ".o"], check=True)
         for name in ("my", "gen"):
             with self.subTest(binary=name):

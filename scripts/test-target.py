@@ -4,6 +4,9 @@
 qemu-aarch64 (aarch64-linux), Node (wasm32-wasi) or Wine (x86_64-windows,
 MYLA-702), and the tests that target is excused from are skipped with their
 reason. Which suites run, and the exceptions, are in tests/burn/_targets.py.
+`host` runs every suite of tests/burn for the machine itself, as
+`scripts/test.sh` does but in parallel and each within its limit (MYLA-926:
+CI's native aarch64 runner).
 
 Each suite runs in its own process, as many at once as there are CPUs
 (`-j N` to change), and is stopped after `--limit` seconds (a program hung
@@ -16,6 +19,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import concurrent.futures
+import glob
 import os
 import shutil
 import signal
@@ -96,8 +100,9 @@ def run_one(module: str) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("target", choices=_targets.TARGETS)
-    ap.add_argument("modules", nargs="*", help="suites (default: all of tests/burn/_targets.py SUITES)")
+    ap.add_argument("target", choices=[*_targets.TARGETS, "host"])
+    ap.add_argument("modules", nargs="*",
+                    help="suites (default: all of tests/burn/_targets.py SUITES; for host, every tests/burn/test_*.py)")
     ap.add_argument("-j", type=int, default=os.cpu_count() or 1, help="suites run at once")
     # The longest suite, test_selfhost_codegen on x86_64-windows, took 609 s
     # in CI (2026-11-18, 04d8956); once, on 4c91ba2, it was still running at
@@ -105,7 +110,10 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=1500, help="seconds a suite may run (default 1500)")
     ap.add_argument("--one", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
-    os.environ["MYLA_TEST_TARGET"] = args.target
+    if args.target == "host":
+        os.environ.pop("MYLA_TEST_TARGET", None)
+    else:
+        os.environ["MYLA_TEST_TARGET"] = args.target
     os.chdir(ROOT)
     if args.one:
         return run_one(args.modules[0])
@@ -118,7 +126,10 @@ def main() -> int:
             print(msg, file=sys.stderr)
             return 1
         print(f"warning: {msg}", file=sys.stderr)
-    modules = [m if m.startswith("tests.") else "tests.burn." + m for m in args.modules] or _targets.SUITES
+    every = sorted("tests.burn." + os.path.basename(f)[:-3]
+                   for f in glob.glob(os.path.join(ROOT, "tests", "burn", "test_*.py")))
+    modules = ([m if m.startswith("tests.") else "tests.burn." + m for m in args.modules]
+               or (every if args.target == "host" else _targets.SUITES))
 
     def run(module: str) -> tuple[str, int, float, str]:
         start = time.monotonic()

@@ -16,8 +16,9 @@ import tempfile
 import unittest
 
 from tests.burn._golden import golden
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, wine, wine_env
+from tests.burn._native import CAN_BUILD_NATIVE, READS_X86, SKIP_REASON, wine, wine_env
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
+from tests.burn._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 
 def myla(argv: list[str]) -> int:
@@ -55,6 +56,7 @@ PROGRAM = (
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(READS_X86, "-g is x86-64 Linux's alone (Language/Targets, MYLA-259)")
 class TestLineTables(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -117,6 +119,7 @@ MODULE_LIB = (
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(READS_X86, "-g is x86-64 Linux's alone (Language/Targets, MYLA-259)")
 class TestSelfHostedLineTables(unittest.TestCase):
     """`gen_main -g` (the self-hosted compiler) emits the same kind of line
     table: one `.file` per module, `.loc` per function, lambda and statement."""
@@ -145,7 +148,7 @@ class TestSelfHostedLineTables(unittest.TestCase):
         binary = os.path.join(self.dir, "prog" + "".join(flags).replace("-", "_"))
         with open(binary + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm)
-        subprocess.run(["as", "--64", "-o", binary + ".o", binary + ".s"], check=True)
+        subprocess.run([*AS_CMD, "-o", binary + ".o", binary + ".s"], check=True)
         subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
         return binary
 
@@ -201,7 +204,7 @@ class TestSelfHostedLineTables(unittest.TestCase):
         binary = os.path.join(self.dir, "prog_cwd")
         with open(binary + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm)
-        subprocess.run(["as", "--64", "-o", binary + ".o", binary + ".s"], check=True)
+        subprocess.run([*AS_CMD, "-o", binary + ".o", binary + ".s"], check=True)
         subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
         dump = subprocess.run(["readelf", "--debug-dump=info", binary],
                               capture_output=True, text=True, check=True).stdout
@@ -472,6 +475,7 @@ class GdbVariables:
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE and shutil.which("gdb"), "needs native builds and gdb")
+@unittest.skipUnless(READS_X86, "-g is x86-64 Linux's alone (Language/Targets, MYLA-259)")
 class TestGdbVariables(GdbVariables, unittest.TestCase):
     """`myla build -g` of the self-hosted CLI (the Python backend's until
     MYLA-235)."""
@@ -520,6 +524,7 @@ async fun main() {
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE and shutil.which("gdb"), "needs native builds and gdb")
+@unittest.skipUnless(READS_X86, "-g is x86-64 Linux's alone (Language/Targets, MYLA-259)")
 class TestSelfHostedGdbVariables(GdbVariables, unittest.TestCase):
     """The self-hosted backend (`gen_main … -g`)."""
 
@@ -557,7 +562,7 @@ class TestSelfHostedGdbVariables(GdbVariables, unittest.TestCase):
         binary = os.path.join(self.dir, name)
         with open(binary + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm)
-        subprocess.run(["as", "--64", "-o", binary + ".o", binary + ".s"], check=True)
+        subprocess.run([*AS_CMD, "-o", binary + ".o", binary + ".s"], check=True)
         subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
         return binary
 

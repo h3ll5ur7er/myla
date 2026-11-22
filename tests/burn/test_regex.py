@@ -42,6 +42,7 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
+from ._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 DRIVER = """import std.regex as regex
 import std.encoding as encoding
@@ -345,7 +346,7 @@ class RegexDifferentialTest(unittest.TestCase):
             exe = os.path.join(cls.tmp, "driver")
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm.stdout)
-            subprocess.run(["as", "--64", "-o", exe + ".o", exe + ".s"], check=True)
+            subprocess.run([*AS_CMD, "-o", exe + ".o", exe + ".s"], check=True)
             subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
             cls.native = exe
             # the same driver built checked, where an integer overflow is an error (D184, MYLA-550)

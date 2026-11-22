@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 from tests.burn._lsp_scenarios import _Client, _uri
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, READS_X86, SKIP_REASON
 from tests.burn._tools import STDLIB_ROOT, myla_tool, selfhost_tool
 
 _MAIN = """from std.io import println
@@ -91,6 +91,7 @@ class Installed(unittest.TestCase):
         exe = subprocess.run([os.path.join(root, "build", "hi")], capture_output=True, text=True, env=self.env)
         self.assertEqual((exe.stdout, exe.returncode), (_WANT, 0))
 
+    @unittest.skipUnless(READS_X86, "-g is x86-64 Linux's alone (Language/Targets, MYLA-259)")
     def test_a_debug_build_carries_the_pretty_printers(self):
         root = self.project("dbg")
         path = os.path.join(root, "src", "main.my")

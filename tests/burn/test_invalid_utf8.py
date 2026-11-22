@@ -19,6 +19,7 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
+from ._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 # ASCII, two stray bytes, a truncated 4-byte sequence, an overlong NUL, an
 # encoded surrogate, two valid scalars, and a sequence cut off by the end.
@@ -124,7 +125,7 @@ class InvalidUtf8(unittest.TestCase):
         with open(asm_path, "wb") as fh:
             fh.write(asm)
         binary = os.path.join(self.dir, "prog_self")
-        subprocess.run(["as", "--64", "-o", binary + ".o", asm_path], check=True)
+        subprocess.run([*AS_CMD, "-o", binary + ".o", asm_path], check=True)
         subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
         self.assertEqual(self._run([binary]), EXPECTED)
 

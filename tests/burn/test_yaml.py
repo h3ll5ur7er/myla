@@ -48,6 +48,7 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
+from ._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _URL = "https://github.com/yaml/yaml-test-suite"
@@ -298,7 +299,7 @@ class YamlTestSuite(unittest.TestCase):
         native = os.path.join(cls.tmp.name, "native")
         with open(native + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
-        subprocess.run(["as", "--64", "-o", native + ".o", native + ".s"], check=True)
+        subprocess.run([*AS_CMD, "-o", native + ".o", native + ".s"], check=True)
         subprocess.run(["ld", "-o", native, native + ".o"], check=True)
         cls.native = [native]
         cls.checked = _build_checked(path, os.path.join(cls.tmp.name, "checked"))
@@ -523,7 +524,7 @@ class YamlWriterForYaml11(unittest.TestCase):
             native = os.path.join(tmp, "native")
             with open(native + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm.stdout)
-            subprocess.run(["as", "--64", "-o", native + ".o", native + ".s"], check=True)
+            subprocess.run([*AS_CMD, "-o", native + ".o", native + ".s"], check=True)
             subprocess.run(["ld", "-o", native, native + ".o"], check=True)
             proc = subprocess.run([native], input=_framed([t.encode() for t in strings]), capture_output=True, timeout=600)
         self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])

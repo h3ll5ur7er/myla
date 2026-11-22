@@ -11502,7 +11502,7 @@ class TestCompilerParity(unittest.TestCase):
             ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
             self.assertEqual((ran.returncode, ran.stderr),
                              (1, "runtime error: no entry point: define '#main' or a function named 'main'\n"))
-            for flags in (["--target", "x86_64-linux"], ["-g"], ["--checked"], ["--target", "aarch64-linux"],
+            for flags in (["--target", "x86_64-linux"], ["--target", "x86_64-linux", "-g"], ["--checked"], ["--target", "aarch64-linux"],
                           ["--target", "wasm32-wasi"]):
                 with self.subTest(flags=flags):
                     out = os.path.join(tmp, "out")
