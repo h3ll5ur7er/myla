@@ -22,14 +22,19 @@ import tempfile
 from tests.burn._golden import golden
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
+# The machine's own target, as `myla build` names it without `--target`
+# (x86-64 or aarch64 Linux, MYLA-163; "" for another machine), and whether
+# its programs can be built and run here: Linux, with `as` and `ld`.
+HOST_TARGET = {"x86_64": "x86_64-linux", "aarch64": "aarch64-linux"}.get(
+    platform.machine(), "") if sys.platform.startswith("linux") else ""
+
 CAN_BUILD_NATIVE = (
-    sys.platform.startswith("linux")
-    and platform.machine() == "x86_64"
+    HOST_TARGET != ""
     and shutil.which("as") is not None
     and shutil.which("ld") is not None
 )
 
-SKIP_REASON = "native build requires x86-64 Linux with `as` and `ld`"
+SKIP_REASON = "native build requires x86-64 or aarch64 Linux with `as` and `ld`"
 
 # The target native builds are for (MYLA-268): the machine's, or the one
 # MYLA_TEST_TARGET names (aarch64-linux, run under qemu-aarch64; wasm32-wasi,
@@ -37,6 +42,14 @@ SKIP_REASON = "native build requires x86-64 Linux with `as` and `ld`"
 # MYLA-702). scripts/test-target.py runs the
 # suites tests/burn/_targets.py lists for a target with it set.
 TEST_TARGET = os.environ.get("MYLA_TEST_TARGET", "")
+
+# What the programs the tests build are for: MYLA_TEST_TARGET's target, else
+# the machine's. A test that reads x86-64 Linux code (its assembly, its
+# registers under gdb) keys on it, not only on MYLA_TEST_TARGET, so that it
+# is skipped on an aarch64 machine as on the aarch64 target (MYLA-926).
+BUILD_TARGET = TEST_TARGET or HOST_TARGET
+READS_X86 = CAN_BUILD_NATIVE and BUILD_TARGET == "x86_64-linux"
+X86_REASON = "it reads x86-64 Linux code (built for x86-64 Linux only)"
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _RUN_MJS = os.path.join(_ROOT, "tools", "wasm", "run.mjs")
 
@@ -187,7 +200,9 @@ def assemble(asm_path: str, out: str) -> None:
         subprocess.run(["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib",
                         "/stack:125829120", "/out:" + out, obj, *libs], check=True, capture_output=True, text=True)
     else:
-        subprocess.run(["as", "--64", "-o", obj, asm_path], check=True, capture_output=True, text=True)
+        # the machine's own assembler: `--64` is x86-64's flag alone
+        flags = ["--64"] if HOST_TARGET == "x86_64-linux" else []
+        subprocess.run(["as", *flags, "-o", obj, asm_path], check=True, capture_output=True, text=True)
         subprocess.run(["ld", "-o", out, obj], check=True, capture_output=True, text=True)
 
 

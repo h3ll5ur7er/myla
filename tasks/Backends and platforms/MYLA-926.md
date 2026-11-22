@@ -2,7 +2,7 @@
 id: MYLA-926
 title: "CI's tests on native runners: Windows on windows-latest, aarch64 on ubuntu-24.04-arm (D296)"
 type: chore
-status: todo
+status: in-progress
 priority: medium
 labels: [ci, windows, aarch64, testing]
 ---

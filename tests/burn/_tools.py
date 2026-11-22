@@ -2,7 +2,8 @@
 compiler that builds them and the test programs (MYLA-58, MYLA-235).
 
 The self-hosted compiler builds them, bootstrapped as `scripts/bootstrap.sh`
-does: the seed (`bootstrap/seed.s`, MYLA-218) assembled is stage 0, it compiles
+does: the machine's seed (`bootstrap/seed.s` on x86-64,
+`bootstrap/seed-aarch64.s` on aarch64, MYLA-218) assembled is stage 0, it compiles
 the compiler (stage 1), stage 1 compiles it again, and that stage (at the fixed
 point the same as `build/stage3`) compiles every tool. (The Python backend, the
 fallback until MYLA-219, is gone.)
@@ -19,10 +20,15 @@ import functools
 import glob
 import hashlib
 import os
+import platform
 import subprocess
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _CACHE = os.path.join(_REPO, "build", "test-tools")
+
+# The seed for this machine, as scripts/host.sh picks it: x86-64's or
+# aarch64's (MYLA-926: the burn suites run natively on an aarch64 runner).
+_SEED = os.path.join(_REPO, "bootstrap", "seed-aarch64.s" if platform.machine() == "aarch64" else "seed.s")
 
 # the folder holding the standard library (`std/`) and `debug/myla_gdb.py`
 STDLIB_ROOT = os.path.join(_REPO, "lib")
@@ -35,7 +41,7 @@ def _sources_hash() -> str:
         glob.glob(os.path.join(STDLIB_ROOT, "std", "*.my"))
         + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
         + glob.glob(os.path.join(_REPO, "tools", "**", "*.my"), recursive=True)
-        + [os.path.join(_REPO, "bootstrap", "seed.s")]
+        + [_SEED]
     )
     h = hashlib.sha256()
     for path in files:
@@ -74,7 +80,8 @@ def _cached(name: str, make) -> str:
 
 def _assemble(asm: str, out: str) -> None:
     """The assembly file `asm` assembled and linked into `out`."""
-    subprocess.run(["as", "--64", "-o", out + ".o", asm], check=True)
+    flags = ["--64"] if platform.machine() == "x86_64" else []   # x86-64's flag alone
+    subprocess.run(["as", *flags, "-o", out + ".o", asm], check=True)
     subprocess.run(["ld", "-o", out, out + ".o"], check=True)
 
 
@@ -90,8 +97,7 @@ def _compile_with(compiler: str, relpath: str, out: str) -> None:
 def native_compiler() -> str:
     """The self-hosted compiler of the current sources, bootstrapped from the
     seed and cached."""
-    seed = os.path.join(_REPO, "bootstrap", "seed.s")
-    stage0 = _cached("stage0", lambda out: _assemble(seed, out))
+    stage0 = _cached("stage0", lambda out: _assemble(_SEED, out))
     stage1 = _cached("stage1", lambda out: _compile_with(stage0, "selfhost/gen_main.my", out))
     return _cached("stage2", lambda out: _compile_with(stage1, "selfhost/gen_main.my", out))
 
