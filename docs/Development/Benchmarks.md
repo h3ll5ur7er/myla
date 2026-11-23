@@ -268,6 +268,17 @@ What is left:
 - **k-nucleotide** makes a new string for each `seq[i:i + k]`, where Rust and Swift hash a view of the sequence's bytes; with fib it is 72 % of Myla's total.
 - **Binary trees** is ahead of every language that frees by hand or counts references, but Nim.
 
+## An FFT (2026-11-23)
+
+`benchmarks/fft/` holds an iterative radix-2 FFT ([[MYLA-545]]) in the two layouts a user would write, [[benchmarks/fft/fft_split.my]] (two lists of floats) and [[benchmarks/fft/fft_complex.my]] (a list of a `Complex` struct with `Add`, `Sub` and `Mul`), and the same in C ([[benchmarks/fft/fft.c]], `-DCOMPLEX` for the structs). `benchmarks/fft/run.sh [runs]` builds them, requires the same checksum and round-trip error from all, and prints the medians. The twiddle factors come from half-angle steps and multiplications, not from `sin` and `cos`, so every version's results are equal bit for bit.
+
+| | 4096 points (in the cache), by C `-O2` | 1,048,576 points (bound by memory), by C `-O2` |
+| --- | --: | --: |
+| Myla, two lists | 4.0 | about 1.5 to 2 |
+| Myla, list of `Complex` | 5.5 | about 2 to 2.5 |
+
+At 4096 points Myla runs 5.1 times C's instructions. In the butterfly, each of the ten element accesses loads the list's pointer from `self` again, compares the index with the length and computes `k * step` anew, and values live in the frame between them; in the struct version `mul`, `add`, `sub` and the conjugate are calls (a third of the instructions). gcc's `-O3 -march=native` gains little on this loop (0.9 of `-O2`). The large size waits for memory in every version, which hides most of that.
+
 ## How the first round went
 
 The first round (fib, the sieve, binary trees) checked the method and needed two additions to `run.py`: user and system time and page faults, and names for valgrind's addresses. Instruction counts alone hid both large gaps of the round: the sieve's page faults, and binary trees running C's instruction count in 5.7× C's time. The second turned out to be `rep movsq` copying the three-word `Tree` at every match: a microcoded instruction that starts slowly, and which callgrind counts as one. Copying up to 8 words with moves fixed it ([[MYLA-246]]).
