@@ -137,10 +137,11 @@ static double now(void) {
     return t.tv_sec + t.tv_nsec / 1e9;
 }
 
-static void run(const char *name, int n, int rounds) {
-    double start = now();
+// Times `rounds` round trips of `n` points, without the table and the input.
+static void run(int n, int rounds) {
     Plan p = plan(n);
     Signal input = noise(n), x = noise(n);
+    double start = now();
     long long checksum = 0;
     for (int r = 0; r < rounds; r++) {
         transform(x, n, p, 0);
@@ -148,18 +149,20 @@ static void run(const char *name, int n, int rounds) {
         transform(x, n, p, 1);
     }
     long long error = (long long)(distance(x, input, n) * 1e15);
+    double secs = now() - start;
     free_signal(x);
     free_signal(input);
     free_signal(p.w);
-    printf("%s %lld %lld %.3f\n", name, checksum, error, now() - start);
+    printf("fft-%d %lld %lld %d %.6f\n", n, checksum, error, rounds, secs);
 }
 
+//   fft [points rounds]
 int main(int argc, char **argv) {
     if (argc == 3) {
-        run("fft", atoi(argv[1]), atoi(argv[2]));
+        run(atoi(argv[1]), atoi(argv[2]));
         return 0;
     }
-    run("fft-4096", 4096, 10000);
-    run("fft-1048576", 1 << 20, 10);
+    run(4096, 10000);
+    run(1 << 20, 10);
     return 0;
 }

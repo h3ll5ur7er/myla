@@ -1,8 +1,9 @@
 // Benchmark (MYLA-545): an iterative radix-2 FFT over two lists of floats,
 // the real and the imaginary parts. Each size is transformed forward and back
-// `rounds` times; a line is `name checksum error seconds`, the checksum from
-// the first spectrum and the error the largest difference to the input after
-// the last round, in units of 1e-15.
+// `rounds` times; a line is `name checksum error rounds seconds`, the checksum
+// from the first spectrum, the error the largest difference to the input
+// after the last round, in units of 1e-15, and the seconds those of the round
+// trips alone.
 //
 // Every version takes its twiddle factors by half-angle steps and at most
 // one multiplication for each bit of the index (+ - * / and the square root
@@ -10,6 +11,8 @@
 // give, and as accurate as a table of them.
 
 import std.time as time
+from std.num import parse_int
+from std.process import args
 from std.math import abs, sqrt
 
 const SEED: int = 42
@@ -139,11 +142,9 @@ impl Signal {
     }
 }
 
-#test(8, 1)[(8452i64, 0i64)]   // the checksum is a naive DFT's
-#test(1024, 3)[(14809252i64, 1i64)]   // the checksum is a naive DFT's, the error as fft.c prints
-fun round_trips(n: int, rounds: int) -> (int64, int64) {
-    let p = plan(n)
-    let input = noise(n)
+#test(plan(8), noise(8), 1)[(8452i64, 0i64)]   // the checksum is a naive DFT's
+#test(plan(1024), noise(1024), 3)[(14809252i64, 1i64)]   // the checksum is a naive DFT's, the error as fft.c prints
+fun round_trips(p: Plan, input: Signal, rounds: int) -> (int64, int64) {
     var x = input
     var checksum: int64 = 0
     for r in 0..rounds {
@@ -154,14 +155,30 @@ fun round_trips(n: int, rounds: int) -> (int64, int64) {
     return (checksum, (x.distance(input) * 1e15) as int64)
 }
 
-fun run(name: str, n: int, rounds: int) {
+// Times `rounds` round trips of `n` points, without the table and the input.
+fun run(n: int, rounds: int) {
+    let p = plan(n)
+    let input = noise(n)
     let start = time.now()
-    let (checksum, error) = round_trips(n, rounds)
+    let (checksum, error) = round_trips(p, input, rounds)
     let secs = start.elapsed().as_secs_f64()
-    print(f"{name} {checksum} {error} {secs:.3}")
+    print(f"fft-{n} {checksum} {error} {rounds} {secs:.6}")
 }
 
+fun number(text: str) -> int {
+    return match parse_int(text) {
+        Some(v) => v as int
+        None => { panic(f"not a number: {text}") }
+    }
+}
+
+//   fft [points rounds]
 fun main() {
-    run("fft-4096", 4096, 10000)
-    run("fft-1048576", 1 << 20, 10)
+    let argv = args()
+    if argv.len() == 3 {
+        run(number(argv[1]), number(argv[2]))
+    } else {
+        run(4096, 10000)
+        run(1 << 20, 10)
+    }
 }

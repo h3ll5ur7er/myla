@@ -10,20 +10,13 @@ How far Myla is from C on a fast Fourier transform, the textbook iterative radix
 
 - [x] `benchmarks/fft/fft_split.my` and `fft_complex.my`, with `#test` cases (the checksum checked against a naive DFT)
 - [x] `benchmarks/fft/fft.c`, both layouts (`-DCOMPLEX`)
-- [x] `benchmarks/fft/run.sh`: builds, compares the answers, prints the medians
+- [x] `benchmarks/fft/csharp/Program.cs` and `benchmarks/fft/fft.py`: the same in C# (the base library only) and in plain Python (no NumPy), both layouts each
+- [x] `benchmarks/fft/run.py`: builds, requires equal answers, times the round trips alone, writes a results file
+- [x] `benchmarks/fft/report.html`, filled by `report.py`: the results as charts and a table, with every source in a section that opens
 - [x] The result on [[Development/Benchmarks]]
 
 ## Evidence
 
-`benchmarks/fft/run.sh 7` on 2026-11-23 (a shared 4-CPU cloud VM, gcc 13.3, commit `ad442de`): "All checksums and errors identical: fft-4096 121774412 6217, fft-1048576 237801659848 20". Medians, and the time by C's at `-O2` in the same layout:
+`python3 benchmarks/fft/run.py --runs 5` on 2026-11-23 (`benchmarks/fft/results-2026-11-23.json`): "check 4096 points, 3 round trips: all 10 variants print [121774412, 1]", "check 65536 points, 2 round trips: all 10 variants print [7207693291, 2]", and one checksum per size from every timed run. At 4096 points, nanoseconds for one butterfly: C `-O2` 2.10 (two arrays) and 2.08 (structs), C# 3.18 and 2.30, Myla 7.95 and 8.81 (3.8 and 4.2 times C), Python 293 and 320. The table and the large size: [[Development/Benchmarks]]. The checksum at 8 and at 1024 points is a naive DFT's (Python's `cmath`). `build/myla test`: 2/2 (`fft_split.my`) and 3/3 (`fft_complex.my`) passed. Instructions at 4096 points, 200 round trips (callgrind): Myla 1,839 M (lists) and 1,932 M (structs), C at `-O2` 361 M.
 
-| | 4096 points, 10,000 round trips | | 1,048,576 points, 10 round trips | |
-| --- | --: | --: | --: | --: |
-| C, two arrays, `-O2` | 0.97 s | 1.00 | 1.85 s | 1.00 |
-| C, structs, `-O2` | 0.79 s | 1.00 | 1.69 s | 1.00 |
-| C, two arrays, `-O3 -march=native` | 0.89 s | 0.92 | 2.16 s | 1.17 |
-| C, structs, `-O3 -march=native` | 0.70 s | 0.89 | 0.91 s | 0.54 |
-| Myla, two lists | 3.92 s | 4.03 | 3.06 s | 1.65 |
-| Myla, list of `Complex` | 4.33 s | 5.49 | 3.11 s | 1.84 |
-
-The small size is steady (each variant within 10 % over two samples of 5 and 7 runs); the large one is bound by memory and varied by up to 1.8 times between runs of one binary, so its ratios are rough: by the fastest runs 1.5 (lists) and 2.5 (structs). `build/myla test`: 2/2 and 3/3 passed. Instructions at 4096 points, 200 round trips (callgrind): Myla 1,839 M (lists) and 1,932 M (structs), C at `-O2` 361 M.
+A first measurement the same day with gcc 13.3 and whole-program times gave 4.0 and 5.5 times C at 4096 points.
