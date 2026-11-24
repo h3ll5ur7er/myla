@@ -424,6 +424,18 @@ fun absolute(p: str) -> str {
 // under `dir`), removed when the run ends. A case runs for at most `secs`
 // seconds (0: no limit, D259): past them the run is killed, and the next
 // starts after that case.
+// `p`, a path of this machine, as a wasm32 program run here names it: on
+// Windows `/C:/w/x` for `C:\w\x` (and `C:/w/x`), which tools/wasm's shim
+// reads as that drive's (MYLA-944: the scratch directory under %TEMP% is on
+// another drive than Node's working directory); as it is elsewhere.
+#test("/tmp/run0")["/tmp/run0"]
+fun wasi_name(p: str) -> str {
+    if !style.WINDOWS { return p }
+    let q = p.replace("\\", "/")
+    if q.len() >= 2 && q[1] == ':' { return "/" + q }
+    return q
+}
+
 fun resumed_tests(h: Harness, exe: str, lead: [str], program: str, dir: str, secs: int32) -> Result<TestRun, str> {
     var lines: [str] = []
     var passed = 0
@@ -437,7 +449,7 @@ fun resumed_tests(h: Harness, exe: str, lead: [str], program: str, dir: str, sec
         argv.push(format("{}", k))
         argv.push(nonce)
         let root = format("{}/run{}", dir, k)
-        let ran = output_within(command(exe).args(argv).env("MYLA_TEST_PROGRAM", program).env("MYLA_TEST_DIR", root), secs, head + "B:0;")
+        let ran = output_within(command(exe).args(argv).env("MYLA_TEST_PROGRAM", program).env("MYLA_TEST_DIR", wasi_name(root)), secs, head + "B:0;")
         if exists(root) { let gone = remove_dir_all(root) }
         let o = match ran {
             Ok(o) => o,

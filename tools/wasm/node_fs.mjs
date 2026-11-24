@@ -20,6 +20,17 @@ function statOf(st) {
   return { type: typeOf(st), size: st.size, ino: st.ino, nlink: st.nlink, mtimeNs: Math.trunc(st.mtimeMs * 1e6) };
 }
 
+// A WASI path as Node names it on this host. On Windows a program's `/x` is
+// `x` on the working directory's drive, as Node reads a path from `/` there,
+// and `/C:/x` is `C:/x`, so that a file on another drive has a name too
+// (MYLA-944: a test harness's scratch directory under %TEMP% on C: beside a
+// checkout on D:); elsewhere a path is the host's as it is.
+const WINDOWS = process.platform === "win32";
+export function hostPath(p) {
+  if (!WINDOWS || !/^\/[A-Za-z]:(\/|$)/.test(p)) return p;
+  return p.length === 3 ? p.slice(1) + "/" : p.slice(1);
+}
+
 export class NodeFs {
   // Created without truncating: written from the start, as O_CREAT alone
   // does ("a" would append every write wherever the position is, MYLA-298).
@@ -40,7 +51,7 @@ export class NodeFs {
       const named = { r: c.O_RDONLY, w: c.O_TRUNC | c.O_CREAT | c.O_WRONLY, wx: c.O_TRUNC | c.O_CREAT | c.O_WRONLY | c.O_EXCL };
       flags = (typeof flags === "string" ? named[flags] : flags) | extra;
     }
-    const fd = fs.openSync(path, flags);
+    const fd = fs.openSync(hostPath(path), flags);
     return { fd, pos: 0, seekable: fs.fstatSync(fd).isFile(), append: !!append };
   }
   read(h, u8) {
@@ -61,16 +72,16 @@ export class NodeFs {
   }
   close(h) { fs.closeSync(h.fd); }
   fstat(h) { return statOf(fs.fstatSync(h.fd)); }
-  stat(path, follow) { return statOf(follow ? fs.statSync(path) : fs.lstatSync(path)); }
+  stat(path, follow) { return statOf(follow ? fs.statSync(hostPath(path)) : fs.lstatSync(hostPath(path))); }
   readdir(path) {
-    return fs.readdirSync(path, { withFileTypes: true })
+    return fs.readdirSync(hostPath(path), { withFileTypes: true })
       .map((e) => ({ name: e.name, type: e.isDirectory() ? 3 : e.isFile() ? 4 : e.isSymbolicLink() ? 7 : 0 }));
   }
-  mkdir(path) { fs.mkdirSync(path); }
-  rmdir(path) { fs.rmdirSync(path); }
-  unlink(path) { fs.unlinkSync(path); }
-  rename(a, b) { fs.renameSync(a, b); }
-  readlink(path) { return new Uint8Array(fs.readlinkSync(path, { encoding: "buffer" })); }
+  mkdir(path) { fs.mkdirSync(hostPath(path)); }
+  rmdir(path) { fs.rmdirSync(hostPath(path)); }
+  unlink(path) { fs.unlinkSync(hostPath(path)); }
+  rename(a, b) { fs.renameSync(hostPath(a), hostPath(b)); }
+  readlink(path) { return new Uint8Array(fs.readlinkSync(hostPath(path), { encoding: "buffer" })); }
 }
 
 // A write of all of `u8` to the descriptor `fd`, again after EAGAIN (a
