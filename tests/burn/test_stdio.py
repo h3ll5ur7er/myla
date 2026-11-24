@@ -68,10 +68,19 @@ class TestStdioParity(unittest.TestCase):
         self.assertEqual((out, err, code), ("", "", 7))
 
     def test_exit_truncates_to_low_byte(self):
-        out, err, code = run_source_both(
-            "from std.process import exit\n"
-            "fun main() { exit(258) }\n"   # 258 & 0xFF == 2
-        )
+        source = ("from std.process import exit\n"
+                  "fun main() { exit(258) }\n")   # 258 & 0xFF == 2
+        if ON_WINDOWS:
+            # Windows passes the code with its 32 bits (D216): 258 to a
+            # parent there, its low byte the 2 a POSIX parent reads (MYLA-926)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, source)
+                interp = interpret_full(check_file(path), argv=["prog"])
+                native = build_and_run_full(check_file(path), argv0="prog")
+            self.assertEqual(interp, ("", "", 2))
+            self.assertEqual(native, ("", "", 258))
+            return
+        out, err, code = run_source_both(source)
         self.assertEqual(code, 2)
 
     def test_exit_short_circuits_remaining_output(self):

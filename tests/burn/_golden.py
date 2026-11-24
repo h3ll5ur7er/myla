@@ -148,7 +148,11 @@ def _describe(arg, dirs: list[str]):
             where = os.path.relpath(path, _REPO).replace(os.sep, "/")
         else:
             where = os.path.basename(path)
-            for d in {os.path.dirname(path), os.path.dirname(os.path.realpath(path))}:
+            # the directory as given first, then as resolved: a list, so the
+            # marks are numbered the same on every machine (on Windows the two
+            # differ, `RUNNER~1` and `runneradmin`, and a set's order isn't
+            # fixed, MYLA-926)
+            for d in (os.path.dirname(path), os.path.dirname(os.path.realpath(path))):
                 if d not in dirs:
                     dirs.append(d)
         return {"file": where, "sha256": digest}
