@@ -382,6 +382,22 @@ fun timeout_of(v: Option<str>) -> int32 {
     return n
 }
 
+// How a case's process ended as `case_outcome` takes it: its exit status,
+// or minus the signal that ended it. On Windows a status has all 32 bits
+// of the code (D224), and one past 255 is taken modulo 256, as D216 has
+// tests compare it: `exit(-1)`'s 0xFFFFFFFF is 255, not signal 1
+// (MYLA-943). On Linux a status is 0 to 255 already.
+#test(ExitStatus.Exited(3))[3]
+#test(ExitStatus.Exited(-1))[255]
+#test(ExitStatus.Exited(256))[0]
+#test(ExitStatus.Signaled(9))[-9]
+pub fun run_code(status: ExitStatus) -> int32 {
+    return match status {
+        ExitStatus.Exited(c) => c & 255,
+        ExitStatus.Signaled(s) => -s,
+    }
+}
+
 // The verdict on a case past its time limit of `secs` seconds, as the
 // interpreter's `myla test` gives it.
 #test(5)["timed out after 5 s"]
@@ -620,10 +636,7 @@ pub fun run_in_children(program: str, cases: [Case]) -> Option<int32> {
             if r.rest != "" { eprint(r.rest) }
             for l in case_lines(cases[k], Some(timed_out(secs)), lines_of(out.stdout)) { lines.push(l) }
         } else {
-            let code = match out.status {
-                ExitStatus.Exited(c) => c,
-                ExitStatus.Signaled(s) => -s,
-            }
+            let code = run_code(out.status)
             let (verdict, shown) = case_detail(cases[k], out.stdout, out.stderr, code, head)
             match verdict { None => { passed = passed + 1 }, Some(d) => {} }
             for l in case_lines(cases[k], verdict, shown) { lines.push(l) }

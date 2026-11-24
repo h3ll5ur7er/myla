@@ -15,7 +15,7 @@
 from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
-from .loader import load_program_opts, LoadOptions, for_target, for_host, copied_modules, file_of, Loaded, type_errors, warning_reports, in_stdlib, normalize, is_std_module, std_tree_root, same_dir
+from .loader import load_program_opts, LoadOptions, for_target, for_host, copied_modules, file_of, Loaded, type_errors, warning_reports, in_stdlib, normalize, is_absolute, is_std_module, std_tree_root, same_dir
 from .stdroot import EMBEDDED_ROOT
 from .target import Target, Os, parse_target, host, toolchain, with_files, with_libs, missing_tool, unsupported
 from .diag import render, Report
@@ -24,7 +24,7 @@ from .codegen import new_codegen
 from .dwarf import read_gdb_script
 from .interp import new_interp, RtError, TestRun, TestOptions, sched_from_env, time_from_env
 from .harness import harness_source, Harness, runner_case
-from std.test import cut_run, case_outcome, case_lines, record_head, output_within, timed_out
+from std.test import cut_run, case_outcome, case_lines, record_head, output_within, timed_out, run_code
 from std.process import command, env, exit
 from std.time import now_ns
 from std.fs import make_dir_all, remove_dir_all, exists, read_to_string, current_dir, temp_root
@@ -154,7 +154,7 @@ fun own_library(file: str, opts: LoadOptions) -> (str, LoadOptions) {
 fun written_under(file: str, root: str) -> bool {
     let f = normalize(file)
     let r = normalize(root)
-    if r == "." { return f[0] != '/' }
+    if r == "." { return !is_absolute(f) }
     return f.len() > r.len() && f[0:r.len() + 1] == r + "/"
 }
 
@@ -246,7 +246,7 @@ pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, targ
     if refused != "" { return Err("myla: " + refused) }
     let (file, opts) = own_library(given_file, given)
     if hosts_platform(file, opts.stdlib_root, target.platform_file) {
-        return Err(format("myla: {} is std.platform for {}; for {} it is {}/std/{}, whose cases run there", file, host().name, target.name, opts.stdlib_root, target.platform_file))
+        return Err(format("myla: {} is std.platform for {}; for {} it is {}/std/{}, whose cases run there", file, plain_platform_target(), target.name, opts.stdlib_root, target.platform_file))
     }
     // the runtime is every native program's, a harness's too, which can't
     // hold it a second time (MYLA-547)
@@ -310,7 +310,7 @@ pub fun native_tests(given_file: str, given: LoadOptions, sel: TestOptions, targ
         Err(e) => { return Err(format("myla: cannot run the test harness with '{}'", argv[0])) },
     }
     let err = decode(o.stderr)
-    let code = match o.status { ExitStatus.Exited(c) => c, ExitStatus.Signaled(s) => -s }
+    let code = run_code(o.status)
     // what the cases wrote on stderr, which the harness passed on, as the
     // interpreter's `myla test` lets it through
     write(2, err)
@@ -393,9 +393,20 @@ fun hosts_platform(file: str, stdlib_root: str, own: str) -> bool {
     return absolute(file) == absolute(stdlib_root + "/std/platform.my")
 }
 
-// `p` normalized, from the current directory if it is relative.
+// The target whose `std.platform` is `std/platform.my`, as a refusal names
+// it: the host, where that is its own (Linux's); on a host with a platform
+// module of its own (Windows', `platform_windows.my`) x86_64-linux, whose
+// it is (MYLA-943).
+fun plain_platform_target() -> str {
+    if host().platform_file == "" { return host().name }
+    return "x86_64-linux"
+}
+
+// `p` normalized, from the current directory if it is relative (on
+// Windows a drive's path, `D:\a\lib`, is absolute too: MYLA-943).
+#test("/w/../lib")["/lib"]
 fun absolute(p: str) -> str {
-    if p.len() > 0 && p[0] == '/' { return normalize(p) }
+    if is_absolute(p) { return normalize(p) }
     return match current_dir() {
         Ok(d) => normalize(d + "/" + p),
         Err(e) => normalize(p),
@@ -432,7 +443,7 @@ fun resumed_tests(h: Harness, exe: str, lead: [str], program: str, dir: str, sec
             Ok(o) => o,
             Err(e) => { return Err(format("myla: cannot run the test harness with '{}'", exe)) },
         }
-        let code = match o.status { ExitStatus.Exited(c) => c, ExitStatus.Signaled(s) => -s }
+        let code = run_code(o.status)
         let runs = cut_run(o.stdout, o.stderr, code, head)
         if runs.len() == 0 {
             // the harness ended before its first case: that case failed so

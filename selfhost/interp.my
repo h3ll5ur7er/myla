@@ -601,50 +601,17 @@ pub fun sched_of(spec: str) -> (int32, uint64) {
     return (SCHED_SEED, seed)
 }
 
-// MYLA_SCHED's value in the environment `environ` (/proc/self/environ:
-// NAME=value entries, each ended by a NUL), "" when it has none.
-#test("A=1\0MYLA_SCHED=fifo\0B=2\0")["fifo"]
-#test("MYLA_SCHEDX=1\0")[""]
-#test("")[""]
-pub fun sched_in(environ: str) -> str {
-    return env_entry(environ, "MYLA_SCHED=")
-}
-
-// The value of the entry starting with `key` (`NAME=`) in the environment
-// `environ`, "" when it has none.
-#test("A=1\0MYLA_TIME=virtual\0", "MYLA_TIME=")["virtual"]
-#test("A=1\0", "MYLA_TIME=")[""]
-pub fun env_entry(environ: str, key: str) -> str {
-    var i = 0
-    while i < environ.len() {
-        var j = i
-        while j < environ.len() && environ[j] != '\0' { j = j + 1 }
-        var k = 0
-        while k < key.len() && i + k < j && environ[i + k] == key[k] { k = k + 1 }
-        if k == key.len() {
-            var sb = StringBuilder()
-            sb.append(environ, i + k, j)
-            return sb.build()
-        }
-        i = j + 1
-    }
-    return ""
-}
-
-// MYLA_SCHED's value in this process's environment, "" without one.
+// MYLA_SCHED's value in this process's environment, "" without one. Read
+// with std.process's `env`, which Windows has too: /proc/self/environ,
+// read before, isn't there, so the interpreter ran every program in the
+// default order and on the real clock (MYLA-942).
 pub fun sched_from_env() -> str {
-    return match read_to_string("/proc/self/environ") {
-        Ok(e) => sched_in(e),
-        Err(_) => "",
-    }
+    return process_m.env("MYLA_SCHED").unwrap_or("")
 }
 
 // MYLA_TIME's value in this process's environment (D124), "" without one.
 pub fun time_from_env() -> str {
-    return match read_to_string("/proc/self/environ") {
-        Ok(e) => env_entry(e, "MYLA_TIME="),
-        Err(_) => "",
-    }
+    return process_m.env("MYLA_TIME").unwrap_or("")
 }
 
 // Whether the awaited `op` calls a function value (a local, or any callee

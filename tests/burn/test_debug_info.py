@@ -611,6 +611,21 @@ def line_rows(exe: str) -> list[tuple[int, str, int]]:
     return rows
 
 
+def _lldb_cannot_start() -> str | None:
+    """Why the lldb on PATH doesn't start (`lldb --version`), or None when it
+    does. LLVM's lldb for Windows loads the Python it was built with
+    (`python3NN.dll`) as it starts, and where that isn't found ends before
+    a word (run 277 on the Windows runner: no output at all, MYLA-926),
+    which says nothing of the program it was to read."""
+    try:
+        p = subprocess.run(["lldb", "--version"], capture_output=True, text=True, timeout=60)
+    except OSError as e:
+        return f"lldb doesn't start: {e}"
+    if p.returncode == 0 and p.stdout.strip():
+        return None
+    return f"lldb doesn't start: 'lldb --version' ended with {p.returncode & 0xFFFFFFFF:#x}, {p.stderr.strip()!r}"
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS_TOOLS, WINDOWS_SKIP)
 class TestWindowsDebugInfo(unittest.TestCase):
@@ -709,6 +724,9 @@ class TestWindowsDebugInfo(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("lldb"), "lldb is not installed")
     def test_lldb_reads_the_exe(self):
+        cannot = _lldb_cannot_start()
+        if cannot:
+            self.skipTest(cannot)
         session = subprocess.run(["lldb", "-b", "-o", "image lookup -n myla_add -v", "-o", "breakpoint set -f main.my -l 7",
                                   self.build("-g")], capture_output=True, text=True, timeout=120).stdout
         self.assertIn("`myla_add at main.my:6:1", session)
