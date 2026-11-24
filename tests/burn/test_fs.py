@@ -995,10 +995,11 @@ class DirectoryParity(unittest.TestCase):
                 self.assertEqual(result, (REMOVE_TOUR_OUTPUT, "", 0))
 
     def test_a_nul_byte_in_a_path(self) -> None:
-        for impl, result in self.run_all("nul", NUL_PATHS).items():
+        # not "nul": that names Windows' null device in every directory
+        for impl, result in self.run_all("nul-byte", NUL_PATHS).items():
             with self.subTest(implementation=impl):
                 self.assertEqual(result, (NUL_PATHS_OUTPUT, "", 0))
-                self.assertEqual(sorted(os.listdir(self.work_dir("nul", impl))), ["q"])
+                self.assertEqual(sorted(os.listdir(self.work_dir("nul-byte", impl))), ["q"])
 
     def test_seeks_past_the_ends(self) -> None:
         for impl, result in self.run_all("seek_edges", SEEK_EDGES).items():

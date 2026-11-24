@@ -378,6 +378,14 @@ class PythonServer:
         self.server.server_close()
 
 
+def stop(proc: subprocess.Popen) -> None:
+    """The server `proc` killed and waited for: on Windows a program still
+    running (TerminateProcess doesn't wait) can't have its file removed with
+    the test's directory."""
+    proc.kill()
+    proc.wait()
+
+
 def free_port() -> int:
     """A port nothing listens on (bound, then closed)."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -666,7 +674,7 @@ class MylaServer(unittest.TestCase):
                         python_clients(self, int(port))
                         rest, err = proc.communicate(timeout=60)
                     finally:
-                        proc.kill()
+                        stop(proc)
                     self.assertEqual((rest, err, proc.returncode), (f"served {SERVER_REQUESTS}\n", "", 0))
 
 
@@ -744,7 +752,7 @@ class KeepAlive(unittest.TestCase):
                             self.assertTrue(0.25 < elapsed < 3, elapsed)
                         rest, err = proc.communicate(timeout=30)
                     finally:
-                        proc.kill()
+                        stop(proc)
                     self.assertEqual((rest, err, proc.returncode), ("stopped\n", "", 0))
 
 
@@ -953,7 +961,7 @@ class TimeLimits(unittest.TestCase):
             check(port)
             rest, err = proc.communicate(timeout=60)
         finally:
-            proc.kill()
+            stop(proc)
         self.assertEqual((rest, err, proc.returncode), ("stopped\n", "", 0))
 
     def test_idle_non_reading_and_slow_handled_connections(self):

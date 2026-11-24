@@ -590,7 +590,9 @@ ERRORS = PRELUDE + """fun main() {
         Ok(s) => print("connected")
         Err(e) => print(cause(e))
     }
-    match net.connect_timeout(net.addr(net.loopback(), port), 1000) {
+    // (refused well within its time: Windows tries a refused SYN again
+    // for about 2 s before it says so, Linux says so at once)
+    match net.connect_timeout(net.addr(net.loopback(), port), 10000) {
         Ok(s) => print("connected")
         Err(e) => print(cause(e))
     }
