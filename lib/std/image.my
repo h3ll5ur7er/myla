@@ -1299,22 +1299,30 @@ struct CutBox {
 }
 
 fun cut_box(keys: [uint32], order: [int], start: int, end: int) -> CutBox {
+    var lo = [255u32, 255u32, 255u32, 255u32]
+    var hi = [0u32, 0u32, 0u32, 0u32]
+    for k in start..end {
+        let v = keys[order[k]]
+        let r = v >> 24
+        let g = (v >> 16) & 255u32
+        let b = (v >> 8) & 255u32
+        let a = v & 255u32
+        if r < lo[0] { lo[0] = r }
+        if r > hi[0] { hi[0] = r }
+        if g < lo[1] { lo[1] = g }
+        if g > hi[1] { hi[1] = g }
+        if b < lo[2] { lo[2] = b }
+        if b > hi[2] { hi[2] = b }
+        if a < lo[3] { lo[3] = a }
+        if a > hi[3] { hi[3] = a }
+    }
     var best = 0
     var range = -1
     for c in 0..4 {
-        var lo = 255
-        var hi = 0
-        for k in start..end {
-            let v = chan(keys[order[k]], c)
-            if v < lo {
-                lo = v
-            }
-            if v > hi {
-                hi = v
-            }
-        }
-        if hi - lo > range {
-            range = hi - lo
+        // a box is never empty, so `hi` is at least `lo`
+        let w = (hi[c] - lo[c]) as int
+        if w > range {
+            range = w
             best = c
         }
     }
@@ -1342,15 +1350,26 @@ fun median_cut(keys: [uint32], counts: [int], colors: int) -> [Color] {
             break
         }
         let x = boxes[pick]
-        // the box's entries by the channel, then by position for ties
-        var keyed = list_m.filled(x.end - x.start, 0i64)
+        // the box's entries by the channel: a counting sort, which keeps
+        // the order of equals
+        let shift = (24 - 8 * x.channel) as uint32
+        var at = list_m.filled(257, 0)
         for k in x.start..x.end {
-            keyed[k - x.start] = ((chan(keys[order[k]], x.channel) as int64) << 32) | (order[k] as int64)
+            at[(((keys[order[k]] >> shift) & 255u32) as int) + 1] += 1
         }
-        keyed.sort_unstable()
+        for v in 0..256 {
+            at[v + 1] += at[v]
+        }
+        var part = list_m.filled(x.end - x.start, 0)
+        for k in x.start..x.end {
+            let e = order[k]
+            let v = ((keys[e] >> shift) & 255u32) as int
+            part[at[v]] = e
+            at[v] += 1
+        }
         var total: int64 = 0
         for k in x.start..x.end {
-            let e = (keyed[k - x.start] & 0xFFFFFFFFi64) as int
+            let e = part[k - x.start]
             order[k] = e
             total += counts[e] as int64
         }
