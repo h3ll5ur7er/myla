@@ -1,0 +1,3181 @@
+// std.imgproc: image processing over std.image's `Image<S>` (D311,
+// MYLA-941): colour and point operations, geometry, filters, morphology,
+// edges and corners, template matching, connected regions and quality
+// measures.
+//
+// Free functions, image first, so they chain with `|>`:
+// `img |> imgproc.gray() |> imgproc.gaussian_blur(1.4f32) |> imgproc.canny(40.0f32, 120.0f32)`.
+// Integer images go in and come out unless the result is signed or
+// fractional (gradients, responses, distances), which is an `ImageF` in the
+// input's sample units (0 to 255 for an `Image8`). Point operations leave an
+// alpha channel as it is; filters treat every channel alike.
+//
+// Pixel (x, y) is a point at the integer coordinates (x, y) (OpenCV's
+// convention) for the warps; `resize` follows Pillow, whose pixels are
+// squares with their centres at (x + 0.5, y + 0.5), and gives Pillow's
+// pixels exactly for an `Image8`.
+//
+// Inside, the work is done in int32 or float64: float32 arithmetic is
+// several times slower natively. Borders are handled by padding once, so
+// the inner loops have no tests.
+
+import std.image as image
+from std.image import Image, Image8, ImageF, Layout, Color, Rect, Sample, ImageError
+from std.vector32 import Vec2, Vec3
+import std.vector32 as v32
+from std.matrix32 import Mat3
+import std.matrix32 as m32
+import std.unionfind as unionfind
+import std.float as fl
+import std.list as list_m
+import std.option as option_m
+import std.math as math
+
+// How a filter or a warp sees the pixels past the edge (OpenCV's set):
+// with an image `abcdefgh`, `Constant(v)` is `vvv|abcdefgh|vvv` (in sample
+// units: 255.0 is white in an `Image8`), `Replicate` `aaa|abcdefgh|hhh`,
+// `Reflect` `cba|abcdefgh|hgf`, `Reflect101` `dcb|abcdefgh|gfe` (the
+// default, as in OpenCV) and `Wrap` `fgh|abcdefgh|abc`.
+#derive(Eq)
+pub enum Border {
+    Constant(float32)
+    Replicate
+    Reflect
+    Reflect101
+    Wrap
+}
+
+// A resampling filter. `Nearest`, `Bilinear`, `Bicubic` (a = -0.5) and
+// `Lanczos3` are Pillow's, antialiased when shrinking; `Area` averages the
+// source over each target pixel's footprint (OpenCV's INTER_AREA for
+// shrinking, Pillow's BOX for whole factors).
+#derive(Eq)
+pub enum Filter {
+    Nearest
+    Bilinear
+    Bicubic
+    Area
+    Lanczos3
+}
+
+// What `threshold` gives for a sample `v` against `t` (OpenCV's types):
+// `Binary` max if v > t else 0, `BinaryInv` 0 if v > t else max, `Trunc`
+// t if v > t else v, `ToZero` v if v > t else 0, `ToZeroInv` 0 if v > t
+// else v.
+#derive(Eq)
+pub enum Threshold {
+    Binary
+    BinaryInv
+    Trunc
+    ToZero
+    ToZeroInv
+}
+
+// The local threshold of `adaptive_threshold`: the block's mean, or its
+// Gaussian-weighted mean.
+#derive(Eq)
+pub enum Adaptive {
+    Mean
+    Gaussian
+}
+
+// A morphological operation of `morph`: opening (erode, then dilate),
+// closing, gradient (dilate minus erode), top hat (the image minus its
+// opening) and black hat (the closing minus the image).
+#derive(Eq)
+pub enum Morph {
+    Open
+    Close
+    Gradient
+    TopHat
+    BlackHat
+}
+
+// How `match_template` scores a window against the template: the sum of
+// squared differences (`Ssd`, 0 is a perfect match), normalised
+// cross-correlation (`Ncc`, OpenCV's TM_CCORR_NORMED) and zero-mean
+// normalised cross-correlation (`Zncc`, TM_CCOEFF_NORMED, 1 is a perfect
+// match).
+#derive(Eq)
+pub enum Match {
+    Ssd
+    Ncc
+    Zncc
+}
+
+// A `w` by `h` kernel, row by row; its anchor is the middle, (w / 2, h / 2).
+#derive(Eq)
+pub struct Kernel {
+    w: int,
+    h: int,
+    data: [float32],
+}
+
+// A structuring element of `erode`, `dilate` and `morph`: `w` by `h`, row
+// by row, its anchor the middle.
+#derive(Eq)
+pub struct Element {
+    w: int,
+    h: int,
+    mask: [bool],
+}
+
+// A connected region of `components`: its pixels, bounding box and centre
+// of mass.
+#derive(Eq)
+pub struct Region {
+    area: int,
+    bbox: Rect,
+    centroid: Vec2,
+}
+
+// The connected components of a mask: `count` regions labelled 1 to
+// `count` in the order of their first pixel (row by row), `labels` a label
+// a pixel (0 the background), `stats[l]` the region of label `l`, as in
+// OpenCV: `stats[0]` is the background's.
+#derive(Eq)
+pub struct Components {
+    count: int,
+    width: int,
+    height: int,
+    labels: [int32],
+    stats: [Region],
+}
+
+// The smallest and largest value of a channel and the first pixel (row by
+// row) where each is.
+#derive(Eq)
+pub struct Extremes {
+    min: float32,
+    max: float32,
+    min_x: int,
+    min_y: int,
+    max_x: int,
+    max_y: int,
+}
+
+// A summed-area table: `sums[y * (width + 1) + x]` is the sum of the
+// pixels above and left of (x, y), so any rectangle sums in four reads.
+#derive(Eq)
+pub struct Integral {
+    width: int,
+    height: int,
+    sums: [float64],
+}
+
+impl Integral {
+    // The sum of the pixels of `r`, clipped to the image.
+    fun sum(self, r: Rect) -> float64 {
+        let x0 = clampi(r.x, 0, self.width)
+        let y0 = clampi(r.y, 0, self.height)
+        let x1 = clampi(r.x + r.w, 0, self.width)
+        let y1 = clampi(r.y + r.h, 0, self.height)
+        if x1 <= x0 || y1 <= y0 {
+            return 0.0
+        }
+        let s = self.width + 1
+        return self.sums[y1 * s + x1] - self.sums[y0 * s + x1] - self.sums[y1 * s + x0] + self.sums[y0 * s + x0]
+    }
+}
+
+// ---- small helpers ----
+
+#test(5, 0, 3)[3]
+#test(-2, 0, 3)[0]
+fun clampi(v: int, lo: int, hi: int) -> int {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+#test(-3)[3]
+fun iabs(v: int) -> int {
+    return if v < 0 { -v } else { v }
+}
+
+// `floor(x)` as an int, held to ±2^30 (and 0 for NaN) so it never
+// overflows.
+#test(-2.5)[-3]
+#test(2.5)[2]
+#test(-3.0)[-3]
+fun ifloor(x: float64) -> int {
+    if !(x > -1073741824.0) {
+        return if x != x { 0 } else { -1073741824 }
+    }
+    if x > 1073741824.0 {
+        return 1073741824
+    }
+    let i = x as int
+    return if (i as float64) > x { i - 1 } else { i }
+}
+
+// `x` rounded to the nearest integer, halves to even (as OpenCV's cvRound).
+#test(2.5)[2]
+#test(3.5)[4]
+#test(-1.5)[-2]
+#test(1.2)[1]
+fun round_even(x: float64) -> int {
+    let f = ifloor(x)
+    let d = x - (f as float64)
+    if d > 0.5 {
+        return f + 1
+    }
+    if d < 0.5 {
+        return f
+    }
+    return if f % 2 == 0 { f } else { f + 1 }
+}
+
+// A value from 0 to 255 rounded (halves up) and clamped.
+#test(254.5)[255u8]
+#test(-4.0)[0u8]
+#test(12.49)[12u8]
+fun clamp_u8(x: float64) -> uint8 {
+    if !(x > 0.0) {
+        return 0u8
+    }
+    if x >= 255.0 {
+        return 255u8
+    }
+    return (x + 0.5) as uint8
+}
+
+// The index of the alpha channel of `layout`, -1 without one.
+#test(Layout.Rgba)[3]
+#test(Layout.Rgb)[-1]
+fun alpha_index(layout: Layout) -> int {
+    return match layout {
+        GrayAlpha => 1
+        Rgba => 3
+        Gray | Rgb => -1
+    }
+}
+
+// The colour channels of `layout`: those that aren't alpha.
+#test(Layout.GrayAlpha)[1]
+#test(Layout.Rgba)[3]
+fun color_channels(layout: Layout) -> int {
+    return if layout.has_alpha() { layout.channels() - 1 } else { layout.channels() }
+}
+
+// The samples of `c` for a pixel of `layout`: its red for gray.
+fun color_samples(c: Color, layout: Layout) -> [float64] {
+    return match layout {
+        Gray => [c.r as float64]
+        GrayAlpha => [c.r as float64, c.a as float64]
+        Rgb => [c.r as float64, c.g as float64, c.b as float64]
+        Rgba => [c.r as float64, c.g as float64, c.b as float64, c.a as float64]
+    }
+}
+
+// The pixel `i` along an axis of `n` pixels, through the border: -1 where
+// the border is a constant.
+#test(-1, 5, Border.Reflect101)[1]
+#test(-1, 5, Border.Reflect)[0]
+#test(5, 5, Border.Reflect101)[3]
+#test(5, 5, Border.Reflect)[4]
+#test(-2, 5, Border.Replicate)[0]
+#test(7, 5, Border.Wrap)[2]
+#test(-1, 5, Border.Wrap)[4]
+#test(-1, 5, Border.Constant(1.0f32))[-1]
+#test(-7, 3, Border.Reflect101)[1]
+#test(3, 1, Border.Reflect101)[0]
+#test(-4, 2, Border.Reflect)[0]
+fun border_at(i: int, n: int, b: Border) -> int {
+    if i >= 0 && i < n {
+        return i
+    }
+    return match b {
+        Constant(_) => -1
+        Replicate => if i < 0 { 0 } else { n - 1 }
+        Reflect => {
+            let p = 2 * n
+            var j = i % p
+            if j < 0 {
+                j += p
+            }
+            if j >= n { p - 1 - j } else { j }
+        }
+        Reflect101 => {
+            if n == 1 {
+                0
+            } else {
+                let p = 2 * n - 2
+                var j = i % p
+                if j < 0 {
+                    j += p
+                }
+                if j >= n { p - j } else { j }
+            }
+        }
+        Wrap => {
+            var j = i % n
+            if j < 0 {
+                j += n
+            }
+            j
+        }
+    }
+}
+
+// A constant border's value, 0 for the others.
+fun border_value(b: Border) -> float64 {
+    return match b {
+        Constant(v) => v as float64
+        _ => 0.0
+    }
+}
+
+// The pixels -before to n + after - 1 of an axis, through the border.
+fun border_table(n: int, before: int, after: int, b: Border) -> [int] {
+    var t = list_m.filled(n + before + after, 0)
+    for i in 0..t.len() {
+        t[i] = border_at(i - before, n, b)
+    }
+    return t
+}
+
+// Whether `S` is an integer sample type (its maximum past 1).
+fun integer_samples<S: Sample>() -> bool {
+    return S.max_value().to_f32() > 1.0f32
+}
+
+// The samples of `img` as float64.
+fun to_f64<S: Sample>(img: Image<S>) -> [float64] {
+    let n = img.data.len()
+    var out = list_m.filled(n, 0.0)
+    for i in 0..n {
+        out[i] = img.data[i].to_f32() as float64
+    }
+    return out
+}
+
+// The samples of an integer image as int32.
+fun to_i32<S: Sample>(img: Image<S>) -> [int32] {
+    let n = img.data.len()
+    var out = list_m.filled(n, 0)
+    for i in 0..n {
+        out[i] = img.data[i].to_f32() as int32
+    }
+    return out
+}
+
+// The image of float64 samples, rounded (halves up) and clamped for an
+// integer type.
+fun from_f64<S: Sample>(xs: [float64], w: int, h: int, layout: Layout) -> Image<S> {
+    let mx = S.max_value().to_f32() as float64
+    var data = list_m.filled(xs.len(), S.from_f32(0.0f32))
+    if mx > 1.0 {
+        for i in 0..xs.len() {
+            let x = xs[i]
+            let v = if !(x > 0.0) { 0.0 } else if x >= mx { mx } else { ((x + 0.5) as int64) as float64 }
+            data[i] = S.from_f32(v as float32)
+        }
+    } else {
+        for i in 0..xs.len() {
+            data[i] = S.from_f32(xs[i] as float32)
+        }
+    }
+    return Image { width: w, height: h, layout: layout, data: data }
+}
+
+// The image of int32 samples, which are in range.
+fun from_i32<S: Sample>(xs: [int32], w: int, h: int, layout: Layout) -> Image<S> {
+    var data = list_m.filled(xs.len(), S.from_f32(0.0f32))
+    for i in 0..xs.len() {
+        data[i] = S.from_f32(xs[i] as float32)
+    }
+    return Image { width: w, height: h, layout: layout, data: data }
+}
+
+// float64 samples as an ImageF, unscaled.
+fun to_image_f(xs: [float64], w: int, h: int, layout: Layout) -> ImageF {
+    var data = list_m.filled(xs.len(), 0.0f32)
+    for i in 0..xs.len() {
+        data[i] = xs[i] as float32
+    }
+    return Image { width: w, height: h, layout: layout, data: data }
+}
+
+// An Image8 of `layout` from its data.
+fun image8(w: int, h: int, layout: Layout, data: [uint8]) -> Image8 {
+    return Image { width: w, height: h, layout: layout, data: data }
+}
+
+// `Err(Mismatch)` unless `a` and `b` have the same size and layout.
+fun same_shape<S: Sample, T: Sample>(a: Image<S>, b: Image<T>, what: str) -> Result<(), ImageError> {
+    if a.width != b.width || a.height != b.height || a.layout != b.layout {
+        return Err(ImageError.Mismatch(f"{what}: {a.width}x{a.height} {a.layout} and {b.width}x{b.height} {b.layout}"))
+    }
+    return Ok(())
+}
+
+// `src` (w by h pixels of c float64 samples) padded by the border: `top`
+// rows above, `right` columns right, and so on.
+fun pad_f(src: [float64], w: int, h: int, c: int, top: int, right: int, bottom: int, left: int, b: Border) -> [float64] {
+    let pw = w + left + right
+    let ph = h + top + bottom
+    var out = list_m.filled(pw * ph * c, border_value(b))
+    if w == 0 || h == 0 {
+        return out
+    }
+    let xt = border_table(w, left, right, b)
+    let yt = border_table(h, top, bottom, b)
+    let rw = w * c
+    for py in 0..ph {
+        let sy = yt[py]
+        if sy < 0 {
+            continue
+        }
+        let srow = sy * rw
+        let orow = py * pw * c
+        let mid = orow + left * c
+        for i in 0..rw {
+            out[mid + i] = src[srow + i]
+        }
+        for px in 0..left {
+            let sx = xt[px]
+            if sx >= 0 {
+                for k in 0..c {
+                    out[orow + px * c + k] = src[srow + sx * c + k]
+                }
+            }
+        }
+        for px in left + w..pw {
+            let sx = xt[px]
+            if sx >= 0 {
+                for k in 0..c {
+                    out[orow + px * c + k] = src[srow + sx * c + k]
+                }
+            }
+        }
+    }
+    return out
+}
+
+// Each row of `p` (padded by k.len() - 1 columns) correlated with `k`:
+// w by h pixels.
+fun corr_h(p: [float64], w: int, h: int, c: int, k: [float64]) -> [float64] {
+    let pw = w + k.len() - 1
+    let rw = w * c
+    var out = list_m.filled(rw * h, 0.0)
+    for y in 0..h {
+        let pb = y * pw * c
+        let ob = y * rw
+        for t in 0..k.len() {
+            let kt = k[t]
+            if kt == 0.0 {
+                continue
+            }
+            let pt = pb + t * c
+            for i in 0..rw {
+                out[ob + i] += p[pt + i] * kt
+            }
+        }
+    }
+    return out
+}
+
+// Each column of `p` (padded by k.len() - 1 rows) correlated with `k`.
+fun corr_v(p: [float64], w: int, h: int, c: int, k: [float64]) -> [float64] {
+    let rw = w * c
+    var out = list_m.filled(rw * h, 0.0)
+    for y in 0..h {
+        let ob = y * rw
+        for t in 0..k.len() {
+            let kt = k[t]
+            if kt == 0.0 {
+                continue
+            }
+            let pt = (y + t) * rw
+            for i in 0..rw {
+                out[ob + i] += p[pt + i] * kt
+            }
+        }
+    }
+    return out
+}
+
+#test([1.0, 2.0, -3.0])[0.0]
+fun sum_f(xs: [float64]) -> float64 {
+    var s = 0.0
+    for x in xs {
+        s += x
+    }
+    return s
+}
+
+// `src` correlated with `kx` along the rows, then `ky` along the columns,
+// each anchored at its middle.
+fun sep_f(src: [float64], w: int, h: int, c: int, kx: [float64], ky: [float64], b: Border) -> [float64] {
+    var cur = src
+    if kx.len() > 1 || (kx.len() == 1 && kx[0] != 1.0) {
+        let rx = kx.len() / 2
+        let p = pad_f(cur, w, h, c, 0, kx.len() - 1 - rx, 0, rx, b)
+        cur = corr_h(p, w, h, c, kx)
+    }
+    if ky.len() > 1 || (ky.len() == 1 && ky[0] != 1.0) {
+        // past the edge, a constant border was filtered along the rows too
+        let b2 = match b {
+            Constant(v) => Border.Constant(((v as float64) * sum_f(kx)) as float32)
+            _ => b
+        }
+        let ry = ky.len() / 2
+        let p = pad_f(cur, w, h, c, ry, 0, ky.len() - 1 - ry, 0, b2)
+        cur = corr_v(p, w, h, c, ky)
+    }
+    return cur
+}
+
+// `src` correlated with the 2D kernel `k`, anchored at its middle.
+fun corr2d(src: [float64], w: int, h: int, c: int, k: Kernel, b: Border) -> [float64] {
+    let ax = k.w / 2
+    let ay = k.h / 2
+    let p = pad_f(src, w, h, c, ay, k.w - 1 - ax, k.h - 1 - ay, ax, b)
+    let pw = w + k.w - 1
+    let rw = w * c
+    var out = list_m.filled(rw * h, 0.0)
+    for y in 0..h {
+        let ob = y * rw
+        for ty in 0..k.h {
+            for tx in 0..k.w {
+                let kt = k.data[ty * k.w + tx] as float64
+                if kt == 0.0 {
+                    continue
+                }
+                let pt = ((y + ty) * pw + tx) * c
+                for i in 0..rw {
+                    out[ob + i] += p[pt + i] * kt
+                }
+            }
+        }
+    }
+    return out
+}
+
+// float32 weights as float64.
+fun widen(k: [float32]) -> [float64] {
+    var out = list_m.filled(k.len(), 0.0)
+    for i in 0..k.len() {
+        out[i] = k[i] as float64
+    }
+    return out
+}
+
+// ---- colour and point operations ----
+
+// The image in gray, with Pillow's integer luma for colour,
+// L = (R * 19595 + G * 38470 + B * 7471 + 0x8000) >> 16 (ITU-R 601-2);
+// alpha is dropped.
+#test(Image { width: 2, height: 1, layout: Layout.Rgb, data: [255u8, 0u8, 0u8, 10u8, 20u8, 30u8] })[Image { width: 2, height: 1, layout: Layout.Gray, data: [76u8, 18u8] }]
+#test(Image { width: 1, height: 1, layout: Layout.GrayAlpha, data: [7u8, 9u8] })[Image { width: 1, height: 1, layout: Layout.Gray, data: [7u8] }]
+#test(Image { width: 1, height: 1, layout: Layout.Rgba, data: [255u8, 255u8, 255u8, 0u8] })[Image { width: 1, height: 1, layout: Layout.Gray, data: [255u8] }]
+pub fun gray(img: Image8) -> Image8 {
+    let n = img.width * img.height
+    let c = img.layout.channels()
+    if c == 1 {
+        return img
+    }
+    var out = list_m.filled(n, 0u8)
+    if c == 2 {
+        for i in 0..n {
+            out[i] = img.data[2 * i]
+        }
+    } else {
+        var j = 0
+        for i in 0..n {
+            let r = img.data[j] as int32
+            let g = img.data[j + 1] as int32
+            let b = img.data[j + 2] as int32
+            out[i] = ((r * 19595 + g * 38470 + b * 7471 + 0x8000) >> 16) as uint8
+            j += c
+        }
+    }
+    return image8(img.width, img.height, Layout.Gray, out)
+}
+
+// The image in RGB: gray repeated in the three channels; alpha is dropped.
+#test(Image { width: 1, height: 1, layout: Layout.GrayAlpha, data: [7u8, 9u8] })[Image { width: 1, height: 1, layout: Layout.Rgb, data: [7u8, 7u8, 7u8] }]
+#test(Image { width: 1, height: 1, layout: Layout.Rgba, data: [1u8, 2u8, 3u8, 4u8] })[Image { width: 1, height: 1, layout: Layout.Rgb, data: [1u8, 2u8, 3u8] }]
+pub fun to_rgb(img: Image8) -> Image8 {
+    let n = img.width * img.height
+    let c = img.layout.channels()
+    if c == 3 {
+        return img
+    }
+    var out = list_m.filled(n * 3, 0u8)
+    for i in 0..n {
+        let s = i * c
+        if c <= 2 {
+            let v = img.data[s]
+            out[3 * i] = v
+            out[3 * i + 1] = v
+            out[3 * i + 2] = v
+        } else {
+            out[3 * i] = img.data[s]
+            out[3 * i + 1] = img.data[s + 1]
+            out[3 * i + 2] = img.data[s + 2]
+        }
+    }
+    return image8(img.width, img.height, Layout.Rgb, out)
+}
+
+// Hue in degrees (0 to 360), saturation and value (0 to 1) of each pixel,
+// as Python's colorsys computes them: an `ImageF` of three channels.
+// Gray is gray of saturation 0; alpha is dropped.
+#test(Image { width: 2, height: 1, layout: Layout.Rgb, data: [255u8, 0u8, 0u8, 0u8, 0u8, 255u8] })[Image { width: 2, height: 1, layout: Layout.Rgb, data: [0.0f32, 1.0f32, 1.0f32, 240.0f32, 1.0f32, 1.0f32] }]
+pub fun to_hsv(img: Image8) -> ImageF {
+    let src = to_rgb(img)
+    let n = src.width * src.height
+    var out = list_m.filled(n * 3, 0.0f32)
+    for i in 0..n {
+        let r = (src.data[3 * i] as float64) / 255.0
+        let g = (src.data[3 * i + 1] as float64) / 255.0
+        let b = (src.data[3 * i + 2] as float64) / 255.0
+        let mx = r.max(g).max(b)
+        let mn = r.min(g).min(b)
+        out[3 * i + 2] = mx as float32
+        if mx == mn {
+            continue
+        }
+        let d = mx - mn
+        out[3 * i + 1] = (d / mx) as float32
+        let rc = (mx - r) / d
+        let gc = (mx - g) / d
+        let bc = (mx - b) / d
+        var hh = if r == mx { bc - gc } else if g == mx { 2.0 + rc - bc } else { 4.0 + gc - rc }
+        hh = hh / 6.0
+        if hh < 0.0 {
+            hh += 1.0
+        }
+        out[3 * i] = (hh * 360.0) as float32
+    }
+    return Image { width: src.width, height: src.height, layout: Layout.Rgb, data: out }
+}
+
+// The RGB image of hue (degrees), saturation and value, the first three
+// channels of `f`; rounded to 0 to 255.
+#test(Image { width: 2, height: 1, layout: Layout.Rgb, data: [120.0f32, 1.0f32, 1.0f32, 30.0f32, 0.5f32, 0.8f32] })[Image { width: 2, height: 1, layout: Layout.Rgb, data: [0u8, 255u8, 0u8, 204u8, 153u8, 102u8] }]
+pub fun from_hsv(f: ImageF) -> Image8 {
+    let n = f.width * f.height
+    let c = f.layout.channels()
+    if c < 3 {
+        panic(f"from_hsv needs three channels, not {f.layout}")
+    }
+    var out = list_m.filled(n * 3, 0u8)
+    for i in 0..n {
+        var hh = (f.data[i * c] as float64) / 360.0
+        let s = (f.data[i * c + 1] as float64).clamp(0.0, 1.0)
+        let v = (f.data[i * c + 2] as float64).clamp(0.0, 1.0)
+        var r = v
+        var g = v
+        var b = v
+        if s > 0.0 {
+            hh = hh - (ifloor(hh) as float64)
+            let h6 = hh * 6.0
+            var k = ifloor(h6)
+            let fr = h6 - (k as float64)
+            k = k % 6
+            let p = v * (1.0 - s)
+            let q = v * (1.0 - s * fr)
+            let t = v * (1.0 - s * (1.0 - fr))
+            if k == 0 {
+                r = v
+                g = t
+                b = p
+            } else if k == 1 {
+                r = q
+                g = v
+                b = p
+            } else if k == 2 {
+                r = p
+                g = v
+                b = t
+            } else if k == 3 {
+                r = p
+                g = q
+                b = v
+            } else if k == 4 {
+                r = t
+                g = p
+                b = v
+            } else {
+                r = v
+                g = p
+                b = q
+            }
+        }
+        out[3 * i] = clamp_u8(r * 255.0)
+        out[3 * i + 1] = clamp_u8(g * 255.0)
+        out[3 * i + 2] = clamp_u8(b * 255.0)
+    }
+    return image8(f.width, f.height, Layout.Rgb, out)
+}
+
+// The sRGB transfer function undone: each colour channel as linear light
+// (0 to 1), alpha divided by 255.
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 10u8, 255u8] })[Image { width: 3, height: 1, layout: Layout.Gray, data: [0.0f32, 0.003035270f32, 1.0f32] }]
+pub fun to_linear(img: Image8) -> ImageF {
+    var table = list_m.filled(256, 0.0f32)
+    for v in 0..256 {
+        let s = (v as float64) / 255.0
+        let l = if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).pow(2.4) }
+        table[v] = l as float32
+    }
+    let ai = alpha_index(img.layout)
+    let c = img.layout.channels()
+    var out = list_m.filled(img.data.len(), 0.0f32)
+    for i in 0..img.data.len() {
+        if ai >= 0 && i % c == ai {
+            out[i] = ((img.data[i] as float64) / 255.0) as float32
+        } else {
+            out[i] = table[img.data[i] as int]
+        }
+    }
+    return Image { width: img.width, height: img.height, layout: img.layout, data: out }
+}
+
+// Linear light (0 to 1) back to sRGB, rounded to 0 to 255; alpha times 255.
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [0.0f32, 0.003035270f32, 1.0f32] })[Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 10u8, 255u8] }]
+pub fun to_srgb(f: ImageF) -> Image8 {
+    let ai = alpha_index(f.layout)
+    let c = f.layout.channels()
+    var out = list_m.filled(f.data.len(), 0u8)
+    for i in 0..f.data.len() {
+        let l = (f.data[i] as float64).clamp(0.0, 1.0)
+        if ai >= 0 && i % c == ai {
+            out[i] = clamp_u8(l * 255.0)
+        } else {
+            let s = if l <= 0.0031308 { l * 12.92 } else { 1.055 * l.pow(1.0 / 2.4) - 0.055 }
+            out[i] = clamp_u8(s * 255.0)
+        }
+    }
+    return image8(f.width, f.height, f.layout, out)
+}
+
+// Each colour sample `v` as `max - v` (255 - v for an Image8, 1 - v for
+// an ImageF); alpha stays.
+pub fun invert<S: Sample>(img: Image<S>) -> Image<S> {
+    let mx = S.max_value().to_f32()
+    let ai = alpha_index(img.layout)
+    let c = img.layout.channels()
+    var out = img
+    for i in 0..out.data.len() {
+        if ai < 0 || i % c != ai {
+            out.data[i] = S.from_f32(mx - img.data[i].to_f32())
+        }
+    }
+    return out
+}
+
+// Each colour sample `v` as `table[v]` (a value past the table's end
+// stays); alpha stays. A table has 256 entries.
+#test(Image { width: 2, height: 1, layout: Layout.GrayAlpha, data: [3u8, 3u8, 9u8, 1u8] }, [9u8, 8u8, 7u8, 6u8])[Image { width: 2, height: 1, layout: Layout.GrayAlpha, data: [6u8, 3u8, 9u8, 1u8] }]
+pub fun lut(img: Image8, table: [uint8]) -> Image8 {
+    let ai = alpha_index(img.layout)
+    let c = img.layout.channels()
+    let n = table.len()
+    var out = img
+    for i in 0..out.data.len() {
+        if ai < 0 || i % c != ai {
+            let v = img.data[i] as int
+            if v < n {
+                out.data[i] = table[v]
+            }
+        }
+    }
+    return out
+}
+
+// A table through `f`, rounded and clamped.
+fun table_of(f: (float64) -> float64) -> [uint8] {
+    var t = list_m.filled(256, 0u8)
+    for v in 0..256 {
+        t[v] = clamp_u8(f(v as float64))
+    }
+    return t
+}
+
+// Brightness and contrast: `(v - 127.5) * contrast + 127.5 + brightness`,
+// `brightness` in sample units (-255 to 255); alpha stays.
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 100u8, 255u8] }, 10.0f32, 1.0f32)[Image { width: 3, height: 1, layout: Layout.Gray, data: [10u8, 110u8, 255u8] }]
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 100u8, 255u8] }, 0.0f32, 2.0f32)[Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 73u8, 255u8] }]
+#test(Image { width: 2, height: 1, layout: Layout.Gray, data: [0u8, 55u8] }, 0.0f32, -1.0f32)[Image { width: 2, height: 1, layout: Layout.Gray, data: [255u8, 200u8] }]
+pub fun adjust(img: Image8, brightness: float32, contrast: float32 = 1.0f32) -> Image8 {
+    let b = brightness as float64
+    let k = contrast as float64
+    return lut(img, table_of((v: float64) => (v - 127.5) * k + 127.5 + b))
+}
+
+// A power law, `255 * (v / 255)^g`: `g` above 1 darkens, below 1
+// brightens; alpha stays.
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 64u8, 255u8] }, 2.0f32)[Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 16u8, 255u8] }]
+#test(Image { width: 2, height: 1, layout: Layout.Gray, data: [64u8, 128u8] }, 0.5f32)[Image { width: 2, height: 1, layout: Layout.Gray, data: [128u8, 181u8] }]
+pub fun gamma(img: Image8, g: float32) -> Image8 {
+    let e = g as float64
+    return lut(img, table_of((v: float64) => 255.0 * (v / 255.0).pow(e)))
+}
+
+// Each colour sample against `t` (see `Threshold`); alpha stays.
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [10u8, 100u8, 101u8] }, 100u8, Threshold.Binary, 255u8)[Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 0u8, 255u8] }]
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [10u8, 100u8, 101u8] }, 100u8, Threshold.BinaryInv, 7u8)[Image { width: 3, height: 1, layout: Layout.Gray, data: [7u8, 7u8, 0u8] }]
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [10u8, 100u8, 200u8] }, 100u8, Threshold.Trunc, 255u8)[Image { width: 3, height: 1, layout: Layout.Gray, data: [10u8, 100u8, 100u8] }]
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [10u8, 100u8, 200u8] }, 100u8, Threshold.ToZero, 255u8)[Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 0u8, 200u8] }]
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [10u8, 100u8, 200u8] }, 100u8, Threshold.ToZeroInv, 255u8)[Image { width: 3, height: 1, layout: Layout.Gray, data: [10u8, 100u8, 0u8] }]
+pub fun threshold(img: Image8, t: uint8, mode: Threshold = Threshold.Binary, max: uint8 = 255u8) -> Image8 {
+    var table = list_m.filled(256, 0u8)
+    for v in 0..256 {
+        let above = v > (t as int)
+        table[v] = match mode {
+            Binary => if above { max } else { 0u8 }
+            BinaryInv => if above { 0u8 } else { max }
+            Trunc => if above { t } else { v as uint8 }
+            ToZero => if above { v as uint8 } else { 0u8 }
+            ToZeroInv => if above { 0u8 } else { v as uint8 }
+        }
+    }
+    return lut(img, table)
+}
+
+// The 256 bins of channel `channel`: how many pixels have each value.
+pub fun histogram(img: Image8, channel: int = 0) -> [int] {
+    let c = img.layout.channels()
+    if channel < 0 || channel >= c {
+        panic(f"channel {channel} of a {img.layout} image")
+    }
+    var h = list_m.filled(256, 0)
+    var i = channel
+    while i < img.data.len() {
+        h[img.data[i] as int] += 1
+        i += c
+    }
+    return h
+}
+
+// Otsu's threshold of the image's gray: the `t` that maximises the
+// variance between the classes `v <= t` and `v > t` (the first such `t`),
+// for `threshold(img, t)`.
+#test(Image { width: 4, height: 1, layout: Layout.Gray, data: [10u8, 12u8, 200u8, 202u8] })[12u8]
+#test(Image { width: 2, height: 1, layout: Layout.Gray, data: [9u8, 9u8] })[0u8]
+pub fun otsu(img: Image8) -> uint8 {
+    let h = histogram(gray(img))
+    var total = 0.0
+    var sum = 0.0
+    for v in 0..256 {
+        total += h[v] as float64
+        sum += (v as float64) * (h[v] as float64)
+    }
+    var wb = 0.0
+    var sb = 0.0
+    var best = -1.0
+    var t = 0
+    for v in 0..256 {
+        wb += h[v] as float64
+        if wb == 0.0 {
+            continue
+        }
+        let wf = total - wb
+        if wf == 0.0 {
+            break
+        }
+        sb += (v as float64) * (h[v] as float64)
+        let mb = sb / wb
+        let mf = (sum - sb) / wf
+        let between = wb * wf * (mb - mf) * (mb - mf)
+        if between > best {
+            best = between
+            t = v
+        }
+    }
+    return t as uint8
+}
+
+// The Gaussian weights of `sigma` from -radius to radius, normalised.
+fun gaussian_kernel(sigma: float64, radius: int) -> [float64] {
+    var k = list_m.filled(2 * radius + 1, 0.0)
+    var s = 0.0
+    for i in 0..k.len() {
+        let x = (i - radius) as float64
+        k[i] = (-(x * x) / (2.0 * sigma * sigma)).exp()
+        s += k[i]
+    }
+    for i in 0..k.len() {
+        k[i] = k[i] / s
+    }
+    return k
+}
+
+// A local threshold: 255 where the gray sample is above its `block` by
+// `block` neighbourhood's mean (or Gaussian-weighted mean, sigma
+// 0.3 * ((block - 1) / 2 - 1) + 0.8 as OpenCV) minus `c`, else 0; the
+// border replicates. `block` is odd, at least 3.
+#test(Image { width: 3, height: 3, layout: Layout.Gray, data: [10u8, 10u8, 10u8, 10u8, 50u8, 10u8, 10u8, 10u8, 10u8] }, 3, 0.0f32, Adaptive.Mean)[Image { width: 3, height: 3, layout: Layout.Gray, data: [0u8, 0u8, 0u8, 0u8, 255u8, 0u8, 0u8, 0u8, 0u8] }]
+#test(Image { width: 2, height: 1, layout: Layout.Gray, data: [10u8, 10u8] }, 3, 1.0f32, Adaptive.Mean)[Image { width: 2, height: 1, layout: Layout.Gray, data: [255u8, 255u8] }]
+pub fun adaptive_threshold(img: Image8, block: int, c: float32, method: Adaptive = Adaptive.Mean) -> Image8 {
+    if block < 3 || block % 2 == 0 {
+        panic(f"adaptive_threshold needs an odd block of at least 3, not {block}")
+    }
+    let g = gray(img)
+    let src = to_f64(g)
+    let r = block / 2
+    let cc = c as float64
+    var out = list_m.filled(src.len(), 0u8)
+    match method {
+        Mean => {
+            // exact integer sums: v + c > sum / n² is (v + c) * n² > sum
+            let ones = list_m.filled(block, 1.0)
+            let sums = sep_f(src, g.width, g.height, 1, ones, ones, Border.Replicate)
+            let nn = (block * block) as float64
+            for i in 0..src.len() {
+                if (src[i] + cc) * nn > sums[i] {
+                    out[i] = 255u8
+                }
+            }
+        }
+        Gaussian => {
+            let k = gaussian_kernel(0.3 * ((block - 1) as float64 * 0.5 - 1.0) + 0.8, r)
+            let means = sep_f(src, g.width, g.height, 1, k, k, Border.Replicate)
+            for i in 0..src.len() {
+                if src[i] > means[i] - cc {
+                    out[i] = 255u8
+                }
+            }
+        }
+    }
+    return image8(g.width, g.height, Layout.Gray, out)
+}
+
+// A mask: 255 where every channel of the pixel lies within `lo` to `hi`
+// (inclusive; gray against `r`, and alpha against `a` where there is one),
+// else 0.
+#test(Image { width: 3, height: 1, layout: Layout.Rgb, data: [10u8, 20u8, 30u8, 10u8, 99u8, 30u8, 0u8, 0u8, 0u8] }, Color { r: 5u8, g: 15u8, b: 25u8, a: 0u8 }, Color { r: 15u8, g: 25u8, b: 35u8, a: 255u8 })[Image { width: 3, height: 1, layout: Layout.Gray, data: [255u8, 0u8, 0u8] }]
+pub fun in_range(img: Image8, lo: Color, hi: Color) -> Image8 {
+    let c = img.layout.channels()
+    let los = color_samples(lo, img.layout)
+    let his = color_samples(hi, img.layout)
+    let n = img.width * img.height
+    var out = list_m.filled(n, 0u8)
+    for i in 0..n {
+        var ok = true
+        for k in 0..c {
+            let v = img.data[i * c + k] as float64
+            if v < los[k] || v > his[k] {
+                ok = false
+                break
+            }
+        }
+        if ok {
+            out[i] = 255u8
+        }
+    }
+    return image8(img.width, img.height, Layout.Gray, out)
+}
+
+// Histogram equalisation of each colour channel (OpenCV's formula):
+// `v` becomes round((cdf(v) - cdf_min) * 255 / (pixels - cdf_min)), where
+// cdf_min is the count of the darkest value present; alpha stays.
+#test(Image { width: 4, height: 1, layout: Layout.Gray, data: [50u8, 50u8, 60u8, 70u8] })[Image { width: 4, height: 1, layout: Layout.Gray, data: [0u8, 0u8, 128u8, 255u8] }]
+#test(Image { width: 2, height: 1, layout: Layout.Gray, data: [9u8, 9u8] })[Image { width: 2, height: 1, layout: Layout.Gray, data: [9u8, 9u8] }]
+pub fun equalize(img: Image8) -> Image8 {
+    var out = img
+    let c = img.layout.channels()
+    let n = img.width * img.height
+    for ch in 0..color_channels(img.layout) {
+        let h = histogram(img, ch)
+        var cmin = 0
+        for v in 0..256 {
+            if h[v] > 0 {
+                cmin = h[v]
+                break
+            }
+        }
+        let den = n - cmin
+        if den <= 0 {
+            continue
+        }
+        var table = list_m.filled(256, 0u8)
+        var cdf = 0
+        for v in 0..256 {
+            cdf += h[v]
+            if cdf >= cmin {
+                let num = ((cdf - cmin) as int64) * 255
+                table[v] = ((2 * num + (den as int64)) / (2 * (den as int64))) as uint8
+            }
+        }
+        var i = ch
+        while i < out.data.len() {
+            out.data[i] = table[img.data[i] as int]
+            i += c
+        }
+    }
+    return out
+}
+
+// The colour samples stretched linearly so that the smallest is `lo` and
+// the largest `hi` (rounded); a flat image becomes `lo`. Alpha stays.
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [50u8, 75u8, 100u8] }, 0u8, 255u8)[Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 128u8, 255u8] }]
+#test(Image { width: 2, height: 1, layout: Layout.Gray, data: [0u8, 255u8] }, 10u8, 20u8)[Image { width: 2, height: 1, layout: Layout.Gray, data: [10u8, 20u8] }]
+pub fun normalize(img: Image8, lo: uint8 = 0u8, hi: uint8 = 255u8) -> Image8 {
+    let ai = alpha_index(img.layout)
+    let c = img.layout.channels()
+    var mn = 255
+    var mx = 0
+    for i in 0..img.data.len() {
+        if ai < 0 || i % c != ai {
+            let v = img.data[i] as int
+            if v < mn {
+                mn = v
+            }
+            if v > mx {
+                mx = v
+            }
+        }
+    }
+    let l = lo as int
+    let span = (hi as int) - l
+    var table = list_m.filled(256, lo)
+    if mx > mn {
+        for v in mn..mx + 1 {
+            let num = (v - mn) * span
+            let d = mx - mn
+            // rounded halves up, for a negative span too
+            let q = if num >= 0 { (2 * num + d) / (2 * d) } else { -((-2 * num + d - 1) / (2 * d)) }
+            table[v] = (l + q) as uint8
+        }
+    }
+    return lut(img, table)
+}
+
+// A float image (a gradient, a response) for display: its smallest value
+// 0, its largest 255, rounded; a flat image is 0.
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [-1.0f32, 0.0f32, 1.0f32] })[Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 128u8, 255u8] }]
+pub fun normalize_f(f: ImageF) -> Image8 {
+    var mn = 0.0
+    var mx = 0.0
+    for i in 0..f.data.len() {
+        let v = f.data[i] as float64
+        if i == 0 || v < mn {
+            mn = v
+        }
+        if i == 0 || v > mx {
+            mx = v
+        }
+    }
+    var out = list_m.filled(f.data.len(), 0u8)
+    if mx > mn {
+        let k = 255.0 / (mx - mn)
+        for i in 0..f.data.len() {
+            out[i] = clamp_u8(((f.data[i] as float64) - mn) * k)
+        }
+    }
+    return image8(f.width, f.height, f.layout, out)
+}
+
+// |a - b| sample by sample (alpha too).
+pub fun abs_diff<S: Sample>(a: Image<S>, b: Image<S>) -> Result<Image<S>, ImageError> {
+    same_shape(a, b, "abs_diff")?
+    var out = a
+    for i in 0..a.data.len() {
+        let d = a.data[i].to_f32() - b.data[i].to_f32()
+        out.data[i] = S.from_f32(if d < 0.0f32 { -d } else { d })
+    }
+    return Ok(out)
+}
+
+// `a + (b - a) * alpha` sample by sample, rounded: `alpha` 0 is `a`, 1 is
+// `b`.
+pub fun blend<S: Sample>(a: Image<S>, b: Image<S>, alpha: float32) -> Result<Image<S>, ImageError> {
+    same_shape(a, b, "blend")?
+    let k = alpha as float64
+    let fa = to_f64(a)
+    let fb = to_f64(b)
+    var out = list_m.filled(fa.len(), 0.0)
+    for i in 0..fa.len() {
+        out[i] = fa[i] + (fb[i] - fa[i]) * k
+    }
+    return Ok(from_f64(out, a.width, a.height, a.layout))
+}
+
+// The pixels of `img` where `mask` (its first channel) isn't 0, the
+// others 0 in every channel.
+pub fun apply_mask<S: Sample>(img: Image<S>, mask: Image8) -> Result<Image<S>, ImageError> {
+    if img.width != mask.width || img.height != mask.height {
+        return Err(ImageError.Mismatch(f"apply_mask: {img.width}x{img.height} and a {mask.width}x{mask.height} mask"))
+    }
+    let c = img.layout.channels()
+    let mc = mask.layout.channels()
+    let zero = S.from_f32(0.0f32)
+    var out = img
+    for i in 0..img.width * img.height {
+        if mask.data[i * mc] == 0u8 {
+            for k in 0..c {
+                out.data[i * c + k] = zero
+            }
+        }
+    }
+    return Ok(out)
+}
+
+#test
+fun point_generic() {
+    let a: Image8 = Image { width: 2, height: 1, layout: Layout.GrayAlpha, data: [10u8, 20u8, 200u8, 40u8] }
+    let inv = invert(a)
+    assert(inv.data == [245u8, 20u8, 55u8, 40u8])
+    let f: ImageF = Image { width: 1, height: 1, layout: Layout.Gray, data: [0.25f32] }
+    assert(invert(f).data == [0.75f32])
+    let b: Image8 = Image { width: 2, height: 1, layout: Layout.GrayAlpha, data: [20u8, 10u8, 100u8, 40u8] }
+    assert(abs_diff(a, b).expect("same shape").data == [10u8, 10u8, 100u8, 0u8])
+    assert(blend(a, b, 0.5f32).expect("same shape").data == [15u8, 15u8, 150u8, 40u8])
+    let m: Image8 = Image { width: 2, height: 1, layout: Layout.Gray, data: [0u8, 1u8] }
+    assert(apply_mask(a, m).expect("same size").data == [0u8, 0u8, 200u8, 40u8])
+    let hist = histogram(Image { width: 2, height: 2, layout: Layout.Gray, data: [0u8, 2u8, 2u8, 255u8] })
+    assert(hist.len() == 256 && hist[0] == 1 && hist[1] == 0 && hist[2] == 2 && hist[255] == 1)
+    assert(histogram(a, 1)[40] == 1 && histogram(a, 1)[20] == 1)
+    let small: Image8 = image.new(1, 1, Layout.GrayAlpha, 0u8)
+    match abs_diff(a, small) {
+        Ok(_) => assert(false)
+        Err(e) => assert(e == ImageError.Mismatch("abs_diff: 2x1 gray+alpha and 1x1 gray+alpha"))
+    }
+}
+
+// ---- geometry ----
+
+// The resampling coefficients of one axis: for output pixel `i`, the
+// `bounds[2i + 1]` weights `weights[i * ksize ..]` (and their fixed-point
+// twins `fixed`, 22 bits as Pillow's) apply from input pixel `bounds[2i]`.
+struct Coeffs {
+    ksize: int,
+    bounds: [int],
+    weights: [float64],
+    fixed: [int64],
+}
+
+// The half width of a filter's kernel, in input pixels at scale 1.
+#test(Filter.Lanczos3)[3.0]
+fun filter_support(f: Filter) -> float64 {
+    return match f {
+        Nearest => 0.5
+        Area => 0.5
+        Bilinear => 1.0
+        Bicubic => 2.0
+        Lanczos3 => 3.0
+    }
+}
+
+#test(0.0)[1.0]
+#test(1.5)[-0.2122065907891938]
+fun sinc(x: float64) -> float64 {
+    if x == 0.0 {
+        return 1.0
+    }
+    let px = x * math.PI
+    return px.sin() / px
+}
+
+// Pillow's filter functions.
+#test(Filter.Bicubic, 1.5)[-0.0625]
+#test(Filter.Bilinear, -0.25)[0.75]
+fun filter_weight(f: Filter, x: float64) -> float64 {
+    return match f {
+        Nearest | Area => if x > -0.5 && x <= 0.5 { 1.0 } else { 0.0 }
+        Bilinear => {
+            let a = x.abs()
+            if a < 1.0 { 1.0 - a } else { 0.0 }
+        }
+        Bicubic => {
+            let a = x.abs()
+            if a < 1.0 {
+                ((-0.5 + 2.0) * a - (-0.5 + 3.0)) * a * a + 1.0
+            } else if a < 2.0 {
+                (((a - 5.0) * a + 8.0) * a - 4.0) * -0.5
+            } else {
+                0.0
+            }
+        }
+        Lanczos3 => if x >= -3.0 && x < 3.0 { sinc(x) * sinc(x / 3.0) } else { 0.0 }
+    }
+}
+
+// Pillow's `normalize_coeffs_8bpc`: a weight in 22-bit fixed point,
+// rounded away from zero.
+#test(0.5)[2097152i64]
+#test(-0.25)[-1048576i64]
+fun fixed22(w: float64) -> int64 {
+    let s = w * 4194304.0
+    return if w < 0.0 { (s - 0.5) as int64 } else { (s + 0.5) as int64 }
+}
+
+// Pillow's `precompute_coeffs` for a resize of `in_size` pixels to
+// `out_size` with filter `f`.
+fun pillow_coeffs(in_size: int, out_size: int, f: Filter) -> Coeffs {
+    let scale = (in_size as float64) / (out_size as float64)
+    let filterscale = if scale < 1.0 { 1.0 } else { scale }
+    let support = filter_support(f) * filterscale
+    let ksize = (support.ceil() as int) * 2 + 1
+    var bounds = list_m.filled(2 * out_size, 0)
+    var weights = list_m.filled(out_size * ksize, 0.0)
+    let ss = 1.0 / filterscale
+    for xx in 0..out_size {
+        let center = ((xx as float64) + 0.5) * scale
+        // C's (int) truncates toward zero
+        var xmin = (center - support + 0.5) as int
+        if xmin < 0 {
+            xmin = 0
+        }
+        var xmax = (center + support + 0.5) as int
+        if xmax > in_size {
+            xmax = in_size
+        }
+        xmax -= xmin
+        var ww = 0.0
+        let kb = xx * ksize
+        for x in 0..xmax {
+            let w = filter_weight(f, ((x + xmin) as float64 - center + 0.5) * ss)
+            weights[kb + x] = w
+            ww += w
+        }
+        if ww != 0.0 {
+            for x in 0..xmax {
+                weights[kb + x] = weights[kb + x] / ww
+            }
+        }
+        bounds[2 * xx] = xmin
+        bounds[2 * xx + 1] = xmax
+    }
+    return with_fixed(ksize, bounds, weights)
+}
+
+// The coefficients of an exact area average: output pixel `i` covers the
+// input from i * scale to (i + 1) * scale.
+fun area_coeffs(in_size: int, out_size: int) -> Coeffs {
+    let scale = (in_size as float64) / (out_size as float64)
+    let ksize = (scale.ceil() as int) + 2
+    var bounds = list_m.filled(2 * out_size, 0)
+    var weights = list_m.filled(out_size * ksize, 0.0)
+    for xx in 0..out_size {
+        let start = (xx as float64) * scale
+        let end = if xx == out_size - 1 { in_size as float64 } else { ((xx + 1) as float64) * scale }
+        let xmin = ifloor(start)
+        var xmax = end.ceil() as int
+        if xmax > in_size {
+            xmax = in_size
+        }
+        let kb = xx * ksize
+        var ww = 0.0
+        for x in xmin..xmax {
+            let lo = if (x as float64) > start { x as float64 } else { start }
+            let hi = if ((x + 1) as float64) < end { (x + 1) as float64 } else { end }
+            let w = if hi > lo { hi - lo } else { 0.0 }
+            weights[kb + x - xmin] = w
+            ww += w
+        }
+        for x in 0..xmax - xmin {
+            weights[kb + x] = weights[kb + x] / ww
+        }
+        bounds[2 * xx] = xmin
+        bounds[2 * xx + 1] = xmax - xmin
+    }
+    return with_fixed(ksize, bounds, weights)
+}
+
+fun with_fixed(ksize: int, bounds: [int], weights: [float64]) -> Coeffs {
+    var fixed = list_m.filled(weights.len(), 0i64)
+    for i in 0..weights.len() {
+        fixed[i] = fixed22(weights[i])
+    }
+    return Coeffs { ksize: ksize, bounds: bounds, weights: weights, fixed: fixed }
+}
+
+// A 22-bit fixed-point sum back to 0..255, as Pillow's `clip8`.
+#test(4194304i64 * 300i64)[255]
+#test(-5i64)[0]
+fun clip8(ss: int64) -> int32 {
+    let v = ss >> 22
+    if v < 0 {
+        return 0
+    }
+    if v > 255 {
+        return 255
+    }
+    return v as int32
+}
+
+// One horizontal pass of 8-bit samples in fixed point, as Pillow's
+// `ImagingResampleHorizontal_8bpc`.
+fun resample_h_fixed(src: [int32], w: int, h: int, c: int, ow: int, co: Coeffs) -> [int32] {
+    var out = list_m.filled(ow * h * c, 0)
+    for y in 0..h {
+        let sb = y * w * c
+        var o = y * ow * c
+        for xx in 0..ow {
+            let xmin = co.bounds[2 * xx]
+            let n = co.bounds[2 * xx + 1]
+            let kb = xx * co.ksize
+            for ch in 0..c {
+                var ss: int64 = 2097152
+                var si = sb + xmin * c + ch
+                for t in 0..n {
+                    ss += (src[si] as int64) * co.fixed[kb + t]
+                    si += c
+                }
+                out[o] = clip8(ss)
+                o += 1
+            }
+        }
+    }
+    return out
+}
+
+// One vertical pass of 8-bit samples in fixed point.
+fun resample_v_fixed(src: [int32], w: int, c: int, oh: int, co: Coeffs) -> [int32] {
+    let rw = w * c
+    var out = list_m.filled(rw * oh, 0)
+    var acc = list_m.filled(rw, 0i64)
+    for yy in 0..oh {
+        let ymin = co.bounds[2 * yy]
+        let n = co.bounds[2 * yy + 1]
+        let kb = yy * co.ksize
+        for i in 0..rw {
+            acc[i] = 2097152
+        }
+        for t in 0..n {
+            let k = co.fixed[kb + t]
+            let rb = (ymin + t) * rw
+            for i in 0..rw {
+                acc[i] += (src[rb + i] as int64) * k
+            }
+        }
+        let ob = yy * rw
+        for i in 0..rw {
+            out[ob + i] = clip8(acc[i])
+        }
+    }
+    return out
+}
+
+// One horizontal pass in float64.
+fun resample_h_float(src: [float64], w: int, h: int, c: int, ow: int, co: Coeffs) -> [float64] {
+    var out = list_m.filled(ow * h * c, 0.0)
+    for y in 0..h {
+        let sb = y * w * c
+        var o = y * ow * c
+        for xx in 0..ow {
+            let xmin = co.bounds[2 * xx]
+            let n = co.bounds[2 * xx + 1]
+            let kb = xx * co.ksize
+            for ch in 0..c {
+                var ss = 0.0
+                var si = sb + xmin * c + ch
+                for t in 0..n {
+                    ss += src[si] * co.weights[kb + t]
+                    si += c
+                }
+                out[o] = ss
+                o += 1
+            }
+        }
+    }
+    return out
+}
+
+// One vertical pass in float64.
+fun resample_v_float(src: [float64], w: int, c: int, oh: int, co: Coeffs) -> [float64] {
+    let rw = w * c
+    var out = list_m.filled(rw * oh, 0.0)
+    for yy in 0..oh {
+        let ymin = co.bounds[2 * yy]
+        let n = co.bounds[2 * yy + 1]
+        let kb = yy * co.ksize
+        let ob = yy * rw
+        for t in 0..n {
+            let k = co.weights[kb + t]
+            let rb = (ymin + t) * rw
+            for i in 0..rw {
+                out[ob + i] += src[rb + i] * k
+            }
+        }
+    }
+    return out
+}
+
+// The coefficients of `f` for one axis.
+fun coeffs_for(in_size: int, out_size: int, f: Filter) -> Coeffs {
+    return if f == Filter.Area { area_coeffs(in_size, out_size) } else { pillow_coeffs(in_size, out_size, f) }
+}
+
+// Pillow's nearest-neighbour source pixels for an axis: the centre of
+// each target pixel, stepped as Pillow's `ImagingScaleAffine` steps it.
+fun nearest_table(in_size: int, out_size: int) -> [int] {
+    let step = (in_size as float64) / (out_size as float64)
+    var t = list_m.filled(out_size, 0)
+    var xo = step * 0.5
+    for x in 0..out_size {
+        t[x] = clampi(xo as int, 0, in_size - 1)
+        xo += step
+    }
+    return t
+}
+
+// The image resized to `w` by `h`. For an `Image8` this is Pillow's
+// `Image.resize` pixel for pixel (without its premultiplied alpha: RGBA
+// is resized channel by channel); other sample types are resampled in
+// float64 with the same coefficients. Each pass is skipped when its size
+// doesn't change.
+pub fun resize<S: Sample>(img: Image<S>, w: int, h: int, filter: Filter = Filter.Bilinear) -> Image<S> {
+    if w <= 0 || h <= 0 {
+        panic(f"resize to {w}x{h}")
+    }
+    if w == img.width && h == img.height {
+        return img
+    }
+    let c = img.layout.channels()
+    if img.width == 0 || img.height == 0 {
+        return image.new(w, h, img.layout, S.from_f32(0.0f32))
+    }
+    if filter == Filter.Nearest {
+        let xt = nearest_table(img.width, w)
+        let yt = nearest_table(img.height, h)
+        var data = list_m.filled(w * h * c, S.from_f32(0.0f32))
+        var o = 0
+        for y in 0..h {
+            let sb = yt[y] * img.width * c
+            for x in 0..w {
+                let s = sb + xt[x] * c
+                for k in 0..c {
+                    data[o] = img.data[s + k]
+                    o += 1
+                }
+            }
+        }
+        return Image { width: w, height: h, layout: img.layout, data: data }
+    }
+    let fixed = S.max_value().to_f32() == 255.0f32
+    if fixed {
+        var cur = to_i32(img)
+        var cw = img.width
+        if w != img.width {
+            cur = resample_h_fixed(cur, img.width, img.height, c, w, coeffs_for(img.width, w, filter))
+            cw = w
+        }
+        if h != img.height {
+            cur = resample_v_fixed(cur, cw, c, h, coeffs_for(img.height, h, filter))
+        }
+        return from_i32(cur, w, h, img.layout)
+    }
+    var cur = to_f64(img)
+    var cw = img.width
+    if w != img.width {
+        cur = resample_h_float(cur, img.width, img.height, c, w, coeffs_for(img.width, w, filter))
+        cw = w
+    }
+    if h != img.height {
+        cur = resample_v_float(cur, cw, c, h, coeffs_for(img.height, h, filter))
+    }
+    return from_f64(cur, w, h, img.layout)
+}
+
+// The image shrunk to fit `max_w` by `max_h`, keeping its aspect ratio
+// (each side rounded, at least 1); never enlarged.
+pub fun thumbnail<S: Sample>(img: Image<S>, max_w: int, max_h: int, filter: Filter = Filter.Area) -> Image<S> {
+    if img.width <= max_w && img.height <= max_h {
+        return img
+    }
+    let sx = (max_w as float64) / (img.width as float64)
+    let sy = (max_h as float64) / (img.height as float64)
+    let s = if sx < sy { sx } else { sy }
+    let w = clampi(((img.width as float64) * s + 0.5) as int, 1, max_w)
+    let h = clampi(((img.height as float64) * s + 0.5) as int, 1, max_h)
+    return resize(img, w, h, filter)
+}
+
+// The number of taps of a warp's filter along an axis: 1 for nearest.
+fun warp_taps(filter: Filter) -> int {
+    return match filter {
+        Nearest => 1
+        Bilinear | Area => 2
+        Bicubic => 4
+        Lanczos3 => 6
+    }
+}
+
+// A warp's tap weight at a distance `d`.
+fun warp_weight(filter: Filter, d: float64) -> float64 {
+    return match filter {
+        Area => filter_weight(Filter.Bilinear, d)
+        _ => filter_weight(filter, d)
+    }
+}
+
+// The output of a warp: pixel (x, y) of the `ow` by `oh` result samples
+// the source at `inv * (x, y, 1)` (divided by its third component when
+// `perspective`), through `filter` and the border, `fill` the samples of
+// a constant border.
+fun warp_core<S: Sample>(img: Image<S>, inv: [float64], perspective: bool, ow: int, oh: int, filter: Filter, border: Border, fill: [float64]) -> Image<S> {
+    let c = img.layout.channels()
+    let w = img.width
+    let h = img.height
+    let src = to_f64(img)
+    var out = list_m.filled(ow * oh * c, 0.0)
+    let n = warp_taps(filter)
+    let half = n / 2
+    var wx = list_m.filled(n, 0.0)
+    var wy = list_m.filled(n, 0.0)
+    var ix = list_m.filled(n, 0)
+    var iy = list_m.filled(n, 0)
+    var acc = list_m.filled(c, 0.0)
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let fx = ox as float64
+            let fy = oy as float64
+            var sx = inv[0] * fx + inv[1] * fy + inv[2]
+            var sy = inv[3] * fx + inv[4] * fy + inv[5]
+            let o = (oy * ow + ox) * c
+            if perspective {
+                let sw = inv[6] * fx + inv[7] * fy + inv[8]
+                if sw == 0.0 {
+                    for k in 0..c {
+                        out[o + k] = fill[k]
+                    }
+                    continue
+                }
+                sx = sx / sw
+                sy = sy / sw
+            }
+            if n == 1 {
+                let px = border_at(ifloor(sx + 0.5), w, border)
+                let py = border_at(ifloor(sy + 0.5), h, border)
+                if px < 0 || py < 0 {
+                    for k in 0..c {
+                        out[o + k] = fill[k]
+                    }
+                } else {
+                    let s = (py * w + px) * c
+                    for k in 0..c {
+                        out[o + k] = src[s + k]
+                    }
+                }
+                continue
+            }
+            let x0 = ifloor(sx) - half + 1
+            let y0 = ifloor(sy) - half + 1
+            var sumx = 0.0
+            var sumy = 0.0
+            for t in 0..n {
+                wx[t] = warp_weight(filter, sx - ((x0 + t) as float64))
+                wy[t] = warp_weight(filter, sy - ((y0 + t) as float64))
+                sumx += wx[t]
+                sumy += wy[t]
+                ix[t] = border_at(x0 + t, w, border)
+                iy[t] = border_at(y0 + t, h, border)
+            }
+            for k in 0..c {
+                acc[k] = 0.0
+            }
+            for ty in 0..n {
+                let wyt = wy[ty] / sumy
+                if wyt == 0.0 {
+                    continue
+                }
+                let py = iy[ty]
+                for tx in 0..n {
+                    let wt = wyt * wx[tx] / sumx
+                    if wt == 0.0 {
+                        continue
+                    }
+                    let px = ix[tx]
+                    if px < 0 || py < 0 {
+                        for k in 0..c {
+                            acc[k] += wt * fill[k]
+                        }
+                    } else {
+                        let s = (py * w + px) * c
+                        for k in 0..c {
+                            acc[k] += wt * src[s + k]
+                        }
+                    }
+                }
+            }
+            for k in 0..c {
+                out[o + k] = acc[k]
+            }
+        }
+    }
+    return from_f64(out, ow, oh, img.layout)
+}
+
+// The rows of a Mat3 as nine float64s, row by row.
+fun mat_rows(m: Mat3) -> [float64] {
+    return [m.x_axis.x as float64, m.y_axis.x as float64, m.z_axis.x as float64,
+        m.x_axis.y as float64, m.y_axis.y as float64, m.z_axis.y as float64,
+        m.x_axis.z as float64, m.y_axis.z as float64, m.z_axis.z as float64]
+}
+
+// The inverse of a 3 by 3 matrix given row by row; None if singular.
+fun inverse3(a: [float64]) -> Option<[float64]> {
+    let c00 = a[4] * a[8] - a[5] * a[7]
+    let c01 = a[5] * a[6] - a[3] * a[8]
+    let c02 = a[3] * a[7] - a[4] * a[6]
+    let det = a[0] * c00 + a[1] * c01 + a[2] * c02
+    if det == 0.0 || det != det {
+        return None
+    }
+    let d = 1.0 / det
+    return Some([c00 * d, (a[2] * a[7] - a[1] * a[8]) * d, (a[1] * a[5] - a[2] * a[4]) * d,
+        c01 * d, (a[0] * a[8] - a[2] * a[6]) * d, (a[2] * a[3] - a[0] * a[5]) * d,
+        c02 * d, (a[1] * a[6] - a[0] * a[7]) * d, (a[0] * a[4] - a[1] * a[3]) * d])
+}
+
+// A border's fill samples for `c` channels.
+fun fill_of(b: Border, c: int) -> [float64] {
+    return list_m.filled(c, border_value(b))
+}
+
+// The image under the affine map `m`, which takes a source pixel's
+// coordinates to the result's (OpenCV's `warpAffine`): a `w` by `h` image
+// whose pixel p is the source sampled at m⁻¹·p. `m` must be invertible.
+pub fun warp_affine<S: Sample>(img: Image<S>, m: Mat3, w: int, h: int, filter: Filter = Filter.Bilinear, border: Border = Border.Constant(0.0f32)) -> Image<S> {
+    let rows = mat_rows(m)
+    let a = [rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], 0.0, 0.0, 1.0]
+    let Some(inv) = inverse3(a) else {
+        panic("warp_affine: the matrix is singular")
+    }
+    return warp_core(img, inv, false, w, h, filter, border, fill_of(border, img.layout.channels()))
+}
+
+// The image under the homography `m` (source to result, as OpenCV's
+// `warpPerspective`), `w` by `h`. `m` must be invertible.
+pub fun warp_perspective<S: Sample>(img: Image<S>, m: Mat3, w: int, h: int, filter: Filter = Filter.Bilinear, border: Border = Border.Constant(0.0f32)) -> Image<S> {
+    let Some(inv) = inverse3(mat_rows(m)) else {
+        panic("warp_perspective: the matrix is singular")
+    }
+    return warp_core(img, inv, true, w, h, filter, border, fill_of(border, img.layout.channels()))
+}
+
+// The image turned `degrees` counterclockwise about its centre, bilinear;
+// `fill` where no source pixel lands. With `expand` the result is large
+// enough to hold the whole turned image, else the size stays.
+pub fun rotate<S: Sample>(img: Image<S>, degrees: float32, fill: Color = Color { r: 0u8, g: 0u8, b: 0u8, a: 0u8 }, expand: bool = false) -> Image<S> {
+    let a = (degrees as float64).to_radians()
+    let cs = a.cos()
+    let sn = a.sin()
+    var ow = img.width
+    var oh = img.height
+    if expand {
+        let fw = img.width as float64
+        let fh = img.height as float64
+        ow = ((fw * cs).abs() + (fh * sn).abs() - 0.000001).ceil() as int
+        oh = ((fw * sn).abs() + (fh * cs).abs() - 0.000001).ceil() as int
+    }
+    let cx = ((img.width - 1) as float64) / 2.0
+    let cy = ((img.height - 1) as float64) / 2.0
+    let ox = ((ow - 1) as float64) / 2.0
+    let oy = ((oh - 1) as float64) / 2.0
+    // source = c_in + R * (p - c_out), R = [cos -sin; sin cos]
+    let inv = [cs, -sn, cx - cs * ox + sn * oy, sn, cs, cy - sn * ox - cs * oy, 0.0, 0.0, 1.0]
+    var f = color_samples(fill, img.layout)
+    let scale = (S.max_value().to_f32() as float64) / 255.0
+    for k in 0..f.len() {
+        f[k] = f[k] * scale
+    }
+    return warp_core(img, inv, false, ow, oh, Filter.Bilinear, Border.Constant(0.0f32), f)
+}
+
+// The solution of the n by n system `a` x = `b` (a row by row), by
+// Gaussian elimination with partial pivoting; None if singular.
+fun solve(a: [float64], b: [float64], n: int) -> Option<[float64]> {
+    var m = a
+    var v = b
+    for col in 0..n {
+        var p = col
+        for r in col + 1..n {
+            if m[r * n + col].abs() > m[p * n + col].abs() {
+                p = r
+            }
+        }
+        if m[p * n + col].abs() < 0.000000000001 {
+            return None
+        }
+        if p != col {
+            for k in 0..n {
+                let t = m[col * n + k]
+                m[col * n + k] = m[p * n + k]
+                m[p * n + k] = t
+            }
+            let t = v[col]
+            v[col] = v[p]
+            v[p] = t
+        }
+        for r in col + 1..n {
+            let f = m[r * n + col] / m[col * n + col]
+            if f == 0.0 {
+                continue
+            }
+            for k in col..n {
+                m[r * n + k] -= f * m[col * n + k]
+            }
+            v[r] -= f * v[col]
+        }
+    }
+    var x = list_m.filled(n, 0.0)
+    var r = n - 1
+    while r >= 0 {
+        var s = v[r]
+        for k in r + 1..n {
+            s -= m[r * n + k] * x[k]
+        }
+        x[r] = s / m[r * n + r]
+        r -= 1
+    }
+    return Some(x)
+}
+
+// The Mat3 of nine float64s given row by row.
+fun mat_of_rows(r: [float64]) -> Mat3 {
+    return m32.mat3_from_rows(v32.vec3(r[0] as float32, r[1] as float32, r[2] as float32),
+        v32.vec3(r[3] as float32, r[4] as float32, r[5] as float32),
+        v32.vec3(r[6] as float32, r[7] as float32, r[8] as float32))
+}
+
+// The affine map that takes the three points `src` to `dst` (OpenCV's
+// `getAffineTransform`); None if `src` is collinear or not three points.
+#test([Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 1.0, y: 0.0 }, Vec2 { x: 0.0, y: 1.0 }], [Vec2 { x: 2.0, y: 3.0 }, Vec2 { x: 4.0, y: 3.0 }, Vec2 { x: 2.0, y: 6.0 }])[Some(m32.mat3_from_rows(v32.vec3(2.0, 0.0, 2.0), v32.vec3(0.0, 3.0, 3.0), v32.vec3(0.0, 0.0, 1.0)))]
+#test([Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 2.0 }], [Vec2 { x: 2.0, y: 3.0 }, Vec2 { x: 4.0, y: 3.0 }, Vec2 { x: 2.0, y: 6.0 }])[None]
+pub fun affine_from(src: [Vec2], dst: [Vec2]) -> Option<Mat3> {
+    if src.len() != 3 || dst.len() != 3 {
+        return None
+    }
+    var a = list_m.filled(9, 1.0)
+    var bu = list_m.filled(3, 0.0)
+    var bv = list_m.filled(3, 0.0)
+    for i in 0..3 {
+        a[3 * i] = src[i].x as float64
+        a[3 * i + 1] = src[i].y as float64
+        bu[i] = dst[i].x as float64
+        bv[i] = dst[i].y as float64
+    }
+    let u = solve(a, bu, 3)?
+    let v = solve(a, bv, 3)?
+    return Some(mat_of_rows([u[0], u[1], u[2], v[0], v[1], v[2], 0.0, 0.0, 1.0]))
+}
+
+// The homography that takes the four points `src` to `dst` (OpenCV's
+// `getPerspectiveTransform`), its bottom right 1; None if three of `src`
+// are collinear or they aren't four points.
+#test([Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 1.0, y: 0.0 }, Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 0.0, y: 1.0 }], [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 3.0, y: 1.0 }, Vec2 { x: 3.0, y: 3.0 }, Vec2 { x: 1.0, y: 3.0 }])[Some(m32.mat3_from_rows(v32.vec3(2.0, 0.0, 1.0), v32.vec3(0.0, 2.0, 1.0), v32.vec3(0.0, 0.0, 1.0)))]
+pub fun perspective_from(src: [Vec2], dst: [Vec2]) -> Option<Mat3> {
+    if src.len() != 4 || dst.len() != 4 {
+        return None
+    }
+    var a = list_m.filled(64, 0.0)
+    var b = list_m.filled(8, 0.0)
+    for i in 0..4 {
+        let x = src[i].x as float64
+        let y = src[i].y as float64
+        let u = dst[i].x as float64
+        let v = dst[i].y as float64
+        let r = 2 * i
+        a[r * 8] = x
+        a[r * 8 + 1] = y
+        a[r * 8 + 2] = 1.0
+        a[r * 8 + 6] = -u * x
+        a[r * 8 + 7] = -u * y
+        b[r] = u
+        a[(r + 1) * 8 + 3] = x
+        a[(r + 1) * 8 + 4] = y
+        a[(r + 1) * 8 + 5] = 1.0
+        a[(r + 1) * 8 + 6] = -v * x
+        a[(r + 1) * 8 + 7] = -v * y
+        b[r + 1] = v
+    }
+    let hh = solve(a, b, 8)?
+    return Some(mat_of_rows([hh[0], hh[1], hh[2], hh[3], hh[4], hh[5], hh[6], hh[7], 1.0]))
+}
+
+// The image with `top`, `right`, `bottom` and `left` pixels added through
+// the border.
+pub fun pad<S: Sample>(img: Image<S>, top: int, right: int, bottom: int, left: int, border: Border = Border.Constant(0.0f32)) -> Image<S> {
+    if top < 0 || right < 0 || bottom < 0 || left < 0 {
+        panic("pad by a negative size")
+    }
+    let c = img.layout.channels()
+    let p = pad_f(to_f64(img), img.width, img.height, c, top, right, bottom, left, border)
+    return from_f64(p, img.width + left + right, img.height + top + bottom, img.layout)
+}
+
+// The 5-tap binomial kernel of the pyramids, [1 4 6 4 1] / 16.
+fun pyr_kernel(k: float64) -> [float64] {
+    return [k, 4.0 * k, 6.0 * k, 4.0 * k, k]
+}
+
+// The image blurred with the 5 by 5 binomial kernel and halved (OpenCV's
+// `pyrDown`): (w + 1) / 2 by (h + 1) / 2, the even pixels kept.
+pub fun pyr_down<S: Sample>(img: Image<S>, border: Border = Border.Reflect101) -> Image<S> {
+    let c = img.layout.channels()
+    let k = pyr_kernel(1.0 / 16.0)
+    let f = sep_f(to_f64(img), img.width, img.height, c, k, k, border)
+    let ow = (img.width + 1) / 2
+    let oh = (img.height + 1) / 2
+    var out = list_m.filled(ow * oh * c, 0.0)
+    for y in 0..oh {
+        for x in 0..ow {
+            let s = ((2 * y) * img.width + 2 * x) * c
+            let o = (y * ow + x) * c
+            for ch in 0..c {
+                out[o + ch] = f[s + ch]
+            }
+        }
+    }
+    return from_f64(out, ow, oh, img.layout)
+}
+
+// The image doubled (OpenCV's `pyrUp`): zeros put between the pixels,
+// then blurred with the binomial kernel times 4; 2w by 2h.
+pub fun pyr_up<S: Sample>(img: Image<S>, border: Border = Border.Reflect101) -> Image<S> {
+    let c = img.layout.channels()
+    let ow = 2 * img.width
+    let oh = 2 * img.height
+    let src = to_f64(img)
+    var z = list_m.filled(ow * oh * c, 0.0)
+    for y in 0..img.height {
+        for x in 0..img.width {
+            let s = (y * img.width + x) * c
+            let o = ((2 * y) * ow + 2 * x) * c
+            for ch in 0..c {
+                z[o + ch] = src[s + ch]
+            }
+        }
+    }
+    let k = pyr_kernel(1.0 / 8.0)
+    return from_f64(sep_f(z, ow, oh, c, k, k, border), ow, oh, img.layout)
+}
+
+#test
+fun geometry_generic() {
+    let g: Image8 = Image { width: 4, height: 1, layout: Layout.Gray, data: [0u8, 100u8, 200u8, 255u8] }
+    assert(resize(g, 2, 1, Filter.Nearest).data == [100u8, 255u8])
+    assert(resize(g, 2, 1, Filter.Area).data == [50u8, 228u8])
+    assert(resize(g, 4, 1).data == g.data)
+    // Pillow: Image.frombytes("L", (4, 1), bytes([0, 100, 200, 255])).resize((2, 1), BILINEAR)
+    assert(resize(g, 2, 1, Filter.Bilinear).data == [71u8, 209u8])
+    let f: ImageF = Image { width: 2, height: 1, layout: Layout.Gray, data: [0.0f32, 1.0f32] }
+    let up = resize(f, 4, 1, Filter.Bilinear)
+    assert(up.data == [0.0f32, 0.25f32, 0.75f32, 1.0f32])
+    let t = thumbnail(g, 2, 2)
+    assert(t.width == 2 && t.height == 1)
+    // a quarter turn counterclockwise: the right column goes to the top
+    let sq: Image8 = Image { width: 2, height: 2, layout: Layout.Gray, data: [1u8, 2u8, 3u8, 4u8] }
+    assert(rotate(sq, 90.0f32).data == [2u8, 4u8, 1u8, 3u8])
+    let wide: Image8 = Image { width: 3, height: 1, layout: Layout.Gray, data: [1u8, 2u8, 3u8] }
+    let turned = rotate(wide, 90.0f32, image.rgb(0u8, 0u8, 0u8), true)
+    assert(turned.width == 1 && turned.height == 3 && turned.data == [3u8, 2u8, 1u8])
+    // a shift by one pixel to the right
+    let m = m32.translation2d(v32.vec2(1.0f32, 0.0f32))
+    assert(warp_affine(g, m, 4, 1).data == [0u8, 0u8, 100u8, 200u8])
+    assert(warp_affine(g, m, 4, 1, Filter.Nearest, Border.Replicate).data == [0u8, 0u8, 100u8, 200u8])
+    assert(warp_perspective(g, m, 4, 1, Filter.Bicubic, Border.Constant(9.0f32)).data == [9u8, 0u8, 100u8, 200u8])
+    let two: Image8 = Image { width: 2, height: 1, layout: Layout.Gray, data: [1u8, 2u8] }
+    assert(pad(two, 0, 2, 0, 1, Border.Reflect101).data == [2u8, 1u8, 2u8, 1u8, 2u8])
+    let padded = pad(two, 1, 0, 0, 0)
+    assert(padded.width == 2 && padded.height == 2 && padded.data == [0u8, 0u8, 1u8, 2u8])
+    let d = pyr_down(g)
+    assert(d.width == 2 && d.height == 1)
+    let u = pyr_up(g)
+    assert(u.width == 8 && u.height == 2)
+    let flat: Image8 = image.new(3, 3, Layout.Gray, 7u8)
+    assert(pyr_up(pyr_down(flat)).data == list_m.filled(16, 7u8))
+}
+
+// ---- filters ----
+
+// The `w` by `h` kernel of `data`, row by row.
+#test(1, 3, [1.0f32, 2.0f32, 1.0f32])[Kernel { w: 1, h: 3, data: [1.0f32, 2.0f32, 1.0f32] }]
+pub fun kernel(w: int, h: int, data: [float32]) -> Kernel {
+    if w <= 0 || h <= 0 || data.len() != w * h {
+        panic(f"a {w}x{h} kernel needs {w * h} weights, not {data.len()}")
+    }
+    return Kernel { w: w, h: h, data: data }
+}
+
+// The image correlated with `k` (as OpenCV's `filter2D`: the kernel isn't
+// flipped), anchored at its middle; rounded and clamped for integer
+// samples.
+pub fun convolve<S: Sample>(img: Image<S>, k: Kernel, border: Border = Border.Reflect101) -> Image<S> {
+    let f = corr2d(to_f64(img), img.width, img.height, img.layout.channels(), k, border)
+    return from_f64(f, img.width, img.height, img.layout)
+}
+
+// The image correlated with `kx` along the rows and `ky` along the
+// columns: the kernel `ky * kx` in two passes.
+pub fun convolve_sep<S: Sample>(img: Image<S>, kx: [float32], ky: [float32], border: Border = Border.Reflect101) -> Image<S> {
+    let f = sep_f(to_f64(img), img.width, img.height, img.layout.channels(), widen(kx), widen(ky), border)
+    return from_f64(f, img.width, img.height, img.layout)
+}
+
+// The mean of each (2r + 1) by (2r + 1) square, by running sums: the same
+// work for any `r`.
+pub fun box_blur<S: Sample>(img: Image<S>, r: int, border: Border = Border.Reflect101) -> Image<S> {
+    if r <= 0 {
+        return img
+    }
+    let w = img.width
+    let h = img.height
+    let c = img.layout.channels()
+    let n = 2 * r + 1
+    let rw = w * c
+    let p = pad_f(to_f64(img), w, h, c, 0, r, 0, r, border)
+    let prw = (w + 2 * r) * c
+    var hs = list_m.filled(rw * h, 0.0)
+    for y in 0..h {
+        let pb = y * prw
+        let ob = y * rw
+        for ch in 0..c {
+            var s = 0.0
+            for t in 0..n {
+                s += p[pb + t * c + ch]
+            }
+            var i = ch
+            while i < rw {
+                hs[ob + i] = s
+                if i + c < rw {
+                    s += p[pb + i + n * c] - p[pb + i]
+                }
+                i += c
+            }
+        }
+    }
+    let b2 = match border {
+        Constant(v) => Border.Constant(((v as float64) * (n as float64)) as float32)
+        _ => border
+    }
+    let q = pad_f(hs, w, h, c, r, 0, r, 0, b2)
+    var acc = list_m.filled(rw, 0.0)
+    for t in 0..n {
+        let qb = t * rw
+        for i in 0..rw {
+            acc[i] += q[qb + i]
+        }
+    }
+    let nn = (n * n) as float64
+    var out = list_m.filled(rw * h, 0.0)
+    for y in 0..h {
+        let ob = y * rw
+        let add = (y + n) * rw
+        let sub = y * rw
+        for i in 0..rw {
+            out[ob + i] = acc[i] / nn
+        }
+        if y + 1 < h {
+            for i in 0..rw {
+                acc[i] += q[add + i] - q[sub + i]
+            }
+        }
+    }
+    return from_f64(out, w, h, img.layout)
+}
+
+// The radius of a Gaussian of `sigma`: ceil(3 sigma), at least 1.
+#test(2.0f32)[6]
+#test(0.1f32)[1]
+fun gaussian_radius(sigma: float32) -> int {
+    let r = ((sigma as float64) * 3.0).ceil() as int
+    return if r < 1 { 1 } else { r }
+}
+
+// The image blurred by a Gaussian of `sigma` pixels, separably, its
+// kernel ceil(3 sigma) pixels to each side.
+pub fun gaussian_blur<S: Sample>(img: Image<S>, sigma: float32, border: Border = Border.Reflect101) -> Image<S> {
+    if !(sigma > 0.0f32) {
+        return img
+    }
+    let k = gaussian_kernel(sigma as float64, gaussian_radius(sigma))
+    let f = sep_f(to_f64(img), img.width, img.height, img.layout.channels(), k, k, border)
+    return from_f64(f, img.width, img.height, img.layout)
+}
+
+// The median of each (2r + 1) by (2r + 1) square, every channel by itself,
+// by Huang's sliding histogram; the border replicates by default, as
+// Pillow's `MedianFilter(2r + 1)` and OpenCV's `medianBlur`.
+#test(Image { width: 3, height: 3, layout: Layout.Gray, data: [1u8, 2u8, 3u8, 4u8, 200u8, 6u8, 7u8, 8u8, 9u8] }, 1, Border.Replicate)[Image { width: 3, height: 3, layout: Layout.Gray, data: [2u8, 3u8, 3u8, 4u8, 6u8, 6u8, 7u8, 8u8, 9u8] }]
+pub fun median(img: Image8, r: int, border: Border = Border.Replicate) -> Image8 {
+    if r <= 0 {
+        return img
+    }
+    let w = img.width
+    let h = img.height
+    let c = img.layout.channels()
+    let n = 2 * r + 1
+    let th = n * n / 2
+    let pw = w + 2 * r
+    let ph = h + 2 * r
+    let b = match border {
+        Constant(v) => Border.Constant(clamp_u8(v as float64) as float32)
+        _ => border
+    }
+    let p = pad_f(to_f64(img), w, h, c, r, r, r, r, b)
+    var plane = list_m.filled(pw * ph, 0)
+    var hist = list_m.filled(256, 0)
+    var out = img
+    for ch in 0..c {
+        for i in 0..pw * ph {
+            plane[i] = p[i * c + ch] as int
+        }
+        for y in 0..h {
+            for v in 0..256 {
+                hist[v] = 0
+            }
+            for dy in 0..n {
+                let rb = (y + dy) * pw
+                for dx in 0..n {
+                    hist[plane[rb + dx]] += 1
+                }
+            }
+            var m = 0
+            var lt = 0
+            while lt + hist[m] <= th {
+                lt += hist[m]
+                m += 1
+            }
+            out.data[(y * w) * c + ch] = m as uint8
+            for x in 1..w {
+                for dy in 0..n {
+                    let rb = (y + dy) * pw
+                    let a = plane[rb + x - 1]
+                    hist[a] -= 1
+                    if a < m {
+                        lt -= 1
+                    }
+                    let bb = plane[rb + x + n - 1]
+                    hist[bb] += 1
+                    if bb < m {
+                        lt += 1
+                    }
+                }
+                while lt > th {
+                    m -= 1
+                    lt -= hist[m]
+                }
+                while lt + hist[m] <= th {
+                    lt += hist[m]
+                    m += 1
+                }
+                out.data[(y * w + x) * c + ch] = m as uint8
+            }
+        }
+    }
+    return out
+}
+
+// The image sharpened by its Laplacian: `v + amount * (4v - the four
+// neighbours)`.
+pub fun sharpen<S: Sample>(img: Image<S>, amount: float32 = 1.0f32, border: Border = Border.Reflect101) -> Image<S> {
+    let a = amount
+    let k = Kernel { w: 3, h: 3, data: [0.0f32, -a, 0.0f32, -a, 1.0f32 + 4.0f32 * a, -a, 0.0f32, -a, 0.0f32] }
+    return convolve(img, k, border)
+}
+
+// An unsharp mask: `v + amount * (v - blurred)` where |v - blurred| is at
+// least `threshold` (in sample units), the blur a Gaussian of `sigma`.
+pub fun unsharp_mask<S: Sample>(img: Image<S>, sigma: float32, amount: float32 = 1.0f32, threshold: float32 = 0.0f32) -> Image<S> {
+    let src = to_f64(img)
+    let k = gaussian_kernel(sigma as float64, gaussian_radius(sigma))
+    let bl = sep_f(src, img.width, img.height, img.layout.channels(), k, k, Border.Reflect101)
+    let am = amount as float64
+    let th = threshold as float64
+    var out = src
+    for i in 0..src.len() {
+        let d = src[i] - bl[i]
+        if d.abs() >= th {
+            out[i] = src[i] + am * d
+        }
+    }
+    return from_f64(out, img.width, img.height, img.layout)
+}
+
+// The 1D Sobel kernel of a derivative of `order` and `size` taps: the
+// binomial smoothing differenced `order` times (OpenCV's
+// `getDerivKernels`).
+#test(1, 3)[[-1.0, 0.0, 1.0]]
+#test(0, 3)[[1.0, 2.0, 1.0]]
+#test(2, 3)[[1.0, -2.0, 1.0]]
+#test(1, 5)[[-1.0, -2.0, 0.0, 2.0, 1.0]]
+#test(1, 1)[[-1.0, 0.0, 1.0]]
+#test(0, 1)[[1.0]]
+fun deriv_kernel(order: int, size: int) -> [float64] {
+    if size == 1 {
+        return if order == 0 { [1.0] } else { deriv_kernel(order, 3) }
+    }
+    var k = [1.0]
+    for _ in 0..size - 1 - order {
+        var nk = list_m.filled(k.len() + 1, 0.0)
+        for i in 0..nk.len() {
+            let a = if i > 0 { k[i - 1] } else { 0.0 }
+            let b = if i < k.len() { k[i] } else { 0.0 }
+            nk[i] = a + b
+        }
+        k = nk
+    }
+    for _ in 0..order {
+        var nk = list_m.filled(k.len() + 1, 0.0)
+        for i in 0..nk.len() {
+            let a = if i > 0 { k[i - 1] } else { 0.0 }
+            let b = if i < k.len() { k[i] } else { 0.0 }
+            nk[i] = a - b
+        }
+        k = nk
+    }
+    return k
+}
+
+// The Sobel derivative of order `dx` in x and `dy` in y (OpenCV's
+// `Sobel`): `size` 1, 3, 5 or 7, unscaled, in sample units, every channel.
+pub fun sobel<S: Sample>(img: Image<S>, dx: int, dy: int, size: int = 3, border: Border = Border.Reflect101) -> ImageF {
+    if size != 1 && size != 3 && size != 5 && size != 7 {
+        panic(f"sobel of size {size}: 1, 3, 5 or 7")
+    }
+    let lim = if size == 1 { 2 } else { size - 1 }
+    if dx < 0 || dy < 0 || dx + dy == 0 || dx > lim || dy > lim {
+        panic(f"sobel of order {dx}, {dy} and size {size}")
+    }
+    let f = sep_f(to_f64(img), img.width, img.height, img.layout.channels(), deriv_kernel(dx, size), deriv_kernel(dy, size), border)
+    return to_image_f(f, img.width, img.height, img.layout)
+}
+
+// Scharr's derivative in x (`dx` 1, `dy` 0) or y (`dx` 0, `dy` 1):
+// [-1 0 1] smoothed by [3 10 3].
+pub fun scharr<S: Sample>(img: Image<S>, dx: int, dy: int, border: Border = Border.Reflect101) -> ImageF {
+    let d = [-1.0, 0.0, 1.0]
+    let s = [3.0, 10.0, 3.0]
+    let (kx, ky) = if dx == 1 && dy == 0 { (d, s) } else if dx == 0 && dy == 1 { (s, d) } else { panic(f"scharr of order {dx}, {dy}") }
+    let f = sep_f(to_f64(img), img.width, img.height, img.layout.channels(), kx, ky, border)
+    return to_image_f(f, img.width, img.height, img.layout)
+}
+
+// The Laplacian, d²/dx² + d²/dy²: `size` 1 is the kernel
+// [0 1 0; 1 -4 1; 0 1 0], 3, 5 or 7 the sum of two Sobel derivatives.
+pub fun laplacian<S: Sample>(img: Image<S>, size: int = 1, border: Border = Border.Reflect101) -> ImageF {
+    let c = img.layout.channels()
+    let src = to_f64(img)
+    if size == 1 {
+        let k = Kernel { w: 3, h: 3, data: [0.0f32, 1.0f32, 0.0f32, 1.0f32, -4.0f32, 1.0f32, 0.0f32, 1.0f32, 0.0f32] }
+        return to_image_f(corr2d(src, img.width, img.height, c, k, border), img.width, img.height, img.layout)
+    }
+    let gxx = sep_f(src, img.width, img.height, c, deriv_kernel(2, size), deriv_kernel(0, size), border)
+    let gyy = sep_f(src, img.width, img.height, c, deriv_kernel(0, size), deriv_kernel(2, size), border)
+    var f = gxx
+    for i in 0..f.len() {
+        f[i] += gyy[i]
+    }
+    return to_image_f(f, img.width, img.height, img.layout)
+}
+
+// The gradient's magnitude and direction (radians, atan2(gy, gx), -π to
+// π) from the 3 by 3 Sobel derivatives, every channel.
+pub fun gradients<S: Sample>(img: Image<S>, border: Border = Border.Reflect101) -> (ImageF, ImageF) {
+    let c = img.layout.channels()
+    let src = to_f64(img)
+    let d = deriv_kernel(1, 3)
+    let s = deriv_kernel(0, 3)
+    let gx = sep_f(src, img.width, img.height, c, d, s, border)
+    let gy = sep_f(src, img.width, img.height, c, s, d, border)
+    var mag = list_m.filled(gx.len(), 0.0f32)
+    var ang = list_m.filled(gx.len(), 0.0f32)
+    for i in 0..gx.len() {
+        mag[i] = (gx[i] * gx[i] + gy[i] * gy[i]).sqrt() as float32
+        ang[i] = gy[i].atan2(gx[i]) as float32
+    }
+    return (Image { width: img.width, height: img.height, layout: img.layout, data: mag }, Image { width: img.width, height: img.height, layout: img.layout, data: ang })
+}
+
+#test
+fun filters_generic() {
+    let g: Image8 = Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 90u8, 0u8] }
+    assert(box_blur(g, 1).data == [60u8, 30u8, 60u8])
+    assert(box_blur(g, 1, Border.Constant(0.0f32)).data == [10u8, 10u8, 10u8])
+    let k = kernel(3, 1, [0.0f32, 0.0f32, 1.0f32])
+    assert(convolve(g, k).data == [90u8, 0u8, 90u8])
+    assert(convolve_sep(g, [1.0f32], [1.0f32]).data == g.data)
+    let blurred = gaussian_blur(g, 1.0f32)
+    assert(blurred.data[1] < 90u8 && blurred.data[0] > 0u8)
+    let flat: ImageF = image.new(4, 4, Layout.Gray, 0.5f32)
+    assert(gaussian_blur(flat, 1.5f32).data == flat.data)
+    assert(sharpen(flat).data == flat.data)
+    let ramp: Image8 = Image { width: 4, height: 1, layout: Layout.Gray, data: [0u8, 10u8, 20u8, 30u8] }
+    // Reflect101 mirrors the ramp at the ends, so the derivative is 0 there
+    assert(sobel(ramp, 1, 0).data == [0.0f32, 80.0f32, 80.0f32, 0.0f32])
+    assert(sobel(ramp, 1, 0, 1, Border.Replicate).data == [10.0f32, 20.0f32, 20.0f32, 10.0f32])
+    assert(scharr(ramp, 1, 0).data == [0.0f32, 320.0f32, 320.0f32, 0.0f32])
+    assert(laplacian(ramp).data == [20.0f32, 0.0f32, 0.0f32, -20.0f32])
+    let (mag, ang) = gradients(ramp)
+    assert(mag.data[1] == 80.0f32 && ang.data[1] == 0.0f32)
+    let us = unsharp_mask(g, 1.0f32, 1.0f32, 0.0f32)
+    assert(us.data[1] > 90u8)
+}
+
+// ---- morphology ----
+
+// A `w` by `h` rectangle.
+#test(2, 1)[Element { w: 2, h: 1, mask: [true, true] }]
+pub fun rect(w: int, h: int) -> Element {
+    if w <= 0 || h <= 0 {
+        panic(f"a {w}x{h} structuring element")
+    }
+    return Element { w: w, h: h, mask: list_m.filled(w * h, true) }
+}
+
+// A cross: the middle row and the middle column of `w` by `h`.
+#test(3, 3)[Element { w: 3, h: 3, mask: [false, true, false, true, true, true, false, true, false] }]
+pub fun cross(w: int, h: int) -> Element {
+    var e = rect(w, h)
+    for y in 0..h {
+        for x in 0..w {
+            e.mask[y * w + x] = y == h / 2 || x == w / 2
+        }
+    }
+    return e
+}
+
+// The ellipse inscribed in `w` by `h` (OpenCV's `MORPH_ELLIPSE`).
+#test(5, 5)[Element { w: 5, h: 5, mask: [false, false, true, false, false, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, false, false, true, false, false] }]
+pub fun ellipse(w: int, h: int) -> Element {
+    var e = rect(w, h)
+    let r = h / 2
+    let c = w / 2
+    let inv_r2 = if r > 0 { 1.0 / ((r * r) as float64) } else { 0.0 }
+    for i in 0..h {
+        let dy = i - r
+        var j1 = 0
+        var j2 = 0
+        if iabs(dy) <= r {
+            let dx = round_even((c as float64) * (((r * r - dy * dy) as float64) * inv_r2).sqrt())
+            j1 = if c - dx > 0 { c - dx } else { 0 }
+            j2 = if c + dx + 1 < w { c + dx + 1 } else { w }
+        }
+        for j in 0..w {
+            e.mask[i * w + j] = j >= j1 && j < j2
+        }
+    }
+    return e
+}
+
+// The minimum (or the maximum, `take_max`) of each channel under the
+// element anchored at (ax, ay), pixels past the edge ignored: the extreme
+// of each run of the element's rows, computed once for the whole image,
+// then combined row by row.
+fun morph_core(img: Image8, se: Element, ax: int, ay: int, take_max: bool) -> Image8 {
+    let w = img.width
+    let h = img.height
+    let c = img.layout.channels()
+    let rw = w * c
+    let ident = if take_max { 0 } else { 255 }
+    var src = list_m.filled(img.data.len(), 0)
+    for i in 0..src.len() {
+        src[i] = img.data[i] as int
+    }
+    // the runs of each row of the element: (row, start, length)
+    var runs: [(int, int, int)] = []
+    for ty in 0..se.h {
+        var tx = 0
+        while tx < se.w {
+            if se.mask[ty * se.w + tx] {
+                let start = tx
+                while tx < se.w && se.mask[ty * se.w + tx] {
+                    tx += 1
+                }
+                runs.push((ty, start, tx - start))
+            } else {
+                tx += 1
+            }
+        }
+    }
+    // the extreme over each distinct (start, length), for every pixel
+    var keys: [(int, int)] = []
+    var planes: [[int]] = []
+    var which = list_m.filled(runs.len(), 0)
+    for ri in 0..runs.len() {
+        let (_, start, len) = runs[ri]
+        let key = (start, len)
+        var found = -1
+        for ki in 0..keys.len() {
+            if keys[ki] == key {
+                found = ki
+            }
+        }
+        if found < 0 {
+            found = keys.len()
+            keys.push(key)
+            var pl = list_m.filled(rw * h, ident)
+            let off = start - ax
+            for y in 0..h {
+                let rb = y * rw
+                for x in 0..w {
+                    let lo = if x + off > 0 { x + off } else { 0 }
+                    let hi = if x + off + len < w { x + off + len } else { w }
+                    for ch in 0..c {
+                        var m = ident
+                        var s = rb + lo * c + ch
+                        for _ in lo..hi {
+                            let v = src[s]
+                            if take_max {
+                                if v > m {
+                                    m = v
+                                }
+                            } else if v < m {
+                                m = v
+                            }
+                            s += c
+                        }
+                        pl[rb + x * c + ch] = m
+                    }
+                }
+            }
+            planes.push(pl)
+        }
+        which[ri] = found
+    }
+    var out = list_m.filled(rw * h, ident)
+    for ri in 0..runs.len() {
+        let (ty, _, _) = runs[ri]
+        let pl = planes[which[ri]]
+        for y in 0..h {
+            let sy = y + ty - ay
+            if sy < 0 || sy >= h {
+                continue
+            }
+            let ob = y * rw
+            let sb = sy * rw
+            if take_max {
+                for i in 0..rw {
+                    let v = pl[sb + i]
+                    if v > out[ob + i] {
+                        out[ob + i] = v
+                    }
+                }
+            } else {
+                for i in 0..rw {
+                    let v = pl[sb + i]
+                    if v < out[ob + i] {
+                        out[ob + i] = v
+                    }
+                }
+            }
+        }
+    }
+    var res = list_m.filled(out.len(), 0u8)
+    for i in 0..out.len() {
+        res[i] = out[i] as uint8
+    }
+    return image8(w, h, img.layout, res)
+}
+
+// Each sample as the minimum under the element `se` (anchored at its
+// middle); pixels past the edge don't count.
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [9u8, 1u8, 9u8] }, Element { w: 3, h: 1, mask: [true, true, true] })[Image { width: 3, height: 1, layout: Layout.Gray, data: [1u8, 1u8, 1u8] }]
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [9u8, 1u8, 7u8] }, Element { w: 2, h: 1, mask: [true, true] })[Image { width: 3, height: 1, layout: Layout.Gray, data: [9u8, 1u8, 1u8] }]
+pub fun erode(img: Image8, se: Element) -> Image8 {
+    return morph_core(img, se, se.w / 2, se.h / 2, false)
+}
+
+// Each sample as the maximum under the element `se`.
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 5u8, 0u8] }, Element { w: 3, h: 1, mask: [true, true, true] })[Image { width: 3, height: 1, layout: Layout.Gray, data: [5u8, 5u8, 5u8] }]
+pub fun dilate(img: Image8, se: Element) -> Image8 {
+    return morph_core(img, se, se.w / 2, se.h / 2, true)
+}
+
+// `a - b` sample by sample, held at 0.
+fun sub_sat(a: Image8, b: Image8) -> Image8 {
+    var out = a
+    for i in 0..a.data.len() {
+        let d = (a.data[i] as int) - (b.data[i] as int)
+        out.data[i] = if d < 0 { 0u8 } else { d as uint8 }
+    }
+    return out
+}
+
+// An opening, closing, gradient, top hat or black hat (see `Morph`).
+#test(Image { width: 5, height: 1, layout: Layout.Gray, data: [0u8, 9u8, 0u8, 9u8, 9u8] }, Morph.Open, Element { w: 2, h: 1, mask: [true, true] })[Image { width: 5, height: 1, layout: Layout.Gray, data: [0u8, 0u8, 0u8, 9u8, 9u8] }]
+#test(Image { width: 5, height: 1, layout: Layout.Gray, data: [9u8, 0u8, 9u8, 0u8, 0u8] }, Morph.Close, Element { w: 2, h: 1, mask: [true, true] })[Image { width: 5, height: 1, layout: Layout.Gray, data: [9u8, 9u8, 9u8, 0u8, 0u8] }]
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 9u8, 9u8] }, Morph.Gradient, Element { w: 3, h: 1, mask: [true, true, true] })[Image { width: 3, height: 1, layout: Layout.Gray, data: [9u8, 9u8, 0u8] }]
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [1u8, 9u8, 1u8] }, Morph.TopHat, Element { w: 3, h: 1, mask: [true, true, true] })[Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 8u8, 0u8] }]
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [9u8, 1u8, 9u8] }, Morph.BlackHat, Element { w: 3, h: 1, mask: [true, true, true] })[Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 8u8, 0u8] }]
+pub fun morph(img: Image8, op: Morph, se: Element) -> Image8 {
+    return match op {
+        Open => reflected(erode(img, se), se, true)
+        Close => reflected(dilate(img, se), se, false)
+        Gradient => sub_sat(dilate(img, se), erode(img, se))
+        TopHat => sub_sat(img, reflected(erode(img, se), se, true))
+        BlackHat => sub_sat(reflected(dilate(img, se), se, false), img)
+    }
+}
+
+// The second step of an opening (a dilation, `take_max`) or a closing,
+// under the element reflected about its anchor, so that the result is an
+// opening for an even size too.
+fun reflected(img: Image8, se: Element, take_max: bool) -> Image8 {
+    var e = se
+    let n = se.mask.len()
+    for i in 0..n {
+        e.mask[i] = se.mask[n - 1 - i]
+    }
+    return morph_core(img, e, se.w - 1 - se.w / 2, se.h - 1 - se.h / 2, take_max)
+}
+
+// ---- edges, corners, matching ----
+
+// Canny's edges of the image's gray (OpenCV's `Canny` with an L2
+// gradient): 3 by 3 Sobel derivatives (the border replicated), thinned to
+// the local maxima across the edge, then kept where the magnitude is above
+// `high` or joined (8-connected) to such a pixel through pixels above
+// `low`. 255 on an edge, else 0. Blur first: it doesn't.
+#test(Image { width: 4, height: 3, layout: Layout.Gray, data: [0u8, 0u8, 200u8, 200u8, 0u8, 0u8, 200u8, 200u8, 0u8, 0u8, 200u8, 200u8] }, 100.0f32, 300.0f32)[Image { width: 4, height: 3, layout: Layout.Gray, data: [0u8, 255u8, 0u8, 0u8, 0u8, 255u8, 0u8, 0u8, 0u8, 255u8, 0u8, 0u8] }]
+pub fun canny(img: Image8, low: float32, high: float32) -> Image8 {
+    let g = gray(img)
+    let w = g.width
+    let h = g.height
+    // the gray padded by one pixel, replicated
+    let pw = w + 2
+    var p = list_m.filled(pw * (h + 2), 0)
+    for py in 0..h + 2 {
+        let sy = clampi(py - 1, 0, h - 1)
+        for px in 0..pw {
+            let sx = clampi(px - 1, 0, w - 1)
+            p[py * pw + px] = g.data[sy * w + sx] as int
+        }
+    }
+    // derivatives, and the squared magnitude with a zero frame
+    var gx = list_m.filled(w * h, 0)
+    var gy = list_m.filled(w * h, 0)
+    var mag = list_m.filled(pw * (h + 2), 0)
+    for y in 0..h {
+        let a = y * pw
+        let b = a + pw
+        let c = b + pw
+        for x in 0..w {
+            let dx = (p[a + x + 2] + 2 * p[b + x + 2] + p[c + x + 2]) - (p[a + x] + 2 * p[b + x] + p[c + x])
+            let dy = (p[c + x] + 2 * p[c + x + 1] + p[c + x + 2]) - (p[a + x] + 2 * p[a + x + 1] + p[a + x + 2])
+            gx[y * w + x] = dx
+            gy[y * w + x] = dy
+            mag[b + x + 1] = dx * dx + dy * dy
+        }
+    }
+    let lo = if low > 0.0f32 { (low as float64) * (low as float64) } else { low as float64 }
+    let hi = if high > 0.0f32 { (high as float64) * (high as float64) } else { high as float64 }
+    // 0 a candidate, 1 none, 2 an edge; a frame of 1
+    var map = list_m.filled(pw * (h + 2), 1)
+    var stack: [int] = []
+    for y in 0..h {
+        for x in 0..w {
+            let j = (y + 1) * pw + x + 1
+            let m = mag[j]
+            let mf = m as float64
+            if !(mf > lo) {
+                continue
+            }
+            let xs = gx[y * w + x]
+            let ys = gy[y * w + x]
+            let ax = iabs(xs)
+            let ay = iabs(ys) << 15
+            let tg22x = ax * 13573
+            var is_max = false
+            if ay < tg22x {
+                is_max = m > mag[j - 1] && m >= mag[j + 1]
+            } else {
+                let tg67x = tg22x + (ax << 16)
+                if ay > tg67x {
+                    is_max = m > mag[j - pw] && m >= mag[j + pw]
+                } else {
+                    let s = if (xs < 0) != (ys < 0) { -1 } else { 1 }
+                    is_max = m > mag[j - pw - s] && m > mag[j + pw + s]
+                }
+            }
+            if is_max {
+                if mf > hi {
+                    map[j] = 2
+                    stack.push(j)
+                } else {
+                    map[j] = 0
+                }
+            }
+        }
+    }
+    let nb = [-pw - 1, -pw, -pw + 1, -1, 1, pw - 1, pw, pw + 1]
+    while stack.len() > 0 {
+        let j = stack.pop()
+        for d in nb {
+            if map[j + d] == 0 {
+                map[j + d] = 2
+                stack.push(j + d)
+            }
+        }
+    }
+    var out = list_m.filled(w * h, 0u8)
+    for y in 0..h {
+        for x in 0..w {
+            if map[(y + 1) * pw + x + 1] == 2 {
+                out[y * w + x] = 255u8
+            }
+        }
+    }
+    return image8(w, h, Layout.Gray, out)
+}
+
+// The structure tensor of the first channel: the sums over `block` by
+// `block` of gx², gx·gy and gy², the derivatives Sobel's divided by 8 and
+// by the sample maximum (so a step of full scale is 1).
+fun structure<S: Sample>(img: Image<S>, block: int, border: Border) -> ([float64], [float64], [float64]) {
+    let w = img.width
+    let h = img.height
+    let c = img.layout.channels()
+    var src = list_m.filled(w * h, 0.0)
+    for i in 0..w * h {
+        src[i] = img.data[i * c].to_f32() as float64
+    }
+    let scale = 1.0 / (8.0 * (S.max_value().to_f32() as float64))
+    let d = deriv_kernel(1, 3)
+    let s = deriv_kernel(0, 3)
+    let gx = sep_f(src, w, h, 1, d, s, border)
+    let gy = sep_f(src, w, h, 1, s, d, border)
+    var xx = list_m.filled(w * h, 0.0)
+    var xy = list_m.filled(w * h, 0.0)
+    var yy = list_m.filled(w * h, 0.0)
+    for i in 0..w * h {
+        let a = gx[i] * scale
+        let b = gy[i] * scale
+        xx[i] = a * a
+        xy[i] = a * b
+        yy[i] = b * b
+    }
+    let ones = list_m.filled(block, 1.0)
+    return (sep_f(xx, w, h, 1, ones, ones, border), sep_f(xy, w, h, 1, ones, ones, border), sep_f(yy, w, h, 1, ones, ones, border))
+}
+
+// Harris's corner response of the first channel, det(M) - k·trace(M)²
+// with M the structure tensor summed over `block` by `block`.
+pub fun harris<S: Sample>(img: Image<S>, block: int = 3, k: float32 = 0.04f32, border: Border = Border.Reflect101) -> ImageF {
+    let (a, b, c) = structure(img, block, border)
+    let kk = k as float64
+    var r = list_m.filled(a.len(), 0.0f32)
+    for i in 0..a.len() {
+        let t = a[i] + c[i]
+        r[i] = (a[i] * c[i] - b[i] * b[i] - kk * t * t) as float32
+    }
+    return Image { width: img.width, height: img.height, layout: Layout.Gray, data: r }
+}
+
+// Shi and Tomasi's corners of the first channel (OpenCV's
+// `goodFeaturesToTrack`): the pixels whose smaller structure tensor
+// eigenvalue is at least `quality` times the largest and the largest in
+// its 3 by 3 neighbourhood, strongest first (ties row by row), each at
+// least `min_distance` from those before it; at most `max_corners` (all
+// when 0).
+pub fun good_features<S: Sample>(img: Image<S>, max_corners: int, quality: float32 = 0.01f32, min_distance: float32 = 10.0f32, block: int = 3) -> [Vec2] {
+    let w = img.width
+    let h = img.height
+    let (a, b, c) = structure(img, block, Border.Reflect101)
+    var e = list_m.filled(a.len(), 0.0)
+    var best = 0.0
+    for i in 0..a.len() {
+        let m = (a[i] + c[i]) * 0.5
+        let d = (a[i] - c[i]) * 0.5
+        e[i] = m - (d * d + b[i] * b[i]).sqrt()
+        if e[i] > best {
+            best = e[i]
+        }
+    }
+    let thr = best * (quality as float64)
+    var cands: [(float64, int)] = []
+    for y in 0..h {
+        for x in 0..w {
+            let v = e[y * w + x]
+            if !(v > thr) || v <= 0.0 {
+                continue
+            }
+            var is_max = true
+            for dy in -1..2 {
+                for dx in -1..2 {
+                    let xx = x + dx
+                    let yy = y + dy
+                    if xx >= 0 && yy >= 0 && xx < w && yy < h && e[yy * w + xx] > v {
+                        is_max = false
+                    }
+                }
+            }
+            if is_max {
+                cands.push((v, y * w + x))
+            }
+        }
+    }
+    cands.sort_by((p: (float64, int), q: (float64, int)) => p.0 > q.0)
+    let md = (min_distance as float64) * (min_distance as float64)
+    var out: [Vec2] = []
+    for (_, i) in cands {
+        let x = (i % w) as float64
+        let y = (i / w) as float64
+        var ok = true
+        for p in out {
+            let dx = (p.x as float64) - x
+            let dy = (p.y as float64) - y
+            if dx * dx + dy * dy < md {
+                ok = false
+                break
+            }
+        }
+        if ok {
+            out.push(Vec2 { x: x as float32, y: y as float32 })
+            if max_corners > 0 && out.len() >= max_corners {
+                break
+            }
+        }
+    }
+    return out
+}
+
+// The summed-area table of channel `channel`.
+pub fun integral<S: Sample>(img: Image<S>, channel: int = 0) -> Integral {
+    let w = img.width
+    let h = img.height
+    let c = img.layout.channels()
+    if channel < 0 || channel >= c {
+        panic(f"channel {channel} of a {img.layout} image")
+    }
+    let s = w + 1
+    var sums = list_m.filled(s * (h + 1), 0.0)
+    for y in 0..h {
+        var row = 0.0
+        for x in 0..w {
+            row += img.data[(y * w + x) * c + channel].to_f32() as float64
+            sums[(y + 1) * s + x + 1] = sums[y * s + x + 1] + row
+        }
+    }
+    return Integral { width: w, height: h, sums: sums }
+}
+
+// The sums over each window of `tw` by `th` of `v` (one value a pixel,
+// w by h), from its summed-area table: (w - tw + 1) by (h - th + 1).
+fun window_sums(v: [float64], w: int, h: int, tw: int, th: int) -> [float64] {
+    let s = w + 1
+    var t = list_m.filled(s * (h + 1), 0.0)
+    for y in 0..h {
+        var row = 0.0
+        for x in 0..w {
+            row += v[y * w + x]
+            t[(y + 1) * s + x + 1] = t[y * s + x + 1] + row
+        }
+    }
+    let ow = w - tw + 1
+    let oh = h - th + 1
+    var out = list_m.filled(ow * oh, 0.0)
+    for y in 0..oh {
+        for x in 0..ow {
+            out[y * ow + x] = t[(y + th) * s + x + tw] - t[y * s + x + tw] - t[(y + th) * s + x] + t[y * s + x]
+        }
+    }
+    return out
+}
+
+// How well the template `t` matches at each position of `img` (OpenCV's
+// `matchTemplate`): an `ImageF` of one channel, (W - w + 1) by (H - h + 1),
+// the score of the window whose top left corner is there, over every
+// channel (see `Match`). A flat window or template scores 0 under `Ncc`
+// and `Zncc`.
+pub fun match_template<S: Sample>(img: Image<S>, t: Image<S>, method: Match = Match.Zncc) -> Result<ImageF, ImageError> {
+    if t.layout != img.layout || t.width > img.width || t.height > img.height || t.width == 0 || t.height == 0 {
+        return Err(ImageError.Mismatch(f"match_template: a {t.width}x{t.height} {t.layout} template in a {img.width}x{img.height} {img.layout} image"))
+    }
+    let c = img.layout.channels()
+    let w = img.width
+    let h = img.height
+    let tw = t.width
+    let th = t.height
+    let ow = w - tw + 1
+    let oh = h - th + 1
+    let src = to_f64(img)
+    let tf = to_f64(t)
+    let n = (tw * th * c) as float64
+    var tsum = 0.0
+    var tsq = 0.0
+    for v in tf {
+        tsum += v
+        tsq += v * v
+    }
+    // per-pixel sums over the channels, for the window sums
+    var ps = list_m.filled(w * h, 0.0)
+    var pq = list_m.filled(w * h, 0.0)
+    for i in 0..w * h {
+        for k in 0..c {
+            let v = src[i * c + k]
+            ps[i] += v
+            pq[i] += v * v
+        }
+    }
+    let ws = window_sums(ps, w, h, tw, th)
+    let wq = window_sums(pq, w, h, tw, th)
+    var out = list_m.filled(ow * oh, 0.0f32)
+    let rw = tw * c
+    for y in 0..oh {
+        for x in 0..ow {
+            var cross = 0.0
+            for ty in 0..th {
+                let sb = ((y + ty) * w + x) * c
+                let tb = ty * rw
+                for i in 0..rw {
+                    cross += src[sb + i] * tf[tb + i]
+                }
+            }
+            let o = y * ow + x
+            let is = ws[o]
+            let iq = wq[o]
+            let score = match method {
+                Ssd => iq - 2.0 * cross + tsq
+                Ncc => {
+                    let d = (iq * tsq).sqrt()
+                    if d > 0.0 { cross / d } else { 0.0 }
+                }
+                Zncc => {
+                    let num = cross - is * tsum / n
+                    let vi = iq - is * is / n
+                    let vt = tsq - tsum * tsum / n
+                    if vi > 0.0 && vt > 0.0 { num / (vi * vt).sqrt() } else { 0.0 }
+                }
+            }
+            out[o] = score as float32
+        }
+    }
+    return Ok(Image { width: ow, height: oh, layout: Layout.Gray, data: out })
+}
+
+// The smallest and largest value of channel `channel` and where each is
+// first (row by row).
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [2.0f32, -1.0f32, 5.0f32] }, 0)[Extremes { min: -1.0f32, max: 5.0f32, min_x: 1, min_y: 0, max_x: 2, max_y: 0 }]
+pub fun min_max(f: ImageF, channel: int = 0) -> Extremes {
+    let c = f.layout.channels()
+    if f.width == 0 || f.height == 0 || channel < 0 || channel >= c {
+        panic(f"min_max of channel {channel} of a {f.width}x{f.height} {f.layout} image")
+    }
+    var mn = f.data[channel]
+    var mx = mn
+    var mi = 0
+    var xi = 0
+    for i in 1..f.width * f.height {
+        let v = f.data[i * c + channel]
+        if v < mn {
+            mn = v
+            mi = i
+        }
+        if v > mx {
+            mx = v
+            xi = i
+        }
+    }
+    return Extremes { min: mn, max: mx, min_x: mi % f.width, min_y: mi / f.width, max_x: xi % f.width, max_y: xi / f.width }
+}
+
+#test
+fun corners_and_matching() {
+    // a bright square on black: its corners are the strongest responses
+    var img: Image8 = image.new(12, 12, Layout.Gray, 0u8)
+    for y in 3..9 {
+        for x in 3..9 {
+            img[(x, y, 0)] = 255u8
+        }
+    }
+    let r = harris(img)
+    let e = min_max(r)
+    assert(e.max > 0.0f32 && e.min < 0.0f32)
+    let pts = good_features(img, 4, 0.1f32, 3.0f32)
+    assert(pts.len() == 4)
+    for p in pts {
+        assert((p.x == 3.0f32 || p.x == 8.0f32) && (p.y == 3.0f32 || p.y == 8.0f32))
+    }
+    let t: Image8 = Image { width: 2, height: 2, layout: Layout.Gray, data: [0u8, 0u8, 0u8, 255u8] }
+    let m = match_template(img, t).expect("fits")
+    assert(m.width == 11 && m.height == 11)
+    let best = min_max(m)
+    assert(best.max_x == 2 && best.max_y == 2 && best.max > 0.999f32)
+    let ssd = match_template(img, t, Match.Ssd).expect("fits")
+    let low = min_max(ssd)
+    assert(low.min == 0.0f32 && low.min_x == 2 && low.min_y == 2)
+    let ncc = match_template(img, t, Match.Ncc).expect("fits")
+    assert(ncc.data[0] == 0.0f32)
+    let ii = integral(img)
+    assert(ii.sum(image.rect(0, 0, 12, 12)) == 36.0 * 255.0)
+    assert(ii.sum(image.rect(2, 2, 2, 2)) == 255.0)
+    assert(ii.sum(image.rect(-5, -5, 3, 3)) == 0.0)
+    match match_template(t, img) {
+        Ok(_) => assert(false)
+        Err(_) => {}
+    }
+}
+
+// ---- regions ----
+
+// The connected components of the pixels whose first channel isn't 0,
+// 8- or 4-connected, by two passes over a union-find.
+#test(Image { width: 4, height: 2, layout: Layout.Gray, data: [1u8, 0u8, 0u8, 1u8, 0u8, 1u8, 0u8, 1u8] }, 8)[Components { count: 2, width: 4, height: 2, labels: [1, 0, 0, 2, 0, 1, 0, 2], stats: [Region { area: 4, bbox: Rect { x: 0, y: 0, w: 3, h: 2 }, centroid: Vec2 { x: 1.25, y: 0.5 } }, Region { area: 2, bbox: Rect { x: 0, y: 0, w: 2, h: 2 }, centroid: Vec2 { x: 0.5, y: 0.5 } }, Region { area: 2, bbox: Rect { x: 3, y: 0, w: 1, h: 2 }, centroid: Vec2 { x: 3.0, y: 0.5 } }] }]
+#test(Image { width: 2, height: 2, layout: Layout.Gray, data: [1u8, 0u8, 0u8, 1u8] }, 4)[Components { count: 2, width: 2, height: 2, labels: [1, 0, 0, 2], stats: [Region { area: 2, bbox: Rect { x: 0, y: 0, w: 2, h: 2 }, centroid: Vec2 { x: 0.5, y: 0.5 } }, Region { area: 1, bbox: Rect { x: 0, y: 0, w: 1, h: 1 }, centroid: Vec2 { x: 0.0, y: 0.0 } }, Region { area: 1, bbox: Rect { x: 1, y: 1, w: 1, h: 1 }, centroid: Vec2 { x: 1.0, y: 1.0 } }] }]
+pub fun components(img: Image8, connectivity: int = 8) -> Components {
+    if connectivity != 4 && connectivity != 8 {
+        panic(f"connectivity {connectivity}: 4 or 8")
+    }
+    let w = img.width
+    let h = img.height
+    let c = img.layout.channels()
+    var lab = list_m.filled(w * h, 0)
+    var uf = unionfind.new(1)
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x
+            if img.data[i * c] == 0u8 {
+                continue
+            }
+            let n = if y > 0 { lab[i - w] } else { 0 }
+            let west = if x > 0 { lab[i - 1] } else { 0 }
+            var l = 0
+            if connectivity == 4 {
+                if n > 0 {
+                    l = n
+                    if west > 0 && west != n {
+                        let joined = uf.union(n, west)
+                    }
+                } else if west > 0 {
+                    l = west
+                }
+            } else if n > 0 {
+                // the north neighbour touches the other three
+                l = n
+            } else {
+                let ne = if y > 0 && x + 1 < w { lab[i - w + 1] } else { 0 }
+                let nw = if y > 0 && x > 0 { lab[i - w - 1] } else { 0 }
+                let left = if west > 0 { west } else { nw }
+                if ne > 0 {
+                    l = ne
+                    if left > 0 && left != ne {
+                        let joined = uf.union(ne, left)
+                    }
+                } else {
+                    l = left
+                }
+            }
+            if l == 0 {
+                l = uf.add()
+            }
+            lab[i] = l
+        }
+    }
+    // final labels in the order of each component's first pixel
+    var final_of = list_m.filled(uf.len(), 0)
+    var count = 0
+    var labels = list_m.filled(w * h, 0i32)
+    var area = [0]
+    var minx = [w]
+    var miny = [h]
+    var maxx = [-1]
+    var maxy = [-1]
+    var sx: [int64] = [0]
+    var sy: [int64] = [0]
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x
+            var l = 0
+            if lab[i] > 0 {
+                let root = uf.find(lab[i])
+                if final_of[root] == 0 {
+                    count += 1
+                    final_of[root] = count
+                    area.push(0)
+                    minx.push(w)
+                    miny.push(h)
+                    maxx.push(-1)
+                    maxy.push(-1)
+                    sx.push(0)
+                    sy.push(0)
+                }
+                l = final_of[root]
+            }
+            labels[i] = l as int32
+            area[l] += 1
+            if x < minx[l] {
+                minx[l] = x
+            }
+            if x > maxx[l] {
+                maxx[l] = x
+            }
+            if y < miny[l] {
+                miny[l] = y
+            }
+            maxy[l] = y
+            sx[l] += x as int64
+            sy[l] += y as int64
+        }
+    }
+    var stats: [Region] = []
+    for l in 0..count + 1 {
+        if area[l] == 0 {
+            stats.push(Region { area: 0, bbox: Rect { x: 0, y: 0, w: 0, h: 0 }, centroid: Vec2 { x: 0.0f32, y: 0.0f32 } })
+            continue
+        }
+        let a = area[l] as float64
+        stats.push(Region {
+            area: area[l],
+            bbox: Rect { x: minx[l], y: miny[l], w: maxx[l] - minx[l] + 1, h: maxy[l] - miny[l] + 1 },
+            centroid: Vec2 { x: ((sx[l] as float64) / a) as float32, y: ((sy[l] as float64) / a) as float32 },
+        })
+    }
+    return Components { count: count, width: w, height: h, labels: labels, stats: stats }
+}
+
+impl Components {
+    // A mask of the pixels of label `l`: 255 there, else 0.
+    fun mask(self, l: int) -> Image8 {
+        var out = list_m.filled(self.labels.len(), 0u8)
+        for i in 0..self.labels.len() {
+            if (self.labels[i] as int) == l {
+                out[i] = 255u8
+            }
+        }
+        return image8(self.width, self.height, Layout.Gray, out)
+    }
+}
+
+// The image with the region around (x, y) set to `value`: the pixels
+// connected to it (4- or 8-) whose every channel is within `tolerance` of
+// the seed's. A seed outside leaves the image as it is.
+#test(Image { width: 3, height: 2, layout: Layout.Gray, data: [5u8, 6u8, 9u8, 5u8, 9u8, 5u8] }, 0, 0, Color { r: 1u8, g: 0u8, b: 0u8, a: 0u8 }, 1, 4)[Image { width: 3, height: 2, layout: Layout.Gray, data: [1u8, 1u8, 9u8, 1u8, 9u8, 5u8] }]
+#test(Image { width: 2, height: 2, layout: Layout.Gray, data: [5u8, 9u8, 9u8, 5u8] }, 0, 0, Color { r: 1u8, g: 0u8, b: 0u8, a: 0u8 }, 0, 8)[Image { width: 2, height: 2, layout: Layout.Gray, data: [1u8, 9u8, 9u8, 1u8] }]
+pub fun flood_fill(img: Image8, x: int, y: int, value: Color, tolerance: int = 0, connectivity: int = 4) -> Image8 {
+    if !img.in_bounds(x, y) {
+        return img
+    }
+    let w = img.width
+    let h = img.height
+    let c = img.layout.channels()
+    let vs = color_samples(value, img.layout)
+    var seed = list_m.filled(c, 0)
+    for k in 0..c {
+        seed[k] = img.data[(y * w + x) * c + k] as int
+    }
+    var seen = list_m.filled(w * h, false)
+    var out = img
+    var stack = [y * w + x]
+    seen[y * w + x] = true
+    while stack.len() > 0 {
+        let i = stack.pop()
+        for k in 0..c {
+            out.data[i * c + k] = vs[k] as uint8
+        }
+        let px = i % w
+        let py = i / w
+        for dy in -1..2 {
+            for dx in -1..2 {
+                if dx == 0 && dy == 0 {
+                    continue
+                }
+                if connectivity == 4 && dx != 0 && dy != 0 {
+                    continue
+                }
+                let nx = px + dx
+                let ny = py + dy
+                if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                    continue
+                }
+                let j = ny * w + nx
+                if seen[j] {
+                    continue
+                }
+                var ok = true
+                for k in 0..c {
+                    if iabs((img.data[j * c + k] as int) - seed[k]) > tolerance {
+                        ok = false
+                    }
+                }
+                if ok {
+                    seen[j] = true
+                    stack.push(j)
+                }
+            }
+        }
+    }
+    return out
+}
+
+// Squared distances far past any image's.
+const FAR: float64 = 1000000000000000.0
+
+// Felzenszwalb and Huttenlocher's 1D distance transform of the n squared
+// distances `f`: the lower envelope of the parabolas (q - p)² + f[p].
+#test([0.0, 1000000000000000.0, 1000000000000000.0, 0.0, 1000000000000000.0], 5)[[0.0, 1.0, 1.0, 0.0, 1.0]]
+#test([4.0, 1000000000000000.0], 2)[[4.0, 5.0]]
+fun dt1d(f: [float64], n: int) -> [float64] {
+    var d = list_m.filled(n, 0.0)
+    if n == 0 {
+        return d
+    }
+    var v = list_m.filled(n, 0)
+    var z = list_m.filled(n + 1, 0.0)
+    var k = 0
+    z[0] = -1000000000000000000.0
+    z[1] = 1000000000000000000.0
+    for q in 1..n {
+        let fq = f[q] + ((q * q) as float64)
+        var p = v[k]
+        var s = (fq - (f[p] + ((p * p) as float64))) / ((2 * q - 2 * p) as float64)
+        while s <= z[k] {
+            k -= 1
+            p = v[k]
+            s = (fq - (f[p] + ((p * p) as float64))) / ((2 * q - 2 * p) as float64)
+        }
+        k += 1
+        v[k] = q
+        z[k] = s
+        z[k + 1] = 1000000000000000000.0
+    }
+    k = 0
+    for q in 0..n {
+        while z[k + 1] < (q as float64) {
+            k += 1
+        }
+        let dq = (q - v[k]) as float64
+        d[q] = dq * dq + f[v[k]]
+    }
+    return d
+}
+
+// The Euclidean distance of each pixel to the nearest pixel whose first
+// channel is 0 (0 there), exact (Felzenszwalb and Huttenlocher); infinite
+// everywhere when there is none.
+#test(Image { width: 4, height: 1, layout: Layout.Gray, data: [0u8, 1u8, 1u8, 1u8] })[Image { width: 4, height: 1, layout: Layout.Gray, data: [0.0f32, 1.0f32, 2.0f32, 3.0f32] }]
+#test(Image { width: 2, height: 2, layout: Layout.Gray, data: [0u8, 1u8, 1u8, 1u8] })[Image { width: 2, height: 2, layout: Layout.Gray, data: [0.0f32, 1.0f32, 1.0f32, 1.4142135f32] }]
+pub fun distance_transform(img: Image8) -> ImageF {
+    let w = img.width
+    let h = img.height
+    let c = img.layout.channels()
+    var g = list_m.filled(w * h, FAR)
+    for i in 0..w * h {
+        if img.data[i * c] == 0u8 {
+            g[i] = 0.0
+        }
+    }
+    var col = list_m.filled(h, 0.0)
+    for x in 0..w {
+        for y in 0..h {
+            col[y] = g[y * w + x]
+        }
+        let d = dt1d(col, h)
+        for y in 0..h {
+            g[y * w + x] = d[y]
+        }
+    }
+    var row = list_m.filled(w, 0.0)
+    var out = list_m.filled(w * h, 0.0f32)
+    for y in 0..h {
+        for x in 0..w {
+            row[x] = g[y * w + x]
+        }
+        let d = dt1d(row, w)
+        for x in 0..w {
+            out[y * w + x] = if d[x] >= FAR / 2.0 { fl.infinity() as float32 } else { d[x].sqrt() as float32 }
+        }
+    }
+    return Image { width: w, height: h, layout: Layout.Gray, data: out }
+}
+
+// ---- quality ----
+
+// The mean squared difference of the samples, in sample units.
+pub fun mse<S: Sample>(a: Image<S>, b: Image<S>) -> Result<float64, ImageError> {
+    same_shape(a, b, "mse")?
+    if a.data.len() == 0 {
+        return Ok(0.0)
+    }
+    var s = 0.0
+    for i in 0..a.data.len() {
+        let d = (a.data[i].to_f32() as float64) - (b.data[i].to_f32() as float64)
+        s += d * d
+    }
+    return Ok(s / (a.data.len() as float64))
+}
+
+// The peak signal-to-noise ratio in decibels, 10·log10(max² / mse);
+// infinite for equal images.
+pub fun psnr<S: Sample>(a: Image<S>, b: Image<S>) -> Result<float64, ImageError> {
+    let e = mse(a, b)?
+    if e == 0.0 {
+        return Ok(fl.infinity())
+    }
+    let mx = S.max_value().to_f32() as float64
+    return Ok(10.0 * (mx * mx / e).log10())
+}
+
+// The structural similarity of Wang, Bovik, Sheikh and Simoncelli (2004):
+// an 11 by 11 Gaussian window of sigma 1.5, K1 0.01, K2 0.03, the mean of
+// the map over the windows inside the image ("valid") and over the
+// channels; 1 for equal images. Both images are at least 11 by 11.
+pub fun ssim<S: Sample>(a: Image<S>, b: Image<S>) -> Result<float64, ImageError> {
+    same_shape(a, b, "ssim")?
+    if a.width < 11 || a.height < 11 {
+        return Err(ImageError.Mismatch(f"ssim needs 11x11 at least, not {a.width}x{a.height}"))
+    }
+    let w = a.width
+    let h = a.height
+    let c = a.layout.channels()
+    let l = S.max_value().to_f32() as float64
+    let c1 = (0.01 * l) * (0.01 * l)
+    let c2 = (0.03 * l) * (0.03 * l)
+    let k = gaussian_kernel(1.5, 5)
+    let fa = to_f64(a)
+    let fb = to_f64(b)
+    var aa = fa
+    var bb = fb
+    var ab = fa
+    for i in 0..fa.len() {
+        aa[i] = fa[i] * fa[i]
+        bb[i] = fb[i] * fb[i]
+        ab[i] = fa[i] * fb[i]
+    }
+    let ma = sep_f(fa, w, h, c, k, k, Border.Reflect101)
+    let mb = sep_f(fb, w, h, c, k, k, Border.Reflect101)
+    let saa = sep_f(aa, w, h, c, k, k, Border.Reflect101)
+    let sbb = sep_f(bb, w, h, c, k, k, Border.Reflect101)
+    let sab = sep_f(ab, w, h, c, k, k, Border.Reflect101)
+    var total = 0.0
+    var n = 0
+    for y in 5..h - 5 {
+        for x in 5..w - 5 {
+            for ch in 0..c {
+                let i = (y * w + x) * c + ch
+                let mua = ma[i]
+                let mub = mb[i]
+                let va = saa[i] - mua * mua
+                let vb = sbb[i] - mub * mub
+                let cov = sab[i] - mua * mub
+                total += ((2.0 * mua * mub + c1) * (2.0 * cov + c2)) / ((mua * mua + mub * mub + c1) * (va + vb + c2))
+                n += 1
+            }
+        }
+    }
+    return Ok(total / (n as float64))
+}
+
+#test
+fun quality() {
+    var a: Image8 = image.new(12, 12, Layout.Gray, 100u8)
+    var b = a
+    assert(mse(a, b).expect("same") == 0.0)
+    assert(psnr(a, b).expect("same").is_infinite())
+    assert(ssim(a, b).expect("same") > 0.9999999)
+    b[(3, 3, 0)] = 110u8
+    let e = mse(a, b).expect("same")
+    assert(e == 100.0 / 144.0)
+    let p = psnr(a, b).expect("same")
+    assert(p > 49.7 && p < 49.8)
+    let s = ssim(a, b).expect("same")
+    assert(s < 1.0 && s > 0.9)
+    let small: Image8 = image.new(4, 4, Layout.Gray, 0u8)
+    match ssim(small, small) {
+        Ok(_) => assert(false)
+        Err(e) => assert(e == ImageError.Mismatch("ssim needs 11x11 at least, not 4x4"))
+    }
+}
