@@ -2415,7 +2415,8 @@ fun check_packages(packages: [(str, str)]) -> Result<[(str, str)], Report> {
         if !valid_package_name(name) { return Err(list_error(format("invalid package name '{}'", name))) }
         if has(names, name) { return Err(list_error(format("package '{}' is given twice", name))) }
         if dir == "" { return Err(list_error(format("package '{}' has no directory", name))) }
-        if !is_dir(dir) { return Err(list_error(format("package '{}': '{}' is not a directory", name, dir))) }
+        // (with `/` on Windows, as every path a message names, D311)
+        if !is_dir(dir) { return Err(list_error(format("package '{}': '{}' is not a directory", name, slashed(dir)))) }
         names.push(name)
         out.push((name, normalize(dir)))
     }
