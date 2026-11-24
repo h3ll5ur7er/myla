@@ -56,6 +56,18 @@ BUILD_TARGET = TEST_TARGET or HOST_TARGET
 READS_X86 = CAN_BUILD_NATIVE and BUILD_TARGET == "x86_64-linux"
 X86_REASON = "it reads x86-64 Linux code (built for x86-64 Linux only)"
 
+# A test that can't run on Windows itself (a pty, a Unix signal, /proc, a
+# FIFO, a Linux tool), marked so with its reason, never skipped silently
+# (MYLA-926 step 2): `@linux_only("Unix ptys and termios")`.
+ON_WINDOWS = sys.platform == "win32"
+
+
+def linux_only(reason: str):
+    """The decorator that skips a test or class on Windows, saying why."""
+    import unittest
+    return unittest.skipIf(ON_WINDOWS, f"Linux-only: {reason}")
+
+
 # The machine's assembler as the tests call it: `--64` is only x86-64's flag.
 AS_CMD = ["as", "--64"] if HOST_TARGET == "x86_64-linux" else ["as"]
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

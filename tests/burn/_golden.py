@@ -136,11 +136,12 @@ def _describe(arg, dirs: list[str]):
         digest = hashlib.sha256(data).hexdigest()
         if path.startswith(RECORDED_CORPUS + os.sep):
             # a corpus file as it was recorded, before a rewrite (MYLA-240)
-            where = os.path.relpath(path, RECORDED_CORPUS)
-        elif path.startswith(_REPO + os.sep) and "/build/" not in "/" + os.path.relpath(path, _REPO):
+            where = os.path.relpath(path, RECORDED_CORPUS).replace(os.sep, "/")
+        elif path.startswith(_REPO + os.sep) and "/build/" not in "/" + os.path.relpath(path, _REPO).replace(os.sep, "/"):
             # (the path below the repository: a checkout inside a directory
             # named build is still the repository, MYLA-800)
-            where = os.path.relpath(path, _REPO)
+            # (keyed with `/`, as recorded, on Windows too: MYLA-926)
+            where = os.path.relpath(path, _REPO).replace(os.sep, "/")
         else:
             where = os.path.basename(path)
             for d in {os.path.dirname(path), os.path.dirname(os.path.realpath(path))}:

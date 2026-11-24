@@ -42,7 +42,7 @@ import unittest
 from ._golden import NoGolden, answered_or_recorded, golden, recorded_examples
 from ._native import CAN_BUILD_NATIVE, READS_X86, SKIP_REASON, TEST_TARGET, X86_REASON, assemble, run_argv, target_flags
 from ._targets import program_excuse
-from ._tools import STDLIB_ROOT, selfhost_tool
+from ._tools import STDLIB_ROOT, measure_script, selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -439,14 +439,7 @@ MODULE_ERRORS = {
 # A child's peak RSS counts its parent's memory at fork time, so the program
 # is started from this minimal helper (a few MB) rather than from the test
 # process, and the helper reports the program's exit code and peak (KB).
-_MEASURE = (
-    "import os, shutil, sys\n"
-    "argv = sys.argv[1:]\n"
-    "path = argv[0] if '/' in argv[0] else shutil.which(argv[0])\n"
-    "pid = os.posix_spawn(path, argv, os.environ)\n"
-    "_, status, usage = os.wait4(pid, 0)\n"
-    "sys.stderr.write(f'{os.waitstatus_to_exitcode(status)} {usage.ru_maxrss}\\n')\n"
-)
+_MEASURE = measure_script(exe_first=False, newline_first=False)   # (Windows' own there, MYLA-926)
 
 
 # Diagnostics whose ranges are not plain one-line ASCII (MYLA-65).

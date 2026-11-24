@@ -209,10 +209,27 @@ def target() -> str:
     return os.environ.get("MYLA_TEST_TARGET", "") or ("x86_64-windows" if sys.platform == "win32" else "")
 
 
+# The x86_64-windows excuses that are Wine's, not Windows': on Windows
+# itself (MYLA-926 step 2, MYLA_TEST_TARGET unset) these tests run.
+WINE_ONLY = {
+    "test_platform_primitives.Paths",
+    "test_fs.DirectoryParity.test_symbolic_links",
+    "test_fs.DirectoryParity.test_where_links_lead",
+    "test_fs.DirectoryParity.test_opens_that_neither_wait_nor_follow",
+    "test_term.Terminal.test_raw_mode_and_back",
+    "test_reactor_scaling.BusyWorkers.test_round_trips_beside_tasks_that_only_yield",
+    "test_stdio.TestArgsExample.test_native_matches_interpreter",
+    "test_stdio.TestStdioParity.test_args_round_trip",
+}
+
+
 def excuse_for(test_id: str) -> str | None:
     """Why the running target skips the test `test_id` (`module.Class.method`,
     a prefix of it naming a class or module), or None."""
+    native = not os.environ.get("MYLA_TEST_TARGET")
     for key, why in SKIP.get(target(), {}).items():
+        if native and key in WINE_ONLY:
+            continue
         short = test_id.removeprefix("tests.burn.")
         if short == key or short.startswith(key + "."):
             return why

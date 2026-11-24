@@ -93,6 +93,10 @@ class _Client:
 
 
 def _uri(path):
+    # (a Windows path's URI is file:///C:/..., MYLA-926; Linux's as it was)
+    if os.name == "nt":
+        import pathlib
+        return pathlib.Path(os.path.realpath(path)).as_uri()
     return "file://" + os.path.realpath(path)
 
 

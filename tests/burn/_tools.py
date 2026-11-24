@@ -178,16 +178,36 @@ def myla_tool(relpath: str, name: str) -> str:
 # A child's peak resident memory (`ru_maxrss`) counts the memory of the
 # process it was forked from, as `exec` keeps the old image's peak; the test
 # process grows to hundreds of MB over a run of the whole suite (MYLA-611).
-# So a measured program is started from this minimal helper, which reports
-# its exit code and peak (KB) on its last line of stderr.
-_MEASURE = (
-    "import os, shutil, sys\n"
-    "exe, argv = sys.argv[1], sys.argv[2:]\n"
-    "path = exe if '/' in exe else shutil.which(exe)\n"
-    "pid = os.posix_spawn(path, argv, os.environ)\n"
-    "_, status, usage = os.wait4(pid, 0)\n"
-    "sys.stderr.write(f'\\n{os.waitstatus_to_exitcode(status)} {usage.ru_maxrss}\\n')\n"
-)
+# So a measured program is started from a minimal helper, which reports its
+# exit code and peak (KB) on its last line of stderr. On Windows the peak is
+# the process's own peak working set, read from its handle once it ended
+# (K32GetProcessMemoryInfo, MYLA-926 step 2).
+def measure_script(exe_first: bool, newline_first: bool) -> str:
+    """The helper's Python source: its arguments the executable then the
+    command line (`exe_first`) or the command line alone, its report line
+    after a newline (`newline_first`) or not."""
+    args = "exe, argv = sys.argv[1], sys.argv[2:]\n" if exe_first else "argv = sys.argv[1:]\nexe = argv[0]\n"
+    nl = "\\n" if newline_first else ""
+    if not WINDOWS:
+        return ("import os, shutil, sys\n" + args +
+                "path = exe if '/' in exe else shutil.which(exe)\n"
+                "pid = os.posix_spawn(path, argv, os.environ)\n"
+                "_, status, usage = os.wait4(pid, 0)\n"
+                f"sys.stderr.write(f'{nl}{{os.waitstatus_to_exitcode(status)}} {{usage.ru_maxrss}}\\n')\n")
+    return ("import ctypes, subprocess, sys\n"
+            "from ctypes import wintypes\n" + args +
+            "class Counters(ctypes.Structure):\n"
+            "    _fields_ = [('cb', wintypes.DWORD), ('faults', wintypes.DWORD)] + "
+            "[(n, ctypes.c_size_t) for n in ('peak', 'ws', 'qpp', 'qp', 'qpnp', 'qnp', 'pf', 'peak_pf')]\n"
+            "p = subprocess.Popen(argv, executable=exe)\n"
+            "p.wait()\n"
+            "c = Counters()\n"
+            "c.cb = ctypes.sizeof(c)\n"
+            "ctypes.windll.kernel32.K32GetProcessMemoryInfo(wintypes.HANDLE(int(p._handle)), ctypes.byref(c), c.cb)\n"
+            f"sys.stderr.write(f'{nl}{{p.returncode}} {{c.peak // 1024}}\\n')\n")
+
+
+_MEASURE = measure_script(exe_first=True, newline_first=True)
 
 
 def peak_memory(argv: list[str], exe: str | None = None) -> tuple[str, int]:
