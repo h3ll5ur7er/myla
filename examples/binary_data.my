@@ -1,0 +1,74 @@
+// Binary data with std.bytes (MYLA-931): a small chunked file format written
+// with a `ByteWriter` and read back with a `ByteReader`, and 5-bit codes
+// packed with an `MsbBitWriter` and unpacked with an `MsbBitReader`. Every
+// read gives an `Option`, so input that is cut short or wrong gives `None`,
+// never a runtime error.
+import std.bytes as bytes
+
+// A chunk: a 4-byte tag, the payload's length (big-endian), the payload.
+#test("TEXT", [104u8, 105u8])[[84u8, 69u8, 88u8, 84u8, 0u8, 0u8, 0u8, 2u8, 104u8, 105u8]]
+fun chunk(tag: str, payload: [uint8]) -> [uint8] {
+    var w = bytes.writer()
+    w.put_str(tag)
+    w.put_u32_be(payload.len() as uint32)
+    w.put_bytes(payload)
+    return w.finish()
+}
+
+// The chunks of `b`, each its tag and payload; `None` if one is cut short.
+#test([84u8, 69u8, 88u8, 84u8, 0u8, 0u8, 0u8, 1u8, 104u8])[Some([("TEXT", [104u8])])]
+#test([84u8, 69u8, 88u8, 84u8, 0u8, 0u8, 0u8, 2u8, 104u8])[None]
+#test([])[Some([])]
+fun chunks(b: [uint8]) -> Option<[(str, [uint8])]> {
+    var r = bytes.reader(b)
+    var out: [(str, [uint8])] = []
+    while !r.at_end() {
+        let tag = r.take(4)?
+        let len = r.u32_be()?
+        // a length past 2^31 - 1 turns negative, and `take` refuses it
+        let payload = r.take(len as int)?
+        out.push((bytes.to_str(tag), payload))
+    }
+    return Some(out)
+}
+
+// `codes` (each below 32) packed into 5 bits each, the highest bit first.
+#test([1, 31])[[0x0Fu8, 0xC0u8]]
+#test([])[[]]
+fun pack5(codes: [int]) -> [uint8] {
+    var w = bytes.msb_writer()
+    for c in codes {
+        w.put_bits(c as uint32, 5)
+    }
+    return w.finish()
+}
+
+// `n` codes of 5 bits from `b`; `None` if `b` has fewer.
+#test([0x0Fu8, 0xC0u8], 2)[Some([1, 31])]
+#test([0x0Fu8], 2)[None]
+fun unpack5(b: [uint8], n: int) -> Option<[int]> {
+    var r = bytes.msb_reader(b)
+    var out: [int] = []
+    for i in 0..n {
+        let c = r.bits(5)?
+        out.push(c as int)
+    }
+    return Some(out)
+}
+
+fun main() {
+    let codes = [3, 14, 15, 9, 26]
+    let file = chunk("NAME", bytes.from_str("myla")).concat(chunk("CODE", pack5(codes)))
+    print(f"{file.len()} bytes")
+    for (tag, payload) in chunks(file).unwrap_or([]) {
+        print(f"{tag}: {payload.len()} bytes")
+        if tag == "CODE" {
+            let back = unpack5(payload, codes.len()).unwrap_or([])
+            print(back == codes)
+        }
+    }
+    match chunks(file[:file.len() - 1]) {
+        Some(_) => print("read")
+        None => print("cut short")
+    }
+}

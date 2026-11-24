@@ -69,7 +69,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.ini` | [[Language/Standard-library/Ini]] | INI files: sections, keys, comments, read and written in order |
 | `std.yaml` | [[Language/Standard-library/Yaml]] | The safe subset of YAML 1.2: block and flow collections, quoted and block scalars, the core schema, writing; anchors, tags and second documents refused |
 | `std.xml` | [[Language/Standard-library/Xml]] | Well-formed XML 1.0 without a DTD: a tree, a pull reader over a text or a stream, writing with escaping and indentation |
-| `std.bytes` | [[Language/Standard-library/Bytes]] | Strings as `[uint8]` and back, checking and building UTF-8 |
+| `std.bytes` | [[Language/Standard-library/Bytes]] | Strings as `[uint8]` and back, checking and building UTF-8; binary data: `ByteReader` and `ByteWriter` (integers and floats of both byte orders), bit readers and writers of both bit orders, with JPEG's stuffing and markers |
 | `std.encoding` | [[Language/Standard-library/Encoding]] | Hex and Base64 (standard and URL-safe), strict decoding |
 | `std.url` | [[Language/Standard-library/Url]] | Percent-encoding, query strings, parsing and building URLs |
 | `std.hash` | [[Language/Standard-library/Hash]] | The `Hasher` that `Hash` builds on, and wyhash |

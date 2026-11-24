@@ -3,6 +3,12 @@
 // A `str` is bytes (D164), so these move between `str` and `[uint8]` as the
 // bytes are, any bytes; `is_utf8`, `utf8_error`, `encode_char` and
 // `decode_char` are where UTF-8 is checked and built.
+//
+// The readers and writers of binary data at the end (MYLA-931) read and
+// write integers of both byte orders, floats, and bit streams of both bit
+// orders, for the codecs.
+
+import std.float as float_m // `from_bits`, `from_bits32`, `to_bits`
 
 // The bytes of `s`, as they are.
 #test("ab")[[97u8, 98u8]]
@@ -201,4 +207,1442 @@ fun every_byte_round_trips() {
     back[0] = 7u8
     back.push(1u8)
     assert(s[0] == 0u8 && s.len() == 256 && all[0] == 0u8, "copies, not shared")
+}
+
+// --- Reading and writing binary data (MYLA-931) ----------------------------
+//
+// What every codec needs: integers of both byte orders read from bytes and
+// written to them (`ByteReader`, `ByteWriter`), and bit streams of both bit
+// orders (`MsbBitReader`, `LsbBitReader`, `MsbBitWriter`, `LsbBitWriter`).
+// A read past the end gives `None` and changes nothing, so untrusted input
+// can't end in a runtime error.
+
+// Bytes read from the front: `data[pos:]` is what is left. Read with the
+// methods; `pos` may be set by hand, and outside `0..data.len()` nothing can
+// be read.
+#derive(Eq)
+pub struct ByteReader {
+    data: [uint8],
+    pos: int,
+}
+
+// A reader of `data` from its start.
+#test([5u8])[ByteReader { data: [5u8], pos: 0 }]
+pub fun reader(data: [uint8]) -> ByteReader {
+    return ByteReader { data: data, pos: 0 }
+}
+
+
+impl ByteReader {
+    // The bytes left to read: 0 at the end, or with `pos` outside the data.
+    #test(reader([1u8, 2u8, 3u8]))[3]
+    #test(ByteReader { data: [1u8, 2u8, 3u8], pos: 2 })[1]
+    #test(ByteReader { data: [1u8], pos: 4 })[0]
+    #test(ByteReader { data: [1u8], pos: -1 })[0]
+    fun remaining(self) -> int {
+        if self.pos < 0 || self.pos > self.data.len() { return 0 }
+        return self.data.len() - self.pos
+    }
+
+    // Whether `n` more bytes can be read (`n` >= 0).
+    #test(reader([1u8, 2u8]), 2)[true]
+    #test(reader([1u8, 2u8]), 3)[false]
+    #test(reader([1u8, 2u8]), 0)[true]
+    #test(reader([1u8, 2u8]), -1)[false]
+    #test(ByteReader { data: [1u8], pos: -1 }, 1)[false]
+    fun has(self, n: int) -> bool {
+        return n >= 0 && self.pos >= 0 && self.pos <= self.data.len() - n
+    }
+
+    // Whether nothing is left to read.
+    #test(reader([]))[true]
+    #test(reader([1u8]))[false]
+    fun at_end(self) -> bool {
+        return self.remaining() == 0
+    }
+
+    // To position `p`, from 0 to `data.len()` (the end); `false`, and the
+    // position unchanged, outside that.
+    #test(reader([1u8, 2u8]), 2)[true]
+    #test(reader([1u8, 2u8]), 3)[false]
+    #test(reader([1u8, 2u8]), -1)[false]
+    fun seek(var self, p: int) -> bool {
+        if p < 0 || p > self.data.len() { return false }
+        self.pos = p
+        return true
+    }
+
+    // `n` bytes on (or back, for a negative `n`); `false`, and the position
+    // unchanged, if that leaves `0..data.len()`.
+    #test(reader([1u8, 2u8]), 2)[true]
+    #test(reader([1u8, 2u8]), 3)[false]
+    #test(ByteReader { data: [1u8, 2u8], pos: 2 }, -2)[true]
+    fun skip(var self, n: int) -> bool {
+        if self.pos < 0 || self.pos > self.data.len() { return false }
+        if n > self.data.len() - self.pos || n < -self.pos { return false }
+        self.pos += n
+        return true
+    }
+
+    // The next `n` bytes (a copy), or `None` if fewer are left or `n` < 0.
+    #test(reader([1u8, 2u8, 3u8]), 2)[Some([1u8, 2u8])]
+    #test(reader([1u8, 2u8, 3u8]), 4)[None]
+    #test(reader([1u8]), 0)[Some([])]
+    fun take(var self, n: int) -> Option<[uint8]> {
+        if !self.has(n) { return None }
+        let p = self.pos
+        self.pos = p + n
+        return Some(self.data[p:p + n])
+    }
+
+    // All the bytes left (a copy), and the position at the end.
+    #test(ByteReader { data: [1u8, 2u8, 3u8], pos: 1 })[[2u8, 3u8]]
+    #test(ByteReader { data: [1u8], pos: 3 })[[]]
+    fun take_rest(var self) -> [uint8] {
+        let n = self.remaining()
+        let p = self.pos
+        self.pos = self.data.len()
+        if n == 0 { return [] }
+        return self.data[p:]
+    }
+
+    // Whether the next bytes are `sig`; if so, they are read (a signature, a
+    // tag), else nothing is.
+    #test(reader([0x47u8, 0x49u8, 0x46u8]), [0x47u8, 0x49u8])[true]
+    #test(reader([0x47u8, 0x49u8, 0x46u8]), [0x47u8, 0x48u8])[false]
+    #test(reader([0x47u8]), [0x47u8, 0x49u8])[false]
+    #test(reader([]), [])[true]
+    fun eat(var self, sig: [uint8]) -> bool {
+        let n = sig.len()
+        if !self.has(n) { return false }
+        let p = self.pos
+        for i in 0..n {
+            if self.data[p + i] != sig[i] { return false }
+        }
+        self.pos = p + n
+        return true
+    }
+
+    // The next byte without reading it.
+    #test(reader([9u8]))[Some(9u8)]
+    #test(reader([]))[None]
+    fun peek_u8(self) -> Option<uint8> {
+        if self.pos < 0 || self.pos >= self.data.len() { return None }
+        return Some(self.data[self.pos])
+    }
+
+    // The next byte.
+    #test(reader([0xFEu8]))[Some(0xFEu8)]
+    #test(reader([]))[None]
+    fun u8(var self) -> Option<uint8> {
+        let p = self.pos
+        if p < 0 || p >= self.data.len() { return None }
+        self.pos = p + 1
+        return Some(self.data[p])
+    }
+
+    // The next byte as a signed integer (two's complement).
+    #test(reader([0xFEu8]))[Some(-2i8)]
+    #test(reader([0x7Fu8]))[Some(127i8)]
+    #test(reader([]))[None]
+    fun i8(var self) -> Option<int8> {
+        let p = self.pos
+        if p < 0 || p >= self.data.len() { return None }
+        self.pos = p + 1
+        return Some(self.data[p] as int8)
+    }
+
+    // The next two bytes, the most significant first.
+    #test(reader([0x12u8, 0x34u8]))[Some(0x1234u16)]
+    #test(reader([0x12u8]))[None]
+    fun u16_be(var self) -> Option<uint16> {
+        let p = self.pos
+        if p < 0 || p > self.data.len() - 2 { return None }
+        self.pos = p + 2
+        return Some(((self.data[p] as uint16) << 8) | (self.data[p + 1] as uint16))
+    }
+
+    // The next two bytes, the least significant first.
+    #test(reader([0x12u8, 0x34u8]))[Some(0x3412u16)]
+    #test(reader([0x12u8]))[None]
+    fun u16_le(var self) -> Option<uint16> {
+        let p = self.pos
+        if p < 0 || p > self.data.len() - 2 { return None }
+        self.pos = p + 2
+        return Some((self.data[p] as uint16) | ((self.data[p + 1] as uint16) << 8))
+    }
+
+    #test(reader([0xFFu8, 0xFEu8]))[Some(-2i16)]
+    #test(reader([0x12u8]))[None]
+    fun i16_be(var self) -> Option<int16> {
+        return match self.u16_be() {
+            Some(v) => Some(v as int16)
+            None => None
+        }
+    }
+
+    #test(reader([0xFEu8, 0xFFu8]))[Some(-2i16)]
+    #test(reader([0x12u8]))[None]
+    fun i16_le(var self) -> Option<int16> {
+        return match self.u16_le() {
+            Some(v) => Some(v as int16)
+            None => None
+        }
+    }
+
+    // The next three bytes, the most significant first (OpenType's uint24).
+    #test(reader([0x12u8, 0x34u8, 0x56u8]))[Some(0x123456u32)]
+    #test(reader([0x12u8, 0x34u8]))[None]
+    fun u24_be(var self) -> Option<uint32> {
+        let p = self.pos
+        if p < 0 || p > self.data.len() - 3 { return None }
+        self.pos = p + 3
+        let d = self.data
+        return Some(((d[p] as uint32) << 16) | ((d[p + 1] as uint32) << 8) | (d[p + 2] as uint32))
+    }
+
+    // The next three bytes, the least significant first.
+    #test(reader([0x12u8, 0x34u8, 0x56u8]))[Some(0x563412u32)]
+    #test(reader([0x12u8, 0x34u8]))[None]
+    fun u24_le(var self) -> Option<uint32> {
+        let p = self.pos
+        if p < 0 || p > self.data.len() - 3 { return None }
+        self.pos = p + 3
+        let d = self.data
+        return Some((d[p] as uint32) | ((d[p + 1] as uint32) << 8) | ((d[p + 2] as uint32) << 16))
+    }
+
+    // The next four bytes, the most significant first.
+    #test(reader([0xDEu8, 0xADu8, 0xBEu8, 0xEFu8]))[Some(0xDEADBEEFu32)]
+    #test(reader([0xDEu8, 0xADu8, 0xBEu8]))[None]
+    fun u32_be(var self) -> Option<uint32> {
+        let p = self.pos
+        if p < 0 || p > self.data.len() - 4 { return None }
+        self.pos = p + 4
+        let d = self.data
+        return Some(((d[p] as uint32) << 24) | ((d[p + 1] as uint32) << 16) | ((d[p + 2] as uint32) << 8) | (d[p + 3] as uint32))
+    }
+
+    // The next four bytes, the least significant first.
+    #test(reader([0xDEu8, 0xADu8, 0xBEu8, 0xEFu8]))[Some(0xEFBEADDEu32)]
+    #test(reader([0xDEu8, 0xADu8, 0xBEu8]))[None]
+    fun u32_le(var self) -> Option<uint32> {
+        let p = self.pos
+        if p < 0 || p > self.data.len() - 4 { return None }
+        self.pos = p + 4
+        let d = self.data
+        return Some((d[p] as uint32) | ((d[p + 1] as uint32) << 8) | ((d[p + 2] as uint32) << 16) | ((d[p + 3] as uint32) << 24))
+    }
+
+    #test(reader([0xFFu8, 0xFFu8, 0xFFu8, 0xFEu8]))[Some(-2i32)]
+    #test(reader([0u8]))[None]
+    fun i32_be(var self) -> Option<int32> {
+        return match self.u32_be() {
+            Some(v) => Some(v as int32)
+            None => None
+        }
+    }
+
+    #test(reader([0xFEu8, 0xFFu8, 0xFFu8, 0xFFu8]))[Some(-2i32)]
+    #test(reader([0u8]))[None]
+    fun i32_le(var self) -> Option<int32> {
+        return match self.u32_le() {
+            Some(v) => Some(v as int32)
+            None => None
+        }
+    }
+
+    // The next eight bytes, the most significant first.
+    #test(reader([1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8]))[Some(0x0102030405060708u64)]
+    #test(reader([1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8]))[None]
+    fun u64_be(var self) -> Option<uint64> {
+        let p = self.pos
+        if p < 0 || p > self.data.len() - 8 { return None }
+        self.pos = p + 8
+        let d = self.data
+        let hi = ((d[p] as uint32) << 24) | ((d[p + 1] as uint32) << 16) | ((d[p + 2] as uint32) << 8) | (d[p + 3] as uint32)
+        let lo = ((d[p + 4] as uint32) << 24) | ((d[p + 5] as uint32) << 16) | ((d[p + 6] as uint32) << 8) | (d[p + 7] as uint32)
+        return Some(((hi as uint64) << 32) | (lo as uint64))
+    }
+
+    // The next eight bytes, the least significant first.
+    #test(reader([1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8]))[Some(0x0807060504030201u64)]
+    #test(reader([1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8]))[None]
+    fun u64_le(var self) -> Option<uint64> {
+        let p = self.pos
+        if p < 0 || p > self.data.len() - 8 { return None }
+        self.pos = p + 8
+        let d = self.data
+        let lo = (d[p] as uint32) | ((d[p + 1] as uint32) << 8) | ((d[p + 2] as uint32) << 16) | ((d[p + 3] as uint32) << 24)
+        let hi = (d[p + 4] as uint32) | ((d[p + 5] as uint32) << 8) | ((d[p + 6] as uint32) << 16) | ((d[p + 7] as uint32) << 24)
+        return Some(((hi as uint64) << 32) | (lo as uint64))
+    }
+
+    #test(reader([0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFEu8]))[Some(-2i64)]
+    #test(reader([0u8]))[None]
+    fun i64_be(var self) -> Option<int64> {
+        return match self.u64_be() {
+            Some(v) => Some(v as int64)
+            None => None
+        }
+    }
+
+    #test(reader([0xFEu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8]))[Some(-2i64)]
+    #test(reader([0u8]))[None]
+    fun i64_le(var self) -> Option<int64> {
+        return match self.u64_le() {
+            Some(v) => Some(v as int64)
+            None => None
+        }
+    }
+
+    // The next four bytes as an IEEE 754 single, the most significant first.
+    #test(reader([0xC0u8, 0x20u8, 0u8, 0u8]))[Some(-2.5f32)]
+    #test(reader([0u8]))[None]
+    fun f32_be(var self) -> Option<float32> {
+        return match self.u32_be() {
+            Some(v) => Some(float_m.from_bits32(v))
+            None => None
+        }
+    }
+
+    #test(reader([0u8, 0u8, 0x20u8, 0xC0u8]))[Some(-2.5f32)]
+    #test(reader([0u8]))[None]
+    fun f32_le(var self) -> Option<float32> {
+        return match self.u32_le() {
+            Some(v) => Some(float_m.from_bits32(v))
+            None => None
+        }
+    }
+
+    // The next eight bytes as an IEEE 754 double, the most significant first.
+    #test(reader([0x3Fu8, 0xF8u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]))[Some(1.5)]
+    #test(reader([0u8]))[None]
+    fun f64_be(var self) -> Option<float64> {
+        return match self.u64_be() {
+            Some(v) => Some(float_m.from_bits(v))
+            None => None
+        }
+    }
+
+    #test(reader([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0xF8u8, 0x3Fu8]))[Some(1.5)]
+    #test(reader([0u8]))[None]
+    fun f64_le(var self) -> Option<float64> {
+        return match self.u64_le() {
+            Some(v) => Some(float_m.from_bits(v))
+            None => None
+        }
+    }
+}
+
+// Bytes written at the end of `out`.
+#derive(Eq)
+pub struct ByteWriter {
+    out: [uint8],
+}
+
+// An empty writer.
+#test()[ByteWriter { out: [] }]
+pub fun writer() -> ByteWriter {
+    return ByteWriter { out: [] }
+}
+
+
+impl ByteWriter {
+    // The bytes written so far.
+    #test(ByteWriter { out: [1u8, 2u8] })[2]
+    fun len(self) -> int {
+        return self.out.len()
+    }
+
+    // The bytes written.
+    #test(ByteWriter { out: [1u8, 2u8] })[[1u8, 2u8]]
+    fun finish(self) -> [uint8] {
+        return self.out
+    }
+
+    fun put_u8(var self, v: uint8) {
+        self.out.push(v)
+    }
+
+    fun put_i8(var self, v: int8) {
+        self.out.push(v as uint8)
+    }
+
+    fun put_u16_be(var self, v: uint16) {
+        self.out.push((v >> 8) as uint8)
+        self.out.push(v as uint8)
+    }
+
+    fun put_u16_le(var self, v: uint16) {
+        self.out.push(v as uint8)
+        self.out.push((v >> 8) as uint8)
+    }
+
+    fun put_i16_be(var self, v: int16) {
+        self.put_u16_be(v as uint16)
+    }
+
+    fun put_i16_le(var self, v: int16) {
+        self.put_u16_le(v as uint16)
+    }
+
+    // The low 24 bits of `v`, the most significant first.
+    fun put_u24_be(var self, v: uint32) {
+        self.out.push((v >> 16) as uint8)
+        self.out.push((v >> 8) as uint8)
+        self.out.push(v as uint8)
+    }
+
+    fun put_u24_le(var self, v: uint32) {
+        self.out.push(v as uint8)
+        self.out.push((v >> 8) as uint8)
+        self.out.push((v >> 16) as uint8)
+    }
+
+    fun put_u32_be(var self, v: uint32) {
+        self.out.push((v >> 24) as uint8)
+        self.out.push((v >> 16) as uint8)
+        self.out.push((v >> 8) as uint8)
+        self.out.push(v as uint8)
+    }
+
+    fun put_u32_le(var self, v: uint32) {
+        self.out.push(v as uint8)
+        self.out.push((v >> 8) as uint8)
+        self.out.push((v >> 16) as uint8)
+        self.out.push((v >> 24) as uint8)
+    }
+
+    fun put_i32_be(var self, v: int32) {
+        self.put_u32_be(v as uint32)
+    }
+
+    fun put_i32_le(var self, v: int32) {
+        self.put_u32_le(v as uint32)
+    }
+
+    fun put_u64_be(var self, v: uint64) {
+        self.put_u32_be((v >> 32) as uint32)
+        self.put_u32_be(v as uint32)
+    }
+
+    fun put_u64_le(var self, v: uint64) {
+        self.put_u32_le(v as uint32)
+        self.put_u32_le((v >> 32) as uint32)
+    }
+
+    fun put_i64_be(var self, v: int64) {
+        self.put_u64_be(v as uint64)
+    }
+
+    fun put_i64_le(var self, v: int64) {
+        self.put_u64_le(v as uint64)
+    }
+
+    fun put_f32_be(var self, v: float32) {
+        self.put_u32_be(v.to_bits())
+    }
+
+    fun put_f32_le(var self, v: float32) {
+        self.put_u32_le(v.to_bits())
+    }
+
+    fun put_f64_be(var self, v: float64) {
+        self.put_u64_be(v.to_bits())
+    }
+
+    fun put_f64_le(var self, v: float64) {
+        self.put_u64_le(v.to_bits())
+    }
+
+    fun put_bytes(var self, b: [uint8]) {
+        for x in b { self.out.push(x) }
+    }
+
+    // The bytes of `s`, as they are.
+    fun put_str(var self, s: str) {
+        for i in 0..s.len() { self.out.push(s[i]) }
+    }
+
+    // `n` zero bytes (padding); none for `n` <= 0.
+    fun put_zeros(var self, n: int) {
+        for i in 0..n { self.out.push(0) }
+    }
+
+    // The byte at `at`, written before, replaced: a runtime error outside
+    // `0..len()`, as for a list. The `set_` methods fill in a length or an
+    // offset once it is known.
+    fun set_u8(var self, at: int, v: uint8) {
+        self.out[at] = v
+    }
+
+    fun set_u16_be(var self, at: int, v: uint16) {
+        self.out[at] = (v >> 8) as uint8
+        self.out[at + 1] = v as uint8
+    }
+
+    fun set_u16_le(var self, at: int, v: uint16) {
+        self.out[at] = v as uint8
+        self.out[at + 1] = (v >> 8) as uint8
+    }
+
+    fun set_u32_be(var self, at: int, v: uint32) {
+        self.out[at] = (v >> 24) as uint8
+        self.out[at + 1] = (v >> 16) as uint8
+        self.out[at + 2] = (v >> 8) as uint8
+        self.out[at + 3] = v as uint8
+    }
+
+    fun set_u32_le(var self, at: int, v: uint32) {
+        self.out[at] = v as uint8
+        self.out[at + 1] = (v >> 8) as uint8
+        self.out[at + 2] = (v >> 16) as uint8
+        self.out[at + 3] = (v >> 24) as uint8
+    }
+}
+
+// Bits read from bytes, each byte's highest bit first: JPEG, TIFF's LZW,
+// PNG's packed samples. With JPEG's rules (`jpeg_reader`) the data is an
+// entropy-coded segment: 0xFF 0x00 is the byte 0xFF, and 0xFF followed by any
+// other byte (after fill bytes 0xFF) is a marker, where the data ends.
+//
+// The fields are the state, for a hot loop that keeps `acc` and `n` in local
+// variables and stores them back: the next bit to read is bit `n - 1` of
+// `acc`, and `refill()` loads bytes until `n` is at least 56 or the data
+// ends. Leave `jpeg`, `end`, `extra`, `mark` and `mark_pos` to the methods.
+#derive(Eq)
+pub struct MsbBitReader {
+    data: [uint8],
+    next: int,      // the next byte to load
+    acc: uint64,    // the bytes loaded, the last in the low 8 bits
+    n: int,         // the low `n` bits of `acc` (at most 63) are loaded and not read
+    jpeg: bool,
+    end: int,       // the data ends at `end`: `data.len()`, or a marker
+    extra: int,     // bytes from `next` to `end` that are no data (stuffing)
+    mark: int,      // the marker at `end` (its second byte), or -1
+    mark_pos: int,  // where it is (its 0xFF before the code), or `data.len()`
+}
+
+// `start` moved into `0..data.len()`.
+#test(3, 2)[2]
+#test(-1, 2)[0]
+#test(1, 2)[1]
+fun clamp_start(start: int, len: int) -> int {
+    if start < 0 { return 0 }
+    if start > len { return len }
+    return start
+}
+
+// A reader of `data`'s bits from byte `start` on (moved into the data).
+#test([1u8], 0)[MsbBitReader { data: [1u8], next: 0, acc: 0u64, n: 0, jpeg: false, end: 1, extra: 0, mark: -1, mark_pos: 1 }]
+pub fun msb_reader(data: [uint8], start: int = 0) -> MsbBitReader {
+    let len = data.len()
+    return MsbBitReader {
+        data: data, next: clamp_start(start, len), acc: 0, n: 0, jpeg: false,
+        end: len, extra: 0, mark: -1, mark_pos: len,
+    }
+}
+
+// A reader of a JPEG entropy-coded segment that starts at `start`: 0xFF 0x00
+// is read as 0xFF, and the data ends at the first marker.
+#test([1u8, 0xFFu8, 0xD9u8], 0)[MsbBitReader { data: [1u8, 0xFFu8, 0xD9u8], next: 0, acc: 0u64, n: 0, jpeg: true, end: 1, extra: 0, mark: 0xD9, mark_pos: 1 }]
+pub fun jpeg_reader(data: [uint8], start: int = 0) -> MsbBitReader {
+    var r = msb_reader(data, start)
+    r.jpeg = true
+    r.find_end()
+    return r
+}
+
+
+impl MsbBitReader {
+    // JPEG: the end of the segment from `next` on, its marker, and the bytes
+    // in it that are no data: each 0x00 after a 0xFF, and fill bytes 0xFF
+    // before it. A 0xFF (or a run of them) at the very end is no data either.
+    fun find_end(var self) {
+        let d = self.data
+        let len = d.len()
+        var i = self.next
+        var extra = 0
+        self.end = len
+        self.mark = -1
+        self.mark_pos = len
+        while i < len {
+            if d[i] != 0xFF {
+                i += 1
+            } else {
+                var q = i + 1
+                while q < len && d[q] == 0xFF { q += 1 }
+                if q >= len {
+                    self.end = i
+                    break
+                }
+                if d[q] != 0 {
+                    self.end = i
+                    self.mark = d[q] as int
+                    self.mark_pos = q - 1
+                    break
+                }
+                extra += q - i
+                i = q + 1
+            }
+        }
+        self.extra = extra
+    }
+
+    // Bytes loaded into `acc` until `n` is at least 56 or the data ends
+    // (JPEG: the 0x00 after a 0xFF dropped). The reads call it themselves.
+    fun refill(var self) {
+        let end = self.end
+        if !self.jpeg {
+            while self.n < 56 && self.next < end {
+                self.acc = (self.acc << 8) | (self.data[self.next] as uint64)
+                self.next += 1
+                self.n += 8
+            }
+            return
+        }
+        while self.n < 56 && self.next < end {
+            let b = self.data[self.next]
+            self.next += 1
+            if b == 0xFF {
+                // fill bytes, then the 0x00 (`find_end` saw it, before `end`)
+                let after = self.next
+                while self.data[self.next] == 0xFF { self.next += 1 }
+                self.next += 1
+                self.extra -= self.next - after
+            }
+            self.acc = (self.acc << 8) | (b as uint64)
+            self.n += 8
+        }
+    }
+
+    // The data's bits not read yet.
+    #test(msb_reader([1u8, 2u8], 1))[8i64]
+    #test(jpeg_reader([0xFFu8, 0u8, 0xFFu8, 0xD9u8], 0))[8i64]
+    fun bits_left(self) -> int64 {
+        return (self.n as int64) + 8i64 * ((self.end - self.next - self.extra) as int64)
+    }
+
+    // The next `k` bits (0 to 32), the first the highest; `None`, and nothing
+    // read, if fewer are left or `k` is outside 0 to 32.
+    #test(msb_reader([0xA5u8], 0), 3)[Some(5u32)]
+    #test(msb_reader([0xA5u8], 0), 9)[None]
+    #test(msb_reader([0xA5u8], 0), 33)[None]
+    fun bits(var self, k: int) -> Option<uint32> {
+        if (k as uint32) > 32u32 { return None }
+        if self.n < k {
+            self.refill()
+            if self.n < k { return None }
+        }
+        self.n -= k
+        return Some(((self.acc >> (self.n as uint64)) & ((1u64 << (k as uint64)) - 1u64)) as uint32)
+    }
+
+    // The next `k` bits (0 to 32) without reading them; past the end of the
+    // data they are zeros (a Huffman decoder looks ahead by its longest code).
+    #test(msb_reader([0xA5u8], 0), 4)[10u32]
+    #test(msb_reader([0xA5u8], 0), 12)[0xA50u32]
+    fun peek(var self, k: int) -> uint32 {
+        if k <= 0 || k > 32 { return 0 }
+        if self.n < k { self.refill() }
+        let mask = (1u64 << (k as uint64)) - 1u64
+        if self.n >= k {
+            return ((self.acc >> ((self.n - k) as uint64)) & mask) as uint32
+        }
+        return ((self.acc << ((k - self.n) as uint64)) & mask) as uint32
+    }
+
+    // `k` bits (`k` >= 0, any number) passed over; `false`, and nothing read,
+    // if fewer are left.
+    #test(msb_reader([1u8, 2u8], 0), 16)[true]
+    #test(msb_reader([1u8, 2u8], 0), 17)[false]
+    fun skip_bits(var self, k: int) -> bool {
+        if k <= self.n {
+            if k < 0 { return false }
+            self.n -= k
+            return true
+        }
+        if (k as int64) > self.bits_left() { return false }
+        var left = k - self.n
+        self.n = 0
+        if !self.jpeg {
+            // whole bytes without loading them
+            self.next += left / 8
+            left = left % 8
+        }
+        while left > 0 {
+            self.refill()
+            let t = if left < self.n { left } else { self.n }
+            self.n -= t
+            left -= t
+        }
+        return true
+    }
+
+    // The rest of the byte being read passed over (nothing if at a byte's
+    // start).
+    fun align_byte(var self) {
+        self.n -= self.n % 8
+    }
+
+    // The position in `data` of the byte that holds the next bit; after
+    // `align_byte`, of the next byte. At the end of the data, `data.len()`, or
+    // for JPEG the start of the marker's fill bytes.
+    #test(msb_reader([1u8, 2u8], 1))[1]
+    #test(jpeg_reader([0xFFu8, 0u8, 7u8], 0))[0]
+    fun byte_pos(self) -> int {
+        // the bytes in `acc` with a bit not read; JPEG's 0xFF came with a 0x00
+        let k = (self.n + 7) / 8
+        var p = self.next - k
+        if self.jpeg {
+            for j in 0..k {
+                if ((self.acc >> ((8 * j) as uint64)) & 255u64) == 255u64 { p -= 1 }
+            }
+        }
+        return p
+    }
+
+    // JPEG: the marker (the byte after its 0xFF) where the data ends, as soon
+    // as the reader is made or `skip_marker` moved past the last one, before
+    // the bits up to it are read; `None` if the data ends without one (and
+    // always for `msb_reader`).
+    #test(jpeg_reader([1u8, 0xFFu8, 0xD9u8], 0))[Some(0xD9u8)]
+    #test(jpeg_reader([1u8, 0xFFu8, 0u8], 0))[None]
+    fun marker(self) -> Option<uint8> {
+        if self.mark < 0 { return None }
+        return Some(self.mark as uint8)
+    }
+
+    // Where `marker()` is in `data`: the position of the 0xFF just before its
+    // code; `data.len()` without one.
+    #test(jpeg_reader([1u8, 0xFFu8, 0xFFu8, 0xD9u8], 0))[2]
+    #test(msb_reader([1u8], 0))[1]
+    fun marker_pos(self) -> int {
+        return self.mark_pos
+    }
+
+    // JPEG: past the marker where the data ends (a restart marker RSTn), the
+    // bits not read before it dropped, and on to the next segment; gives the
+    // marker, or `None` (nothing changed) without one.
+    #test(jpeg_reader([1u8, 0xFFu8, 0xD0u8, 2u8], 0))[Some(0xD0u8)]
+    #test(jpeg_reader([1u8], 0))[None]
+    fun skip_marker(var self) -> Option<uint8> {
+        if self.mark < 0 { return None }
+        let m = self.mark as uint8
+        self.next = self.mark_pos + 2
+        self.acc = 0
+        self.n = 0
+        self.find_end()
+        return Some(m)
+    }
+}
+
+// Bits read from bytes, each byte's lowest bit first: DEFLATE, GIF's LZW.
+//
+// The fields are the state, as for `MsbBitReader`: the next bit to read is
+// bit 0 of `acc`, the bits of `acc` from `n` up are zeros, and `refill()`
+// loads bytes until `n` is at least 56 or the data ends.
+#derive(Eq)
+pub struct LsbBitReader {
+    data: [uint8],
+    next: int,      // the next byte to load
+    acc: uint64,    // the low `n` bits are loaded and not read, the next lowest; the rest 0
+    n: int,         // at most 63
+}
+
+// A reader of `data`'s bits from byte `start` on (moved into the data).
+#test([1u8], 0)[LsbBitReader { data: [1u8], next: 0, acc: 0u64, n: 0 }]
+pub fun lsb_reader(data: [uint8], start: int = 0) -> LsbBitReader {
+    return LsbBitReader { data: data, next: clamp_start(start, data.len()), acc: 0, n: 0 }
+}
+
+
+impl LsbBitReader {
+    // Bytes loaded into `acc` until `n` is at least 56 or the data ends. The
+    // reads call it themselves.
+    fun refill(var self) {
+        let len = self.data.len()
+        while self.n < 56 && self.next < len {
+            self.acc = self.acc | ((self.data[self.next] as uint64) << (self.n as uint64))
+            self.next += 1
+            self.n += 8
+        }
+    }
+
+    // The data's bits not read yet.
+    #test(lsb_reader([1u8, 2u8], 1))[8i64]
+    fun bits_left(self) -> int64 {
+        return (self.n as int64) + 8i64 * ((self.data.len() - self.next) as int64)
+    }
+
+    // The next `k` bits (0 to 32), the first the lowest; `None`, and nothing
+    // read, if fewer are left or `k` is outside 0 to 32.
+    #test(lsb_reader([0xA5u8], 0), 3)[Some(5u32)]
+    #test(lsb_reader([0xA5u8], 0), 9)[None]
+    #test(lsb_reader([0xA5u8], 0), -1)[None]
+    fun bits(var self, k: int) -> Option<uint32> {
+        if (k as uint32) > 32u32 { return None }
+        if self.n < k {
+            self.refill()
+            if self.n < k { return None }
+        }
+        let v = (self.acc & ((1u64 << (k as uint64)) - 1u64)) as uint32
+        self.acc = self.acc >> (k as uint64)
+        self.n -= k
+        return Some(v)
+    }
+
+    // The next `k` bits (0 to 32) without reading them; past the end of the
+    // data they are zeros.
+    #test(lsb_reader([0xA5u8], 0), 4)[5u32]
+    #test(lsb_reader([0xA5u8], 0), 12)[0xA5u32]
+    fun peek(var self, k: int) -> uint32 {
+        if k <= 0 || k > 32 { return 0 }
+        if self.n < k { self.refill() }
+        return (self.acc & ((1u64 << (k as uint64)) - 1u64)) as uint32
+    }
+
+    // `k` bits (`k` >= 0, any number) passed over; `false`, and nothing read,
+    // if fewer are left.
+    #test(lsb_reader([1u8, 2u8], 0), 16)[true]
+    #test(lsb_reader([1u8, 2u8], 0), 17)[false]
+    fun skip_bits(var self, k: int) -> bool {
+        if k <= self.n {
+            if k < 0 { return false }
+            self.acc = self.acc >> (k as uint64)
+            self.n -= k
+            return true
+        }
+        if (k as int64) > self.bits_left() { return false }
+        let left = k - self.n
+        self.acc = 0
+        self.n = 0
+        self.next += left / 8
+        let rest = left % 8
+        if rest > 0 {
+            self.refill()
+            self.acc = self.acc >> (rest as uint64)
+            self.n -= rest
+        }
+        return true
+    }
+
+    // The rest of the byte being read passed over (nothing if at a byte's
+    // start).
+    fun align_byte(var self) {
+        let r = self.n % 8
+        self.acc = self.acc >> (r as uint64)
+        self.n -= r
+    }
+
+    // The position in `data` of the byte that holds the next bit; after
+    // `align_byte`, of the next byte; `data.len()` at the end.
+    #test(lsb_reader([1u8, 2u8], 1))[1]
+    fun byte_pos(self) -> int {
+        return self.next - (self.n + 7) / 8
+    }
+}
+
+// Bits written to bytes, each byte's highest bit first; with JPEG's rules
+// (`jpeg_writer`) a 0xFF byte is followed by 0x00 and padding is 1 bits.
+#derive(Eq)
+pub struct MsbBitWriter {
+    out: [uint8],
+    acc: uint64,    // the low `n` bits are written and not yet a byte
+    n: int,
+    jpeg: bool,
+    total: int64,   // the bits written, padding included
+}
+
+#test()[MsbBitWriter { out: [], acc: 0u64, n: 0, jpeg: false, total: 0i64 }]
+pub fun msb_writer() -> MsbBitWriter {
+    return MsbBitWriter { out: [], acc: 0, n: 0, jpeg: false, total: 0 }
+}
+
+// A writer of a JPEG entropy-coded segment.
+#test()[MsbBitWriter { out: [], acc: 0u64, n: 0, jpeg: true, total: 0i64 }]
+pub fun jpeg_writer() -> MsbBitWriter {
+    return MsbBitWriter { out: [], acc: 0, n: 0, jpeg: true, total: 0 }
+}
+
+
+impl MsbBitWriter {
+    // The low `k` bits of `v` (`k` from 0 to 32), the highest first.
+    fun put_bits(var self, v: uint32, k: int) {
+        if k < 0 || k > 32 { panic(f"put_bits: {k} bits is outside 0 to 32") }
+        self.acc = (self.acc << (k as uint64)) | ((v as uint64) & ((1u64 << (k as uint64)) - 1u64))
+        self.n += k
+        self.total += k as int64
+        while self.n >= 8 {
+            self.n -= 8
+            let b = ((self.acc >> (self.n as uint64)) & 255u64) as uint8
+            self.out.push(b)
+            if b == 0xFF && self.jpeg { self.out.push(0) }
+        }
+    }
+
+    // The bits written, padding included.
+    #test(msb_writer())[0i64]
+    fun bit_len(self) -> int64 {
+        return self.total
+    }
+
+    // The byte being written filled up: with 0 bits, or 1 bits for JPEG.
+    fun align_byte(var self) {
+        let r = self.n % 8
+        if r == 0 { return }
+        let fill = if self.jpeg { (1u32 << ((8 - r) as uint32)) - 1u32 } else { 0u32 }
+        self.put_bits(fill, 8 - r)
+    }
+
+    // `b` as it is (no stuffing), after `align_byte`.
+    fun put_bytes(var self, b: [uint8]) {
+        self.align_byte()
+        for x in b { self.out.push(x) }
+        self.total += 8i64 * (b.len() as int64)
+    }
+
+    // JPEG: the marker 0xFF `code` (a restart marker RSTn), after
+    // `align_byte`.
+    fun put_marker(var self, code: uint8) {
+        self.put_bytes([0xFFu8, code])
+    }
+
+    // The bytes written, the last one filled up as `align_byte` does (the
+    // writer is left so).
+    #test(msb_writer())[[]]
+    fun finish(var self) -> [uint8] {
+        self.align_byte()
+        return self.out
+    }
+}
+
+// Bits written to bytes, each byte's lowest bit first.
+#derive(Eq)
+pub struct LsbBitWriter {
+    out: [uint8],
+    acc: uint64,    // the low `n` bits are written and not yet a byte; the rest 0
+    n: int,
+    total: int64,
+}
+
+#test()[LsbBitWriter { out: [], acc: 0u64, n: 0, total: 0i64 }]
+pub fun lsb_writer() -> LsbBitWriter {
+    return LsbBitWriter { out: [], acc: 0, n: 0, total: 0 }
+}
+
+
+impl LsbBitWriter {
+    // The low `k` bits of `v` (`k` from 0 to 32), the lowest first.
+    fun put_bits(var self, v: uint32, k: int) {
+        if k < 0 || k > 32 { panic(f"put_bits: {k} bits is outside 0 to 32") }
+        self.acc = self.acc | (((v as uint64) & ((1u64 << (k as uint64)) - 1u64)) << (self.n as uint64))
+        self.n += k
+        self.total += k as int64
+        while self.n >= 8 {
+            self.out.push((self.acc & 255u64) as uint8)
+            self.acc = self.acc >> 8
+            self.n -= 8
+        }
+    }
+
+    // The bits written, padding included.
+    #test(lsb_writer())[0i64]
+    fun bit_len(self) -> int64 {
+        return self.total
+    }
+
+    // The byte being written filled up with 0 bits.
+    fun align_byte(var self) {
+        let r = self.n % 8
+        if r > 0 { self.put_bits(0, 8 - r) }
+    }
+
+    // `b` as it is, after `align_byte`.
+    fun put_bytes(var self, b: [uint8]) {
+        self.align_byte()
+        for x in b { self.out.push(x) }
+        self.total += 8i64 * (b.len() as int64)
+    }
+
+    // The bytes written, the last one filled up with 0 bits (the writer is
+    // left so).
+    #test(lsb_writer())[[]]
+    fun finish(var self) -> [uint8] {
+        self.align_byte()
+        return self.out
+    }
+}
+
+// --- Tests of the readers and writers ---------------------------------------
+
+// A pseudo-random sequence for the tests: a 32-bit LCG's high bits.
+struct TestRng {
+    s: uint32,
+}
+
+impl TestRng {
+    fun next(var self, bound: int) -> int {
+        self.s = self.s.wrapping_mul(1664525u32).wrapping_add(1013904223u32)
+        return ((self.s >> 8) % (bound as uint32)) as int
+    }
+}
+
+// Bit `i` of `b`, counting from the first byte's highest bit (`msb`) or its
+// lowest one.
+#test([0x80u8, 1u8], 0, true)[1u32]
+#test([0x80u8, 1u8], 8, false)[1u32]
+#test([0x80u8, 1u8], 8, true)[0u32]
+fun test_bit(b: [uint8], i: int, msb: bool) -> uint32 {
+    let k = if msb { 7 - i % 8 } else { i % 8 }
+    return ((b[i / 8] >> (k as uint8)) & 1u8) as uint32
+}
+
+// `n` bits from bit `at` on, one by one: the reference the readers must match.
+#test([0xB3u8], 0, 3, true)[5u32]
+#test([0xB3u8], 0, 3, false)[3u32]
+fun test_bits(b: [uint8], at: int, n: int, msb: bool) -> uint32 {
+    var v = 0u32
+    for j in 0..n {
+        if msb {
+            v = (v << 1) | test_bit(b, at + j, true)
+        } else {
+            v = v | (test_bit(b, at + j, false) << (j as uint32))
+        }
+    }
+    return v
+}
+
+#test
+fun byte_reader_reads_each_width() {
+    var r = reader([0x12u8, 0x34u8, 0x56u8, 0x78u8, 0x9Au8, 0xBCu8, 0xDEu8, 0xF0u8])
+    assert(r.u16_be() == Some(0x1234u16) && r.pos == 2, "u16_be")
+    assert(r.u16_le() == Some(0x7856u16), "u16_le")
+    assert(r.u32_be() == Some(0x9ABCDEF0u32) && r.at_end(), "u32_be to the end")
+    assert(r.u8() == None && r.pos == 8, "past the end")
+    assert(r.seek(0) && r.u32_le() == Some(0x78563412u32), "seek, u32_le")
+    assert(r.seek(0) && r.u64_be() == Some(0x123456789ABCDEF0u64), "u64_be")
+    assert(r.seek(0) && r.u64_le() == Some(0xF0DEBC9A78563412u64), "u64_le")
+    assert(r.seek(1) && r.u24_be() == Some(0x345678u32) && r.pos == 4, "u24_be")
+    assert(r.u24_le() == Some(0xDEBC9Au32), "u24_le")
+    assert(r.seek(4) && r.i8() == Some(-102i8), "i8")
+    assert(r.seek(4) && r.i16_be() == Some(-25924i16), "i16_be 0x9ABC")
+    assert(r.seek(4) && r.i16_le() == Some(-17254i16), "i16_le 0xBC9A")
+    assert(r.seek(4) && r.i32_be() == Some(-1698898192i32), "i32_be 0x9ABCDEF0")
+    assert(r.seek(4) && r.i32_le() == Some(-253838182i32), "i32_le 0xF0DEBC9A")
+    assert(r.seek(0) && r.i64_be() == Some(0x123456789ABCDEF0i64), "i64_be")
+    assert(r.seek(0) && r.i64_le() == Some(-1090226688147180526i64), "i64_le")
+}
+
+#test
+fun byte_reader_reads_floats() {
+    var r = reader([0x3Fu8, 0x80u8, 0u8, 0u8, 0u8, 0u8, 0x20u8, 0xC0u8])
+    assert(r.f32_be() == Some(1.0f32), "f32_be 1.0")
+    assert(r.f32_le() == Some(-2.5f32), "f32_le -2.5")
+    var d = reader([0xC0u8, 0x04u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0xF0u8, 0x3Fu8])
+    assert(d.f64_be() == Some(-2.5), "f64_be -2.5")
+    assert(d.f64_le() == Some(1.0), "f64_le 1.0")
+    assert(d.f32_be() == None && d.f64_le() == None && d.pos == 16, "none past the end")
+}
+
+// A read that doesn't fit gives `None` and leaves the position where it was.
+#test
+fun byte_reader_short_reads_keep_the_position() {
+    var r = reader([1u8, 2u8, 3u8])
+    assert(r.skip(1) && r.pos == 1, "skip 1")
+    assert(r.u32_be() == None && r.pos == 1, "u32_be")
+    assert(r.u24_le() == None && r.pos == 1, "u24_le")
+    assert(r.f64_be() == None && r.i64_le() == None && r.pos == 1, "64 bits")
+    assert(r.take(3) == None && r.pos == 1, "take 3")
+    assert(!r.skip(3) && r.pos == 1, "skip 3")
+    assert(!r.skip(-2) && r.pos == 1, "skip -2")
+    assert(!r.seek(4) && !r.seek(-1) && r.pos == 1, "seek outside")
+    assert(r.u16_be() == Some(0x0203u16) && r.pos == 3, "u16_be fits")
+    assert(r.remaining() == 0 && r.at_end(), "at the end")
+    assert(r.skip(-3) && r.pos == 0, "skip back")
+    // a position set by hand outside the bytes reads nothing
+    r.pos = -1
+    assert(r.u8() == None && r.u16_le() == None && !r.has(1) && r.remaining() == 0, "pos -1")
+    r.pos = 9
+    assert(r.u8() == None && r.take(0) == None && r.remaining() == 0, "pos 9")
+}
+
+#test
+fun byte_reader_takes_and_peeks() {
+    var r = reader([0x89u8, 0x50u8, 0x4Eu8, 0x47u8, 7u8, 8u8, 9u8])
+    assert(!r.eat([0x89u8, 0x51u8]) && r.pos == 0, "eat a wrong signature")
+    assert(r.eat([0x89u8, 0x50u8, 0x4Eu8, 0x47u8]) && r.pos == 4, "eat the signature")
+    assert(!r.eat([7u8, 8u8, 9u8, 10u8]) && r.pos == 4, "eat past the end")
+    assert(r.peek_u8() == Some(7u8) && r.pos == 4, "peek")
+    assert(r.has(3) && !r.has(4) && r.remaining() == 3, "has")
+    assert(r.take(2) == Some([7u8, 8u8]) && r.pos == 6, "take 2")
+    assert(r.take(0) == Some([]) && r.pos == 6, "take 0")
+    assert(r.take(-1) == None && r.pos == 6, "take -1")
+    assert(r.take_rest() == [9u8] && r.at_end(), "take_rest")
+    assert(r.take_rest() == [] && r.peek_u8() == None, "nothing left")
+}
+
+#test
+fun byte_writer_round_trips() {
+    var w = writer()
+    w.put_u8(0xABu8)
+    w.put_i8(-2i8)
+    w.put_u16_be(0x1234u16)
+    w.put_u16_le(0x1234u16)
+    w.put_i16_be(-2i16)
+    w.put_i16_le(-3i16)
+    w.put_u24_be(0x123456u32)
+    w.put_u24_le(0x123456u32)
+    w.put_u32_be(0xDEADBEEFu32)
+    w.put_u32_le(0xDEADBEEFu32)
+    w.put_i32_be(-5i32)
+    w.put_i32_le(-6i32)
+    w.put_u64_be(0x0102030405060708u64)
+    w.put_u64_le(0x0102030405060708u64)
+    w.put_i64_be(-7i64)
+    w.put_i64_le(-8i64)
+    w.put_f32_be(1.5f32)
+    w.put_f32_le(-0.25f32)
+    w.put_f64_be(3.25)
+    w.put_f64_le(-1e300)
+    w.put_bytes([1u8, 2u8])
+    w.put_str("hé")
+    w.put_zeros(2)
+    assert(w.len() == 95, f"length {w.len()}")
+    let b = w.finish()
+    assert(b[2:6] == [0x12u8, 0x34u8, 0x34u8, 0x12u8], "both orders of u16")
+    assert(b[10:16] == [0x12u8, 0x34u8, 0x56u8, 0x56u8, 0x34u8, 0x12u8], "both orders of u24")
+    var r = reader(b)
+    assert(r.u8() == Some(0xABu8) && r.i8() == Some(-2i8), "8 bits")
+    assert(r.u16_be() == Some(0x1234u16) && r.u16_le() == Some(0x1234u16), "u16")
+    assert(r.i16_be() == Some(-2i16) && r.i16_le() == Some(-3i16), "i16")
+    assert(r.u24_be() == Some(0x123456u32) && r.u24_le() == Some(0x123456u32), "u24")
+    assert(r.u32_be() == Some(0xDEADBEEFu32) && r.u32_le() == Some(0xDEADBEEFu32), "u32")
+    assert(r.i32_be() == Some(-5i32) && r.i32_le() == Some(-6i32), "i32")
+    assert(r.u64_be() == Some(0x0102030405060708u64) && r.u64_le() == Some(0x0102030405060708u64), "u64")
+    assert(r.i64_be() == Some(-7i64) && r.i64_le() == Some(-8i64), "i64")
+    assert(r.f32_be() == Some(1.5f32) && r.f32_le() == Some(-0.25f32), "f32")
+    assert(r.f64_be() == Some(3.25) && r.f64_le() == Some(-1e300), "f64")
+    assert(r.take(2) == Some([1u8, 2u8]) && r.take(3) == Some([104u8, 195u8, 169u8]), "bytes, str")
+    assert(r.take_rest() == [0u8, 0u8], "zeros")
+}
+
+#test
+fun byte_writer_patches() {
+    var w = writer()
+    w.put_u32_be(0u32)
+    w.put_str("IHDR")
+    w.put_u32_le(0u32)
+    w.set_u32_be(0, 13u32)
+    w.set_u32_le(8, 0x01020304u32)
+    w.set_u16_be(4, 0x6968u16)
+    w.set_u16_le(6, 0x5244u16)
+    w.set_u8(4, 0x4Au8)
+    assert(w.finish() == [0u8, 0u8, 0u8, 13u8, 0x4Au8, 0x68u8, 0x44u8, 0x52u8, 4u8, 3u8, 2u8, 1u8], "patched")
+}
+
+#test
+fun msb_reader_reads_bits() {
+    var r = msb_reader([0b10110011u8, 0b01011100u8])
+    assert(r.bits_left() == 16, "16 bits")
+    assert(r.bits(3) == Some(0b101u32), "3 bits")
+    assert(r.bits(5) == Some(0b10011u32), "5 bits")
+    assert(r.peek(4) == 0b0101u32 && r.bits_left() == 8, "peek keeps them")
+    assert(r.bits(4) == Some(0b0101u32), "4 bits")
+    assert(r.peek(8) == 0b11000000u32, "peek past the end pads with zeros")
+    assert(r.bits(5) == None && r.bits_left() == 4, "too many: none, nothing used")
+    assert(r.bits(0) == Some(0u32) && r.bits(33) == None && r.bits(-1) == None, "0, 33, -1")
+    assert(r.bits(4) == Some(0b1100u32) && r.bits_left() == 0, "the last 4")
+    assert(r.bits(1) == None && r.peek(32) == 0u32, "none left")
+}
+
+#test
+fun lsb_reader_reads_bits() {
+    var r = lsb_reader([0b10110011u8, 0b01011100u8])
+    assert(r.bits(3) == Some(0b011u32), "3 bits")
+    assert(r.bits(5) == Some(0b10110u32), "5 bits")
+    assert(r.peek(4) == 0b1100u32, "peek")
+    assert(r.bits(4) == Some(0b1100u32), "4 bits")
+    assert(r.peek(8) == 0b0101u32, "peek past the end pads with zeros")
+    assert(r.bits(5) == None && r.bits_left() == 4, "too many")
+    assert(r.bits(0) == Some(0u32) && r.bits(33) == None, "0 and 33")
+    assert(r.bits(4) == Some(0b0101u32) && r.bits(1) == None, "the last 4")
+}
+
+// Reads of every width from 0 to 32 bits, mixed with skips and alignment,
+// against the bits taken one by one; both orders, from a start inside.
+#test
+fun bit_readers_match_the_reference() {
+    var rng = TestRng { s: 7u32 }
+    var data: [uint8] = []
+    for i in 0..300 {
+        data.push(rng.next(256) as uint8)
+    }
+    for order in 0..2 {
+        let msb = order == 0
+        var m = msb_reader(data, 3)
+        var l = lsb_reader(data, 3)
+        var at = 24
+        var reads = 0
+        while true {
+            let k = rng.next(33)
+            let left = data.len() * 8 - at
+            let what = rng.next(10)
+            if what == 0 {
+                // align to a byte
+                if msb { m.align_byte() } else { l.align_byte() }
+                at = (at + 7) / 8 * 8
+            } else if what == 1 {
+                let s = rng.next(80)
+                let ok = if msb { m.skip_bits(s) } else { l.skip_bits(s) }
+                assert(ok == (s <= left), "skip_bits")
+                if ok { at += s }
+            } else {
+                let got = if msb { m.bits(k) } else { l.bits(k) }
+                if k > left {
+                    assert(got == None, "none past the end")
+                    break
+                }
+                let want = test_bits(data, at, k, msb)
+                let peeked = if msb { m.peek(0) } else { l.peek(0) }
+                assert(got == Some(want) && peeked == 0u32, f"{k} bits at {at}")
+                at += k
+                reads += 1
+            }
+            let bl = if msb { m.bits_left() } else { l.bits_left() }
+            assert(bl == (data.len() * 8 - at) as int64, "bits_left")
+            let bp = if msb { m.byte_pos() } else { l.byte_pos() }
+            assert(bp == at / 8, f"byte_pos {bp} at bit {at}")
+        }
+        assert(reads > 100, "enough reads")
+    }
+}
+
+#test
+fun bit_readers_align_and_start() {
+    var m = msb_reader([0xA5u8, 0x3Cu8, 0xFFu8], 1)
+    assert(m.byte_pos() == 1 && m.bits(3) == Some(1u32) && m.byte_pos() == 1, "start 1")
+    m.align_byte()
+    assert(m.byte_pos() == 2 && m.bits(8) == Some(0xFFu32) && m.byte_pos() == 3, "aligned")
+    m.align_byte()
+    assert(m.byte_pos() == 3 && m.bits_left() == 0, "aligning at the end")
+    var outside = msb_reader([1u8], 5)
+    assert(outside.bits_left() == 0 && outside.byte_pos() == 1, "a start past the end is the end")
+    var l = lsb_reader([0xA5u8, 0x3Cu8], -3)
+    assert(l.bits(4) == Some(5u32) && l.byte_pos() == 0, "a negative start is 0")
+    l.align_byte()
+    assert(l.bits(8) == Some(0x3Cu32), "aligned")
+    assert(!l.skip_bits(1) && l.skip_bits(0), "skip at the end")
+}
+
+// JPEG's entropy-coded data: 0xFF 0x00 is the byte 0xFF, other bytes after
+// 0xFF are a marker, where the data ends.
+#test
+fun jpeg_reader_unstuffs_and_stops_at_markers() {
+    var r = jpeg_reader([0x12u8, 0xFFu8, 0x00u8, 0x34u8, 0xFFu8, 0xD0u8, 0x56u8, 0xFFu8, 0xFFu8, 0xD9u8])
+    assert(r.marker() == Some(0xD0u8) && r.marker_pos() == 4, "the marker ahead")
+    assert(r.bits_left() == 24, "three data bytes before it")
+    assert(r.bits(8) == Some(0x12u32), "0x12")
+    assert(r.bits(4) == Some(0xFu32) && r.byte_pos() == 1, "half of the stuffed 0xFF")
+    assert(r.bits(4) == Some(0xFu32) && r.byte_pos() == 3, "past the 0x00")
+    assert(r.bits(8) == Some(0x34u32) && r.byte_pos() == 4 && r.bits_left() == 0, "0x34")
+    assert(r.bits(1) == None && r.peek(8) == 0u32, "the marker ends the data")
+    assert(r.skip_marker() == Some(0xD0u8), "skip RST0")
+    assert(r.byte_pos() == 6 && r.bits_left() == 8 && r.marker_pos() == 8, "after it")
+    assert(r.bits(8) == Some(0x56u32), "0x56")
+    assert(r.marker() == Some(0xD9u8) && r.byte_pos() == 7, "EOI, after a fill byte")
+    assert(r.skip_marker() == Some(0xD9u8) && r.marker() == None && r.bits_left() == 0, "the end")
+    assert(r.skip_marker() == None, "no marker left")
+    // a start inside, bits left in the buffer dropped by skip_marker, a
+    // trailing 0xFF that isn't data
+    var s = jpeg_reader([0u8, 0xABu8, 0xCDu8, 0xFFu8, 0xD1u8, 0xEEu8, 0xFFu8], 1)
+    assert(s.bits(4) == Some(0xAu32) && s.skip_marker() == Some(0xD1u8), "dropping 12 bits")
+    assert(s.bits_left() == 8 && s.marker() == None && s.marker_pos() == 7, "0xEE, then a lone 0xFF")
+    assert(s.bits(8) == Some(0xEEu32) && s.bits(1) == None && s.byte_pos() == 6, "0xEE")
+    // the plain reader takes them as data and sees no marker
+    var p = msb_reader([0xFFu8, 0xD0u8])
+    assert(p.marker() == None && p.skip_marker() == None && p.bits(16) == Some(0xFFD0u32), "plain")
+}
+
+#test
+fun msb_writer_writes_bits() {
+    var w = msb_writer()
+    w.put_bits(0b101u32, 3)
+    w.put_bits(0b10011u32, 5)
+    w.put_bits(0xFFFFFFF5u32, 4) // only the low 4 bits
+    assert(w.bit_len() == 12, "12 bits")
+    assert(w.finish() == [0b10110011u8, 0b01010000u8], "padded with zeros")
+    var a = msb_writer()
+    a.put_bits(1u32, 1)
+    a.align_byte()
+    a.put_bytes([7u8])
+    a.put_bits(0u32, 0)
+    a.put_bits(0xDEADBEEFu32, 32)
+    assert(a.finish() == [0x80u8, 7u8, 0xDEu8, 0xADu8, 0xBEu8, 0xEFu8], "aligned, then 32 bits")
+}
+
+#test
+fun lsb_writer_writes_bits() {
+    var w = lsb_writer()
+    w.put_bits(0b011u32, 3)
+    w.put_bits(0b10110u32, 5)
+    w.put_bits(0xFFFFFFFCu32, 4)
+    assert(w.bit_len() == 12, "12 bits")
+    assert(w.finish() == [0b10110011u8, 0b00001100u8], "padded with zeros")
+    var a = lsb_writer()
+    a.put_bits(1u32, 1)
+    a.put_bytes([7u8])
+    a.put_bits(0xDEADBEEFu32, 32)
+    assert(a.finish() == [1u8, 7u8, 0xEFu8, 0xBEu8, 0xADu8, 0xDEu8], "aligned, then 32 bits")
+}
+
+#test
+fun jpeg_writer_stuffs_and_pads_with_ones() {
+    var w = jpeg_writer()
+    w.put_bits(0xFFu32, 8)
+    w.put_bits(0b10u32, 2)
+    w.put_marker(0xD0u8)
+    w.put_bits(0xFu32, 4)
+    w.put_bits(0xFu32, 4)
+    w.put_bits(0u32, 1)
+    let b = w.finish()
+    assert(b == [0xFFu8, 0u8, 0xBFu8, 0xFFu8, 0xD0u8, 0xFFu8, 0u8, 0x7Fu8], "stuffed, padded, marker")
+    var r = jpeg_reader(b)
+    assert(r.bits(8) == Some(0xFFu32) && r.bits(2) == Some(2u32), "read back")
+    r.align_byte()
+    assert(r.skip_marker() == Some(0xD0u8) && r.bits(8) == Some(0xFFu32), "the marker, the 0xFF")
+}
+
+// Bits of random widths written and read back, in both orders.
+#test
+fun bit_writers_round_trip() {
+    var rng = TestRng { s: 99u32 }
+    var ks: [int] = []
+    var vs: [uint32] = []
+    for i in 0..400 {
+        let k = rng.next(33)
+        ks.push(k)
+        vs.push(((rng.next(65536) as uint32) << 16) | (rng.next(65536) as uint32))
+    }
+    var m = msb_writer()
+    var l = lsb_writer()
+    var j = jpeg_writer()
+    var total: int64 = 0
+    for i in 0..ks.len() {
+        m.put_bits(vs[i], ks[i])
+        l.put_bits(vs[i], ks[i])
+        j.put_bits(vs[i], ks[i])
+        total += ks[i] as int64
+    }
+    assert(m.bit_len() == total && l.bit_len() == total && j.bit_len() == total, "bit_len")
+    var mr = msb_reader(m.finish())
+    var lr = lsb_reader(l.finish())
+    var jr = jpeg_reader(j.finish())
+    for i in 0..ks.len() {
+        let mask = if ks[i] == 32 { 0xFFFFFFFFu32 } else { (1u32 << (ks[i] as uint32)) - 1u32 }
+        let want = Some(vs[i] & mask)
+        assert(mr.bits(ks[i]) == want && lr.bits(ks[i]) == want && jr.bits(ks[i]) == want, f"value {i}")
+    }
+    assert(mr.bits_left() < 8 && lr.bits_left() < 8 && jr.bits_left() < 8, "only the padding left")
+}
+
+// The data bytes of the JPEG segment from `start` (in `0..d.len()`), the
+// marker that ends it (-1 for none) and where it is: the reference for
+// `jpeg_reader`, one byte at a time.
+#test([1u8, 0xFFu8, 0u8, 2u8, 0xFFu8, 0xFFu8, 0xD9u8], 0)[([1u8, 0xFFu8, 2u8], 0xD9, 5)]
+#test([1u8, 0xFFu8], 0)[([1u8], -1, 2)]
+fun test_segment(d: [uint8], start: int) -> ([uint8], int, int) {
+    var out: [uint8] = []
+    var i = start
+    while i < d.len() {
+        if d[i] != 0xFF {
+            out.push(d[i])
+            i += 1
+        } else {
+            var q = i + 1
+            while q < d.len() && d[q] == 0xFF { q += 1 }
+            if q >= d.len() { return (out, -1, d.len()) }
+            if d[q] != 0 { return (out, d[q] as int, q - 1) }
+            out.push(0xFF)
+            i = q + 1
+        }
+    }
+    return (out, -1, d.len())
+}
+
+// Random operations on random bytes (many 0xFF, 0x00 and markers among
+// them), from random starts: every result is the reference's or `None`, the
+// counts stay in range, and nothing ends in a runtime error.
+#test
+fun bit_readers_fuzz() {
+    var rng = TestRng { s: 2026u32 }
+    for trial in 0..300 {
+        var d: [uint8] = []
+        let len = rng.next(40)
+        for i in 0..len {
+            let c = rng.next(8)
+            d.push(if c < 3 { 0xFFu8 } else if c == 3 { 0u8 } else if c == 4 { 0xD0u8 } else { rng.next(256) as uint8 })
+        }
+        let start = rng.next(len + 5) - 2
+        let at0 = clamp_start(start, len)
+        let order = rng.next(3)
+        var m = if order == 1 { jpeg_reader(d, start) } else { msb_reader(d, start) }
+        var l = lsb_reader(d, start)
+        // the reference bits: the segment's data bytes for JPEG, else the bytes
+        var seg = d[at0:]
+        var mark = -1
+        var mark_pos = len
+        if order == 1 {
+            let (s, mk, mp) = test_segment(d, at0)
+            seg = s
+            mark = mk
+            mark_pos = mp
+        }
+        var at = 0 // bits of `seg` read
+        for step in 0..60 {
+            let total = (seg.len() * 8) as int64
+            let left = if order == 2 { l.bits_left() } else { m.bits_left() }
+            assert(left == total - (at as int64), f"trial {trial}: bits_left {left}, {total - (at as int64)} expected")
+            let bp = if order == 2 { l.byte_pos() } else { m.byte_pos() }
+            assert(bp >= at0 && bp <= len, f"trial {trial}: byte_pos {bp}")
+            let op = rng.next(7)
+            let k = rng.next(38) - 2
+            if op <= 2 {
+                let got = if order == 2 { l.bits(k) } else { m.bits(k) }
+                if k < 0 || k > 32 || (k as int64) > left {
+                    assert(got == None, f"trial {trial}: bits({k}) of {left}")
+                } else {
+                    assert(got == Some(test_bits(seg, at, k, order != 2)), f"trial {trial}: bits({k})")
+                    at += k
+                }
+            } else if op == 3 {
+                let got = if order == 2 { l.peek(k) } else { m.peek(k) }
+                if k >= 0 && k <= 32 && (k as int64) <= left {
+                    assert(got == test_bits(seg, at, k, order != 2), f"trial {trial}: peek({k})")
+                }
+            } else if op == 4 {
+                let ok = if order == 2 { l.skip_bits(k) } else { m.skip_bits(k) }
+                assert(ok == (k >= 0 && (k as int64) <= left), f"trial {trial}: skip_bits({k})")
+                if ok { at += k }
+            } else if op == 5 {
+                if order == 2 { l.align_byte() } else { m.align_byte() }
+                at = (at + 7) / 8 * 8
+            } else if order != 2 {
+                assert(m.marker_pos() == mark_pos, f"trial {trial}: marker_pos")
+                let got = m.skip_marker()
+                if mark < 0 {
+                    assert(got == None, f"trial {trial}: no marker")
+                } else {
+                    assert(got == Some(mark as uint8), f"trial {trial}: the marker")
+                    let next = clamp_start(mark_pos + 2, len)
+                    let (s, mk, mp) = test_segment(d, next)
+                    seg = s
+                    mark = mk
+                    mark_pos = mp
+                    at = 0
+                }
+            }
+        }
+    }
 }
