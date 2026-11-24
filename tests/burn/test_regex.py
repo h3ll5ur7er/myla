@@ -282,11 +282,15 @@ def python_answers(cases: list[tuple[str, bytes]]) -> list[str | None]:
         for pattern, text in cases:
             signal.setitimer(signal.ITIMER_REAL, 0.02)
             try:
-                out.append(python_answer(pattern, text))
+                try:
+                    answer = python_answer(pattern, text)
+                finally:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
             except TooSlow:
-                out.append(None)
-            finally:
-                signal.setitimer(signal.ITIMER_REAL, 0)
+                # (also the alarm of a case at its limit, which may come as
+                # the timer is cleared: native aarch64, run 277, MYLA-926)
+                answer = None
+            out.append(answer)
     finally:
         signal.signal(signal.SIGALRM, old)
     return out
