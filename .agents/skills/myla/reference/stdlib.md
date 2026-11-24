@@ -255,11 +255,13 @@ FNV-1a, CRC-32 (IEEE), Adler-32; every function has a `str` form and a `_bytes` 
 - Gotcha: these used to be `std.hash`'s (D166); now an explicit import. `std.hash` is only the `Hasher`.
 
 ## std.compress
-DEFLATE (RFC 1951) inflate and deflate; gzip and zlib containers; as functions and as streams. `import std.compress as compress`.
-- `enum CompressError { Truncated, BadHeader, PresetDictionary, BadBlockType, BadStoredLength, BadCodeLengths, BadCode, DistanceTooFar, ChecksumMismatch, LengthMismatch, TrailingData, TooLarge, Io(IoError) }`
+DEFLATE (RFC 1951) inflate and deflate; gzip and zlib containers; as functions and as streams. LZW (GIF, TIFF) and PackBits. `import std.compress as compress`.
+- `enum CompressError { Truncated, BadHeader, PresetDictionary, BadBlockType, BadStoredLength, BadCodeLengths, BadCode, DistanceTooFar, ChecksumMismatch, LengthMismatch, TrailingData, TooLarge, Io(IoError), BadCodeSize }`
 - `fun inflate(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError>` · `gunzip(b, max_output = …)` · `zlib_decompress(b, max_output = …)` (past `max_output`: `TooLarge`)
 - `fun deflate(b: [uint8], level: int = 6) -> [uint8]` · `gzip(b, level = 6)` · `zlib_compress(b, level = 6)` (never fail)
 - Streams: `fun inflate_reader<R: Read>(r: R) -> Decoder<R>`, `gzip_reader`, `zlib_reader` (`Decoder` is a `Read`; a corrupt stream reads as `IoError.InvalidInput`, `.error() -> Option<CompressError>` says why). `fun deflate_writer<W: Write>(w: W, level: int = 6) -> Encoder<W>`, `gzip_writer`, `zlib_writer` (`Encoder` is a `Write`; `.finish(self) -> Result<W, IoError>` must be called, nothing finishes it at exit).
+- LZW (MYLA-932): `fun lzw_decode_gif(b: [uint8], min_code_size: int, max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError>` (the sub-blocks' bytes joined; LSB-first; a `min_code_size` outside 1 to 8 is `BadCodeSize`) · `fun lzw_encode_gif(b: [uint8], min_code_size: int) -> [uint8]` (2 to 8, each byte below `1 << min_code_size`, else a panic) · `fun lzw_decode_tiff(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError>` (MSB-first with the early change; the old LSB-first LZW detected as libtiff does) · `fun lzw_encode_tiff(b: [uint8]) -> [uint8]`. A code past the table is `BadCode`; the data may end without its end code (the image decoder checks the length).
+- PackBits: `fun packbits_decode(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError>` (a run cut short: `Truncated`) · `fun packbits_encode(b: [uint8]) -> [uint8]`
 - Gotcha: works on `[uint8]`, not `str`: `bytes.from_str(s)` / `bytes.to_str(b)` from `std.bytes`.
 
 ## std.csv

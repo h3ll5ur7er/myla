@@ -1,5 +1,6 @@
 // std.compress: DEFLATE decompression (MYLA-344) and compression
-// (MYLA-352), and the gzip and zlib formats around it.
+// (MYLA-352), and the gzip and zlib formats around it; LZW and PackBits
+// (MYLA-932).
 //
 // Inflate is RFC 1951: stored blocks, and blocks of fixed and of dynamic
 // Huffman codes, with a window of 32 KiB. gzip (RFC 1952) and zlib
@@ -16,6 +17,10 @@
 // The compressor, `Deflate`, is given its input whole (`deflate`, `gzip`,
 // `zlib_compress`) or in pieces, through the stream `Encoder` that
 // `deflate_writer`, `gzip_writer` and `zlib_writer` make.
+//
+// Beside DEFLATE, the codecs of GIF and TIFF (MYLA-932): LZW in GIF's form
+// (LSB-first, no early change) and TIFF's (MSB-first, early change, and the
+// old LSB-first form libtiff still reads), and PackBits.
 
 from std.io import Read, Write, from_bytes, memory_stream, MemoryStream
 from std.ioerror import IoError, io_error_name
@@ -44,7 +49,7 @@ pub enum CompressError {
     // of the block
     BadCodeLengths,
     // A code its block's Huffman code doesn't have, or a length or distance
-    // symbol DEFLATE doesn't define
+    // symbol DEFLATE doesn't define; an LZW code past its table
     BadCode,
     // A distance back past the start of the output
     DistanceTooFar,
@@ -59,6 +64,8 @@ pub enum CompressError {
     TooLarge,
     // The stream it reads from failed
     Io(IoError),
+    // A GIF LZW minimum code size outside 1 to 8
+    BadCodeSize,
 }
 
 impl CompressError {
@@ -66,6 +73,7 @@ impl CompressError {
     #test(CompressError.Truncated)["compressed data ends too early"]
     #test(CompressError.DistanceTooFar)["distance too far back"]
     #test(CompressError.TooLarge)["output longer than max_output"]
+    #test(CompressError.BadCodeSize)["invalid LZW minimum code size"]
     #test(CompressError.Io(IoError.NotFound))["read failed: NotFound"]
     #test(CompressError.Io(IoError.Other(5)))["read failed: Other(5)"]
     fun message(self) -> str {
@@ -83,6 +91,7 @@ impl CompressError {
             TrailingData => "data after the end of the stream"
             TooLarge => "output longer than max_output"
             Io(e) => f"read failed: {io_error_name(e)}"
+            BadCodeSize => "invalid LZW minimum code size"
         }
     }
 
@@ -102,6 +111,7 @@ impl CompressError {
             TrailingData => -11
             TooLarge => -12
             Io(e) => io_code(e)
+            BadCodeSize => -13
         }
     }
 }
@@ -2394,6 +2404,442 @@ impl<W: Write> Write for Encoder<W> {
         let r = w.flush()
         self.sink.push(w)
         return r
+    }
+}
+
+// --- LZW (GIF and TIFF) -------------------------------------------------------------
+
+// The most entries an LZW table holds: codes have at most 12 bits.
+const LZW_CODES: int32 = 4096
+const LZW_MAX_WIDTH: int32 = 12
+// The slots of the encoder's hash of (prefix, byte) pairs: twice the codes.
+const LZW_SLOTS: int32 = 8192
+const LZW_SLOT_MASK: int32 = 8191
+
+// Codes of `w` bits read from `data`, LSB-first (GIF, old TIFF) or
+// MSB-first (TIFF). A private helper, to be replaced by std.bytes's
+// `BitReader` (MYLA-931).
+struct CodeReader {
+    data: [uint8],
+    pos: int32,
+    acc: uint64,
+    n: int32,
+    lsb: bool,
+}
+
+impl CodeReader {
+    // The next code of `w` bits (at most 12), or -1 once fewer bits are left:
+    // a part of a byte at the end is padding.
+    fun next(var self, w: int32) -> int32 {
+        while self.n < w {
+            if self.pos >= self.data.len() { return -1 }
+            let x = self.data[self.pos] as uint64
+            if self.lsb {
+                self.acc = self.acc | (x << (self.n as uint64))
+            } else {
+                self.acc = (self.acc << 8u64) | x
+            }
+            self.pos += 1
+            self.n += 8
+        }
+        let mask = (1u64 << (w as uint64)) - 1u64
+        self.n -= w
+        if self.lsb {
+            let code = (self.acc & mask) as int32
+            self.acc = self.acc >> (w as uint64)
+            return code
+        }
+        let code = ((self.acc >> (self.n as uint64)) & mask) as int32
+        self.acc = self.acc & ((1u64 << (self.n as uint64)) - 1u64)
+        return code
+    }
+}
+
+// Codes written to `out` as `CodeReader` reads them. A private helper, to
+// be replaced by std.bytes's `BitWriter` (MYLA-931).
+struct CodeWriter {
+    out: [uint8],
+    acc: uint64,
+    n: int32,
+    lsb: bool,
+}
+
+impl CodeWriter {
+    // `code`, in `w` bits.
+    fun put(var self, code: int32, w: int32) {
+        if self.lsb {
+            self.acc = self.acc | ((code as uint64) << (self.n as uint64))
+            self.n += w
+            while self.n >= 8 {
+                self.out.push((self.acc & 255u64) as uint8)
+                self.acc = self.acc >> 8u64
+                self.n -= 8
+            }
+        } else {
+            self.acc = (self.acc << (w as uint64)) | (code as uint64)
+            self.n += w
+            while self.n >= 8 {
+                self.n -= 8
+                self.out.push(((self.acc >> (self.n as uint64)) & 255u64) as uint8)
+            }
+            self.acc = self.acc & ((1u64 << (self.n as uint64)) - 1u64)
+        }
+    }
+
+    // The bits of a last part byte, the rest of it zeros; the bytes.
+    fun finish(var self) -> [uint8] {
+        if self.n > 0 {
+            if self.lsb {
+                self.out.push((self.acc & 255u64) as uint8)
+            } else {
+                self.out.push(((self.acc << ((8 - self.n) as uint64)) & 255u64) as uint8)
+            }
+            self.acc = 0
+            self.n = 0
+        }
+        return self.out
+    }
+}
+
+// The bytes the LZW codes in `b` stand for: literals below `1 <<
+// min_code_size`, then the clear and the end code, then the table's
+// entries. Codes are `min_code_size + 1` bits wide after a clear and grow by
+// one bit, up to 12, once the next entry reaches `1 << width` (GIF), or one
+// before it if `early` is 1 (TIFF's "early change"). A full table stays as
+// it is until a clear (the "deferred clear"). The stream ends at the end
+// code or with the input; bits after the end code are ignored.
+fun lzw_decode(b: [uint8], min_code_size: int32, lsb: bool, early: int32, max_output: int) -> Result<[uint8], CompressError> {
+    if min_code_size < 1 || min_code_size > 8 { return Err(CompressError.BadCodeSize) }
+    let clear = 1 << min_code_size
+    let end = clear + 1
+    var r = CodeReader { data: b, pos: 0, acc: 0, n: 0, lsb: lsb }
+    // an entry is a string the output already holds: where, and how long
+    var start = list_m.filled(LZW_CODES, 0)
+    var length = list_m.filled(LZW_CODES, 0)
+    var out: [uint8] = []
+    var width = min_code_size + 1
+    var next = end + 1
+    var prev_at = -1 // where the previous code's string starts; -1 after a clear
+    var prev_len = 0
+    while true {
+        let code = r.next(width)
+        if code < 0 || code == end { break }
+        if code == clear {
+            width = min_code_size + 1
+            next = end + 1
+            prev_at = -1
+            continue
+        }
+        let at = out.len()
+        var len = 1
+        if code < clear {
+            if out.len() >= max_output { return Err(CompressError.TooLarge) }
+            out.push(code as uint8)
+        } else {
+            var from_at = 0
+            if code < next {
+                from_at = start[code]
+                len = length[code]
+            } else if code == next && prev_at >= 0 {
+                // the entry this code makes: the previous string and its first byte
+                from_at = prev_at
+                len = prev_len + 1
+            } else {
+                return Err(CompressError.BadCode)
+            }
+            if len > max_output - out.len() { return Err(CompressError.TooLarge) }
+            for i in from_at..from_at + len { out.push(out[i]) }
+        }
+        if prev_at >= 0 && next < LZW_CODES {
+            start[next] = prev_at
+            length[next] = prev_len + 1
+            next += 1
+        }
+        if next >= (1 << width) - early && width < LZW_MAX_WIDTH { width += 1 }
+        prev_at = at
+        prev_len = len
+    }
+    return Ok(out)
+}
+
+// The LZW codes of `b`, as `lzw_decode` reads them: a clear code first,
+// then the longest strings the table has, each adding an entry, and the end
+// code. Once the table has `full` entries a clear code starts it again;
+// with `full` past `LZW_CODES` it is never cleared and stops growing
+// instead (for the decoder's tests).
+fun lzw_encode(b: [uint8], min_code_size: int32, lsb: bool, early: int32, full: int32) -> [uint8] {
+    let clear = 1 << min_code_size
+    let end = clear + 1
+    var w = CodeWriter { out: [], acc: 0, n: 0, lsb: lsb }
+    // the table: the code of each (prefix code, byte) pair, keyed `prefix << 8 | byte`
+    var keys = list_m.filled(LZW_SLOTS, -1)
+    var codes = list_m.filled(LZW_SLOTS, 0)
+    var width = min_code_size + 1
+    var next = end + 1
+    w.put(clear, width)
+    if b.len() == 0 {
+        w.put(end, width)
+        return w.finish()
+    }
+    var prefix = b[0] as int32
+    if prefix >= clear { panic(f"compress.lzw_encode_gif: byte {prefix} doesn't fit min_code_size {min_code_size}") }
+    for i in 1..b.len() {
+        let c = b[i] as int32
+        if c >= clear { panic(f"compress.lzw_encode_gif: byte {c} doesn't fit min_code_size {min_code_size}") }
+        let key = (prefix << 8) | c
+        var h = (key.wrapping_mul(HASH_MUL) >> 19) & LZW_SLOT_MASK
+        var found = -1
+        while keys[h] >= 0 {
+            if keys[h] == key {
+                found = codes[h]
+                break
+            }
+            h = (h + 1) & LZW_SLOT_MASK
+        }
+        if found >= 0 {
+            prefix = found
+            continue
+        }
+        w.put(prefix, width)
+        if next < LZW_CODES {
+            keys[h] = key
+            codes[h] = next
+            next += 1
+        }
+        if next == full {
+            w.put(clear, width)
+            for j in 0..LZW_SLOTS { keys[j] = -1 }
+            width = min_code_size + 1
+            next = end + 1
+        } else if next - 1 >= (1 << width) - early && width < LZW_MAX_WIDTH {
+            width += 1
+        }
+        prefix = c
+    }
+    w.put(prefix, width)
+    // the decoder adds an entry for the last code before it reads the end code
+    if next >= (1 << width) - early && width < LZW_MAX_WIDTH { width += 1 }
+    w.put(end, width)
+    return w.finish()
+}
+
+// A GIF minimum code size an encoder takes, checked: outside 2 to 8 it is a
+// runtime error.
+fun gif_code_size(min_code_size: int) -> int32 {
+    if min_code_size < 2 || min_code_size > 8 {
+        panic(f"compress.lzw_encode_gif: min_code_size {min_code_size} is not 2 to 8")
+    }
+    return min_code_size
+}
+
+// The bytes (palette indices) the LZW data `b` of a GIF image stands for:
+// its sub-blocks' bytes joined, without their lengths, and the minimum code
+// size before them. Codes are read LSB-first, from `min_code_size + 1` bits
+// up to 12; a table that fills up without a clear code is kept (the deferred
+// clear). The data ends with the end code (what follows it is ignored) or
+// where the input does. A code past the table is `BadCode`, a
+// `min_code_size` outside 1 to 8 `BadCodeSize`, more than `max_output` bytes
+// `TooLarge`.
+#test(unhex("00010410304020418305070e0808"), 8, ALL)[Ok(unhex("00010203000102030001020300010203"))] // Pillow, 4x4, 4 colours
+#test(unhex("00011c705080c1000501103c30d080c002010904123488502143871025163c987061c38711076eace811638280"), 8, ALL)[Ok(unhex("00070e050c030a01080f060d040b020900070e050c030a01080f060d040b020900070e050c030a01080f060d040b020900070e050c030a01080f060d040b0209"))] // Pillow, 8x8, 16 colours
+#test(unhex("4c0a"), 2, ALL)[Ok(unhex("0101"))] // clear, 1, 1, end
+#test(unhex("8c0b"), 2, ALL)[Ok(unhex("010101"))] // clear, 1, 6 (the entry it makes), end
+#test(unhex("0c"), 2, ALL)[Ok(unhex("01"))] // no end code: the data ends with the input
+#test(unhex("29"), 2, ALL)[Ok(unhex("01"))] // 1, end: no clear code first
+#test(unhex(""), 2, ALL)[Ok(unhex(""))]
+#test(unhex("2c"), 2, ALL)[Ok(unhex(""))] // clear, end
+#test(unhex("2cff"), 2, ALL)[Ok(unhex(""))] // bits after the end code
+#test(unhex("3c"), 2, ALL)[Err(CompressError.BadCode)] // code 7, past the table
+#test(unhex("34"), 2, ALL)[Err(CompressError.BadCode)] // code 6 right after a clear
+#test(unhex("2c"), 0, ALL)[Err(CompressError.BadCodeSize)]
+#test(unhex("2c"), 9, ALL)[Err(CompressError.BadCodeSize)]
+#test(unhex("00010410304020418305070e0808"), 8, 16)[Ok(unhex("00010203000102030001020300010203"))] // max_output: as long as the output
+#test(unhex("00010410304020418305070e0808"), 8, 15)[Err(CompressError.TooLarge)]
+#test(unhex("8c0b"), 2, 2)[Err(CompressError.TooLarge)] // in an entry's string
+#test(unhex("2c"), 2, -1)[panic("compress.lzw_decode_gif: max_output -1 is below 0")]
+pub fun lzw_decode_gif(b: [uint8], min_code_size: int, max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError> {
+    return lzw_decode(b, min_code_size, true, 0, limit("lzw_decode_gif", max_output))
+}
+
+// The LZW data of the bytes (palette indices) `b` for a GIF image whose
+// minimum code size is `min_code_size` (2 to 8, else a runtime error; each
+// byte must be below `1 << min_code_size`): a clear code first, a clear code
+// whenever the table is full, and the end code, LSB-first. It goes into
+// the file in sub-blocks of at most 255 bytes, after `min_code_size`.
+#test(unhex("0101"), 2)[unhex("4c0a")]
+#test(unhex("010101"), 2)[unhex("8c0b")]
+#test(unhex(""), 2)[unhex("2c")]
+#test(unhex("00010203000102030001020300010203"), 8)[unhex("00010410304020418305070e0808")] // as Pillow's
+#test(unhex("04"), 2)[panic("compress.lzw_encode_gif: byte 4 doesn't fit min_code_size 2")]
+#test(unhex(""), 1)[panic("compress.lzw_encode_gif: min_code_size 1 is not 2 to 8")]
+pub fun lzw_encode_gif(b: [uint8], min_code_size: int) -> [uint8] {
+    return lzw_encode(b, gif_code_size(min_code_size), true, 0, LZW_CODES)
+}
+
+// The bytes a TIFF strip or tile compressed with LZW (compression 5)
+// stands for. Codes are read MSB-first, from 9 bits up to 12, one code
+// early ("early change"). A strip whose first byte is 0 and whose second's
+// lowest bit is 1 is in the old LZW of TIFF 5.0 (LSB-first, no early
+// change), as libtiff detects it. The data ends with the end code or with
+// the input. A code past the table is `BadCode`, more than `max_output`
+// bytes `TooLarge`.
+#test(unhex("8000002020181205048340e0a00808"), ALL)[Ok(unhex("00010203040001020304000102030400"))] // Pillow (libtiff), 4x4 grey
+#test(unhex("804040"), ALL)[Ok(unhex(""))] // clear, end
+#test(unhex("8000"), ALL)[Ok(unhex(""))] // the clear code, no end code
+#test(unhex(""), ALL)[Ok(unhex(""))]
+#test(unhex("0003080808"), ALL)[Ok(unhex("0102"))] // the old LZW, LSB-first: clear, 1, 2, end
+#test(unhex("804080"), ALL)[Err(CompressError.BadCode)] // code 258 right after a clear
+#test(unhex("8000002020181205048340e0a00808"), 15)[Err(CompressError.TooLarge)]
+#test(unhex(""), -1)[panic("compress.lzw_decode_tiff: max_output -1 is below 0")]
+pub fun lzw_decode_tiff(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError> {
+    let most = limit("lzw_decode_tiff", max_output)
+    if b.len() >= 2 && b[0] == 0u8 && (b[1] & 1u8) == 1u8 { return lzw_decode(b, 8, true, 0, most) }
+    return lzw_decode(b, 8, false, 1, most)
+}
+
+// The LZW data of `b` for a TIFF strip or tile (compression 5): MSB-first,
+// with the early change, a clear code first, a clear code before the table's
+// 4094th entry (as libtiff), and the end code.
+#test(unhex(""))[unhex("804040")]
+#test(unhex("0102"))[unhex("8000405010")]
+pub fun lzw_encode_tiff(b: [uint8]) -> [uint8] {
+    return lzw_encode(b, 8, false, 1, 4094)
+}
+
+// --- PackBits -----------------------------------------------------------------------
+
+// The bytes the PackBits data `b` (TIFF's compression 32773, Apple's
+// MacPaint format) stands for: a header byte `n` as an `int8` followed by
+// `n + 1` bytes as they are (0 to 127), or by one byte repeated `1 - n`
+// times (-127 to -1); -128 is skipped. A run cut short by the end of the
+// input is `Truncated`, more than `max_output` bytes `TooLarge`.
+#test(unhex("fd00fd00ff000101020003fe04"), ALL)[Ok(unhex("00000000000000000000010203040404"))] // Pillow (libtiff), 4x4 grey
+#test(unhex(""), ALL)[Ok(unhex(""))]
+#test(unhex("80"), ALL)[Ok(unhex(""))] // -128, a no-op
+#test(unhex("81aa"), ALL)[Ok(list_m.filled(128, 170u8))] // the longest repeat
+#test(unhex("02616263"), ALL)[Ok(bytes_m.from_str("abc"))]
+#test(unhex("026162"), ALL)[Err(CompressError.Truncated)] // a literal run cut short
+#test(unhex("fe"), ALL)[Err(CompressError.Truncated)] // a repeat without its byte
+#test(unhex("81aa"), 128)[Ok(list_m.filled(128, 170u8))] // max_output: as long as the output
+#test(unhex("81aa"), 127)[Err(CompressError.TooLarge)]
+#test(unhex("02616263"), 2)[Err(CompressError.TooLarge)]
+#test(unhex(""), -1)[panic("compress.packbits_decode: max_output -1 is below 0")]
+pub fun packbits_decode(b: [uint8], max_output: int = 0x7FFFFFFF) -> Result<[uint8], CompressError> {
+    let most = limit("packbits_decode", max_output)
+    var out: [uint8] = []
+    var p = 0
+    while p < b.len() {
+        let n = b[p] as int32
+        p += 1
+        if n < 128 {
+            let k = n + 1
+            if k > b.len() - p { return Err(CompressError.Truncated) }
+            if k > most - out.len() { return Err(CompressError.TooLarge) }
+            for i in p..p + k { out.push(b[i]) }
+            p += k
+        } else if n > 128 {
+            let k = 257 - n
+            if p >= b.len() { return Err(CompressError.Truncated) }
+            if k > most - out.len() { return Err(CompressError.TooLarge) }
+            let v = b[p]
+            p += 1
+            for i in 0..k { out.push(v) }
+        }
+    }
+    return Ok(out)
+}
+
+// The PackBits data of `b`: runs of three or more equal bytes (two at the
+// start of a literal run) as repeats of up to 128 bytes, the rest as literal
+// runs of up to 128 bytes. It is never longer than `b` and a byte for each
+// 128 of it.
+#test(unhex(""))[unhex("")]
+#test(bytes_m.from_str("abc"))[unhex("02616263")]
+#test(unhex("00000000000000000000010203040404"))[unhex("f70002010203fe04")]
+#test(unhex("0000"))[unhex("ff00")] // two at the start: a repeat
+#test(unhex("01000002"))[unhex("0301000002")] // two inside a literal run stay in it
+#test(list_m.filled(130, 7u8))[unhex("8107ff07")] // a repeat of 128, then of 2
+pub fun packbits_encode(b: [uint8]) -> [uint8] {
+    var w = PackBitsWriter { out: [], data: b }
+    var lit = -1 // where the pending literal run starts; -1: none
+    var i = 0
+    while i < b.len() {
+        var run = 1
+        while i + run < b.len() && run < 128 && b[i + run] == b[i] { run += 1 }
+        if run >= 3 || (run == 2 && lit < 0) {
+            if lit >= 0 { w.literal(lit, i) }
+            lit = -1
+            w.out.push((257 - run) as uint8)
+            w.out.push(b[i])
+        } else {
+            if lit < 0 { lit = i }
+            if i + run - lit > 128 {
+                w.literal(lit, lit + 128)
+                lit += 128
+            }
+        }
+        i += run
+    }
+    if lit >= 0 { w.literal(lit, b.len()) }
+    return w.out
+}
+
+// PackBits data being written from `data`.
+struct PackBitsWriter {
+    out: [uint8],
+    data: [uint8],
+}
+
+impl PackBitsWriter {
+    // The literal run of `data[first:to]` (1 to 128 bytes).
+    fun literal(var self, first: int32, to: int32) {
+        self.out.push((to - first - 1) as uint8)
+        for i in first..to { self.out.push(self.data[i]) }
+    }
+}
+
+// Every kind of input comes back through both LZWs and PackBits, from
+// every minimum code size, and PackBits never grows by more than a byte in
+// 128.
+#test
+fun lzw_and_packbits_round_trips() {
+    let inputs = samples()
+    for i in 0..inputs.len() {
+        let b = inputs[i]
+        assert(lzw_decode_gif(lzw_encode_gif(b, 8), 8) == Ok(b), f"GIF LZW of input {i}")
+        assert(lzw_decode_tiff(lzw_encode_tiff(b)) == Ok(b), f"TIFF LZW of input {i}")
+        let p = packbits_encode(b)
+        assert(packbits_decode(p) == Ok(b), f"PackBits of input {i}")
+        assert(p.len() <= b.len() + (b.len() + 127) / 128, f"PackBits of input {i}: {p.len()} bytes")
+    }
+    for size in 2..9 {
+        var b = noise(3000, size)
+        for j in 0..b.len() { b[j] = b[j] & ((1 << size) - 1) as uint8 }
+        for j in 0..500 { b.push((j / 50 % (1 << size)) as uint8) }
+        assert(lzw_decode_gif(lzw_encode_gif(b, size), size) == Ok(b), f"GIF LZW of {size}-bit bytes")
+    }
+    let runs = list_m.filled(100000, 9u8)
+    assert(lzw_encode_gif(runs, 8).len() < 1000, "a run shrinks")
+    assert(lzw_decode_tiff(lzw_encode_tiff(runs)) == Ok(runs), "a run")
+}
+
+// A table that fills up without a clear code is kept as it is (the
+// deferred clear), as decoders must accept.
+#test
+fun lzw_deferred_clear() {
+    let b = noise(15000, 11)
+    let gif = lzw_encode(b, 8, true, 0, LZW_CODES + 1)
+    assert(gif != lzw_encode_gif(b, 8), "no clear code")
+    assert(lzw_decode_gif(gif, 8) == Ok(b), "GIF")
+    assert(lzw_decode_tiff(lzw_encode(b, 8, false, 1, LZW_CODES + 1)) == Ok(b), "TIFF")
+}
+
+// The old LZW of TIFF 5.0 is GIF's with a minimum code size of 8.
+#test
+fun lzw_old_tiff() {
+    let inputs = samples()
+    for i in 1..inputs.len() {
+        assert(lzw_decode_tiff(lzw_encode_gif(inputs[i], 8)) == Ok(inputs[i]), f"input {i}")
     }
 }
 

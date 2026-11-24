@@ -1,0 +1,64 @@
+// The codecs inside GIF and TIFF files, from std.compress (MYLA-932): LZW
+// in GIF's and in TIFF's form, and PackBits.
+import std.compress as compress
+
+// The palette index (0 to 3) at `x`, `y` of a 16x16 picture of rings.
+#test(8, 8)[0]
+#test(0, 0)[0]
+#test(12, 8)[1]
+fun ring(x: int, y: int) -> uint8 {
+    let dx = x - 8
+    let dy = y - 8
+    return ((dx * dx + dy * dy) / 16 % 4) as uint8
+}
+
+// LZW data as a GIF file holds it: in sub-blocks of at most 255 bytes, each
+// after its length, and an empty one last.
+#test([7u8, 8u8])[[2u8, 7u8, 8u8, 0u8]]
+#test([])[[0u8]]
+fun sub_blocks(b: [uint8]) -> [uint8] {
+    var out: [uint8] = []
+    var p = 0
+    while p < b.len() {
+        var end = p + 255
+        if end > b.len() { end = b.len() }
+        out.push((end - p) as uint8)
+        for x in b[p:end] { out.push(x) }
+        p = end
+    }
+    out.push(0)
+    return out
+}
+
+fun main() {
+    var picture: [uint8] = []
+    for y in 0..16 {
+        for x in 0..16 { picture.push(ring(x, y)) }
+    }
+
+    // GIF: two bits a pixel, so a minimum code size of 2
+    let gif = compress.lzw_encode_gif(picture, 2)
+    print(f"GIF LZW: {picture.len()} bytes in {gif.len()}, {sub_blocks(gif).len()} as sub-blocks")
+    match compress.lzw_decode_gif(gif, 2) {
+        Ok(b) => print(f"decoded: {b == picture}")
+        Err(e) => print(f"error: {e}")
+    }
+
+    // TIFF: a strip's bytes, MSB-first
+    let tiff = compress.lzw_encode_tiff(picture)
+    print(f"TIFF LZW: {tiff.len()} bytes")
+    match compress.lzw_decode_tiff(tiff, 100) {
+        Ok(_) => print("decoded")
+        Err(e) => print(f"at most 100 bytes: {e}")
+    }
+
+    // PackBits: runs of equal bytes
+    let packed = compress.packbits_encode(picture)
+    print(f"PackBits: {packed.len()} bytes")
+    var broken = packed
+    broken.pop()
+    match compress.packbits_decode(broken) {
+        Ok(_) => print("decoded")
+        Err(e) => print(f"one byte short: {e}")
+    }
+}
