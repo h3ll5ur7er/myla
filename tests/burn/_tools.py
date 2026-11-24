@@ -132,7 +132,7 @@ def link_windows(asm_path: str, out: str, quiet: bool = True) -> None:
             fh.write(f"LIBRARY {dll}\nEXPORTS\n" + "".join(n + "\n" for n in names))
         subprocess.run(["llvm-dlltool", "-m", "i386:x86-64", "-d", stem + ".def", "-l", stem + ".lib"], **run)
         libs.append(stem + ".lib")
-    subprocess.run(["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib",
+    subprocess.run(["lld-link", "/nologo", "/Brepro", "/subsystem:console", "/entry:_start", "/nodefaultlib",
                     "/stack:125829120", "/out:" + out, obj, *libs], **run)
 
 

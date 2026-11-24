@@ -708,7 +708,7 @@ fun each_target_has_its_tools() {
     // (an import library a DLL the program calls, MYLA-722)
     let libs = ["a.exe.kernel32.lib", "a.exe.bcrypt.lib"]
     let win_tools = (["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", "a.exe.o", "a.exe.s"],
-                     ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:a.exe", "a.exe.o", "a.exe.kernel32.lib", "a.exe.bcrypt.lib"])
+                     ["lld-link", "/nologo", "/Brepro", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:a.exe", "a.exe.o", "a.exe.kernel32.lib", "a.exe.bcrypt.lib"])
     assert(build_commands(win, x86, "a.exe.s", "a.exe.o", "a.exe", libs) == win_tools && build_commands(win, a64, "a.exe.s", "a.exe.o", "a.exe", libs) == win_tools, "windows")
     assert(import_command(win, x86, "a.exe", "kernel32.dll") == ["llvm-dlltool", "-m", "i386:x86-64", "-d", "a.exe.kernel32.def", "-l", "a.exe.kernel32.lib"], "windows' import library")
     assert(import_command(win, x86, "a.exe", "bcrypt.dll") == ["llvm-dlltool", "-m", "i386:x86-64", "-d", "a.exe.bcrypt.def", "-l", "a.exe.bcrypt.lib"], "bcrypt's")

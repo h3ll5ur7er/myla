@@ -90,6 +90,19 @@ class _Layout(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        if not ON_WINDOWS:
+            cls._tmp.cleanup()
+            return
+        # Windows may hold an executable that just ran a moment past its
+        # process's end (`build\myla.exe` in use, run 280, MYLA-926): a few
+        # tries, then the error as before
+        import time
+        for _ in range(20):
+            try:
+                cls._tmp.cleanup()
+                return
+            except PermissionError:
+                time.sleep(0.5)
         cls._tmp.cleanup()
 
     def myla_cmd(self, *argv: str) -> subprocess.CompletedProcess:
