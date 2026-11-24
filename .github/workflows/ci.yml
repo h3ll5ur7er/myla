@@ -330,16 +330,16 @@ jobs:
         run: python3 scripts/stress-native.py --runs 1000 --workers 4,16 --only t23_results_seen_by_their_awaiter --only t24_cancelled_sleepers --only t25_timers_fire --only t26_tasks_yield --only t27_children_read_as_they_write
 
   burn-windows:
-    # the burn suites natively on Windows (MYLA-926 step 2, D296): the 39 the
-    # targets job runs for x86_64-windows under Wine, run here on
-    # windows-latest against Windows' own programs and tools (the toolchain
-    # bootstrapped from bootstrap/seed-windows.s with the image's LLVM),
-    # through `scripts/test-target.py host`. Beside the Wine job until this
-    # has been green a while; the rest of tests/burn comes as each suite is
-    # ported or marked Linux-only with its reason
+    # the burn suites natively on Windows (MYLA-926 step 2, D296): every
+    # suite of tests/burn, run on windows-latest against Windows' own
+    # programs and tools (the toolchain bootstrapped from
+    # bootstrap/seed-windows.s with the image's LLVM), through
+    # `scripts/test-target.py host`; a test Windows can't run says so
+    # (`linux_only` with its reason). Beside the Wine job until this has
+    # been green a while
     name: Burn suites on Windows (native, windows-latest)
     runs-on: windows-latest
-    timeout-minutes: 75
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash
@@ -374,10 +374,8 @@ jobs:
         with:
           path: build/test-tools
           key: test-tools-${{ runner.os }}-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed-windows.s') }}
-      - name: The burn suites for x86_64-windows, natively
-        run: |
-          suites=$(python -c "import sys; sys.path.insert(0, '.'); from tests.burn import _targets; print(' '.join(_targets.SUITES))")
-          python scripts/test-target.py host $suites
+      - name: Every burn suite, natively
+        run: python scripts/test-target.py host
 
   bootstrap-windows:
     # the bootstrap on Windows itself (MYLA-709, D214), as bootstrap-arm64
