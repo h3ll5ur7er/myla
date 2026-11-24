@@ -62,6 +62,15 @@ EXPECTED = {
                                  "Hello, Myla!\nHello, Myla?\n2\n1\nlift-off\n"),
     "time_and_math.my": "1.41\ntrue\n3.141592653589793\nanswered 7\ngave up\n7\ntrue\n",
     "transforms.my": "(243, 275)\n(320, 249)\n(235, 164)\n(320, 154)\n(320, 312)\n(397, 275)\n(320, 179)\n(405, 164)\ntrue\n",
+    "images.my": ("::::::::::::::::\n----------------\n---------%%%%%--\n=========%%%%%==\n=========%%%%%==\n"
+                  "+++++++++%%%%%++\n+++++++++%%%%%++\n****************\n****************\n################\n"
+                  "................\n................\n................\n................\n................\n"
+                  "................\ncorner 8x8, top left #b8979cff\n"
+                  "palette #122f6eff #6b6aa3ff #eac07dff #af929dff\n0100100100100100\n1010101010101011\n"
+                  "1111011102222210\n1101111112222211\n1111111112222211\n1111111112222233\n3333333332222233\n"
+                  "3333333333222233\n3232332323233323\n2223223223222232\n0000000000000000\n0000000000000000\n"
+                  "0000000000000000\n0000000000000000\n0000000000000000\n0000000000000000\n"
+                  "preview: 8 lines of 16 cells\n"),
     "book_api.my": 'GET /api/books/2 -> 200 {"id":2,"title":"The Dispossessed","year":1974} (version 1)\nGET /api/books/search?q=dark -> 200 {"query":"dark","found":[{"id":1,"title":"The Left Hand of Darkness","year":1969}]} (version 1)\nGET /api/books/9 -> 404 {"error":"no book 9"} (version 1)\nPOST /api/books -> 200 {"id":4,"title":"The Lathe of Heaven","year":1971} (version 1)\nPOST /api/books -> 422 {"error":"$.title: missing field"} (version 1)\nDELETE /api/books/2 -> 405 method not allowed (version 1)\nGET / -> 200 see /api/books/{id} (version -)\n',
 }
 
