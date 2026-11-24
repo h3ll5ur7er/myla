@@ -294,6 +294,8 @@ The run of 2026-11-23 (`results-2026-11-23.json`: a shared 4-CPU cloud VM, gcc 1
 
 The small size is steady. The large one waits for memory in every compiled version and varied by up to 2.1 times between runs of one program, so its order is not settled.
 
+Myla's 0.95 at the large size was noise. `benchmarks/fft/sweep.py` times C and Myla at every power of two from 1,024 to 1,048,576 points; on 2026-11-24 (fastest of five runs, another and slower host) Myla was slower at every size, the two-list version by 4.8 times at 4096 points, 2.7 at 65,536 and 1.8 at 1,048,576. The difference stays at about 5 to 10 ns for one butterfly while both times grow past the 2 MB cache: cachegrind counts the same misses past it for both (about 2 for one butterfly), and 194 instructions and 76 data accesses in Myla against C's 45 and 12. `cache-boundary.html` shows it.
+
 At 4096 points Myla runs 5.1 times C's instructions (callgrind, the two-list version). In the butterfly, element accesses load the list's pointer from `self` again, compare the index with the length and compute `k * step` anew, and values live in the frame between them; in the struct version `mul`, `add`, `sub` and the conjugate are calls (a third of the instructions).
 
 ## How the first round went

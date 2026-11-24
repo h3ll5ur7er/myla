@@ -1,0 +1,172 @@
+<title>FFT Cache Boundary Check</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;700&display=swap">
+<style>
+/* Layout: a one-screen memo. Verdict first, one chart that carries the argument, then the evidence. */
+:root {
+  --bg: #f5f6f9; --surface: #ffffff; --ink: #12151c; --ink-2: #4a5060; --ink-3: #7a8091; --rule: #dcdfe7;
+  --accent: #5a45d6; --c: #2a78d6; --m: #eb6834; --band-c: #2a78d622; --band-m: #eb683422;
+  --display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --bg: #101218; --surface: #181b23; --ink: #eef0f5; --ink-2: #b4b9c6; --ink-3: #868c9c; --rule: #2c313d;
+    --accent: #9d8ff2; --c: #3987e5; --m: #d95926; --band-c: #3987e533; --band-m: #d9592633; color-scheme: dark; }
+}
+:root[data-theme="dark"] { --bg: #101218; --surface: #181b23; --ink: #eef0f5; --ink-2: #b4b9c6; --ink-3: #868c9c; --rule: #2c313d;
+  --accent: #9d8ff2; --c: #3987e5; --m: #d95926; --band-c: #3987e533; --band-m: #d9592633; color-scheme: dark; }
+body { background: var(--bg); color: var(--ink); font: 16px/1.6 var(--body); }
+.page { max-width: 860px; margin: 0 auto; padding-block: 44px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 40px; }
+section, header { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+p { margin: 0; color: var(--ink-2); max-width: 68ch; }
+p strong { color: var(--ink); font-weight: 600; }
+h1, h2 { font-family: var(--display); margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+h1 { font-size: clamp(1.8rem, 5vw, 2.6rem); line-height: 1.1; font-weight: 700; max-width: 22ch; }
+h2 { font-size: 1.3rem; font-weight: 700; }
+.eyebrow { font: 500 0.78rem/1.4 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
+.lede { font-size: 1.12rem; line-height: 1.55; }
+code { font-family: var(--mono); font-size: 0.9em; }
+.figure { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 18px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.cap { font-size: 0.84rem; color: var(--ink-3); line-height: 1.5; max-width: 80ch; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.86rem; color: var(--ink-2); }
+.legend i { display: inline-block; width: 16px; height: 3px; border-radius: 2px; margin: 0 6px 3px 0; vertical-align: middle; }
+.legend b { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin: 0 6px -1px 0; background: var(--band-m); }
+#chart { width: 100%; position: relative; }
+#chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+#chart text { font-family: var(--mono); font-size: 11px; fill: var(--ink-3); }
+#chart .lbl { font-family: var(--body); font-size: 12.5px; font-weight: 600; fill: var(--ink); }
+#chart .note { font-family: var(--body); font-size: 11.5px; fill: var(--ink-2); }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.86rem; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--rule); }
+th:first-child, td:first-child { text-align: left; }
+th { font: 500 0.72rem var(--mono); letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); }
+td { font-family: var(--mono); color: var(--ink-2); }
+td.r { color: var(--ink); font-weight: 600; }
+tr.past td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+ul { margin: 0; padding-left: 20px; color: var(--ink-2); max-width: 70ch; display: flex; flex-direction: column; gap: 6px; font-size: 0.95rem; }
+#tip { position: fixed; z-index: 20; pointer-events: none; background: var(--ink); color: var(--bg); padding: 8px 10px; border-radius: 4px; font-size: 0.8rem; line-height: 1.45; box-shadow: 0 4px 14px rgb(0 0 0 / 0.22); }
+#tip b { display: block; } #tip span { font-family: var(--mono); opacity: 0.9; display: block; }
+</style>
+
+<div class="page">
+<header>
+  <div class="eyebrow">FFT benchmark · follow-up · 24 Nov 2026</div>
+  <h1>Myla does not pass C beyond the cache</h1>
+  <p class="lede">The first FFT report listed Myla at <strong>0.95 times C</strong> for a million points. That number was measurement noise. Re-timed across eleven sizes, Myla is slower than C at every one: <strong id="r-small"></strong> times in the cache and still <strong id="r-large"></strong> times at a million points.</p>
+  <p>What is real is that the gap narrows. Myla pays a fixed extra cost per butterfly. Once the data outgrows the cache, both programs wait for the same memory, and that shared wait makes the fixed cost a smaller share of the total.</p>
+</header>
+
+<section>
+  <h2>Time per butterfly, by transform size</h2>
+  <div class="figure">
+    <div class="legend"><span><i style="background:var(--c)"></i>C, gcc -O2</span><span><i style="background:var(--m)"></i>Myla</span><span><b></b>Fastest to slowest of 5 runs</span></div>
+    <div id="chart"></div>
+    <div class="cap">Two arrays of floats (the layout where the first report showed 0.95). Lines join the fastest of five runs at each size; bands reach the slowest. The x axis doubles at each step. Hover or tap for the numbers.</div>
+  </div>
+  <p>The two lines never cross. They rise together past about 87,000 points, where the 24 bytes per point (signal plus table of factors) no longer fit this machine's 2 MB second-level cache. The distance between them stays between about 5 and 10 ns throughout.</p>
+</section>
+
+<section>
+  <h2>Why the first report was wrong</h2>
+  <p>That run timed each program five times on a shared cloud VM, at one large size, and reported the median. At that size single runs of the same binary differed by up to 2.1 times. C happened to draw slow runs and Myla fast ones. The report flagged the panel as unreliable, but the 0.95 was still printed, and it should not have been read as a result.</p>
+</section>
+
+<section>
+  <h2>Same cache misses, different amount of work</h2>
+  <p>A cache simulation (valgrind's cachegrind, set to this machine's 48 KB and 2 MB caches) at 1,048,576 points:</p>
+  <div class="figure"><div class="scroll"><table>
+    <thead><tr><th>Per butterfly</th><th>C, gcc -O2</th><th>Myla</th></tr></thead>
+    <tbody>
+      <tr><td>Instructions</td><td>about 45</td><td>about 194</td></tr>
+      <tr><td>Memory reads and writes</td><td>about 12</td><td>about 76</td></tr>
+      <tr><td>Misses past the 2 MB cache</td><td>about 2.0</td><td>about 2.2</td></tr>
+    </tbody></table></div>
+    <div class="cap">Whole-program counts divided by 20,971,520 butterflies, so setup is included and the figures are approximate. Raw counts: instructions 951 M and 4,072 M; data accesses 246 M and 1,595 M; misses past the 2 MB cache 41.8 M and 45.9 M.</div>
+  </div>
+  <p>Both programs touch the same elements in the same order, so they miss the cache almost equally. Myla's extra work is about 65 additional memory accesses per butterfly that always hit the first-level cache: list pointers reloaded from <code>self</code>, list lengths read for bounds checks, and intermediate values kept on the stack. They cost a few nanoseconds whatever the data size.</p>
+</section>
+
+<section>
+  <h2>All sizes, both layouts</h2>
+  <div class="figure"><div class="scroll"><table id="table"></table></div>
+  <div class="cap">Nanoseconds per butterfly, fastest of five runs. Shaded rows are past the 2 MB cache.</div></div>
+</section>
+
+<section>
+  <h2>Method</h2>
+  <ul>
+    <li>The same programs as the first report: an in-place radix-2 FFT, identical operation for operation in C and Myla, with identical checksums. C is built with gcc 16.2 at <code>-O2 -ffp-contract=off</code>; Myla with <code>myla build</code>.</li>
+    <li>Each size runs about 134 million butterflies, five times, pinned to one CPU. The fastest run is the least disturbed one, so the table and the lines use it.</li>
+    <li>Machine: Intel Xeon at 2.1 GHz, 4 virtual CPUs, 48 KB first-level and 2 MB second-level cache per core, a shared cloud VM. It was a different, slower host than the first report's, so compare shapes and ratios, not absolute times.</li>
+    <li>Script: <code>benchmarks/fft/sweep.py</code> in the Myla repository.</li>
+  </ul>
+</section>
+</div>
+<div id="tip" hidden></div>
+
+<script>
+// points, [min, max] ns per butterfly: C split, Myla split, C complex, Myla complex (sweep.py, 24 Nov 2026)
+const ROWS = [
+  [1024, [2.33, 2.44], [9.40, 11.19], [2.30, 2.71], [8.95, 12.16]],
+  [2048, [1.83, 2.74], [9.79, 10.51], [1.90, 2.49], [10.29, 12.39]],
+  [4096, [2.02, 3.58], [9.64, 13.28], [2.29, 2.76], [9.88, 12.05]],
+  [8192, [2.55, 3.64], [9.60, 11.86], [2.10, 3.31], [9.83, 11.56]],
+  [16384, [3.16, 4.36], [9.44, 10.81], [2.38, 3.12], [9.91, 12.54]],
+  [32768, [2.57, 3.45], [8.86, 11.18], [2.91, 3.21], [10.31, 14.88]],
+  [65536, [3.48, 3.67], [9.53, 10.48], [2.26, 3.28], [9.18, 12.63]],
+  [131072, [3.72, 4.20], [9.17, 12.59], [3.38, 3.73], [11.37, 17.71]],
+  [262144, [5.97, 6.21], [14.38, 18.08], [4.88, 5.58], [16.19, 17.57]],
+  [524288, [9.98, 12.34], [14.82, 20.50], [7.82, 9.35], [15.32, 18.45]],
+  [1048576, [12.17, 14.04], [21.84, 29.02], [8.26, 9.58], [21.68, 25.02]],
+];
+const L2_POINTS = 2 * 1024 * 1024 / 24;
+const $ = id => document.getElementById(id);
+const nf = n => n.toLocaleString('en-US');
+const ratio = (r, a, b) => r[b][0] / r[a][0];
+$('r-small').textContent = ratio(ROWS[2], 1, 2).toFixed(1);
+$('r-large').textContent = ratio(ROWS[10], 1, 2).toFixed(1);
+
+function draw() {
+  const host = $('chart'); const W = Math.max(300, host.clientWidth), narrow = W < 520;
+  const H = narrow ? 300 : 360, m = { l: 40, r: narrow ? 14 : 70, t: 26, b: 34 };
+  const x = n => m.l + (Math.log2(n) - 10) / 10 * (W - m.l - m.r);
+  const yMax = 30, y = v => H - m.b - v / yMax * (H - m.t - m.b);
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Nanoseconds per butterfly against transform size for C and Myla. Myla is above C at every size.">`;
+  for (let v = 0; v <= yMax; v += 5) s += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--rule)" stroke-width="1"/><text x="${m.l - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  s += `<text x="${m.l - 34}" y="12">ns per butterfly</text>`;
+  ROWS.forEach((r, i) => { if (!narrow || i % 2 === 0) s += `<text x="${x(r[0])}" y="${H - m.b + 16}" text-anchor="middle">${r[0] >= 1048576 ? '1M' : r[0] >= 1024 ? Math.round(r[0] / 1024) + 'k' : r[0]}</text>`; });
+  s += `<text x="${W - m.r}" y="${H - 2}" text-anchor="end">points</text>`;
+  const bx = x(L2_POINTS);
+  s += `<line x1="${bx}" x2="${bx}" y1="${m.t}" y2="${H - m.b}" stroke="var(--ink-3)" stroke-width="1" stroke-dasharray="4 4"/>`;
+  s += `<text class="note" x="${bx - 6}" y="${m.t + 10}" text-anchor="end">fits the 2 MB cache</text><text class="note" x="${bx + 6}" y="${m.t + 10}">does not fit</text>`;
+  for (const [col, color, band, name] of [[2, 'var(--m)', 'var(--band-m)', 'Myla'], [1, 'var(--c)', 'var(--band-c)', 'C']]) {
+    const top = ROWS.map(r => `${x(r[0])},${y(Math.min(yMax, r[col][1]))}`), bot = ROWS.map(r => `${x(r[0])},${y(r[col][0])}`).reverse();
+    s += `<polygon points="${top.concat(bot).join(' ')}" fill="${band}"/>`;
+    s += `<polyline points="${ROWS.map(r => `${x(r[0])},${y(r[col][0])}`).join(' ')}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>`;
+    for (const r of ROWS) s += `<circle cx="${x(r[0])}" cy="${y(r[col][0])}" r="3.5" fill="${color}" stroke="var(--surface)" stroke-width="1.5"/>`;
+    const last = ROWS[ROWS.length - 1];
+    if (!narrow) s += `<text class="lbl" x="${x(last[0]) + 10}" y="${y(last[col][0]) + 4}">${name}</text>`;
+  }
+  s += `<line id="cross" x1="0" x2="0" y1="${m.t}" y2="${H - m.b}" stroke="var(--ink-2)" stroke-width="1" visibility="hidden"/>`;
+  s += `<rect id="hit" x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="transparent"/></svg>`;
+  host.innerHTML = s;
+  const tip = $('tip'), cross = $('cross'), svg = host.querySelector('svg');
+  const move = e => { const b = svg.getBoundingClientRect(); const px = (e.clientX - b.left) * W / b.width;
+    let best = 0; ROWS.forEach((r, i) => { if (Math.abs(x(r[0]) - px) < Math.abs(x(ROWS[best][0]) - px)) best = i; });
+    const r = ROWS[best]; cross.setAttribute('x1', x(r[0])); cross.setAttribute('x2', x(r[0])); cross.setAttribute('visibility', 'visible');
+    tip.innerHTML = `<b>${nf(r[0])} points</b><span>C     ${r[1][0].toFixed(2)} ns (to ${r[1][1].toFixed(2)})</span><span>Myla  ${r[2][0].toFixed(2)} ns (to ${r[2][1].toFixed(2)})</span><span>Myla is ${ratio(r, 1, 2).toFixed(1)}× C</span>`;
+    tip.hidden = false; const t = tip.getBoundingClientRect();
+    tip.style.left = Math.max(8, Math.min(e.clientX + 14, innerWidth - t.width - 8)) + 'px'; tip.style.top = Math.max(8, e.clientY - t.height - 12) + 'px'; };
+  const hide = () => { tip.hidden = true; cross.setAttribute('visibility', 'hidden'); };
+  $('hit').addEventListener('pointermove', move); $('hit').addEventListener('pointerdown', move); $('hit').addEventListener('pointerleave', hide);
+}
+draw(); let timer; addEventListener('resize', () => { clearTimeout(timer); timer = setTimeout(draw, 120); });
+
+let h = '<thead><tr><th>Points</th><th>C, two arrays</th><th>Myla, two lists</th><th>Myla ÷ C</th><th>C, structs</th><th>Myla, structs</th><th>Myla ÷ C</th></tr></thead><tbody>';
+for (const r of ROWS) h += `<tr${r[0] > L2_POINTS ? ' class="past"' : ''}><td>${nf(r[0])}</td><td>${r[1][0].toFixed(2)}</td><td>${r[2][0].toFixed(2)}</td><td class="r">${ratio(r, 1, 2).toFixed(1)}</td><td>${r[3][0].toFixed(2)}</td><td>${r[4][0].toFixed(2)}</td><td class="r">${ratio(r, 3, 4).toFixed(1)}</td></tr>`;
+$('table').innerHTML = h + '</tbody>';
+</script>
