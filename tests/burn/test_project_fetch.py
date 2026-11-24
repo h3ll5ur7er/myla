@@ -5,16 +5,17 @@
 checks it out into `.myla/deps/<name>-<commit>/` and writes the lock file;
 `build`, `run`, `test` and `check` check out locked commits that are missing,
 but never resolve references. The repositories are local, in temporary
-directories, reached through `file://` URLs.
+directories, reached through `file://` URLs (`file:///C:/…` on Windows).
 """
 from __future__ import annotations
 
 import os
+import pathlib
 import shutil
 import subprocess
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, ON_WINDOWS, SKIP_REASON
 from .test_selfhost_cli import _Layout
 
 HAVE_GIT = shutil.which("git") is not None
@@ -43,7 +44,7 @@ def library(root: str, name: str, greeting: str, deps: str = "") -> str:
     git(root, "init", "-q")
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "first")
-    return "file://" + root
+    return pathlib.Path(root).as_uri()
 
 
 def commit_greeting(root: str, name: str, greeting: str) -> str:
@@ -161,7 +162,7 @@ class TestFetch(_Layout):
         self.assertEqual((proc.stdout, proc.returncode), ("", 0), proc.stderr)
         self.assertEqual(proc.stderr, f"fetching greet ({commit[:7]})\n")
         self.assertFalse(os.path.exists(partial))
-        run = subprocess.run([os.path.join(app, "build", "app")], capture_output=True, text=True)
+        run = subprocess.run([os.path.join(app, "build", "app" + EXE)], capture_output=True, text=True)
         self.assertEqual(run.stdout, "hi\n")
         proc = self.run_in(app, "clean", "--deps")
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -180,7 +181,7 @@ class TestFetch(_Layout):
         git(outer, "add", "-A")
         git(outer, "commit", "-q", "-m", "outer")
         outer_commit = git(outer, "rev-parse", "HEAD")
-        app = self.app(f'greet = {{ git = "file://{outer}" }}\n')
+        app = self.app(f'greet = {{ git = "{pathlib.Path(outer).as_uri()}" }}\n')
         proc = self.run_in(app, "fetch")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stderr, f"fetching greet ({outer_commit[:7]})\nfetching inner ({inner_commit[:7]})\n")
@@ -199,7 +200,7 @@ class TestFetch(_Layout):
         self.assertEqual(proc.stderr, f"myla: dependency 'greet': there is no tag 'nope' in {url}\n")
         self.assertFalse(os.path.exists(os.path.join(app, "myla.lock")))
 
-        missing = "file://" + os.path.join(self.base, "nowhere")
+        missing = pathlib.Path(self.base, "nowhere").as_uri()
         app = self.app(f'greet = {{ git = "{missing}" }}\n')
         proc = self.run_in(app, "fetch")
         self.assertEqual(proc.returncode, 1)
@@ -226,8 +227,10 @@ class TestFetch(_Layout):
         repo = os.path.join(self.base, "greet")
         url = library(repo, "greet", "x")
         other = os.path.join(self.base, "other")
+        # (a literal string on Windows, where a basic string's `\` would start escapes)
+        path = f"'{repo}'" if ON_WINDOWS else f'"{repo}"'
         _write(os.path.join(other, "myla.toml"),
-               f'[package]\nname = "other"\nversion = "1"\n\n[dependencies]\ngreet = {{ path = "{repo}" }}\n')
+               f'[package]\nname = "other"\nversion = "1"\n\n[dependencies]\ngreet = {{ path = {path} }}\n')
         _write(os.path.join(other, "src", "other.my"), "pub fun f() -> int {\n    return 1\n}\n")
         app = self.app(f'greet = {{ git = "{url}" }}\nother = {{ path = "../other" }}\n')
         proc = self.run_in(app, "fetch")

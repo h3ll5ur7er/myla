@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, linux_only
 from ._tools import STDLIB_ROOT, native_compiler
 from . import test_time
 from .test_aarch64 import LIBRARY_WITHOUT_THE_RUNTIME, PROGRAMS, build_x86, run
@@ -62,7 +62,7 @@ def build_wasm(src: str, out: str, stdlib: str = STDLIB_ROOT) -> None:
 class WasmParity(unittest.TestCase):
     def same(self, src: str) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            xb, wb = os.path.join(tmp, "x86"), os.path.join(tmp, "prog.wasm")
+            xb, wb = os.path.join(tmp, "x86" + EXE), os.path.join(tmp, "prog.wasm")
             build_x86(src, xb)
             build_wasm(src, wb)
             self.assertEqual(run(NODE + [wb]), run([xb]))
@@ -210,7 +210,7 @@ class WasmParity(unittest.TestCase):
             path = os.path.join(tmp, "files.my")
             with open(path, "w") as fh:
                 fh.write(source)
-            xb, wb = os.path.join(tmp, "x86"), os.path.join(tmp, "files.wasm")
+            xb, wb = os.path.join(tmp, "x86" + EXE), os.path.join(tmp, "files.wasm")
             build_x86(path, xb)
             build_wasm(path, wb)
             want = subprocess.run([xb], capture_output=True, text=True, cwd=tmp)
@@ -548,8 +548,8 @@ class WasmStack(unittest.TestCase):
             fh.write(source.lstrip())
         out = os.path.join(tmp, name + ".wasm")
         build_wasm(path, out)
-        build_x86(path, os.path.join(tmp, name))
-        want = run([os.path.join(tmp, name)])
+        build_x86(path, os.path.join(tmp, name + EXE))
+        want = run([os.path.join(tmp, name + EXE)])
         self.assertEqual(want[1:], ("runtime error: stack overflow\n", 1))
         self.assertEqual(run(NODE + [out]), want)
 
@@ -603,6 +603,7 @@ class WasmCapabilities(unittest.TestCase):
             build_wasm(path, out)
             self.assertEqual(run(NODE + [out]), ("unsupported\nnot found\n", "", 0))
 
+@linux_only("the program runs through a #!/bin/sh wrapper")
 @unittest.skipUnless(HAVE_WASM, WASM_SKIP)
 class WasmTime(test_time.Time):
     """test_time's programs built for wasm and run under Node (through a

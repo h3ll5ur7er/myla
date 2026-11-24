@@ -7,7 +7,7 @@ retired, MYLA-219; the self-hosted compiler's abbreviation table is still
 compared with the one the Python backend wrote, recorded.) On Windows
 (MYLA-757) the same DWARF is in the `.exe`'s COFF sections: LLVM's tools,
 gdb and lldb read it from the file, gdb under Wine from the running
-program."""
+program; on Windows itself (MYLA-926) the `.exe` runs directly."""
 import os
 import re
 import shutil
@@ -16,9 +16,9 @@ import tempfile
 import unittest
 
 from tests.burn._golden import golden
-from tests.burn._native import CAN_BUILD_NATIVE, HOST_TARGET, READS_X86, SKIP_REASON, wine, wine_env
+from tests.burn._native import (CAN_BUILD_NATIVE, HOST_TARGET, ON_WINDOWS, READS_X86, SKIP_REASON, assemble,
+                                linux_only, wine, wine_env)
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
-from tests.burn._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 
 def myla(argv: list[str]) -> int:
@@ -148,8 +148,7 @@ class TestSelfHostedLineTables(unittest.TestCase):
         binary = os.path.join(self.dir, "prog" + "".join(flags).replace("-", "_"))
         with open(binary + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm)
-        subprocess.run([*AS_CMD, "-o", binary + ".o", binary + ".s"], check=True)
-        subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
+        assemble(binary + ".s", binary)
         return binary
 
     def test_readelf_sees_the_lines_of_every_module(self):
@@ -204,8 +203,7 @@ class TestSelfHostedLineTables(unittest.TestCase):
         binary = os.path.join(self.dir, "prog_cwd")
         with open(binary + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm)
-        subprocess.run([*AS_CMD, "-o", binary + ".o", binary + ".s"], check=True)
-        subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
+        assemble(binary + ".s", binary)
         dump = subprocess.run(["readelf", "--debug-dump=info", binary],
                               capture_output=True, text=True, check=True).stdout
         comp_dir = [line for line in dump.splitlines() if "DW_AT_comp_dir" in line]
@@ -562,8 +560,7 @@ class TestSelfHostedGdbVariables(GdbVariables, unittest.TestCase):
         binary = os.path.join(self.dir, name)
         with open(binary + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm)
-        subprocess.run([*AS_CMD, "-o", binary + ".o", binary + ".s"], check=True)
-        subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
+        assemble(binary + ".s", binary)
         return binary
 
 
@@ -651,7 +648,7 @@ class TestWindowsDebugInfo(unittest.TestCase):
         self.assertLessEqual({6, 7, 8, 11, 12, 13, 15, 16, 17}, {line for _, f, line in rows if f == "main.my"})
         # LLVM's symbolizer says so too, with the function's name
         said = _llvm("llvm-symbolizer", f"--obj={exe}", hex(low_pc)).split()
-        self.assertEqual((said[0], said[1].replace("\\", "/")), ("myla_add", self.dir + "/main.my:6:1"))
+        self.assertEqual((said[0], said[1].replace("\\", "/")), ("myla_add", self.dir.replace("\\", "/") + "/main.my:6:1"))
 
     @unittest.skipUnless(shutil.which("llvm-dwarfdump"), "needs llvm-dwarfdump")
     def test_functions_variables_and_their_types(self):
@@ -718,13 +715,17 @@ class TestWindowsDebugInfo(unittest.TestCase):
         self.assertIn('name = "a", type = "int32"', session)
         self.assertRegex(session, r"Breakpoint 1: where = prog\.exe`myla_add \+ \d+ at main\.my:7:5")
 
-    @unittest.skipUnless(wine(), "Wine is not installed")
+    @unittest.skipUnless(ON_WINDOWS or wine(), "Wine is not installed")
     def test_it_runs_as_without_g(self):
-        wine_env()
+        # under Wine here, on Windows itself there (MYLA-926)
+        runner = [] if ON_WINDOWS else wine()
+        if not ON_WINDOWS:
+            wine_env()
         for exe in (self.build(out="plain.exe"), self.build("-g")):
-            ran = subprocess.run([*wine(), exe], capture_output=True, cwd=self.dir, timeout=120)
+            ran = subprocess.run([*runner, exe], capture_output=True, cwd=self.dir, timeout=120)
             self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"5\ntwo\n2\n", b"", 0))
 
+    @linux_only("Wine's winedbg and a #!/bin/sh gdb")
     @unittest.skipUnless(wine() and shutil.which("gdb"), "needs Wine and gdb")
     def test_gdb_on_the_running_program_under_wine(self):
         # winedbg --gdb starts the program under its gdb proxy, then `gdb`
