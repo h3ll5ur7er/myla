@@ -110,6 +110,9 @@ def run_one(module: str) -> int:
 
 
 def main() -> int:
+    # the suites' logs are UTF-8; a console in another code page (Windows'
+    # cp1252) must not end the run before it prints them (MYLA-926)
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("target", choices=[*_targets.TARGETS, "host"])
     ap.add_argument("modules", nargs="*",
