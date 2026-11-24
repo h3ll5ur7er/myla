@@ -312,9 +312,10 @@ class TestErrorCorpus(unittest.TestCase):
 def _rendered_stderr(phase: str, name: str) -> str:
     """The whole of what `myla check` (`myla run` for a runtime error) of the
     corpus file `name` writes to stderr, run from the repository so that the
-    file is named `examples/errors/<name>`."""
+    file is named `examples/errors/<name>`: with `/` on every machine (Windows
+    takes it too), so a pinned file reads the same there (MYLA-926)."""
     command = "run" if phase == "runtime" else "check"
-    proc = subprocess.run([selfhost_tool("main"), command, os.path.join("examples", "errors", name), "--stdlib", "lib"],
+    proc = subprocess.run([selfhost_tool("main"), command, "examples/errors/" + name, "--stdlib", "lib"],
                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60, cwd=_REPO)
     return proc.stderr
 
