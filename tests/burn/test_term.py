@@ -24,27 +24,28 @@ target, which must agree; `scripts/test-target.py` runs the suite for aarch64
 (Node), where the terminal and signal classes are excused (`_targets.py`) and
 `TermOnWasm` checks the `Unsupported` instead, and Windows (Wine, MYLA-707),
 where what rests on Unix's signals and termios is excused and
-`test_windows.Console` checks the console instead."""
-import fcntl
+`test_windows.Console` checks the console instead. On Windows itself
+(MYLA-926 step 2) the pipes, the editor's drawing, the primitives without a
+terminal and the warnings run; the pseudo-terminals, termios and the Unix
+signals are Linux's (`linux_only`), their modules imported where used."""
 import os
-import pty
-import resource
 import select
 import signal
 import struct
 import subprocess
 import tempfile
-import termios
 import threading
 import time
 import unittest
 
-from ._native import (BUILD_TARGET, 
+from ._native import (BUILD_TARGET,
     CAN_BUILD_NATIVE,
+    EXE,
     SKIP_REASON,
     TEST_TARGET,
     Program,
     build_and_run_full,
+    linux_only,
     native_build,
     run_argv,
     write_program,
@@ -52,6 +53,11 @@ from ._native import (BUILD_TARGET,
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 COLS, ROWS = 101, 33
+
+# why a test is Linux's (MYLA-926 step 2): Windows has neither Unix's
+# pseudo-terminals and termios nor its signals
+PTYS = "Unix ptys and termios (test_windows.Console checks the console)"
+SIGNALS_REASON = "Unix signals (test_windows.Console sends Ctrl-C)"
 
 # what Wine's console adds to a program's output on a terminal, and what
 # the program wrote (`Pty`)
@@ -77,6 +83,9 @@ class Pty:
     its mode."""
 
     def __init__(self, argv, executable=None, env=None, preexec_fn=None):
+        import fcntl
+        import pty
+        import termios
         self.master, self.slave = pty.openpty()
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         self.proc = subprocess.Popen(argv, executable=executable, stdin=self.slave, stdout=self.slave,
@@ -120,6 +129,7 @@ class Pty:
         os.write(self.master, data)
 
     def lflag(self) -> int:
+        import termios
         return termios.tcgetattr(self.slave)[3]
 
     def finish(self, timeout: float = 60) -> tuple[str, int]:
@@ -153,7 +163,7 @@ class Built:
     def __init__(self, source: str):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = write_program(self.tmp.name, source)
-        self.binary = os.path.join(self.tmp.name, "prog")
+        self.binary = os.path.join(self.tmp.name, "prog" + EXE)
         native_build(Program(self.path), self.binary)
 
     def commands(self):
@@ -254,6 +264,7 @@ class Terminal(Case):
         cls.tty.close()
         cls.raw.close()
 
+    @linux_only(PTYS)
     def test_a_terminal_its_size_and_colours(self):
         for how, argv, exe in self.tty.commands():
             with self.subTest(how):
@@ -274,7 +285,9 @@ class Terminal(Case):
                 self.assertEqual((p.stdout, p.returncode), ("tty false false false\nno size\nstdin no size\n"
                                                             "ansi false colors false\nraw: not a terminal\n", 0))
 
+    @linux_only(PTYS)
     def test_raw_mode_and_back(self):
+        import termios
         for how, argv, exe in self.raw.commands():
             with self.subTest(how):
                 t = Pty(argv, exe)
@@ -455,15 +468,18 @@ def caught_signals(pid: int) -> set[int]:
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@linux_only(PTYS)
 class RawModeEnds(Case):
     """D187: raw mode ends with the program, through the runtime's exit hook:
     a return from `main`, `exit`, a panic, a runtime error, a stack overflow,
     a failed task; leaving raw mode removes the hook."""
 
-    COOKED = termios.ECHO | termios.ICANON | termios.ISIG
-
     @classmethod
     def setUpClass(cls):
+        import termios
+        cls.COOKED = termios.ECHO | termios.ICANON | termios.ISIG
+        # (SIGHUP and SIGQUIT are Unix's alone)
+        cls.ENDING = {signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM}
         cls.ends = Built(ENDS)
         cls.ends_async = Built(ENDS_ASYNC)
         cls.signals = Built(RAW_SIGNALS)
@@ -510,6 +526,7 @@ class RawModeEnds(Case):
                     self.assertEqual(lflag, self.COOKED, f"left raw: {oct(lflag)}")
 
     def test_leaving_raw_mode_removes_the_hook(self):
+        import termios
         for how, argv, exe in self.commands(self.ends, "left"):
             with self.subTest(how):
                 out, code, lflag = self.ended(argv, exe)
@@ -523,6 +540,7 @@ class RawModeEnds(Case):
         wait for the other workers) and the waiting worker sleeps: it ran on,
         raw, a worker spinning on a whole CPU, until a key came. (On one
         worker the key read holds the only worker, the failing task's too.)"""
+        import resource
         built = Built(BLOCKED_KEY)
         try:
             for mode, want in (("fail", 1), ("exit", 4)):
@@ -554,12 +572,12 @@ class RawModeEnds(Case):
         finally:
             built.close()
 
-    ENDING = {signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM}
-
     def signalled(self, how: str, argv, exe, sigs, ready="ready\n", ignore_hup=False):
         """The program started on a terminal and sent the signals `sigs`
         once it is `ready`, a beat apart: the signals it catches then, its
         exit status and whether the terminal is cooked once it ended."""
+        import resource
+
         def pre():
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             if ignore_hup:
@@ -814,6 +832,7 @@ class Lines:
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@linux_only(SIGNALS_REASON)
 class Signals(Case):
     @classmethod
     def setUpClass(cls):
@@ -933,7 +952,9 @@ class Signals(Case):
 class Repl(Case):
     """`myla repl` on a terminal edits its lines with `std.term`."""
 
+    @linux_only(PTYS)
     def test_editing_history_and_control_keys(self):
+        import termios
         t = Pty([selfhost_tool("main"), "repl", "--stdlib", STDLIB_ROOT], env=env_with(TERM="xterm"))
         t.expect("myla> ")
         # raw while it waits for a line
@@ -969,11 +990,13 @@ class Repl(Case):
         self.assertEqual(lflag() & (termios.ECHO | termios.ICANON), termios.ECHO | termios.ICANON)
         t.close()
 
+    @linux_only(PTYS)
     def test_a_long_line_typed_while_an_input_runs(self):
         """MYLA-548: a line of 20,000 characters typed while the last input
         runs reaches the editor whole: the terminal takes a key at a time
         then (echoed, Ctrl-C a signal), where, cooked, its own line editing
         kept 4,095 bytes of it and dropped the rest."""
+        import termios
         t = Pty([selfhost_tool("main"), "repl", "--stdlib", STDLIB_ROOT], env=env_with(TERM="xterm"))
         t.expect("myla> ")
         t.send(b"var t = 0\r")
@@ -998,10 +1021,11 @@ class Repl(Case):
         t.close()
 
     def test_pipes_read_plain_lines(self):
-        p = subprocess.run([selfhost_tool("main"), "repl", "--stdlib", STDLIB_ROOT], input="1 + 1\n",
-                           capture_output=True, text=True, timeout=120)
-        self.assertEqual((p.stdout, p.returncode), ("2\n", 0))
-        self.assertEqual(p.stderr, "myla> myla> \n")
+        # (bytes: a text input's newline is CR LF on Windows)
+        p = subprocess.run([selfhost_tool("main"), "repl", "--stdlib", STDLIB_ROOT], input=b"1 + 1\n",
+                           capture_output=True, timeout=120)
+        self.assertEqual((p.stdout, p.returncode), (b"2\n", 0))
+        self.assertEqual(p.stderr, b"myla> myla> \n")
 
 
 PASTE = """import std.term as term
@@ -1145,6 +1169,7 @@ class Primitives(Case):
         finally:
             b.close()
 
+    @linux_only(PTYS)
     def test_the_mode_on_a_terminal(self):
         src = """#allow(primitive)
 fun main() {
