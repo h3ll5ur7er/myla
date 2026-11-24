@@ -1,9 +1,10 @@
 """Burn test: the self-hosted `myla` CLI ([[selfhost/main.my]], MYLA-31, MYLA-35).
 
-The CLI is built by the self-hosted compiler and copied to `<tmp>/build/myla`,
-next to a `<tmp>/lib` that links to this repository's stdlib, the layout
-of a checkout. It is run from another directory, so the stdlib root must come
-from the binary's own location.
+The CLI is built by the self-hosted compiler and copied to `<tmp>/build/myla`
+(`myla.exe` on Windows), next to a `<tmp>/lib` that links to this
+repository's stdlib (a copy on Windows), the layout of a checkout. It is run
+from another directory, so the stdlib root must come from the binary's own
+location.
 
 Where it must print what the retired Python CLI printed, the Python CLI's
 output is its recorded answer (`tests/burn/_golden.py`, MYLA-219).
@@ -20,7 +21,7 @@ import tempfile
 import unittest
 
 from ._golden import answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE, HOST_TARGET, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, ON_WINDOWS, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -75,8 +76,12 @@ class _Layout(unittest.TestCase):
         cls._tmp = tempfile.TemporaryDirectory()
         root = cls._tmp.name
         os.makedirs(os.path.join(root, "build"))
-        os.symlink(os.path.join(_REPO, "lib"), os.path.join(root, "lib"))
-        cls.myla = os.path.join(root, "build", "myla")
+        if ON_WINDOWS:
+            # a copy: a link to a directory is a privilege on Windows (MYLA-926)
+            shutil.copytree(os.path.join(_REPO, "lib"), os.path.join(root, "lib"))
+        else:
+            os.symlink(os.path.join(_REPO, "lib"), os.path.join(root, "lib"))
+        cls.myla = os.path.join(root, "build", "myla" + EXE)
         shutil.copy(selfhost_tool("main"), cls.myla)
         cls.work = os.path.join(root, "work")       # the directory commands run in
         os.makedirs(cls.work)
@@ -88,7 +93,8 @@ class _Layout(unittest.TestCase):
         cls._tmp.cleanup()
 
     def myla_cmd(self, *argv: str) -> subprocess.CompletedProcess:
-        return subprocess.run([self.myla, *argv], cwd=self.work, capture_output=True, text=True)
+        # (UTF-8 whatever the locale: Windows' is its ANSI code page, MYLA-926)
+        return subprocess.run([self.myla, *argv], cwd=self.work, capture_output=True, encoding="utf-8")
 
 
 # An actor method changing its state after an `await` on the strength of a
@@ -185,25 +191,29 @@ class SelfHostedCli(_Layout):
         self.assertIn("1/1 passed", proc.stdout)
 
     def test_build_leaves_only_the_binary(self):
-        out = os.path.join(self.work, "out", "prog")
+        out = os.path.join(self.work, "out", "prog" + EXE)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         proc = self.myla_cmd("build", "prog.my", "-o", out)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(os.listdir(os.path.dirname(out)), ["prog"])
+        self.assertEqual(os.listdir(os.path.dirname(out)), ["prog" + EXE])
         run = subprocess.run([out, "z"], capture_output=True, text=True)
         self.assertEqual(run.stdout, f"2\n{out}\nz\n42\n")
 
     def test_build_without_the_assembler_on_path(self):
-        # the tools are looked for on PATH (D147): without `as` there, the
-        # build says what it needs
+        # the tools are looked for on PATH (D147): without `as` there (clang
+        # on Windows, D211), the build says what it needs
         empty = os.path.join(self.work, "empty-path")
         os.makedirs(empty, exist_ok=True)
-        out = os.path.join(self.work, "out", "noas")
+        out = os.path.join(self.work, "out", "noas" + EXE)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         proc = subprocess.run([self.myla, "build", "prog.my", "-o", out], cwd=self.work, capture_output=True,
                               text=True, env=dict(os.environ, PATH=empty))
         self.assertEqual(proc.returncode, 1)
-        self.assertIn(f"myla: 'as' was not found: building for {HOST_TARGET} here needs GNU as and ld (binutils)", proc.stderr)
+        if HOST_TARGET == "x86_64-windows":
+            missing = "myla: 'clang' was not found: building for x86_64-windows here needs clang, llvm-dlltool and lld-link"
+        else:
+            missing = f"myla: 'as' was not found: building for {HOST_TARGET} here needs GNU as and ld (binutils)"
+        self.assertIn(missing, proc.stderr)
 
     @unittest.skipUnless(shutil.which("clang"), "needs clang")
     def test_build_without_the_linker_on_path(self):
@@ -211,8 +221,8 @@ class SelfHostedCli(_Layout):
         # wasm-ld on PATH, the link names the missing one and the target
         only = os.path.join(self.work, "clang-only")
         os.makedirs(only, exist_ok=True)
-        if not os.path.exists(os.path.join(only, "clang")):
-            os.symlink(shutil.which("clang"), os.path.join(only, "clang"))
+        if not os.path.exists(os.path.join(only, "clang" + EXE)):
+            os.symlink(shutil.which("clang"), os.path.join(only, "clang" + EXE))
         out = os.path.join(self.work, "out", "nold")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         proc = subprocess.run([self.myla, "build", "prog.my", "--target", "wasm32-wasi", "-o", out], cwd=self.work,
@@ -418,8 +428,11 @@ class TestRepl(_Layout):
     an open bracket continues the input, errors don't end the session."""
 
     def repl(self, text: str) -> subprocess.CompletedProcess:
-        return subprocess.run([self.myla, "repl"], cwd=self.work, input=text, capture_output=True, text=True,
+        # the input as bytes, UTF-8: Windows' text mode would end each line
+        # with "\r\n" (MYLA-926)
+        proc = subprocess.run([self.myla, "repl"], cwd=self.work, input=text.encode(), capture_output=True,
                               timeout=120)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, proc.stdout.decode(), proc.stderr.decode())
 
     def test_a_session(self):
         proc = self.repl(SESSION)
