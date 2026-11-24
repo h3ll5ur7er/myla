@@ -27,7 +27,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
-from ._native import CAN_BUILD_NATIVE
+from ._native import CAN_BUILD_NATIVE, EXE, ON_WINDOWS
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -92,6 +92,17 @@ class BackEndNames(unittest.TestCase):
         self.assertNotIn("std$list$sum", names)  # only in a `#test` case of `checked_code`
 
 
+def _head(stderr: str) -> list[str]:
+    """An error's first five lines: its message, place and source line. On
+    Windows the place's `\\` as `/`: a file checked itself is named as given
+    (`lib\\std\\text.my`), one imported by the library's root and `/`
+    (`lib/std/text.my`, MYLA-926)."""
+    lines = stderr.split("\n")[:5]
+    if ON_WINDOWS:
+        lines = [line.replace("\\", "/") if line.lstrip().startswith("--> ") else line for line in lines]
+    return lines
+
+
 class ImportedStdBodies(unittest.TestCase):
     """MYLA-413, D179 (2): an imported module of `std` has its functions'
     bodies read once called, with the error of one read at the place and in
@@ -140,7 +151,7 @@ class ImportedStdBodies(unittest.TestCase):
                 proc = self.myla_cmd(cmd, path, lib=lib)
                 self.assertEqual((proc.stderr, proc.returncode), ("", 0), (cmd, lib))
             if CAN_BUILD_NATIVE:
-                exe = os.path.join(self.work, "uncalled")
+                exe = os.path.join(self.work, "uncalled" + EXE)
                 proc = self.myla_cmd("build", path, "-o", exe, lib=lib)
                 self.assertEqual((proc.stderr, proc.returncode), ("", 0))
                 self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, "a b\nc\n")
@@ -150,21 +161,21 @@ class ImportedStdBodies(unittest.TestCase):
         # read late gives the same error, place and source line
         eager = self.myla_cmd("check", os.path.join(self.lib, "std", "text.my"))
         self.assertEqual(eager.returncode, 1)
-        first = eager.stderr.split("\n")[:5]
+        first = _head(eager.stderr)
         self.assertEqual(first[0], "type error: return type mismatch: expected 'int32', found 'str'", eager.stderr)
         for call in ("text.broken_413()", "text.calls_broken_413()"):
             proc = self.myla_cmd("check", self.calling(call))
             self.assertEqual(proc.returncode, 1, call)
-            self.assertEqual(proc.stderr.split("\n")[:5], first, call)
+            self.assertEqual(_head(proc.stderr), first, call)
 
     def test_a_called_body_has_the_eager_parse_error(self) -> None:
         eager = self.myla_cmd("check", os.path.join(self.plib, "std", "text.my"), lib=self.plib)
         self.assertEqual(eager.returncode, 1)
-        first = eager.stderr.split("\n")[:5]
+        first = _head(eager.stderr)
         self.assertEqual(first[0], "parse error: expected variable name, found '='", eager.stderr)
         proc = self.myla_cmd("check", self.calling("text.garbled_413()"), lib=self.plib)
         self.assertEqual(proc.returncode, 1)
-        self.assertEqual(proc.stderr.split("\n")[:5], first)
+        self.assertEqual(_head(proc.stderr), first)
 
     # a body with a brace too many or missing: the skipped body ends short or
     # long, and what is left reads as declarations (MYLA-413's follow-up in
@@ -185,7 +196,7 @@ class ImportedStdBodies(unittest.TestCase):
                 self.assertTrue(eager.stderr.startswith("parse error: "), eager.stderr)
                 path = self.write("braces.my", f"import std.brace_{name} as b\n\nfun main() {{\n    print(b.f_793(1))\n}}\n")
                 proc = self.myla_cmd("check", path)
-                self.assertEqual(proc.stderr.split("\n")[:5], eager.stderr.split("\n")[:5])
+                self.assertEqual(_head(proc.stderr), _head(eager.stderr))
 
     def test_a_test_attribute_in_a_body_is_an_error(self) -> None:
         # M9 of the review of 2026-11-17: a `#test` in a function's body is
