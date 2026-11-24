@@ -17,16 +17,16 @@ needs.
 from __future__ import annotations
 
 import os
-import select
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 from ._golden import golden
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-from ._tools import STDLIB_ROOT, selfhost_tool
-from ._native import AS_CMD  # the machine's assembler (MYLA-926)
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, assemble
+from ._tools import EXE, STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -211,11 +211,10 @@ class StdinParity(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(source)
         asm = subprocess.run([cls.gen, path, STDLIB_ROOT], capture_output=True, text=True, check=True)
-        sh_native = os.path.join(d, "sh_native")
+        sh_native = os.path.join(d, "sh_native" + EXE)
         with open(sh_native + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
-        subprocess.run([*AS_CMD, "-o", sh_native + ".o", sh_native + ".s"], check=True)
-        subprocess.run(["ld", "-o", sh_native, sh_native + ".o"], check=True)
+        assemble(sh_native + ".s", sh_native)
         cls.paths[name] = path
         return {
             "self-hosted interpreter": [cls.interp, path, STDLIB_ROOT],
@@ -289,9 +288,7 @@ class StdinParity(unittest.TestCase):
                     self.assertEqual(_read_line(proc, 30), b"bye\n")
                     self.assertEqual(proc.wait(30), 0)
                 finally:
-                    proc.kill()
-                    proc.wait()
-                    proc.stdout.close()
+                    _end(proc)
 
     def test_waiting_for_input(self) -> None:
         for impl, argv in self.programs["wait"].items():
@@ -308,24 +305,51 @@ class StdinParity(unittest.TestCase):
                     self.assertEqual(_read_line(proc, 30), b"true\n")    # the end of the input
                     self.assertEqual(proc.wait(30), 0)
                 finally:
-                    proc.kill()
-                    proc.wait()
-                    proc.stdout.close()
+                    _end(proc)
+
+
+# The bytes of each process's output, as a thread of its own reads them
+# (`select` takes no pipe on Windows, MYLA-926): b"" at the end.
+_OUTPUTS: dict[subprocess.Popen, tuple[queue.Queue, threading.Thread]] = {}
 
 
 def _read_line(proc: subprocess.Popen, timeout: float) -> bytes:
-    """One line of the process's output, or what arrived before `timeout`."""
-    fd = proc.stdout.fileno()
+    """One line of the process's output, or what arrived before `timeout`
+    (a byte at most `timeout` seconds after the one before)."""
+    if proc not in _OUTPUTS:
+        got: queue.Queue = queue.Queue()
+
+        def pump() -> None:
+            while True:
+                byte = proc.stdout.read(1)
+                got.put(byte)
+                if not byte:
+                    return
+
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+        _OUTPUTS[proc] = (got, reader)
+    got = _OUTPUTS[proc][0]
     line = b""
     while not line.endswith(b"\n"):
-        ready, _, _ = select.select([fd], [], [], timeout)
-        if not ready:
+        try:
+            byte = got.get(timeout=timeout)
+        except queue.Empty:
             break
-        byte = os.read(fd, 1)
         if not byte:
+            got.put(byte)      # the end, for the next read too
             break
         line += byte
     return line
+
+
+def _end(proc: subprocess.Popen) -> None:
+    """`proc` stopped, its output's reader ended and its pipe closed."""
+    proc.kill()
+    proc.wait()
+    if proc in _OUTPUTS:
+        _OUTPUTS.pop(proc)[1].join(30)
+    proc.stdout.close()
 
 
 if __name__ == "__main__":

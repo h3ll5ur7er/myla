@@ -37,7 +37,7 @@ import time
 import unittest
 
 from ._golden import NoGolden, answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE
+from ._native import CAN_BUILD_NATIVE, linux_only
 from ._tools import STDLIB_ROOT, peak_memory, selfhost_tool
 
 _REPO = os.path.abspath(
@@ -488,7 +488,7 @@ class SelfHostedInterpParity(unittest.TestCase):
                 with self.subTest(mode=mode):
                     self.assertLess(times[500], 3 * times[5] + 0.5, f"{mode}: 5 bytes {times[5]:.2f} s, 500 bytes {times[500]:.2f} s")
 
-    @unittest.skipIf(not os.path.isdir("/proc/self/task"), "counts the wake-ups in /proc")
+    @linux_only("counts the wake-ups in /proc, under a raised RLIMIT_NOFILE")
     def test_an_idle_server_sleeps(self) -> None:
         """An interpreted server waiting for connections, and for requests
         on 900 kept ones, wakes a few dozen times a second and uses a few
