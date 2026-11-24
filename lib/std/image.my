@@ -594,10 +594,9 @@ impl<S: Sample> Image<S> {
         var j = 0
         if self.layout.is_color() && !layout.is_color() {
             if dc == 1 {
-                for _ in 0..n {
-                    out[j] = S.luma(d[i], d[i + 1], d[i + 2])
+                for k in 0..n {
+                    out[k] = S.luma(d[i], d[i + 1], d[i + 2])
                     i += sc
-                    j += 1
                 }
             } else {
                 for _ in 0..n {
