@@ -40,3 +40,21 @@ The `burn-arm64` job on `ubuntu-24.04-arm` (`scripts/test-target.py host`), on t
 | 45016466400 | `43e721a` | 113 of 114 (`test_wasm.test_compiler`, its reference the machine's own default), 33 min |
 
 What the tests assumed of an x86-64 machine, now keyed on it (`_native.HOST_TARGET`, `AS_CMD`, `READS_X86`): the x86-64 seed and `as --64` (`_tools`, sixteen suites), the x86-64 assembly and registers read (codegen, float registers, loop overhead, register arguments, small and byte copies, packed lists, overflow, `test_raw_memory`'s `call`, gdb's `$rdi`), `-g` (x86-64 Linux's and Windows' alone: `test_debug_info`, `test_installed`, the debugger, a project's `-g` build), the host's name in messages (`test_selfhost_cli`, `test_test_native`, `test_label_names`), and an x86-64 reference build (`test_wasm`). Two tests were too slow for the slower machine and changed: `test_selfhost_parser`'s linear-time bound is relative now, and `num`'s `pow10_sig_is_exact` makes each power of ten from the one before (15.8 s interpreted on x86-64, 10.3 s now). The slowness itself is [[MYLA-929]].
+
+## Evidence (step 2, 2026-11-24)
+
+The `burn-windows` job on `windows-latest` (`python scripts/test-target.py host`), on the branch:
+
+| Run | Head | Suites | Result |
+|---|---|---|---|
+| 45337804748 | `5006f69` | the 39 of the Wine job | stopped printing its logs (cp1252: `PYTHONUTF8`, UTF-8 logs) |
+| 45342580451 | `82856b0` | 39 | 25 of 39 in 5 min (the Wine job: 8 min) |
+| 45346263902 | `9b25804` | 39 | 30 of 39: the loader's Windows paths ([[MYLA-931]]) |
+| 45353314368 | `2f48251` | 39 | 36 of 39 (test_http: [[MYLA-933]]) |
+| 45358031010 | `b2c1061` | all 114 | 94 of 114 in 19 min |
+| 45365757361 | `b7c3965` | 114 | 95: test_http passes ([[MYLA-933]]) |
+| 45371789872 | `640e5c8` | 114 | 111: groups A–E ([[MYLA-934]], [[MYLA-936]], [[MYLA-937]], [[MYLA-938]], [[MYLA-940]], [[MYLA-941]], [[MYLA-942]], [[MYLA-943]]) |
+| 45378102638 | `fd0abe0` | 114 | 111 (test_std_cache: the PE time stamp) |
+| 45384362001 | `692f445` | 114 | 112: left [[MYLA-944]] (a wasm32 harness's scratch directory on another drive) and test_http's `test_kept_connections_wait_parked` at 4.532 s of its 4.5 ([[MYLA-945]]) |
+
+What the suites assumed of Linux, ported: the build sites (`_native.assemble`, `.exe`), POSIX modules imported where they're used, process groups and signals (`taskkill`, `CTRL_BREAK_EVENT`), a reader thread for `select` on pipes, text-mode files and input (CRLF), `\` in expected paths (`_native.shown`), `relpath` across drives, Git's read-only objects, an executable still held a moment after its process, `nul` as a name, `/bin/echo`, Windows' loopback (a refused connect retried for 2 s), the exit code's 32 bits (D216), a handle number that is open, the UCRT's `expm1`. What they found in Myla, fixed: the loader's and the project tool's paths ([[MYLA-931]], [[MYLA-930]]), interp_main's library ([[MYLA-932]]), a parked socket's close and Winsock's send buffering ([[MYLA-933]]), CRLF in manifests and diagnostics ([[MYLA-934]], [[MYLA-941]]), a test program's CRLF block ([[MYLA-936]]), read-only files ([[MYLA-937]]), the language server's URIs ([[MYLA-938]]), the interpreter's environment ([[MYLA-942]]), the driver's drive paths and an exit past 255 ([[MYLA-943]]), and `lld-link`'s time stamp (`/Brepro`: a Windows program builds to the same bytes each time). Linux unchanged: the `burn` job, the Wine job and `burn-arm64` (114 of 114) pass on the same heads. The Wine job's `test_children_run_in_parallel` failed twice in seven runs (runs 275 and 281) and passes natively: Wine's, one more reason to retire it.
