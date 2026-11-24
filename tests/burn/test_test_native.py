@@ -20,9 +20,10 @@ import tempfile
 import time
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, HOST_TARGET, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, SKIP_REASON, linux_only
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
-from tests.burn.test_test_functions import _ASYNC, _ASYNC_WANT, _FUNCTIONS, _FUNCTIONS_WANT, _UNWINDING, _myla, _write
+from tests.burn.test_test_functions import (_ASYNC, _ASYNC_WANT, _FUNCTIONS, _FUNCTIONS_WANT, _UNWINDING, _myla,
+                                            _scratch_env, _write)
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _RUN_MJS = os.path.join(_REPO, "tools", "wasm", "run.mjs")
@@ -659,7 +660,7 @@ class TestNative(unittest.TestCase):
             scratch = os.path.join(tmp, "scratch")
             os.mkdir(scratch)
             path = _write(tmp, "unwind.my", _UNWINDING)
-            proc = _myla(["test", path, "--native"], tmp, {"TMPDIR": scratch})
+            proc = _myla(["test", path, "--native"], tmp, _scratch_env(scratch))
             self.assertEqual(proc.returncode, 1, proc.stderr)
             self.assertEqual(proc.stdout, _UNWINDING_NATIVE_WANT)
             # no deferred block ran on the failure
@@ -747,6 +748,7 @@ class TestNative(unittest.TestCase):
                     proc = _myla(["test", path, *flags], tmp, {"MYLA_THREADS": "4"})
                     self.assertEqual((proc.stdout, proc.returncode), (_NOISY_WANT, 0))
 
+    @linux_only("the case reads /proc/self/cmdline and has its parent killed by a Unix signal")
     def test_a_forged_record_of_a_killed_child(self):
         # M2: a child a signal ended has no record
         with tempfile.TemporaryDirectory() as tmp:
@@ -754,6 +756,7 @@ class TestNative(unittest.TestCase):
             proc = _myla(["test", path, "--native"], tmp)
             self.assertEqual((proc.stdout, proc.returncode), ("FAIL  forged #1: killed by signal 9\n\n0/1 passed.\n", 1))
 
+    @linux_only("the cases' children are sh and sleep, looked for with pgrep")
     def test_a_case_s_time_limit(self):
         # D259, alike on both runners
         with tempfile.TemporaryDirectory() as tmp:
@@ -768,6 +771,7 @@ class TestNative(unittest.TestCase):
             self.assertEqual(proc.returncode, 1)
             self.assertIn("--timeout takes whole seconds", proc.stderr)
 
+    @linux_only("the case's child is sh's sleep, looked for with pgrep")
     @unittest.skipUnless(os.path.exists("/proc"), "needs Linux")
     def test_a_case_s_children_go_with_it(self):
         # D259: past its limit the case's process group is killed, the
@@ -802,6 +806,7 @@ class TestNative(unittest.TestCase):
                 time.sleep(0.1)
             self.assertEqual(subprocess.run(["pgrep", "-f", scratch], capture_output=True, text=True).stdout, "")
 
+    @linux_only("the case's child is sh's sleep, looked for with pgrep")
     @unittest.skipUnless(os.path.exists("/proc"), "needs Linux")
     def test_a_case_s_children_go_with_a_killed_run(self):
         # MYLA-819: `myla test --native` killed while a case waits for a
@@ -882,11 +887,12 @@ class TestNative(unittest.TestCase):
             scratch = os.path.join(tmp, "scratch")
             os.mkdir(scratch)
             path = _write(tmp, "calls_main.my", source)
-            proc = _myla(["test", path, "--native"], tmp, {"TMPDIR": scratch})
+            proc = _myla(["test", path, "--native"], tmp, _scratch_env(scratch))
             self.assertEqual(proc.returncode, 1)
             self.assertIn("unknown function 'main'", proc.stderr)
             self.assertIn("didn't build", proc.stderr)
-            kept = glob.glob(os.path.join(scratch, "myla-test-*", "harness.my"))
+            # (named after the harness, `harness.exe` on Windows)
+            kept = glob.glob(os.path.join(scratch, "myla-test-*", "harness" + EXE + ".my"))
             self.assertEqual(len(kept), 1, proc.stderr)
             with open(kept[0], encoding="utf-8") as fh:
                 self.assertIn("fun __myla_case_0() -> Option<str>", fh.read())
@@ -1035,7 +1041,7 @@ fun last() {}
             scratch = os.path.join(tmp, "scratch")
             os.mkdir(scratch)
             path = _write(tmp, "unwind.my", _UNWINDING)
-            proc = self._run(tmp, path, env={"TMPDIR": scratch})
+            proc = self._run(tmp, path, env=_scratch_env(scratch))
             self.assertEqual(proc.returncode, 1, proc.stderr)
             self.assertEqual(proc.stdout, _UNWINDING_NATIVE_WANT)
             self.assertFalse(os.path.exists(os.path.join(tmp, "unwound.txt")))

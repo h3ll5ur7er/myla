@@ -14,13 +14,14 @@ import tempfile
 import unittest
 
 from . import test_windows
-from ._native import (BUILD_TARGET, 
+from ._native import (BUILD_TARGET,
     CAN_BUILD_NATIVE,
     SKIP_REASON,
     TEST_TARGET,
     build_and_run_full,
     check_file,
     interpret_full,
+    linux_only,
     native_build,
     run_file_both_now,
     run_source_both_now,
@@ -250,6 +251,7 @@ class TestSubprocessParity(unittest.TestCase):
 
 @unittest.skipUnless(CAN_BUILD_NATIVE and TEST_TARGET in ("", "x86_64-linux") and shutil.which("strace"),
                      "strace's fault injection, on x86-64 Linux")
+@linux_only("strace's fault injection (Git for Windows' strace is MSYS2's)")
 class FailedPipeRead(unittest.TestCase):
     """A read of a child's pipe that fails is `Other` of its cause in `run`
     and `output`, once the child ended (MYLA-862), not the stream's end with
@@ -291,4 +293,5 @@ class WindowsChildren(test_windows.Children):
     their ground with a Windows program of its own as the child:
     test_windows.Children's output, error, exit code, command builder, PATH,
     directory, environment, input, waiting in a task, killing, and a test
-    harness's cases as children."""
+    harness's cases as children. On Windows itself (MYLA-926) the same,
+    the programs run as they are."""

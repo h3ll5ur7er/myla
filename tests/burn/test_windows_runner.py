@@ -7,9 +7,11 @@ from __future__ import annotations
 import ctypes
 import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 
+from ._native import EXE as EXE_SUFFIX, ON_WINDOWS
 from .test_windows import RUNNER_CASES
 
 _SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, "scripts", "windows-runner.py")
@@ -77,12 +79,14 @@ class Programs(unittest.TestCase):
         r = runner.Runner.__new__(runner.Runner)
         r.bundle = os.path.join(os.sep, "b")
         with tempfile.TemporaryDirectory() as d:
-            tool = os.path.join(d, "llvm-symbolizer")
+            # (on Windows a program on PATH is found by its extension, in
+            # PATHEXT's case)
+            tool = os.path.join(d, "llvm-symbolizer" + EXE_SUFFIX)
             with open(tool, "w") as fh:
                 fh.write("#!/bin/sh\n")
             os.chmod(tool, 0o755)
             r.env = {"PATH": d}
-            self.assertEqual(r.program("llvm-symbolizer", "/w"), tool)
+            self.assertEqual(os.path.normcase(r.program("llvm-symbolizer", "/w")), os.path.normcase(tool))
         self.assertEqual(r.program("bin/debug.exe", "/w"), os.path.join(os.sep, "b", "bin", "debug.exe"))
         self.assertEqual(r.program("./hello.exe", "/w"), os.path.join("/w", "hello.exe"))
 
@@ -127,6 +131,20 @@ class Records(unittest.TestCase):
         self.assertEqual((ctypes.sizeof(counters), counters.PeakPagefileUsage.offset), (72, 64))
 
 
+# A step's script and the command that runs it: sh's on Linux, Python's on
+# Windows (MYLA-926: no sh there; the runner takes a word with no `/` for a
+# program on PATH, a path such as Windows' sys.executable as it is)
+SCRIPT = "t.py" if ON_WINDOWS else "t.sh"
+RUN = [sys.executable, SCRIPT] if ON_WINDOWS else ["sh", SCRIPT]
+# what each test's script does, in sh and in Python (its output bytes as
+# they are: Python's text streams would end its lines with CR LF there)
+TALLY_393 = ("echo 393; echo 'BAD child 7' >&2\n",
+             "import sys\nsys.stdout.buffer.write(b'393\\n')\nsys.stderr.buffer.write(b'BAD child 7\\n')\n")
+RIGHT_FIRST = ("if [ -e seen ]; then echo 1; else touch seen; echo 0; fi\n",
+               "import os, sys\nif os.path.exists('seen'):\n    sys.stdout.buffer.write(b'1\\n')\n"
+               "else:\n    open('seen', 'w').close()\n    sys.stdout.buffer.write(b'0\\n')\n")
+
+
 class Reports(unittest.TestCase):
     """What a failed step says, and a tally's rate (MYLA-798: the report of
     process/many-children couldn't say why it failed)."""
@@ -136,25 +154,26 @@ class Reports(unittest.TestCase):
         r.bundle, r.wine, r.runs, r.tally, r.env, r.note, r.tools_missing = work, [], 3, tally, dict(os.environ), "", []
         return r
 
-    def script(self, work: str, body: str) -> None:
-        with open(os.path.join(work, "t.sh"), "w") as fh:
-            fh.write(body)
+    def script(self, work: str, body: tuple[str, str]) -> None:
+        """The step's script, `body`'s sh or Python, as SCRIPT in `work`."""
+        with open(os.path.join(work, SCRIPT), "w") as fh:
+            fh.write(body[1] if ON_WINDOWS else body[0])
 
     def test_a_failed_step_shows_its_standard_error_checked_or_not(self):
         with tempfile.TemporaryDirectory() as d:
-            self.script(d, "echo 393; echo 'BAD child 7' >&2\n")
+            self.script(d, TALLY_393)
             r = self.runner_in(d)
-            bad = r.run_step(runner.step(["sh", "t.sh"], "400\n", None), d, {})
+            bad = r.run_step(runner.step(RUN, "400\n", None), d, {})
             self.assertIn("stdout differs", bad)
             self.assertIn("its standard error b'BAD child 7\\n'", bad)
-            self.assertEqual(r.run_step(runner.step(["sh", "t.sh"], "393\n", None), d, {}), "")
+            self.assertEqual(r.run_step(runner.step(RUN, "393\n", None), d, {}), "")
 
     def test_a_tally_runs_every_run_and_gives_the_rate(self):
         with tempfile.TemporaryDirectory() as d:
             # right the first time, wrong after
-            self.script(d, "if [ -e seen ]; then echo 1; else touch seen; echo 0; fi\n")
-            case = {"name": "x/rate", "steps": [runner.step(["sh", "t.sh"], "0\n", repeat=True)],
-                    "files": {"t.sh": "t.sh"}, "windows_only": ""}
+            self.script(d, RIGHT_FIRST)
+            case = {"name": "x/rate", "steps": [runner.step(RUN, "0\n", repeat=True)],
+                    "files": {SCRIPT: SCRIPT}, "windows_only": ""}
             import contextlib
             import io
             said = io.StringIO()
@@ -162,7 +181,7 @@ class Reports(unittest.TestCase):
                 verdict, what = self.runner_in(d, tally=True).run_case(case)
             self.assertEqual(verdict, "FAIL")
             self.assertIn("2 runs failed", what)
-            self.assertIn("rate x/rate step 1 (sh t.sh): 1 of 3 right", said.getvalue())
+            self.assertIn(f"rate x/rate step 1 ({' '.join(RUN)}): 1 of 3 right", said.getvalue())
 
 
 if __name__ == "__main__":
