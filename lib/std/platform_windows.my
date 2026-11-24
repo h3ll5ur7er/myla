@@ -4266,11 +4266,17 @@ pub fun sock_error(h: int64) -> int64 {
 // signal on Windows). A non-blocking socket on the port whose send would
 // wait sends a copy of them (at most SEND_ROOM) overlapped, its end the
 // poller's to hear of; until it ends the next send is WOULD_BLOCK, and how
-// it failed, if it did, is the next one's error.
+// it failed, if it did, is the next one's error. One send takes at most
+// SEND_ROOM bytes (MYLA-933): Winsock takes the whole of a send into its
+// buffer while that isn't full, however large the send, so on the Windows
+// runner an 8 MiB response went at once to a peer that read none of it,
+// and the server's `write_ms` and its count of what its clients got
+// (MYLA-863) saw it all sent; Linux's buffer takes what fits, and the
+// rest waits for the peer to read.
 pub fun sock_send(h: int64, p: int64, n: int64) -> int64 {
     var len = n
-    if len > 1073741824 {
-        len = 1073741824
+    if len > SEND_ROOM {
+        len = SEND_ROOM
     }
     let ws = ws_hold(h)
     let r = send_with(ws, h, p, len)
@@ -4574,13 +4580,27 @@ fun poll_ready(got: int64, events: int64) -> int64 {
 // The socket `h` closed (`closesocket`), its watched handle with it; one
 // whose overlapped send still goes on is closed once it ends
 // (`ws_close_later`), so its bytes go as Linux sends a closed socket's.
+// A stream socket whose read of no bytes goes on (one parked, waiting to
+// read, in a program with tasks) is closed gracefully, as Linux closes
+// every socket (MYLA-933): Winsock closes a socket with a receive pending
+// abortively, with a reset, so the peer lost what it had been sent and not
+// yet read (a keeper's 408) and got WSAECONNRESET for the end. So the
+// receive is cancelled first (`CancelIoEx`; its packet comes cancelled, as
+// a close's would), and a socket closed now is shut down for sending
+// before (SD_SEND: its FIN goes after the bytes it holds), libuv's
+// `uv_tcp_close` order; one closed later has no receive pending by then.
 pub fun sock_close(h: int64) -> int64 {
     var spare: int64 = 0
     var accepted: int64 = 0
+    var reading = false
     net_lock()
     ws_later()
     let ws = ws_take(h)
     if ws != 0 {
+        if __load64(ws + WS_KIND) == K_STREAM && ws_going(ws, WS_PROBE, F_PROBING) {
+            reading = true
+            let c = __syscall(__rt_get("__imp_CancelIoEx"), h, ws + WS_PROBE, 0)
+        }
         if ws_going(ws, WS_SEND, F_SENDING) && ws_close_later(ws, __rt_get("__imp_closesocket")) {
             net_unlock()
             return 0
@@ -4591,6 +4611,9 @@ pub fun sock_close(h: int64) -> int64 {
         ws_drop(ws)
     }
     net_unlock()
+    if reading {
+        let shut = __syscall(__rt_get("__imp_shutdown"), h, 1, 0)       // SD_SEND
+    }
     let r = __syscall(__rt_get("__imp_closesocket"), h, 0, 0)
     if spare != 0 {
         // (AcceptEx's socket: its operation ends cancelled)
