@@ -4,7 +4,7 @@ Read from the source, `lib/std/*.my` (November 2026); the prose reference is `do
 
 Implicit modules (methods in every program, no import): `std.str`, `std.char`, `std.int`, `std.float`, `std.list`, `std.option`, `std.map`, `std.hash`.
 
-Other modules: `std.algebra`, `std.archive`, `std.args`, `std.bench`, `std.bigint`, `std.bitset`, `std.btree`, `std.bytes`, `std.cache`, `std.checksum`, `std.compress`, `std.csv`, `std.deque`, `std.digest`, `std.encoding`, `std.fmt`, `std.fs`, `std.glob`, `std.graph`, `std.grid`, `std.heap`, `std.http`, `std.ini`, `std.io`, `std.ioerror`, `std.iter`, `std.json`, `std.log`, `std.math`, `std.net`, `std.num`, `std.path`, `std.platform` (with `std.rt`: internal), `std.process`, `std.random`, `std.regex`, `std.set`, `std.signal`, `std.slice`, `std.task`, `std.term`, `std.test`, `std.text`, `std.time`, `std.toml`, `std.unionfind`, `std.url`, `std.uuid`, `std.vector` (with `std.matrix`, `std.quaternion` and the `32` twins), `std.xml`, `std.yaml`, and the gdb helper `lib/debug/myla_gdb.py`.
+Other modules: `std.algebra`, `std.archive`, `std.args`, `std.bench`, `std.bigint`, `std.bitset`, `std.btree`, `std.bytes`, `std.cache`, `std.checksum`, `std.compress`, `std.csv`, `std.deque`, `std.digest`, `std.encoding`, `std.fmt`, `std.fs`, `std.glob`, `std.graph`, `std.grid`, `std.heap`, `std.http`, `std.image`, `std.ini`, `std.io`, `std.ioerror`, `std.iter`, `std.json`, `std.log`, `std.math`, `std.net`, `std.num`, `std.path`, `std.platform` (with `std.rt`: internal), `std.process`, `std.random`, `std.regex`, `std.set`, `std.signal`, `std.slice`, `std.task`, `std.term`, `std.test`, `std.text`, `std.time`, `std.toml`, `std.unionfind`, `std.url`, `std.uuid`, `std.vector` (with `std.matrix`, `std.quaternion` and the `32` twins), `std.xml`, `std.yaml`, and the gdb helper `lib/debug/myla_gdb.py`.
 
 ## Conventions
 
@@ -437,6 +437,21 @@ async fun main() {
 // 200 hi /a/b 2 text/plain
 // served 1
 ```
+
+## std.image
+The image type of the codecs, std.imgproc, std.draw (D311, MYLA-933). `import std.image as image`, `from std.image import Image8, Layout, Color` (struct literals need the import).
+- `pub struct Image<S> { width: int, height: int, layout: Layout, data: [S] }` (`Eq`), samples interleaved row by row: `data[(y * width + x) * channels + c]`. `typealias Image8 = Image<uint8>`, `Image16`, `ImageF` (`float32`). `enum Layout { Gray, GrayAlpha, Rgb, Rgba }` with `channels()`, `has_alpha()`, `is_color()`, `Format` (`"gray+alpha"`); `layout_of(n) -> Option<Layout>`.
+- `trait Sample` (`uint8`, `uint16`, `float32`; called on the type): `max_value()`, `s.to_f32()` (unscaled), `from_f32(v)` (rounded, clamped), `s.to_unorm8()`, `from_unorm8(v)`, `luma(r, g, b)` (BT.601; integers `(R*19595 + G*38470 + B*7471 + 0x8000) >> 16`, Pillow's `convert("L")` exactly), `s.mul_alpha(a)`, `s.div_alpha(a)` (Pillow's `"RGBa"` and back).
+- `struct Color { r, g, b, a: uint8 }` (straight alpha, `Eq`, `Hash`, `Format` `#rrggbbaa`): `rgb(r, g, b)`, `rgba(r, g, b, a)`, `parse_color(s) -> Option<Color>` (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`), `c.with_alpha(a)`, `c.lerp(d, t: float32)`. `struct Rect { x, y, w, h: int }`: `rect(x, y, w, h)`, `r.contains(x, y)`, `r.is_empty()`, `r.intersect(o)` (`rect(0, 0, 0, 0)` if none).
+- `enum ImageError { Truncated, BadSignature, Unsupported(str), Corrupt(str), Checksum, TooLarge(int64), Mismatch(str), Io(IoError) }` (`message()`, `Format`), every codec's. `struct ImageInfo { width, height, layout, bit_depth, frames, format: str }`. `MAX_PIXELS: int64 = 2^28`, `MAX_SAMPLES`, `sample_count(w, h, ch) -> Option<int64>`, `check_size(w, h, ch, max_pixels) -> Result<(), ImageError>`.
+- Making: `new<S: Sample>(w, h, layout, fill: S) -> Image<S>` (a negative size or past 2^31 − 1 samples a failure), `from_data<S: Sample>(w, h, layout, data) -> Result<Image<S>, ImageError>` (`Mismatch`), `merge<S: Sample>(planes: [Image<S>], layout) -> Result<Image<S>, ImageError>`.
+- Reading: `img[(x, y, c)]`, `img[(x, y, c)] = v` (out of bounds a failure), `img.get(x, y, c) -> Option<S>`, `in_bounds(x, y)`, `channels()`, `offset(x, y, c)`, `bounds() -> Rect`, `color_at(x, y) -> Color`, `set_color(var self, x, y, c)`, `row(y) -> [S]`, `channel(c) -> Image<S>` (gray).
+- Converting: `img.convert(layout)` (luma; gaining alpha opaque, losing it dropped), `to_f32() -> ImageF` (0..1), `to_u8() -> Image8`, `to_u16() -> Image16`, `map<T: Sample>(f: (S) -> T) -> Image<T>`.
+- Geometry (new images): `crop(r)` (clipped), `flip_h()`, `flip_v()`, `rotate90()` (clockwise), `rotate180()`, `rotate270()`, `transpose()`, `premultiplied()`, `unpremultiplied()`; in place: `paste(var self, src, x, y)` (clipped, converted to the layout, no blending), `fill(var self, v: [S])`.
+- `quantize(img: Image8, colors: int, dither: bool = true) -> Indexed` (median cut, Floyd–Steinberg; exact when the image has `colors` colours or fewer); `struct Indexed { width, height, palette: [Color], indices: [uint8] }`, `ix.to_image() -> Image8` (`Rgb` if the palette is opaque, else `Rgba`).
+- `ansi<S: Sample>(img: Image<S>, columns: int) -> str`: truecolor half blocks (`▀`), area-scaled down to `columns`, ready to `print`.
+- Gotchas: no `impl Image<uint8>` (refused): 8-bit-only code is generic over `Sample` or a free function of `Image8`. Generic calls need the sample type from outside (`var img: Image8 = image.new(…)`, `from_data<uint8>(…)`). Keep `#test` images to a few pixels: the interpreter is slow.
+- Prose: `docs/Language/Standard-library/Image.md`
 
 ## std.ini
 INI (configparser-like, no interpolation). `import std.ini as ini`.

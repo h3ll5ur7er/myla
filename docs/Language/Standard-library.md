@@ -88,6 +88,7 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.random` | [[Language/Standard-library/Random]] | `Rng`, a seeded generator (xoshiro256**): seeded or from the system's entropy, integers in a range without bias, floats, shuffles, choices |
 | `std.uuid` | [[Language/Standard-library/Uuid]] | UUIDs of RFC 9562, version 4 (random) and 7 (a time), parsing and the canonical text |
 | `std.compress` | [[Language/Standard-library/Compress]] | DEFLATE and the gzip and zlib formats: `inflate`, `gunzip`, `zlib_decompress` and `Read` streams over any stream; `deflate`, `gzip`, `zlib_compress` at levels 0 to 9 and `Write` streams |
+| `std.image` | [[Language/Standard-library/Image]] | `Image<S>` of `uint8`, `uint16` or `float32` samples in gray, gray and alpha, RGB or RGBA; `Color`, `Rect`, the codecs' `ImageError`; layout and sample conversions (BT.601 luma as Pillow's), crop, paste, flips and quarter turns, premultiplied alpha, `quantize` to a palette by median cut, `ansi` previews in a terminal |
 | `std.archive` | [[Language/Standard-library/Archive]] | tar archives read and written (ustar, pax, GNU long names), zip archives read (stored, deflate), safe entry names |
 | `std.args` | [[Language/Standard-library/Args]] | Command-line arguments: a declarative spec of flags, options, positionals and subcommands, parsing, the generated help |
 | `std.rt` | [[Language/Standard-library/Rt]] | The runtime in Myla; not for programs |
