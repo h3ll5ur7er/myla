@@ -17,3 +17,5 @@ The tenth failure, TestWasm32's scratch directories, is [[MYLA-944]].
 - [x] `absolute`, `written_under` through `is_absolute`; `run_code` in std.test with its cases; the refusal's target
 - [x] test_test_native's Windows expectations: the refusal names x86_64-linux there, and the corpus's `lib/std/platform.my` is refused natively on Windows (its interpreted cases still run)
 - [x] Evidence on Linux: `myla test lib/std/test.my --only run_code` 4/4, driver.my's `absolute`, `written_under`, `hosts_platform` cases pass, the bootstrap's fixed point, test_test_native as before. On Windows itself: the next `burn-windows` run
+
+Follow-up (2026-11-24, the lead): `selfhost/project_cmd.my`'s two test-program runs (`myla test` in a project, the built and the interpreted) take their code through `run_code` too, so an `exit(-1)` there is 255 on Windows as on Linux, not signal 1.
