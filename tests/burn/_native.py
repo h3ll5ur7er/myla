@@ -62,6 +62,13 @@ X86_REASON = "it reads x86-64 Linux code (built for x86-64 Linux only)"
 ON_WINDOWS = sys.platform == "win32"
 
 
+def shown(path: str) -> str:
+    """`path` as myla's messages write a source file's path: with `/` for each
+    `\\` on Windows, as the loader keeps paths there (MYLA-931; `--> C:/w/main.my:2:5`);
+    as it is elsewhere (MYLA-926)."""
+    return path.replace("\\", "/") if ON_WINDOWS else path
+
+
 def linux_only(reason: str):
     """The decorator that skips a test or class on Windows, saying why."""
     import unittest

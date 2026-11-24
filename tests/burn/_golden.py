@@ -131,6 +131,10 @@ def _describe(arg, dirs: list[str]):
         path = os.path.abspath(arg)
         with open(path, "rb") as fh:
             data = fh.read()
+        if os.name == "nt":
+            # a program the test wrote in text mode has CRLF there: the same
+            # text as the recording's LF, so keyed as it (MYLA-926)
+            data = data.replace(b"\r\n", b"\n")
         for r in {_REPO, os.path.realpath(_REPO)}:   # as the recording checkout saw it
             data = data.replace(r.encode(), RECORDED_REPO.encode())
         digest = hashlib.sha256(data).hexdigest()
