@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, SKIP_REASON, assemble
+from tests.burn._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, SKIP_REASON, assemble, shown
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 PROGRAM = """// MYLA-162's prototype: string concatenation and equality written in Myla
@@ -202,7 +202,7 @@ class RawMemory(unittest.TestCase):
                         fh.write(main)
                     ran = subprocess.run([selfhost_tool("main"), "check", path, "--stdlib", STDLIB_ROOT],
                                          capture_output=True, text=True)
-                    where = os.path.join(tmp, directory, module)
+                    where = shown(os.path.join(tmp, directory, module))   # (as myla writes it)
                     if module == "raw.my":
                         self.assertEqual(ran.returncode, 1, ran.stderr)
                         self.assertTrue(ran.stderr.startswith("type error: '__addr_of' reads or writes raw memory: "

@@ -414,6 +414,12 @@ def golden(name: str):
             named = [(d, f"\x00DIR{i}\x00") for i, d in enumerate(dirs)]
             named += [(r, "\x00REPO\x00") for r in {_REPO, os.path.realpath(_REPO)}]
             marks = sorted(named, key=lambda m: -len(m[0]))
+            # put back as myla's messages write a path, which is where the
+            # answers have them (`  --> \x00REPO\x00/examples/errors/x.my:2:5`):
+            # with `/` on Windows (MYLA-931), not as the half-`\` path
+            # `D:\a\myla\myla/examples/…` that nothing prints (MYLA-926)
+            from tests.burn._native import shown   # (here: _native imports this module)
+            back = [(m, shown(d)) for d, m in marks]
             if RECORD:
                 value = fn(*args, **kwargs)
                 store[key] = _swap(_encode(value), marks)
@@ -424,13 +430,13 @@ def golden(name: str):
                 # a question about a program rewritten since the recording
                 # (MYLA-240): the original's answer, its positions moved
                 alias = _aliases(name)[key]
-                value = _decode(_swap(store[alias["to"]], [(m, d) for d, m in marks]))
+                value = _decode(_swap(store[alias["to"]], back))
                 return translate(value, alias["lines"], name)
             if key not in store:
                 if _changing_file(list(args) + list(kwargs.values())):
                     raise unittest.SkipTest(f"{name}: {key_obj[0]!r:.120} changed after the Python toolchain was retired")
                 raise NoGolden(f"no recorded answer of the retired Python toolchain for {name}{tuple(key_obj[0])!r:.300}: "
                                "the question is new or its file changed; give the test an expectation of its own")
-            return _decode(_swap(store[key], [(m, d) for d, m in marks]))
+            return _decode(_swap(store[key], back))
         return answer
     return wrap

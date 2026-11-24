@@ -37,7 +37,7 @@ import time
 import unittest
 
 from ._golden import NoGolden, answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE, linux_only
+from ._native import CAN_BUILD_NATIVE, linux_only, shown
 from ._tools import STDLIB_ROOT, peak_memory, selfhost_tool
 
 _REPO = os.path.abspath(
@@ -315,7 +315,7 @@ class SelfHostedInterpParity(unittest.TestCase):
                         # overflow, then the overflow at its operator
                         out, err, code = self._myla_run_full(path)
                         self.assertEqual((out, code), (OVERFLOWS[name], 1))
-                        self.assertTrue(err.startswith(f"runtime error: integer overflow\n  --> {path}:"), err)
+                        self.assertTrue(err.startswith(f"runtime error: integer overflow\n  --> {shown(path)}:"), err)
                         continue
                     try:
                         want = _cli_oracle(path, modules)

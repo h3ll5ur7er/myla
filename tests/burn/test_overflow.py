@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, run_argv, selfhost_run, target_flags,
-                                write_program, READS_X86, X86_REASON)
+                                shown, write_program, READS_X86, X86_REASON)
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 _RUN_MJS = os.path.join(os.path.dirname(STDLIB_ROOT), "tools", "wasm", "run.mjs")
@@ -379,10 +379,10 @@ class TestOverflow(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, src)
             out, err, code = selfhost_run(path)
-            self.assertEqual((out, err.splitlines(True)[:2], code), (want[0], want[1].format(path).splitlines(True), 1))
+            self.assertEqual((out, err.splitlines(True)[:2], code), (want[0], want[1].format(shown(path)).splitlines(True), 1))
             if CAN_BUILD_NATIVE:
                 out, err, code = build_and_run(path, True)
-                self.assertEqual((out, err.splitlines(True)[:2], code), (want[0], want[1].format(path).splitlines(True), 1))
+                self.assertEqual((out, err.splitlines(True)[:2], code), (want[0], want[1].format(shown(path)).splitlines(True), 1))
 
     def test_what_fits_is_the_same_everywhere(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -400,10 +400,10 @@ class TestOverflow(unittest.TestCase):
             path = write_program(tmp, src)
             out, err, code = selfhost_run(path)
             self.assertEqual((out, code), ("", 1))
-            self.assertTrue(err.startswith(f"runtime error: {OVER}\n  --> {path}:2:29\n"), err)
+            self.assertTrue(err.startswith(f"runtime error: {OVER}\n  --> {shown(path)}:2:29\n"), err)
             if CAN_BUILD_NATIVE:
                 self.assertEqual(build_and_run(path, False), ("-2147483648\n", "", 0))
-                self.assertEqual(build_and_run(path, True), ("", f"runtime error: {OVER}\n  --> {path}:2:29\n", 1))
+                self.assertEqual(build_and_run(path, True), ("", f"runtime error: {OVER}\n  --> {shown(path)}:2:29\n", 1))
 
     def test_compound_assignment_traps(self):
         src = ("fun main() {\n    var x: uint8 = 250\n    var i = 0\n    while i < 10 {\n"
@@ -412,7 +412,7 @@ class TestOverflow(unittest.TestCase):
             path = write_program(tmp, src)
             out, err, code = selfhost_run(path)
             self.assertEqual((out, code), ("", 1))
-            self.assertTrue(err.startswith(f"runtime error: {OVER}\n  --> {path}:5:"), err)
+            self.assertTrue(err.startswith(f"runtime error: {OVER}\n  --> {shown(path)}:5:"), err)
             if CAN_BUILD_NATIVE:
                 self.assertEqual(build_and_run(path, False), ("4\n", "", 0))
                 nout, nerr, ncode = build_and_run(path, True)
@@ -477,7 +477,7 @@ def _make_generic(name: str, case):
     def test(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, generic_program(ty, expr, args))
-            where = f"  --> {path}:2:{12 + col}"
+            where = f"  --> {shown(path)}:2:{12 + col}"
             out, err, code = selfhost_run(path)
             self.assertEqual((out, code), ("", 1), err)
             self.assertTrue(err.startswith(f"runtime error: {msg}\n{where}\n"), err)
@@ -494,7 +494,7 @@ def _make(name: str, case):
     def test(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, program(ty, expr, args))
-            where = f"  --> {path}:2:{12 + col}"
+            where = f"  --> {shown(path)}:2:{12 + col}"
             out, err, code = selfhost_run(path)
             self.assertEqual((out, code), ("", 1), err)
             self.assertTrue(err.startswith(f"runtime error: {msg}\n{where}\n"), err)

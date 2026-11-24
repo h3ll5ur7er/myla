@@ -9,7 +9,7 @@ import unittest
 from tests.burn._targets import program_excuse
 from tests.burn._tools import peak_memory, selfhost_tool
 from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, Program, build_and_run, build_and_run_full, interpret,
-                                native_build, run_argv, run_file_both_now, selfhost_run, write_program)
+                                native_build, run_argv, run_file_both_now, selfhost_run, shown, write_program)
 
 PROGRAMS = {
     # H13 (MYLA-792, MYLA-715): a constant made of an imported constant, or of
@@ -11368,10 +11368,10 @@ class TestCompilerParity(unittest.TestCase):
                 out, err, code = selfhost_run(path)
                 self.assertEqual((out, code), ("b\n", 1))
                 self.assertEqual(err.splitlines()[:2], [f"runtime error: invalid char: {value} is not a Unicode scalar value",
-                                                        f"  --> {path}:2:14"])
+                                                        f"  --> {shown(path)}:2:14"])
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path),
                                  ("b\n", f"runtime error: invalid char: {value} is not a Unicode scalar value\n"
-                                          f"  --> {path}:2:14\n", 1))
+                                          f"  --> {shown(path)}:2:14\n", 1))
 
     def test_polymorphic_recursion_is_refused_where_it_is_built(self):
         # MYLA-415 (H5): a generic function calling itself with a larger type
@@ -11404,7 +11404,7 @@ class TestCompilerParity(unittest.TestCase):
                 checked = subprocess.run([myla, "check", path], capture_output=True, text=True, timeout=60)
                 self.assertEqual(checked.returncode, 1, checked.stderr)
                 self.assertTrue(checked.stderr.startswith(f"type error: the instances of '{callee}' nest without end: "
-                                                          f"this call, {what}\n  --> {path}:{at}\n"), checked.stderr)
+                                                          f"this call, {what}\n  --> {shown(path)}:{at}\n"), checked.stderr)
                 self.assertIn(f"note: {how} with a larger type at each step (polymorphic recursion), which native "
                               "code can't be built for\n", checked.stderr)
                 ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
@@ -11442,7 +11442,7 @@ class TestCompilerParity(unittest.TestCase):
                                            capture_output=True, text=True, timeout=60)
                     self.assertEqual(built.returncode, 1, built.stderr)
                     self.assertIn(f"type error: the instances of 'run' nest without end: this call asks for one "
-                                  f"whose type arguments are {why}\n  --> {path}:7:19\n", built.stderr)
+                                  f"whose type arguments are {why}\n  --> {shown(path)}:7:19\n", built.stderr)
                     self.assertIn("(polymorphic recursion)", built.stderr)
 
     def test_a_deep_type_the_program_writes_is_no_recursion(self):
@@ -11702,7 +11702,7 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertEqual(len(at), 1, needle)
                 out, err, code = selfhost_run(path)
                 self.assertEqual(code, 1, err)
-                self.assertEqual(err.splitlines()[:2], [f"runtime error: {message}", f"  --> {path}:{at[0][0]}:{at[0][1]}"])
+                self.assertEqual(err.splitlines()[:2], [f"runtime error: {message}", f"  --> {shown(path)}:{at[0][0]}:{at[0][1]}"])
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(err.splitlines()[:2]) + "\n", 1))
                 if name in ("option_expect", "through_a_tracked_function", "in_a_task"):
                     self.assertEqual(build_and_run_full(Program(path), entry_path=path, checked=True),

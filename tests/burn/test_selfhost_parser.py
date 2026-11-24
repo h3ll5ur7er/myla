@@ -25,7 +25,7 @@ import time
 import unittest
 
 from ._golden import NoGolden, answer_for_file, golden, recorded, recorded_examples
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, shown
 from ._continuation import continues_a_line
 from ._tools import selfhost_tool
 from .test_aarch64 import A64_SKIP, HAVE_A64, build_a64
@@ -460,7 +460,7 @@ class SelfHostedParserParity(unittest.TestCase):
                             self.assertEqual((proc.stdout, proc.stderr), ("ok\n" if cmd == "check" else out + "\n", ""))
                         else:
                             self.assertEqual(proc.returncode, 1)
-                            self.assertTrue(proc.stderr.startswith(f"{error}  --> {path}:{line}:"), proc.stderr[:300])
+                            self.assertTrue(proc.stderr.startswith(f"{error}  --> {shown(path)}:{line}:"), proc.stderr[:300])
             # an `if` statement's `else if` arms: `limit` parse
             for arms, ok in ((limit, True), (limit + 1, False), (20000, False)):
                 path = os.path.join(tmp, f"else_if_stmt_{arms}.my")

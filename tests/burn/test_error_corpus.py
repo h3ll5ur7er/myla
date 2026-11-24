@@ -67,7 +67,7 @@ import subprocess
 import unittest
 
 from ._golden import NoGolden, golden
-from ._native import CAN_BUILD_NATIVE, build_and_run_full, check_file
+from ._native import CAN_BUILD_NATIVE, build_and_run_full, check_file, shown
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 ERRORS_DIR = os.path.abspath(
@@ -407,7 +407,7 @@ def _make(name: str):
                 checked = any(_CHECKED.match(line.strip()) for line in source.splitlines())
                 out, err, code = build_and_run_full(check_file(path), entry_path=path, checked=checked)
                 self.assertEqual(code, 1, f"{name}: the native binary should exit 1")
-                where = f"  --> {path}:{diag['line']}:{diag['column']}"
+                where = f"  --> {shown(path)}:{diag['line']}:{diag['column']}"
                 self.assertEqual(err, f"{native}\n{where}\n", f"{name}: native stderr")
         else:
             self.assertIsNone(native, f"{name}: '//~ native:' only goes with a runtime error")

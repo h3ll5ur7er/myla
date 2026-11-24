@@ -14,13 +14,14 @@ MYLA-219); the Python CLI no longer runs or builds the project alongside.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 
 from ._golden import golden
-from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble, shown
 from ._tools import STDLIB_ROOT, selfhost_tool
 from .test_selfhost_cli import _Layout
 
@@ -172,7 +173,15 @@ def _recorded_python_diagnostic(files: dict[str, str], flags: list[str]) -> str:
 def _python_diagnostic(files: dict[str, str], flags, ws: str) -> str:
     """The Python loader's diagnostic (see `_recorded_python_diagnostic`) for
     the workspace `ws`."""
-    return _recorded_python_diagnostic(files, list(flags)).replace("{ws}", ws)
+    return _in_workspace(_recorded_python_diagnostic(files, list(flags)), ws)
+
+
+def _in_workspace(text: str, ws: str) -> str:
+    """`text` with `{ws}` the workspace `ws`, as myla writes it: a file or
+    directory the loader read as a source path (with `/` on Windows), a
+    `--package` directory that isn't one as given (MYLA-926)."""
+    text = re.sub(r"'\{ws\}(\S*)' is not a directory", lambda m: f"'{ws}{m.group(1)}' is not a directory", text)
+    return text.replace("{ws}", shown(ws))
 
 
 # Diagnostics that line continuation (D104 (3), MYLA-224) changed from the
@@ -259,7 +268,7 @@ class PackageParity(_Layout):
                 _write(ws, files)
                 entry = os.path.join(ws, "app", "main.my")
                 if name in SUPERSEDED:
-                    expected = SUPERSEDED[name].replace("{ws}", ws)
+                    expected = _in_workspace(SUPERSEDED[name], ws)
                 else:
                     expected = _python_diagnostic({**PACKAGES, **files}, flags, ws)
                 args = _package_args(flags, ws)

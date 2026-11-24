@@ -41,7 +41,7 @@ import unittest
 
 from ._golden import NoGolden, answered_or_recorded, golden, recorded_examples
 from ._native import (CAN_BUILD_NATIVE, ON_WINDOWS, READS_X86, SKIP_REASON, TEST_TARGET, X86_REASON, assemble,
-                      run_argv, target_flags)
+                      run_argv, shown, target_flags)
 from ._targets import program_excuse
 from ._tools import EXE, STDLIB_ROOT, measure_script, selfhost_tool
 
@@ -776,7 +776,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 sh = subprocess.run(argv, executable=exe, capture_output=True, text=True)
                 self.assertEqual((sh.stdout, sh.returncode), (want_out, 1))
                 self.assertTrue(sh.stderr.startswith("runtime error: "), sh.stderr)
-                self.assertTrue(sh.stderr.endswith(f"\n  --> {path}:{line}:{column}\n"),
+                self.assertTrue(sh.stderr.endswith(f"\n  --> {shown(path)}:{line}:{column}\n"),
                                 sh.stderr)
 
     def test_module_programs_match_the_oracle(self) -> None:
@@ -802,7 +802,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         CLI's diagnostic, carets included (or the one pinned in SUPERSEDED);
         `modules` are the program's other files."""
         if name in SUPERSEDED:
-            expected = SUPERSEDED[name].replace("{dir}", os.path.dirname(entry))
+            expected = SUPERSEDED[name].replace("{dir}", shown(os.path.dirname(entry)))
         elif recorded_only:
             # a corpus file added since has no recording: test_error_corpus
             # holds it to the self-hosted CLI
