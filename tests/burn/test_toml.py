@@ -53,9 +53,8 @@ import tempfile
 import tomllib
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, check_file, native_build, run_argv
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, TEST_TARGET, assemble, check_file, native_build, run_argv
 from ._tools import STDLIB_ROOT, selfhost_tool
-from ._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 VENDORED = os.path.join(os.path.dirname(__file__), "data", "toml_test_1.0.json")
 
@@ -614,16 +613,16 @@ def _suite() -> tuple[dict[str, tuple[bytes, object]], dict[str, bytes]]:
 
 
 def _build(gen: str, source: str, out: str) -> list[str]:
-    """`source` built for the machine, or for MYLA_TEST_TARGET by the CLI;
-    the command that runs it."""
+    """`source` built for the machine (at `out` with Windows' `.exe`), or for
+    MYLA_TEST_TARGET by the CLI; the command that runs it."""
+    out += EXE
     if TEST_TARGET:
         native_build(check_file(source), out)
         return run_argv(out)[0]
     asm = subprocess.run([gen, source, STDLIB_ROOT], capture_output=True, text=True, check=True)
     with open(out + ".s", "w", encoding="utf-8") as fh:
         fh.write(asm.stdout)
-    subprocess.run([*AS_CMD, "-o", out + ".o", out + ".s"], check=True)
-    subprocess.run(["ld", "-o", out, out + ".o"], check=True)
+    assemble(out + ".s", out)   # (MYLA-926: Windows' too)
     return [out]
 
 
@@ -639,7 +638,7 @@ class TomlAgainstPython(unittest.TestCase):
         sh_native = os.path.join(cls.tmp.name, "sh_native")
         cls.native = {"self-hosted native": _build(gen, path, sh_native)}
         # the same driver built checked, where an integer overflow is an error (D184, MYLA-550)
-        checked = os.path.join(cls.tmp.name, "sh_checked")
+        checked = os.path.join(cls.tmp.name, "sh_checked" + EXE)
         native_build(check_file(path), checked, checked=True)
         cls.native["self-hosted native, checked"] = run_argv(checked)[0] if TEST_TARGET else [checked]
         writer = os.path.join(cls.tmp.name, "writer.my")

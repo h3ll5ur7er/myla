@@ -46,9 +46,8 @@ import sys
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble
 from ._tools import STDLIB_ROOT, selfhost_tool
-from ._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _URL = "https://github.com/yaml/yaml-test-suite"
@@ -121,7 +120,9 @@ _FEATURE_KINDS = {
 
 
 def _build_checked(path: str, out: str) -> list[str]:
-    """The driver at `path` built `--checked` at `out`, as its argv."""
+    """The driver at `path` built `--checked` at `out` (with Windows' `.exe`),
+    as its argv."""
+    out += EXE
     subprocess.run([selfhost_tool("main"), "build", path, "-o", out, "--stdlib", STDLIB_ROOT, "--checked"],
                    capture_output=True, check=True)
     return [out]
@@ -296,11 +297,10 @@ class YamlTestSuite(unittest.TestCase):
             fh.write(DRIVER)
         gen = selfhost_tool("gen_main")
         asm = subprocess.run([gen, path, STDLIB_ROOT], capture_output=True, text=True, check=True)
-        native = os.path.join(cls.tmp.name, "native")
+        native = os.path.join(cls.tmp.name, "native" + EXE)
         with open(native + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
-        subprocess.run([*AS_CMD, "-o", native + ".o", native + ".s"], check=True)
-        subprocess.run(["ld", "-o", native, native + ".o"], check=True)
+        assemble(native + ".s", native)   # for the machine (MYLA-926: Windows' too)
         cls.native = [native]
         cls.checked = _build_checked(path, os.path.join(cls.tmp.name, "checked"))
         cls.interpreter = [selfhost_tool("interp_main"), path, STDLIB_ROOT]
@@ -462,7 +462,7 @@ class YamlNumbers(unittest.TestCase):
             path = os.path.join(tmp, "main.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(DRIVER)
-            plain = os.path.join(tmp, "plain")
+            plain = os.path.join(tmp, "plain" + EXE)
             subprocess.run([selfhost_tool("main"), "build", path, "-o", plain, "--stdlib", STDLIB_ROOT],
                            capture_output=True, check=True)
             checked = _build_checked(path, os.path.join(tmp, "checked"))
@@ -521,11 +521,10 @@ class YamlWriterForYaml11(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(WRITER)
             asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True, check=True)
-            native = os.path.join(tmp, "native")
+            native = os.path.join(tmp, "native" + EXE)
             with open(native + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm.stdout)
-            subprocess.run([*AS_CMD, "-o", native + ".o", native + ".s"], check=True)
-            subprocess.run(["ld", "-o", native, native + ".o"], check=True)
+            assemble(native + ".s", native)
             proc = subprocess.run([native], input=_framed([t.encode() for t in strings]), capture_output=True, timeout=600)
         self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
         out, docs = proc.stdout, []
