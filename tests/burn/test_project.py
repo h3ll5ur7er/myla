@@ -230,7 +230,7 @@ class ProjectModel(unittest.TestCase):
 
     def test_a_manifest_with_crlf_line_breaks(self) -> None:
         # as a Windows editor writes one: "\r\n" ends a line, an unterminated
-        # string's too, and the line is shown without its "\r" (MYLA-934)
+        # string's too, and the line is shown without its "\r" (MYLA-934, MYLA-941)
         cases = (('[package]\nname = "app\n', "manifest error: unterminated string\n"
                   "  --> {root}/app/myla.toml:2:8\n  |\n2 | name = \"app\n  |        ^\n"),
                  ('[package]\nname = "1app"\nversion = "1"\n', "manifest error: '1app' is not a valid package name:"
