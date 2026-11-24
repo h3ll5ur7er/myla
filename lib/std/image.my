@@ -1,0 +1,443 @@
+// std.image: the image type the codecs, std.imgproc, std.draw and std.font
+// share (D311, MYLA-933). An `Image<S>` holds its samples interleaved, row
+// by row, without padding: the sample `c` of the pixel `(x, y)` is
+// `data[(y * width + x) * channels + c]`.
+//
+// This is the skeleton the lanes of wave 1 build on: the types and their
+// basic access. MYLA-933 completes the module; what is declared here keeps
+// its names and signatures.
+
+from std.ioerror import IoError, io_error_name
+import std.list as list_m // `filled`
+import std.float as fl // `is_nan`
+import std.option as option_m // `expect` in the tests
+
+// The most pixels a decoder allocates unless told otherwise: 2^28.
+pub const MAX_PIXELS: int64 = 0x10000000
+
+// The most samples an image holds: a list's limit.
+pub const MAX_SAMPLES: int64 = 2147483647
+
+// A sample type: `uint8`, `uint16` or `float32`. Integers are full scale at
+// their maximum, floats at 1.0.
+pub trait Sample {
+    // 255, 65535 or 1.0.
+    fun max_value() -> Self
+    // The sample's value, unscaled: 255u8 is 255.0.
+    fun to_f32(self) -> float32
+    // A value back to the sample type, rounded and clamped for the integers.
+    fun from_f32(v: float32) -> Self
+    // The sample scaled to 0..255.
+    fun to_unorm8(self) -> uint8
+    // A sample from 0..255, scaled to the type's range.
+    fun from_unorm8(v: uint8) -> Self
+}
+
+impl Sample for uint8 {
+    #test()[255u8]
+    fun max_value() -> uint8 {
+        return 255u8
+    }
+
+    #test(7u8)[7.0f32]
+    fun to_f32(self) -> float32 {
+        return self as float32
+    }
+
+    #test(254.5f32)[255u8]
+    #test(-3.0f32)[0u8]
+    #test(300.0f32)[255u8]
+    #test(1.49f32)[1u8]
+    fun from_f32(v: float32) -> uint8 {
+        if v.is_nan() || v <= 0.0f32 {
+            return 0u8
+        }
+        if v >= 255.0f32 {
+            return 255u8
+        }
+        return (v + 0.5f32) as uint8
+    }
+
+    #test(9u8)[9u8]
+    fun to_unorm8(self) -> uint8 {
+        return self
+    }
+
+    #test(9u8)[9u8]
+    fun from_unorm8(v: uint8) -> uint8 {
+        return v
+    }
+}
+
+impl Sample for uint16 {
+    #test()[65535u16]
+    fun max_value() -> uint16 {
+        return 65535u16
+    }
+
+    #test(700u16)[700.0f32]
+    fun to_f32(self) -> float32 {
+        return self as float32
+    }
+
+    #test(65535.4f32)[65535u16]
+    #test(-1.0f32)[0u16]
+    #test(70000.0f32)[65535u16]
+    fun from_f32(v: float32) -> uint16 {
+        if v.is_nan() || v <= 0.0f32 {
+            return 0u16
+        }
+        if v >= 65535.0f32 {
+            return 65535u16
+        }
+        return (v + 0.5f32) as uint16
+    }
+
+    // Rounded: (v * 255 + 32767) / 65535, as libpng scales 16 bits to 8.
+    #test(65535u16)[255u8]
+    #test(0u16)[0u8]
+    #test(32896u16)[128u8]
+    #test(257u16)[1u8]
+    fun to_unorm8(self) -> uint8 {
+        return (((self as uint32) * 255u32 + 32767u32) / 65535u32) as uint8
+    }
+
+    // Widened by 257, so 255 is 65535.
+    #test(255u8)[65535u16]
+    #test(1u8)[257u16]
+    fun from_unorm8(v: uint8) -> uint16 {
+        return (v as uint16) * 257u16
+    }
+}
+
+impl Sample for float32 {
+    #test()[1.0f32]
+    fun max_value() -> float32 {
+        return 1.0f32
+    }
+
+    #test(0.25f32)[0.25f32]
+    fun to_f32(self) -> float32 {
+        return self
+    }
+
+    #test(0.25f32)[0.25f32]
+    fun from_f32(v: float32) -> float32 {
+        return v
+    }
+
+    #test(1.0f32)[255u8]
+    #test(0.5f32)[128u8]
+    #test(-1.0f32)[0u8]
+    #test(2.0f32)[255u8]
+    fun to_unorm8(self) -> uint8 {
+        return uint8.from_f32(self * 255.0f32)
+    }
+
+    #test(255u8)[1.0f32]
+    #test(0u8)[0.0f32]
+    fun from_unorm8(v: uint8) -> float32 {
+        return (v as float32) / 255.0f32
+    }
+}
+
+// How a pixel's samples are laid out.
+#derive(Eq, Hash)
+pub enum Layout {
+    Gray
+    GrayAlpha
+    Rgb
+    Rgba
+}
+
+impl Layout {
+    #test(Layout.Gray)[1]
+    #test(Layout.GrayAlpha)[2]
+    #test(Layout.Rgb)[3]
+    #test(Layout.Rgba)[4]
+    fun channels(self) -> int {
+        return match self {
+            Gray => 1
+            GrayAlpha => 2
+            Rgb => 3
+            Rgba => 4
+        }
+    }
+
+    #test(Layout.GrayAlpha)[true]
+    #test(Layout.Rgb)[false]
+    fun has_alpha(self) -> bool {
+        return match self {
+            GrayAlpha | Rgba => true
+            Gray | Rgb => false
+        }
+    }
+
+    #test(Layout.Rgb)[true]
+    #test(Layout.GrayAlpha)[false]
+    fun is_color(self) -> bool {
+        return match self {
+            Rgb | Rgba => true
+            Gray | GrayAlpha => false
+        }
+    }
+
+}
+
+// The layout of `n` channels: 1 to 4.
+#test(3)[Some(Layout.Rgb)]
+#test(5)[None]
+pub fun layout_of(n: int) -> Option<Layout> {
+    return match n {
+        1 => Some(Layout.Gray)
+        2 => Some(Layout.GrayAlpha)
+        3 => Some(Layout.Rgb)
+        4 => Some(Layout.Rgba)
+        _ => None
+    }
+}
+
+impl Format for Layout {
+    #test(Layout.GrayAlpha, "")["gray+alpha"]
+    fun format(self, spec: str) -> str {
+        return match self {
+            Gray => "gray"
+            GrayAlpha => "gray+alpha"
+            Rgb => "rgb"
+            Rgba => "rgba"
+        }
+    }
+}
+
+// An image: `width` by `height` pixels of `layout`, the samples interleaved
+// row by row in `data`.
+#derive(Eq)
+pub struct Image<S> {
+    width: int,
+    height: int,
+    layout: Layout,
+    data: [S],
+}
+
+pub typealias Image8 = Image<uint8>
+pub typealias Image16 = Image<uint16>
+pub typealias ImageF = Image<float32>
+
+// A colour: sRGB, straight (not premultiplied) alpha.
+#derive(Eq, Hash)
+pub struct Color {
+    r: uint8,
+    g: uint8,
+    b: uint8,
+    a: uint8,
+}
+
+// A rectangle of pixels: `x`, `y` its top left corner.
+#derive(Eq, Hash)
+pub struct Rect {
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+}
+
+// What a codec's `info` tells without decoding: `bit_depth` is the bits
+// of a sample as stored (1 to 16, 32 for floats), `format` the codec's name
+// ("png", "jpeg", …).
+#derive(Eq)
+pub struct ImageInfo {
+    width: int,
+    height: int,
+    layout: Layout,
+    bit_depth: int,
+    frames: int,
+    format: str,
+}
+
+// The errors of every codec, std.imageio and std.imgproc (D311, D168).
+#derive(Eq)
+pub enum ImageError {
+    // The input ends early.
+    Truncated
+    // The input isn't this format.
+    BadSignature
+    // A valid feature this module doesn't read, by name.
+    Unsupported(str)
+    // What is wrong with the input, with its offset where there is one.
+    Corrupt(str)
+    // A chunk's CRC or a stream's checksum doesn't match.
+    Checksum
+    // The pixels (or samples) asked for, past the limit.
+    TooLarge(int64)
+    // Sizes or layouts that don't fit together.
+    Mismatch(str)
+    // A file couldn't be read or written.
+    Io(IoError)
+}
+
+impl ImageError {
+    #test(ImageError.Truncated)["truncated input"]
+    #test(ImageError.Unsupported("arithmetic coding"))["unsupported: arithmetic coding"]
+    #test(ImageError.TooLarge(300000000i64))["image too large: 300000000 pixels"]
+    #test(ImageError.Io(IoError.NotFound))["NotFound"]
+    fun message(self) -> str {
+        return match self {
+            Truncated => "truncated input"
+            BadSignature => "not an image of this format"
+            Unsupported(what) => f"unsupported: {what}"
+            Corrupt(what) => f"corrupt image: {what}"
+            Checksum => "checksum mismatch"
+            TooLarge(n) => f"image too large: {n} pixels"
+            Mismatch(what) => f"mismatch: {what}"
+            Io(e) => io_error_name(e)
+        }
+    }
+}
+
+impl Format for ImageError {
+    // The message; the spec is ignored.
+    #test(ImageError.Checksum, "")["checksum mismatch"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
+// The samples of a `width` by `height` image of `channels`, in int64;
+// None if a size is negative.
+#test(3, 2, 4)[Some(24i64)]
+#test(-1, 2, 1)[None]
+#test(65536, 65536, 4)[Some(17179869184i64)]
+pub fun sample_count(width: int, height: int, channels: int) -> Option<int64> {
+    if width < 0 || height < 0 || channels < 0 {
+        return None
+    }
+    return Some((width as int64) * (height as int64) * (channels as int64))
+}
+
+// Whether a decoder may allocate a `width` by `height` image of `channels`:
+// `Ok` if the pixels are at most `max_pixels` and the samples fit a list,
+// else `TooLarge` with the pixels asked for (`Corrupt` for a negative size).
+#test(100, 100, 4, 20000i64)[Ok(())]
+#test(1000, 1000, 1, 20000i64)[Err(ImageError.TooLarge(1000000i64))]
+#test(40000, 40000, 4, 0x10000000i64)[Err(ImageError.TooLarge(1600000000i64))]
+pub fun check_size(width: int, height: int, channels: int, max_pixels: int64) -> Result<(), ImageError> {
+    if width < 0 || height < 0 {
+        return Err(ImageError.Corrupt(f"negative size {width}x{height}"))
+    }
+    let pixels = (width as int64) * (height as int64)
+    if pixels > max_pixels || pixels * (channels as int64) > MAX_SAMPLES {
+        return Err(ImageError.TooLarge(pixels))
+    }
+    return Ok(())
+}
+
+// A `width` by `height` image of `layout`, every sample `fill`. A negative
+// size, or more than 2147483647 samples, is a failure (as for `grid.new`).
+pub fun new<S: Sample>(width: int, height: int, layout: Layout, fill: S) -> Image<S> {
+    if width < 0 || height < 0 {
+        panic(f"image size {width} by {height} is negative")
+    }
+    let n = (width as int64) * (height as int64) * (layout.channels() as int64)
+    if n > MAX_SAMPLES {
+        panic(f"image size {width} by {height} is more than 2147483647 samples")
+    }
+    return Image { width: width, height: height, layout: layout, data: list_m.filled(n as int, fill) }
+}
+
+// The image of `data`, which must hold `width * height * channels` samples.
+pub fun from_data<S: Sample>(width: int, height: int, layout: Layout, data: [S]) -> Result<Image<S>, ImageError> {
+    if width < 0 || height < 0 {
+        return Err(ImageError.Mismatch(f"negative size {width}x{height}"))
+    }
+    let n = (width as int64) * (height as int64) * (layout.channels() as int64)
+    if n != (data.len() as int64) {
+        return Err(ImageError.Mismatch(f"{width}x{height} {layout} needs {n} samples, got {data.len()}"))
+    }
+    return Ok(Image { width: width, height: height, layout: layout, data: data })
+}
+
+impl<S: Sample> Image<S> {
+    // The samples of a pixel: 1 to 4.
+    fun channels(self) -> int {
+        return self.layout.channels()
+    }
+
+    // Whether `(x, y)` is a pixel of the image.
+    fun in_bounds(self, x: int, y: int) -> bool {
+        return x >= 0 && y >= 0 && x < self.width && y < self.height
+    }
+
+    // The index in `data` of the sample `c` of the pixel `(x, y)`; the
+    // position isn't checked.
+    fun offset(self, x: int, y: int, c: int) -> int {
+        return (y * self.width + x) * self.layout.channels() + c
+    }
+
+    // The sample `c` of the pixel `(x, y)`; None out of bounds.
+    fun get(self, x: int, y: int, c: int) -> Option<S> {
+        if !self.in_bounds(x, y) || c < 0 || c >= self.layout.channels() {
+            return None
+        }
+        return Some(self.data[self.offset(x, y, c)])
+    }
+}
+
+impl<S: Sample> Index<(int, int, int), S> for Image<S> {
+    // `img[(x, y, c)]`: out of bounds is a failure, as for a list.
+    fun index(self, p: (int, int, int)) -> S {
+        let (x, y, c) = p
+        if !self.in_bounds(x, y) || c < 0 || c >= self.layout.channels() {
+            panic(f"pixel ({x}, {y}, {c}) out of bounds of a {self.width}x{self.height} {self.layout} image")
+        }
+        return self.data[(y * self.width + x) * self.layout.channels() + c]
+    }
+}
+
+impl<S: Sample> IndexSet<(int, int, int), S> for Image<S> {
+    // `img[(x, y, c)] = v`: out of bounds is a failure, as for a list.
+    fun set_index(var self, p: (int, int, int), v: S) {
+        let (x, y, c) = p
+        if !self.in_bounds(x, y) || c < 0 || c >= self.layout.channels() {
+            panic(f"pixel ({x}, {y}, {c}) out of bounds of a {self.width}x{self.height} {self.layout} image")
+        }
+        self.data[(y * self.width + x) * self.layout.channels() + c] = v
+    }
+}
+
+// The colour of `r`, `g`, `b`, opaque.
+#test(1u8, 2u8, 3u8)[Color { r: 1u8, g: 2u8, b: 3u8, a: 255u8 }]
+pub fun rgb(r: uint8, g: uint8, b: uint8) -> Color {
+    return Color { r: r, g: g, b: b, a: 255u8 }
+}
+
+// The colour of `r`, `g`, `b` and alpha `a`.
+#test(1u8, 2u8, 3u8, 4u8)[Color { r: 1u8, g: 2u8, b: 3u8, a: 4u8 }]
+pub fun rgba(r: uint8, g: uint8, b: uint8, a: uint8) -> Color {
+    return Color { r: r, g: g, b: b, a: a }
+}
+
+// The rectangle at `(x, y)` of `w` by `h`.
+#test(1, 2, 3, 4)[Rect { x: 1, y: 2, w: 3, h: 4 }]
+pub fun rect(x: int, y: int, w: int, h: int) -> Rect {
+    return Rect { x: x, y: y, w: w, h: h }
+}
+
+// A test of the generic parts: construction, indexing and their checks.
+#test
+fun image_basics() {
+    var img: Image8 = new(3, 2, Layout.Rgb, 0u8)
+    assert(img.data.len() == 18)
+    img[(2, 1, 0)] = 200u8
+    assert(img[(2, 1, 0)] == 200u8)
+    assert(img.data[img.offset(2, 1, 0)] == 200u8)
+    assert(img.get(3, 0, 0) == None)
+    assert(img.get(2, 1, 0) == Some(200u8))
+    let f: ImageF = new(1, 1, Layout.Gray, 0.5f32)
+    assert(f[(0, 0, 0)] == 0.5f32)
+    match from_data<uint8>(2, 2, Layout.Gray, [1u8, 2u8, 3u8]) {
+        Ok(_) => assert(false)
+        Err(e) => assert(e == ImageError.Mismatch("2x2 gray needs 4 samples, got 3"))
+    }
+    let ok = from_data<uint16>(1, 2, Layout.Gray, [1u16, 2u16]).expect("an image")
+    assert(ok.height == 2)
+}

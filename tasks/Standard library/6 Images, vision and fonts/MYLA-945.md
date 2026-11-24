@@ -2,7 +2,7 @@
 id: MYLA-945
 title: "Image and font test corpus, the fuzz harness and the benchmarks"
 type: chore
-status: backlog
+status: in-progress
 priority: medium
 labels: [stdlib, images, tests]
 ---

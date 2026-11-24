@@ -2,7 +2,7 @@
 id: MYLA-935
 title: "std.png: decode and encode"
 type: feature
-status: backlog
+status: todo
 priority: medium
 labels: [stdlib, images, png]
 ---

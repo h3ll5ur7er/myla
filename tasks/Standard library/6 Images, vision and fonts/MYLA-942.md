@@ -2,7 +2,7 @@
 id: MYLA-942
 title: "std.draw: paths, a coverage rasteriser and an RGBA canvas"
 type: feature
-status: backlog
+status: in-progress
 priority: medium
 labels: [stdlib, images, graphics]
 ---

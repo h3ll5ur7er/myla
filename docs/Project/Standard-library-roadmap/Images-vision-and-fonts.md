@@ -1,12 +1,12 @@
 # Images, vision and fonts
 
-A proposal for the owner: image files (PNG, JPEG, GIF, TIFF and a few simple formats), image processing and computer vision (a "poor man's OpenCV"), 2D vector drawing, and TrueType font rendering, all in Myla. The GUI ([[MYLA-63]]) will need all of it. Before then, it lets programs make charts and thumbnails, check screenshots in tests, look at images in a terminal, and run vision algorithms over files. The umbrella task is [[MYLA-930]], which holds the decisions this page asks for. The work is planned as tasks [[MYLA-931]] to [[MYLA-945]] in `tasks/Standard library/6 Images, vision and fonts/`.
+The plan for image files (PNG, JPEG, GIF, TIFF and a few simple formats), image processing and computer vision (a "poor man's OpenCV"), 2D vector drawing, and TrueType font rendering, all in Myla. The GUI ([[MYLA-63]]) will need all of it. Before then, it lets programs make charts and thumbnails, check screenshots in tests, look at images in a terminal, and run vision algorithms over files. The umbrella task is [[MYLA-930]], which holds the decisions this page asks for. The work is planned as tasks [[MYLA-931]] to [[MYLA-945]] in `tasks/Standard library/6 Images, vision and fonts/`.
 
 [TOC]
 
-## Decisions this needs first
+## Decisions
 
-Each question has a recommendation. They are listed in [[MYLA-930]] for the owner to tick.
+The owner accepted every recommendation below on 2026-11-24 (D311, [[MYLA-930]]).
 
 1. **std or official packages?** [[Project/Standard-library-roadmap#Left out]] puts "graphics, audio, GUI and databases" in packages, and [[MYLA-245]] hasn't decided yet what std is. MYLA-587 names `std.jpeg` and `std.imgproc` as things std.vector builds toward. **Recommendation: std.** Codecs, image processing and font parsing are portable computation with no system interface, the same kind of code as std.compress and std.json. A module costs only the programs that import it. The display, the windowing and the GUI stay out of std. The cost is size: `selfhost/embedded_std.my` is 4.0 MB today (85,600 lines of `lib/std/`), and these modules would add an estimated 15,000 to 20,000 lines, so the toolchain binaries carry roughly 20 % more library text. If MYLA-245 later moves modules into packages, these are the first candidates, and nothing in their API depends on where they live.
 2. **One generic image type or twins?** **Recommendation: generic `Image<S: Sample>`**, with `S` one of `uint8`, `uint16` and `float32`, plus the aliases `Image8`, `Image16` and `ImageF`. D201 generated twins for the vectors because `Vec3<float>` would have to be spelled everywhere. Images are fewer types, generic code (crop, flip, resize, convolution) is the bulk of the library, and the aliases keep the spelling short. A prototype type-checks and runs this shape interpreted and natively ([[#What was measured]]).
@@ -330,7 +330,7 @@ pub fun glyph_cache(f: Font) -> GlyphCache
 
 ## The plan
 
-The tasks are in `tasks/Standard library/6 Images, vision and fonts/`, all in `backlog` until the owner has decided [[MYLA-930]]. Sizes are on the scale of [[Project/Standard-library-roadmap#Reading the table]].
+The tasks are in `tasks/Standard library/6 Images, vision and fonts/`, decided by D311 ([[MYLA-930]]). Sizes are on the scale of [[Project/Standard-library-roadmap#Reading the table]].
 
 | Step | Tasks, in parallel within a step | Size | Needs |
 | --- | --- | --- | --- |

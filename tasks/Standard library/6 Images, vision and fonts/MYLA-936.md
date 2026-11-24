@@ -2,7 +2,7 @@
 id: MYLA-936
 title: "std.jpeg: baseline and progressive decoding"
 type: feature
-status: backlog
+status: todo
 priority: medium
 labels: [stdlib, images, jpeg]
 ---

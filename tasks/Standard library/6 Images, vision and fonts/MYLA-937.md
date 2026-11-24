@@ -2,7 +2,7 @@
 id: MYLA-937
 title: "std.jpeg: baseline encoding"
 type: feature
-status: backlog
+status: todo
 priority: low
 labels: [stdlib, images, jpeg]
 ---

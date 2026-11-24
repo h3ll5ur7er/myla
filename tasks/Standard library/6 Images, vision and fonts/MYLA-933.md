@@ -2,7 +2,7 @@
 id: MYLA-933
 title: "std.image: Image, Color, Rect, ImageError, quantize and the terminal preview"
 type: feature
-status: backlog
+status: in-progress
 priority: medium
 labels: [stdlib, images]
 ---

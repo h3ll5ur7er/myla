@@ -2,7 +2,7 @@
 id: MYLA-938
 title: "std.gif: frames, animation and encoding"
 type: feature
-status: backlog
+status: todo
 priority: low
 labels: [stdlib, images, gif]
 ---

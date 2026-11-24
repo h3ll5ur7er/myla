@@ -2,7 +2,7 @@
 id: MYLA-931
 title: "std.bytes: ByteReader, BitReader and their writers"
 type: feature
-status: backlog
+status: in-progress
 priority: medium
 labels: [stdlib, bytes, images]
 ---

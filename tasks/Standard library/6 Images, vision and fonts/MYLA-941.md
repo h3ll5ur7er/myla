@@ -2,7 +2,7 @@
 id: MYLA-941
 title: "std.imgproc, tier A: colour, geometry, filters, morphology, edges, regions"
 type: feature
-status: backlog
+status: in-progress
 priority: medium
 labels: [stdlib, images, vision]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-932
 title: "std.compress: LZW (GIF and TIFF) and PackBits"
 type: feature
-status: backlog
+status: in-progress
 priority: medium
 labels: [stdlib, compression, images]
 ---

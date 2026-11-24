@@ -2,7 +2,7 @@
 id: MYLA-940
 title: "std.imageio: load and save any supported format"
 type: feature
-status: backlog
+status: todo
 priority: medium
 labels: [stdlib, images]
 ---
