@@ -22,7 +22,7 @@ import tempfile
 import unittest
 
 from ._golden import answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, assemble, linux_only
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, assemble, linux_only, shown
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 from ._tools import EXE, STDLIB_ROOT, myla_tool, selfhost_tool
@@ -779,7 +779,8 @@ class TestResolutionCorpus(unittest.TestCase):
         self.assertEqual(uses, ["2:4-5", "3:10-11"])
 
     def _resolve(self, *files: str) -> dict[str, list[str]]:
-        """`lsp --resolve`'s lines for each of `files`."""
+        """`lsp --resolve`'s lines for each of `files`, by the path as it
+        prints it (`shown`: with `/` on Windows, MYLA-926)."""
         out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", STDLIB_ROOT, "--resolve",
                               *files], capture_output=True, text=True, check=True).stdout
         sections = {}
@@ -811,7 +812,7 @@ class TestResolutionCorpus(unittest.TestCase):
                 self.assertNotIn(pos, uses, line)
                 uses.add(pos)
                 if parts[-1] not in ("global", "module", "field", "method", "variant"):
-                    self.assertEqual(parts[4], path, line)
+                    self.assertEqual(parts[4], shown(path), line)
                     dl, dc = parts[5].split(":")
                     # a bound may name a type parameter declared after
                     # it in the same list, `<I: Iterator<T>, T>` (D171)
@@ -844,11 +845,11 @@ class TestResolutionCorpus(unittest.TestCase):
         files = _corpus()
         self.assertGreater(len(files), 50)
         sections = self._resolve(*files)
-        self.assertEqual(sorted(sections), files)
+        self.assertEqual(sorted(sections), sorted(shown(f) for f in files))
         resolved_total = 0
         for path in files:
             with self.subTest(file=os.path.relpath(path, _REPO)):
-                resolved_total += self._resolves(path, sections[path])
+                resolved_total += self._resolves(path, sections[shown(path)])
         self.assertGreater(resolved_total, 30000)
 
     def test_a_member_is_no_global(self) -> None:
@@ -865,13 +866,13 @@ class TestResolutionCorpus(unittest.TestCase):
             path = os.path.join(tmp, "members.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(source)
-            lines = self._resolve(path)[path]
+            lines = self._resolve(path)[shown(path)]
             defs = sorted(line for line in lines if line.startswith("def ") and line.split()[2] not in ("param", "local"))
             self.assertEqual(defs, ["def 0:11-17 field format", "def 0:7-8 global T", "def 12:4-5 global f",
                                     "def 2:11-12 field n", "def 2:7-8 global U", "def 5:8-14 method format",
                                     "def 8:5-6 global E", "def 9:4-5 variant A"])
-            self.assertIn("use 13:16-22 format -> " + path + " 0:11 field", lines)    # the literal's field
-            self.assertIn("use 15:22-23 A -> " + path + " 9:4 variant", lines)        # the pattern's variant
+            self.assertIn("use 13:16-22 format -> " + shown(path) + " 0:11 field", lines)    # the literal's field
+            self.assertIn("use 15:22-23 A -> " + shown(path) + " 9:4 variant", lines)        # the pattern's variant
             self.assertEqual(self._resolves(path, lines), 24)
 
     def test_members_agree_with_the_checker(self) -> None:
@@ -895,12 +896,12 @@ class TestResolutionCorpus(unittest.TestCase):
             # are where they were
             for line, column, member, kind, decl_line, decl_column in answered_or_recorded(path, _checked_members)[0]:
                 checked += 1
-                found = uses.get((path, line - 1, column - 1))
+                found = uses.get((shown(path), line - 1, column - 1))
                 if found is None:
                     continue
                 resolved += 1
                 with self.subTest(file=os.path.basename(path), line=line, member=member):
-                    self.assertEqual(found[0], path)
+                    self.assertEqual(found[0], shown(path))
                     if kind == "field":
                         self.assertEqual((found[1], found[2]), (decl_line, decl_column))
                     else:
