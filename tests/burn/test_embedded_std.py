@@ -33,7 +33,8 @@ class EmbeddedStd(unittest.TestCase):
             shutil.copytree(STDLIB_ROOT, lib)
             module = os.path.join(tmp, "embedded_std.my")
             shutil.copy(_MODULE, module)
-            with open(os.path.join(lib, "std", "io.my"), "a", encoding="utf-8") as fh:
+            # (newline="": the line ends in "\n" on Windows too, as lib's files do)
+            with open(os.path.join(lib, "std", "io.my"), "a", encoding="utf-8", newline="") as fh:
                 fh.write("// a change\n")
             checked = subprocess.run([self.embed, lib, module, "--check"], capture_output=True, text=True)
             self.assertEqual(checked.returncode, 1)

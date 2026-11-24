@@ -228,6 +228,21 @@ class ProjectModel(unittest.TestCase):
             '2 | name = "app\n'
             "  |        ^\n"))
 
+    def test_a_manifest_with_crlf_line_breaks(self) -> None:
+        # as a Windows editor writes one: "\r\n" ends a line, an unterminated
+        # string's too, and the line is shown without its "\r" (MYLA-934)
+        cases = (('[package]\nname = "app\n', "manifest error: unterminated string\n"
+                  "  --> {root}/app/myla.toml:2:8\n  |\n2 | name = \"app\n  |        ^\n"),
+                 ('[package]\nname = "1app"\nversion = "1"\n', "manifest error: '1app' is not a valid package name:"
+                  " it must be an ASCII letter followed by ASCII letters, digits and '_'\n"
+                  "  --> {root}/app/myla.toml:2:8\n  |\n2 | name = \"1app\"\n  |        ^^^^^^\n"))
+        for text, want in cases:
+            with self.subTest(text=text):
+                root = self.make({"app/myla.toml": ""})
+                with open(os.path.join(root, "app", "myla.toml"), "w", encoding="utf-8", newline="") as fh:
+                    fh.write(text.replace("\n", "\r\n"))
+                self.assertEqual(self.run_tool(root), ("", want, 1))
+
     def test_missing_package_table(self) -> None:
         self.assert_error({"app/myla.toml": "[dependencies]\n"}, "myla: {root}/app/myla.toml: missing table [package]")
 
