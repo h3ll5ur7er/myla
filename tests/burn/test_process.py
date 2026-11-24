@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 from . import test_windows
-from ._native import (
+from ._native import (BUILD_TARGET, 
     CAN_BUILD_NATIVE,
     SKIP_REASON,
     TEST_TARGET,
@@ -282,7 +282,7 @@ class FailedPipeRead(unittest.TestCase):
             self.assertEqual((failed.stdout, failed.returncode), ("other 5\nok 4 0\n", 0))
 
 
-@unittest.skipUnless(TEST_TARGET == "x86_64-windows", "the suites for Windows (scripts/test-target.py x86_64-windows)")
+@unittest.skipUnless(BUILD_TARGET == "x86_64-windows", "the suites for Windows (scripts/test-target.py x86_64-windows)")
 class WindowsChildren(test_windows.Children):
     """These suites for Windows (MYLA-705): the tests above run Linux's tools
     (`/bin/echo`, `/bin/sh`, `cat`), which a Windows program can't start

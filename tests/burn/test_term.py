@@ -39,7 +39,7 @@ import threading
 import time
 import unittest
 
-from ._native import (
+from ._native import (BUILD_TARGET, 
     CAN_BUILD_NATIVE,
     SKIP_REASON,
     TEST_TARGET,
@@ -94,7 +94,7 @@ class Pty:
         except OSError:
             return False
         self.out += chunk
-        if TEST_TARGET == "x86_64-windows":
+        if BUILD_TARGET == "x86_64-windows":
             # Wine's console draws on the terminal: it hides the cursor
             # around each write and ends a line with CR CR LF (MYLA-707)
             for drawn, written in WINE_DRAWING:

@@ -7,6 +7,7 @@ excused from is skipped by the loop itself (`program_excuse`)."""
 from __future__ import annotations
 
 import os
+import sys
 
 TARGETS = ["aarch64-linux", "wasm32-wasi", "x86_64-windows"]
 
@@ -202,7 +203,10 @@ SKIP_PROGRAMS: dict[str, dict[str, str]] = {
 
 
 def target() -> str:
-    return os.environ.get("MYLA_TEST_TARGET", "")
+    """The target whose excuses apply: MYLA_TEST_TARGET's, or on a Windows
+    machine its own, x86_64-windows (MYLA-926 step 2: the suites run there
+    natively, MYLA_TEST_TARGET unset)."""
+    return os.environ.get("MYLA_TEST_TARGET", "") or ("x86_64-windows" if sys.platform == "win32" else "")
 
 
 def excuse_for(test_id: str) -> str | None:

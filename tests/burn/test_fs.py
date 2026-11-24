@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import (
+from ._native import (BUILD_TARGET, 
     CAN_BUILD_NATIVE,
     SKIP_REASON,
     TEST_TARGET,
@@ -775,7 +775,7 @@ def prepare_tree(work: str) -> None:
     for rel in ("tree/one", "tree/sub/two", "tree/sub/deeper/three", "outside/keep"):
         with open(os.path.join(work, rel), "w") as fh:
             fh.write(rel)
-    if TEST_TARGET != "x86_64-windows":
+    if BUILD_TARGET != "x86_64-windows":
         os.symlink(os.path.join(work, "outside"), os.path.join(work, "tree", "link"))
         os.symlink("nowhere", os.path.join(work, "tree", "sub", "dangling"))
 
@@ -934,7 +934,7 @@ class DirectoryParity(unittest.TestCase):
         for impl, result in self.run_all("cwd", CWD_PROGRAM).items():
             with self.subTest(implementation=impl):
                 work = os.path.realpath(self.work_dir("cwd", impl))
-                if TEST_TARGET == "x86_64-windows" and impl.endswith("native"):
+                if BUILD_TARGET == "x86_64-windows" and impl.endswith("native"):
                     # Windows' own path: Wine's drive Z: is the root
                     work = "Z:" + work.replace("/", "\\")
                 self.assertEqual(result, (f"{work} true\n", "", 0))
@@ -973,12 +973,12 @@ class DirectoryParity(unittest.TestCase):
         for impl, result in self.run_all("errnos", ERRNOS, prepare).items():
             with self.subTest(implementation=impl):
                 want = ERRNOS_OUTPUT
-                if TEST_TARGET == "x86_64-windows" and impl.endswith("native"):
+                if BUILD_TARGET == "x86_64-windows" and impl.endswith("native"):
                     want = ERRNOS_OUTPUT_WINDOWS
                 self.assertEqual(result, (want, "", 0))
 
     def test_a_device_s_kind(self) -> None:
-        if TEST_TARGET == "x86_64-windows":
+        if BUILD_TARGET == "x86_64-windows":
             self.skipTest("Windows has no /dev/null")
         def prepare(work: str) -> None:
             import socket

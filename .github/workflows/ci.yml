@@ -329,6 +329,52 @@ jobs:
       - name: The runtime's litmus programs, 1,000 runs each on 4 and 16 workers
         run: python3 scripts/stress-native.py --runs 1000 --workers 4,16 --only t23_results_seen_by_their_awaiter --only t24_cancelled_sleepers --only t25_timers_fire --only t26_tasks_yield --only t27_children_read_as_they_write
 
+  burn-windows:
+    # the burn suites natively on Windows (MYLA-926 step 2, D296): the 39 the
+    # targets job runs for x86_64-windows under Wine, run here on
+    # windows-latest against Windows' own programs and tools (the toolchain
+    # bootstrapped from bootstrap/seed-windows.s with the image's LLVM),
+    # through `scripts/test-target.py host`. Beside the Wine job until this
+    # has been green a while; the rest of tests/burn comes as each suite is
+    # ported or marked Linux-only with its reason
+    name: Burn suites on Windows (native, windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: The checkout's line endings are LF
+        run: |
+          if grep -l $'\r' selfhost/*.my lib/std/*.my tests/burn/*.py bootstrap/seed-windows.s; then
+            echo "::error::CRLF line endings in the checkout (core.autocrlf against .gitattributes)"
+            exit 1
+          fi
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: LLVM's clang, llvm-dlltool and lld-link on PATH; Python
+        run: |
+          llvm="/c/Program Files/LLVM/bin"
+          if [ -d "$llvm" ]; then
+            cygpath -w "$llvm" >> "$GITHUB_PATH"
+            export PATH="$llvm:$PATH"
+          fi
+          for tool in clang llvm-dlltool lld-link python node; do
+            command -v "$tool"
+            version="$("$tool" --version 2>&1 || true)"
+            echo "${version%%$'\n'*}"
+          done
+      - uses: actions/cache@v6
+        with:
+          path: build/test-tools
+          key: test-tools-${{ runner.os }}-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed-windows.s') }}
+      - name: The burn suites for x86_64-windows, natively
+        run: |
+          suites=$(python -c "import sys; sys.path.insert(0, '.'); from tests.burn import _targets; print(' '.join(_targets.SUITES))")
+          python scripts/test-target.py host $suites
+
   bootstrap-windows:
     # the bootstrap on Windows itself (MYLA-709, D214), as bootstrap-arm64
     # is on aarch64: Git Bash runs scripts/bootstrap.sh from

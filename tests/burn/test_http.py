@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-from ._native import (
+from ._native import (BUILD_TARGET, 
     CAN_BUILD_NATIVE,
     SKIP_REASON,
     TEST_TARGET,
@@ -964,7 +964,7 @@ class TimeLimits(unittest.TestCase):
             # (the condition waited for, at most 30 s: 10 s once weren't
             # enough under a full run's load, MYLA-745; the sockets left
             # say which connection the server kept)
-            if TEST_TARGET == "x86_64-windows":
+            if BUILD_TARGET == "x86_64-windows":
                 # (Wine keeps a socket parked on the reactor in its server,
                 # not always among the program's descriptors, MYLA-833: so
                 # the time the server takes, write_ms and its keeper's look)
@@ -1051,7 +1051,7 @@ class TimeLimits(unittest.TestCase):
         def check(port, d):
             cases = [("fifo", b"HTTP/1.1 404 Not Found\r\n"), ("link", b"HTTP/1.1 404 Not Found\r\n"),
                      ("a.txt", b"HTTP/1.1 200 OK\r\n")]
-            if TEST_TARGET == "x86_64-windows":
+            if BUILD_TARGET == "x86_64-windows":
                 # Wine shows a Unix link as what it names (the Windows
                 # runner's `files/links` opens a link on Windows itself)
                 cases = [c for c in cases if c[0] != "link"]

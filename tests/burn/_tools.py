@@ -15,20 +15,30 @@ sources changes.
 """
 from __future__ import annotations
 
-import fcntl
 import functools
 import glob
 import hashlib
 import os
 import platform
 import subprocess
+import sys
+
+try:
+    import fcntl
+except ImportError:          # Windows (MYLA-926 step 2): msvcrt's lock instead
+    fcntl = None
+    import msvcrt
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _CACHE = os.path.join(_REPO, "build", "test-tools")
 
-# The seed for this machine, as scripts/host.sh picks it: x86-64's or
-# aarch64's (MYLA-926: the burn suites run natively on an aarch64 runner).
-_SEED = os.path.join(_REPO, "bootstrap", "seed-aarch64.s" if platform.machine() == "aarch64" else "seed.s")
+# The machine the tools are built for, as scripts/host.sh tells it: x86-64 or
+# aarch64 Linux, or x86-64 Windows (MYLA-926: the burn suites run natively on
+# aarch64 and Windows runners), its seed, and its programs' suffix.
+WINDOWS = sys.platform == "win32"
+_SEED = os.path.join(_REPO, "bootstrap", "seed-windows.s" if WINDOWS
+                     else "seed-aarch64.s" if platform.machine() == "aarch64" else "seed.s")
+EXE = ".exe" if WINDOWS else ""
 
 # the folder holding the standard library (`std/`) and `debug/myla_gdb.py`
 STDLIB_ROOT = os.path.join(_REPO, "lib")
@@ -54,7 +64,7 @@ def _sources_hash() -> str:
 def _cached(name: str, make) -> str:
     """The cached binary `name` for the current sources, made by `make(path)`
     if the cache has none."""
-    path = os.path.join(_CACHE, f"{name}-{BACKEND}-{_sources_hash()}")
+    path = os.path.join(_CACHE, f"{name}-{BACKEND}-{_sources_hash()}{EXE}")
     if os.path.exists(path):
         return path
     os.makedirs(_CACHE, exist_ok=True)
@@ -62,24 +72,75 @@ def _cached(name: str, make) -> str:
     # in parallel, MYLA-268): the others wait, then find it made; the stale
     # copies, and nothing another process is still making, go under the lock
     with open(os.path.join(_CACHE, f"{name}-{BACKEND}.lock"), "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        _lock(lock)
         if os.path.exists(path):
             return path
         for stale in glob.glob(os.path.join(_CACHE, f"{name}-{BACKEND}-*")):
             os.remove(stale)
-        tmp = f"{path}.{os.getpid()}.tmp"
+        tmp = f"{path}.{os.getpid()}.tmp{EXE}"
         try:
             make(tmp)
             os.replace(tmp, path)   # atomic, so a run without the lock never sees half a file
         finally:
-            for leftover in (tmp, tmp + ".s", tmp + ".o"):
+            for leftover in glob.glob(glob.escape(tmp) + "*"):
                 if os.path.exists(leftover):
                     os.remove(leftover)
     return path
 
 
+def _lock(fh) -> None:
+    """`fh`'s file locked for this process, waiting for another's lock."""
+    if fcntl is not None:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        return
+    while True:
+        try:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        except OSError:       # LK_LOCK gives up after ten seconds: wait on
+            continue
+
+
+def windows_imports(asm: str) -> list[tuple[str, list[str]]]:
+    """The system DLLs the Windows assembly `asm` calls into, each with the
+    functions it calls of it through their import slots: the lists its import
+    libraries are made from (D211, D212), as the code generator names them at
+    the assembly's end (`# import <dll> <function> ...`, its `windows_dlls`,
+    MYLA-722)."""
+    out = []
+    for line in asm.splitlines():
+        if line.startswith("# import "):
+            words = line.split()
+            out.append((words[2], words[3:]))
+    return out
+
+
+def link_windows(asm_path: str, out: str, quiet: bool = True) -> None:
+    """The Windows assembly `asm_path` made the `.exe` `out` as `myla build
+    --target x86_64-windows` makes it (D211, scripts/host.sh's
+    windows_asm_to_bin): clang assembles it, llvm-dlltool makes an import
+    library of each system DLL it calls, lld-link links them all."""
+    run = dict(check=True, capture_output=True, text=True) if quiet else dict(check=True)
+    obj = out + ".o"
+    with open(asm_path, encoding="utf-8") as fh:
+        dlls = windows_imports(fh.read())
+    subprocess.run(["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", obj, asm_path], **run)
+    libs = []
+    for dll, names in dlls:
+        stem = f"{out}.{dll.removesuffix('.dll')}"
+        with open(stem + ".def", "w", encoding="utf-8") as fh:
+            fh.write(f"LIBRARY {dll}\nEXPORTS\n" + "".join(n + "\n" for n in names))
+        subprocess.run(["llvm-dlltool", "-m", "i386:x86-64", "-d", stem + ".def", "-l", stem + ".lib"], **run)
+        libs.append(stem + ".lib")
+    subprocess.run(["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib",
+                    "/stack:125829120", "/out:" + out, obj, *libs], **run)
+
+
 def _assemble(asm: str, out: str) -> None:
     """The assembly file `asm` assembled and linked into `out`."""
+    if WINDOWS:
+        link_windows(asm, out, quiet=False)
+        return
     flags = ["--64"] if platform.machine() == "x86_64" else []   # x86-64's flag alone
     subprocess.run(["as", *flags, "-o", out + ".o", asm], check=True)
     subprocess.run(["ld", "-o", out, out + ".o"], check=True)

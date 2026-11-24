@@ -14,7 +14,7 @@ import tempfile
 import unittest
 import zlib
 
-from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, Program, build_and_run_full,
+from tests.burn._native import (BUILD_TARGET, CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, Program, build_and_run_full,
                                 run_source_both_now, selfhost_run, write_program)
 from tests.burn.test_http import NO_SOCKETS, NO_SOCKETS_WHY
 
@@ -302,7 +302,7 @@ def make_root(top: str) -> str:
     for path in (os.path.join(top, "outside.txt"), os.path.join(top, "out", "outside.txt")):
         with open(path, "w") as f:
             f.write("TOP SECRET")
-    if TEST_TARGET != "x86_64-windows":
+    if BUILD_TARGET != "x86_64-windows":
         os.symlink(os.path.join(top, "outside.txt"), os.path.join(root, "leak.txt"))
         os.symlink(os.path.join(top, "out"), os.path.join(root, "dirlink"))
         os.symlink("app.css", os.path.join(root, "inlink.css"))
@@ -321,7 +321,7 @@ class StaticFiles(unittest.TestCase):
         with tempfile.TemporaryDirectory() as top:
             root = make_root(top)
             want = POLICY_WANT
-            if TEST_TARGET == "x86_64-windows":
+            if BUILD_TARGET == "x86_64-windows":
                 # no links there (`make_root`): what a link would serve isn't there
                 want = "".join(f"{line.split(' ')[0]} 404 not found\n" if line.split(" ")[0] in LINKED else line + "\n"
                                for line in POLICY_WANT.splitlines())

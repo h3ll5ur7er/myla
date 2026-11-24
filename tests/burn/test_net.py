@@ -31,7 +31,7 @@ import time
 import unittest
 from unittest import mock
 
-from ._native import (
+from ._native import (BUILD_TARGET, 
     CAN_BUILD_NATIVE,
     SKIP_REASON,
     TEST_TARGET,
@@ -1565,7 +1565,7 @@ ello
 
     def test_the_configuration(self):
         src = "#allow(primitive)\nfun main() {\n    print(__net_config(0))\n    print(__net_config(7).len())\n}\n"
-        if TEST_TARGET == "x86_64-windows":
+        if BUILD_TARGET == "x86_64-windows":
             # MYLA-706: Windows keeps its hosts file under %SystemRoot%
             # (the interpreter is Linux's)
             with tempfile.TemporaryDirectory() as tmp:

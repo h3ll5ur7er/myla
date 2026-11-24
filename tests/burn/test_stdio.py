@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 
-from ._native import (
+from ._native import (BUILD_TARGET, 
     CAN_BUILD_NATIVE,
     SKIP_REASON,
     TEST_TARGET,
@@ -248,7 +248,7 @@ class BrokenPipe(unittest.TestCase):
                 # the target's words for its code (MYLA-716): Windows' for
                 # ERROR_DISK_FULL, which Wine gives a write to /dev/full
                 said = "no space left on device"
-                if TEST_TARGET == "x86_64-windows" and name == "native":
+                if BUILD_TARGET == "x86_64-windows" and name == "native":
                     said = "there is not enough space on the disk"
                 with self.subTest(run=name, stream="stdout"):
                     with open("/dev/full", "w") as full:
