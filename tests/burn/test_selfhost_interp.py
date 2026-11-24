@@ -37,7 +37,7 @@ import time
 import unittest
 
 from ._golden import NoGolden, answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE, linux_only, shown
+from ._native import CAN_BUILD_NATIVE, ON_WINDOWS, linux_only, shown
 from ._tools import STDLIB_ROOT, peak_memory, selfhost_tool
 
 _REPO = os.path.abspath(
@@ -46,6 +46,10 @@ _REPO = os.path.abspath(
 
 # Examples outside the v0.8 interpreter gate's scope (see module docstring).
 EXCLUDED: set[str] = set()
+
+# The module programs that run Linux's /bin/echo, with its output's line and
+# what the program prints when it can't run it, as on Windows.
+_NO_ECHO = {"io_through_the_ir": ("false\n3\n", "false\nnot run\n")}
 
 
 def _corpus() -> list[str]:
@@ -380,6 +384,10 @@ class SelfHostedInterpParity(unittest.TestCase):
                         expected = (MODULE_OUTPUTS_SINCE[name], 0)
                     else:
                         expected = _linked_oracle(entry, _modules(entry))
+                    if ON_WINDOWS and name in _NO_ECHO:
+                        # a Windows program finds no /bin/echo to run (MYLA-705):
+                        # `run` fails, the rest is the same (MYLA-926)
+                        expected = (expected[0].replace(*_NO_ECHO[name]), expected[1])
                     self.assertEqual(self._myla_run(entry), expected)
 
     def test_updates_are_amortised_constant(self) -> None:

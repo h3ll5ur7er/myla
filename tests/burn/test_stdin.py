@@ -25,7 +25,7 @@ import threading
 import unittest
 
 from ._golden import golden
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, assemble
+from ._native import CAN_BUILD_NATIVE, ON_WINDOWS, SKIP_REASON, assemble
 from ._tools import EXE, STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -129,10 +129,18 @@ fun main() {
 }
 """
 
+# A descriptor that isn't open: Linux's 99. On Windows a descriptor is a
+# handle (MYLA-704), and the kernel ignores a handle's low two bits: 99 is
+# handle 96, which a process may well have open (run 277 read it without an
+# invalid handle's error). 2^30 is past the largest handle a process can
+# have (2^24 of them, each a multiple of 4): ReadFile finds it invalid
+# (MYLA-926).
+_NOT_OPEN = 1 << 30 if ON_WINDOWS else 99
+
 BAD_FD = """from std.io import reader
 from std.fs import IoError
 fun main() {
-    var r = reader(99)
+    var r = reader(NOT_OPEN)
     match r.read_line() {
         Err(IoError.Other(code)) => { print(code) },
         _ => { print("no error") },
@@ -142,7 +150,7 @@ fun main() {
         _ => { print("no error") },
     }
 }
-"""
+""".replace("NOT_OPEN", str(_NOT_OPEN))
 
 # Waits for input with a timeout (MYLA-80): nothing has been sent at first,
 # then a line, then the end of the input.

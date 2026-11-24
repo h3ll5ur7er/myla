@@ -20,7 +20,7 @@ import tempfile
 import time
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, SKIP_REASON, linux_only
+from tests.burn._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, ON_WINDOWS, SKIP_REASON, linux_only
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 from tests.burn.test_test_functions import (_ASYNC, _ASYNC_WANT, _FUNCTIONS, _FUNCTIONS_WANT, _UNWINDING, _myla,
                                             _scratch_env, _write)
@@ -630,6 +630,12 @@ def _framed(tmp: str, *flags: str, env: dict | None = None) -> subprocess.Comple
 
 
 
+# The target whose std.platform is lib/std/platform.my: the host's own
+# where that is Linux; on Windows, whose own is platform_windows.my, Linux's
+# (MYLA-943).
+_PLAIN_PLATFORM = "x86_64-linux" if ON_WINDOWS else HOST_TARGET
+
+
 def _corpus() -> list[str]:
     """The files with cases whose native report must be the interpreter's."""
     files = sorted(glob.glob(os.path.join(_REPO, "examples", "*.my")))
@@ -878,7 +884,7 @@ class TestNative(unittest.TestCase):
         # its place there is the target's own module's (S3's review)
         proc = _myla(["test", os.path.join("lib", "std", "platform.my"), "--target", "wasm32-wasi"], _REPO)
         self.assertEqual(proc.returncode, 1)
-        self.assertIn(f"is std.platform for {HOST_TARGET}; for wasm32-wasi it is", proc.stderr)
+        self.assertIn(f"is std.platform for {_PLAIN_PLATFORM}; for wasm32-wasi it is", proc.stderr)
 
     def test_a_harness_that_does_not_build_is_kept(self):
         # a case calling `main`, which the harness blanks
@@ -904,6 +910,12 @@ class TestNative(unittest.TestCase):
             with self.subTest(file=os.path.relpath(f, _REPO)):
                 interp = _myla(["test", f], _REPO)
                 native = _myla(["test", f, "--native"], _REPO)
+                if ON_WINDOWS and f == os.path.join(_REPO, "lib", "std", "platform.my"):
+                    # Linux's std.platform: natively on Windows its place is
+                    # platform_windows.my's, whose cases run there (S3)
+                    self.assertEqual((native.stdout, native.returncode), ("", 1))
+                    self.assertIn("is std.platform for x86_64-linux; for x86_64-windows it is", native.stderr)
+                    continue
                 self.assertEqual((native.stdout, native.stderr, native.returncode),
                                  (interp.stdout, interp.stderr, interp.returncode))
 
