@@ -493,10 +493,11 @@ class RegexDifferentialTest(unittest.TestCase):
         lines += [line(f"a{{{n}}}", b"aaa") for n in ("2147483647", "2147483648", "4294967296", "99999999999999999999")]
         lines += [line(f"a{{1,{n}}}", b"aaa") for n in ("2147483647", "2147483648", "99999999999999999999")]
         plain = self.myla(True, lines)
-        proc = subprocess.run([self.checked], input="\n".join(lines) + "\n", capture_output=True, text=True,
+        # (the lines as bytes, as `myla` gives them: MYLA-926)
+        proc = subprocess.run([self.checked], input=("\n".join(lines) + "\n").encode(), capture_output=True,
                               timeout=900)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.splitlines(), plain, "the plain and the checked build differ")
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode(errors="replace"))
+        self.assertEqual(proc.stdout.decode().splitlines(), plain, "the plain and the checked build differ")
 
     @unittest.skipUnless(shutil.which("go"), "Go isn't installed")
     def test_go_interpreted(self) -> None:

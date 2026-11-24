@@ -52,6 +52,21 @@ def _named(path: str) -> str:
         return path
 
 
+def _strings_apart(carried: object, parsed: object) -> str:
+    """For two builds' outcomes that differ, the printable strings of each
+    binary the other hasn't, which name what put them apart (a path in
+    another spelling, say: on Windows 8.3's `RUNNER~1` and `runneradmin`,
+    MYLA-926); "" for outcomes without binaries."""
+    if not (isinstance(carried, tuple) and len(carried) == 2 and isinstance(carried[1], bytes)
+            and isinstance(parsed, tuple) and len(parsed) == 2 and isinstance(parsed[1], bytes)):
+        return ""
+    import re
+    def strings(b: bytes) -> set[bytes]:
+        return set(re.findall(rb"[ -~]{6,}", b))
+    a, b = strings(carried[1]), strings(parsed[1])
+    return f"only with the cache: {sorted(a - b)[:8]}; only without: {sorted(b - a)[:8]}"
+
+
 def _programs() -> list[str]:
     """Every example with a `main` (not the error corpus), and the compiler."""
     out = []
@@ -126,7 +141,7 @@ class WithAndWithoutTheCache(unittest.TestCase):
         self.assertTrue(keys)
         for k in keys:
             with self.subTest(k):
-                self.assertEqual(self.carried[k], self.parsed[k])
+                self.assertEqual(self.carried[k], self.parsed[k], _strings_apart(self.carried[k], self.parsed[k]))
 
     def test_the_programs_build_to_the_same_bytes(self):
         for k, (result, binary) in ((k, v) for k, v in self.carried.items() if k.startswith("build")):
