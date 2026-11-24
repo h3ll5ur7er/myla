@@ -181,6 +181,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | 3 Streams and the middle tier | [[MYLA-337]], [[MYLA-339]] and [[MYLA-340]] (after MYLA-336 and MYLA-338), [[MYLA-341]], [[MYLA-342]] (after MYLA-330), [[MYLA-343]], [[MYLA-344]], [[MYLA-345]] | [[MYLA-353]] (a decision); the fixes the lanes needed, [[MYLA-360]], [[MYLA-367]], [[MYLA-374]], [[MYLA-375]] | [[MYLA-378]] (what the lanes found missing) |
 | 4 Networks and larger formats | [[MYLA-347]] (after MYLA-346), [[MYLA-348]], [[MYLA-349]], [[MYLA-351]], [[MYLA-352]], [[MYLA-354]] (a decision) | | [[MYLA-346]], then [[MYLA-350]] |
 | 5 Small modules (2026-11-09) | [[MYLA-402]] (#55), [[MYLA-403]] (#67), [[MYLA-404]] (#32) | [[MYLA-396]], [[MYLA-359]] (check time) | |
+| 6 Images, vision and fonts (proposed 2026-11-24) | [[MYLA-930]] (the owner's decisions) first, then [[MYLA-931]] to [[MYLA-945]] in the order of [[Project/Standard-library-roadmap/Images-vision-and-fonts#The plan]] | | |
 | Later | No tasks yet: #10, #39, #40 | | |
 
 A wave's lanes start once the previous wave's pull request is merged. A lane whose task needs nothing may start earlier, while an agent is free: MYLA-327, MYLA-328, MYLA-329, MYLA-335 and MYLA-338 need nothing at all.
@@ -209,6 +210,6 @@ Compiler and platform tasks have their own pull requests, staging a seed when th
 
 ## Left out
 
-- **Graphics, audio, GUI and databases.** These are packages for the project tool ([[Architecture/Project-tool]]), not std.
+- **Graphics, audio, GUI and databases.** These are packages for the project tool ([[Architecture/Project-tool]]), not std. Image files, image processing, 2D drawing and fonts are pure computation, and [[Project/Standard-library-roadmap/Images-vision-and-fonts]] proposes them for std, awaiting the owner's decision in [[MYLA-930]]. Displays, windows and the GUI stay out either way.
 - **A full YAML, XML Schema or HTTP/2.** Each would be a size 8. The subsets above cover the common use.
 - **Dynamic dispatch for streams** (`[Box<dyn Read>]`). Myla has no trait objects ([[Language/Methods-and-traits]]). Generic adapters and an enum of known stream kinds cover the cases seen so far.
