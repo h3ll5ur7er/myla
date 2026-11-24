@@ -458,6 +458,12 @@ impl Parser {
         return self.s[self.i + k]
     }
 
+    // Whether a line ends at the current position: the text's end, "\n" or
+    // "\r\n" (a line break of a Windows editor, which TOML allows too).
+    fun at_line_end(self) -> bool {
+        return self.at_end() || self.peek() == '\n' || (self.peek() == 13u8 && self.ahead(1) == '\n')
+    }
+
     // A new node in the table or array of tables `parent` (none: -1), last
     // of its children.
     fun node(var self, parent: int32, key: str, kind: int32, v: Toml) -> int32 {
@@ -1017,7 +1023,7 @@ impl Parser {
         var sb = StringBuilder()
         var run = self.i                         // start of bytes to copy as they are
         while true {
-            if self.at_end() || self.peek() == '\n' { return Err(self.error("unterminated string", quote)) }
+            if self.at_line_end() { return Err(self.error("unterminated string", quote)) }
             let c = self.peek()
             if c == '"' {
                 sb.append(self.s, run, self.i)
@@ -1042,7 +1048,7 @@ impl Parser {
         self.i = self.i + 1
         let start = self.i
         while true {
-            if self.at_end() || self.peek() == '\n' { return Err(self.error("unterminated string", quote)) }
+            if self.at_line_end() { return Err(self.error("unterminated string", quote)) }
             let c = self.peek()
             if c == '\'' {
                 var sb = StringBuilder()
@@ -1256,6 +1262,9 @@ fun reads_dates_and_times(text: str) -> str {
 #test("a = \"\"\"x\\ y\"\"\"")["1:9: invalid escape in a string"]
 #test("a = '''x\u{1}'''")["1:9: control character in a string"]
 #test("a = \"\"\"x")["1:5: unterminated string"]
+#test("a = \"x\r\nb = 1")["1:5: unterminated string"] // CRLF ends a one-line string as LF does
+#test("a = 'x\r\nb = 1")["1:5: unterminated string"]
+#test("a = \"x\ry\"")["1:7: control character in a string"] // a carriage return alone is one
 #test("a = \"\\e\"")["1:6: invalid escape in a string"]
 #test("a = \"\\uD800\"")["1:6: invalid unicode escape"]
 #test("\"\"\"k\"\"\" = 1")["1:1: a key can't be a multi-line string"]

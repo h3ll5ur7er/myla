@@ -154,6 +154,24 @@ pub fun carets(text: str, line: int32, col: int32, sp: SrcSpan) -> str {
     return sb.build()
 }
 
+// Line `line` of a file as a diagnostic shows it, `raw` as the file has it,
+// and its carets (see caret_range). A line that ends in the "\r" of a "\r\n"
+// (a file written on Windows) is shown without it, and a range that runs to
+// that "\r" stops at the line's end, so the carets are those of the same line
+// ending in "\n" alone.
+#test("    let s = \"ü\r", 2, 13, SrcSpan { sline: 2, scol: 13, eline: 2, ecol: 16 })[("    let s = \"ü", "            ^^")]
+#test("    let s = \"ü", 2, 13, SrcSpan { sline: 2, scol: 13, eline: 2, ecol: 15 })[("    let s = \"ü", "            ^^")]
+#test("/* not\r", 2, 1, SrcSpan { sline: 2, scol: 1, eline: 3, ecol: 1 })[("/* not", "^^^^^^")]
+#test("x = 1\r", 1, 6, SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 7 })[("x = 1", "     ^")]
+fun shown_line(raw: str, line: int32, col: int32, sp: SrcSpan) -> (str, str) {
+    if !raw.ends_with("\r") { return (raw, carets(raw, line, col, sp)) }
+    let text = raw[0:raw.len() - 1]
+    var range = sp
+    let past = text.chars().len() as int32 + 1
+    if range.eline == line && range.ecol > past { range.ecol = past }
+    return (text, carets(text, line, col, range))
+}
+
 // What the CLI prints for `r`: it and its `more`, a blank line apart, then a
 // summary line when there are several.
 #test(Report { kind: "type error", msg: "a", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] })["type error: a"]
@@ -197,12 +215,13 @@ fun located(header: str, path: str, line: int32, col: int32, sp: SrcSpan, src: O
         None => {},
     }
     match src_line {
-        Some(l) => {
+        Some(raw) => {
+            let (l, marks) = shown_line(raw, line, col, sp)
             let gutter = format("{}", line)
             var pad = StringBuilder()
             for c in gutter.chars() { pad.append_byte(' ') }
             let p = pad.build()
-            sb.append(format("\n{} |\n{} | {}\n{} | {}", p, gutter, l, p, carets(l, line, col, sp)))
+            sb.append(format("\n{} |\n{} | {}\n{} | {}", p, gutter, l, p, marks))
         },
         None => {},
     }
