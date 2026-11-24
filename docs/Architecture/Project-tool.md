@@ -45,7 +45,7 @@ shapes/                       the package directory: holds myla.toml
 
 - A package has a program (`src/main.my`), a library (`src/<name>.my`), or both; `myla build` and `myla run` need the program, a dependency needs the library.
 - `src/` is the project root, so the import rules of [[Language/Modules]] apply unchanged inside it: `import circle` is `src/circle.my`, `from .circle import r` works from `src/main.my`.
-- `tests/` holds the integration tests ([[MYLA-306]], [[Language/Attributes-and-testing#integration-tests-in-a-project]]): a file whose trailing comment block has `// output:` is a *test program*, run with its `// input:` on stdin and compared with its output, `// exit:` (0 without) and `// stderr:` (the start of what it printed there); any other file holds `#test` cases run as `src/`'s are. Both import the project's modules as `src/main.my` does (`from names import polite`), and `std.test.program()` is the path of the program `myla test` built first.
+- `tests/` holds the integration tests ([[MYLA-306]], [[Language/Attributes-and-testing#integration-tests-in-a-project]]): a file whose trailing comment block has `// output:` is a *test program*, run with its `// input:` on stdin and compared with its output, `// exit:` (0 without) and `// stderr:` (the start of what it printed there; the block's lines may end in CRLF, as in a Windows checkout, [[MYLA-936]]); any other file holds `#test` cases run as `src/`'s are. Both import the project's modules as `src/main.my` does (`from names import polite`), and `std.test.program()` is the path of the program `myla test` built first.
 - A single `.my` file without a manifest works as today: `myla run hello.my`.
 
 ### How packages map onto imports
