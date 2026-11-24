@@ -25,9 +25,9 @@ Each step drops the emulated job only once the native one has been green beside 
 
 - [x] aarch64: the burn suite on `ubuntu-24.04-arm`, host-architecture keys for the x86-64-only tests
 - [ ] aarch64: qemu off CI (the `targets` job's entry, apt, emulator-only limits)
-- [ ] Windows: the burn suites on `windows-latest`, each POSIX-only test ported or marked with its reason
+- [x] Windows: the burn suites on `windows-latest`, each POSIX-only test ported or marked with its reason
 - [ ] Windows: Wine off CI (the Wine job, Wine in the Linux jobs' apt)
-- [ ] `docs/Development/Testing.md`, the skill's CI table and [[Language/Targets]] say where each target is tested
+- [x] `docs/Development/Testing.md`, the skill's CI table and [[Language/Targets]] say where each target is tested
 
 ## Evidence (step 1, 2026-11-22)
 
@@ -56,5 +56,6 @@ The `burn-windows` job on `windows-latest` (`python scripts/test-target.py host`
 | 45371789872 | `640e5c8` | 114 | 111: groups A–E ([[MYLA-934]], [[MYLA-936]], [[MYLA-937]], [[MYLA-938]], [[MYLA-940]], [[MYLA-941]], [[MYLA-942]], [[MYLA-943]]) |
 | 45378102638 | `fd0abe0` | 114 | 111 (test_std_cache: the PE time stamp) |
 | 45384362001 | `692f445` | 114 | 112: left [[MYLA-944]] (a wasm32 harness's scratch directory on another drive) and test_http's `test_kept_connections_wait_parked` at 4.532 s of its 4.5 ([[MYLA-945]]) |
+| 45493992340 | `9b914f1` | 114 | **114 of 114**: [[MYLA-944]] (`/X:/p` for a wasm program's file on any drive); D311, D312 recorded. The Wine job beside it 36 of 39: twice `wine: created the configuration directory` before a program's error (the prefix set up), and `test_children_run_in_parallel` a third time |
 
 What the suites assumed of Linux, ported: the build sites (`_native.assemble`, `.exe`), POSIX modules imported where they're used, process groups and signals (`taskkill`, `CTRL_BREAK_EVENT`), a reader thread for `select` on pipes, text-mode files and input (CRLF), `\` in expected paths (`_native.shown`), `relpath` across drives, Git's read-only objects, an executable still held a moment after its process, `nul` as a name, `/bin/echo`, Windows' loopback (a refused connect retried for 2 s), the exit code's 32 bits (D216), a handle number that is open, the UCRT's `expm1`. What they found in Myla, fixed: the loader's and the project tool's paths ([[MYLA-931]], [[MYLA-930]]), interp_main's library ([[MYLA-932]]), a parked socket's close and Winsock's send buffering ([[MYLA-933]]), CRLF in manifests and diagnostics ([[MYLA-934]], [[MYLA-941]]), a test program's CRLF block ([[MYLA-936]]), read-only files ([[MYLA-937]]), the language server's URIs ([[MYLA-938]]), the interpreter's environment ([[MYLA-942]]), the driver's drive paths and an exit past 255 ([[MYLA-943]]), and `lld-link`'s time stamp (`/Brepro`: a Windows program builds to the same bytes each time). Linux unchanged: the `burn` job, the Wine job and `burn-arm64` (114 of 114) pass on the same heads. The Wine job's `test_children_run_in_parallel` failed twice in seven runs (runs 275 and 281) and passes natively: Wine's, one more reason to retire it.
