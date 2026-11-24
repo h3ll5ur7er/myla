@@ -16,3 +16,5 @@ The fix is in the runner (`tools/wasm/`, the website's area, so not made by the 
 
 - [x] run.mjs: `PWD` on Windows as above (Linux's unchanged): made by the lead as a minimal named change in the website's area (MYLA-926 step 2)
 - [ ] Evidence: `test_wasm.WasmParity.test_files` passes on the `burn-windows` job; test_wasm passes on Linux as before
+
+Its limit (the lead, 2026-11-24): the spelling without the drive reaches the working directory's drive only; a program's file on another drive (the CI runner's `%TEMP%` is on C:, its checkout on D:) has no name. MYLA-944 proposes `/X:/p` for every drive, which would replace this.

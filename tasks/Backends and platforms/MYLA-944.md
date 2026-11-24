@@ -14,3 +14,5 @@ What fixes it is the shim's business (the wasm agent's area): either the shim ma
 
 - [ ] Decide where the mapping lives (the shim, or the driver for a wasm32 target on a Windows host)
 - [ ] TestWasm32.test_the_scratch_directories_go passes on the `burn-windows` job
+
+The lead's look (2026-11-24): the driver can't hand the harness its directory without the drive, as MYLA-940's runner and test_wasm's `under_the_runner` name paths (`/Users/…`): on the CI runner `%TEMP%` is on C: and the checkout, Node's working directory, on D:, and Node reads `/x` from the working directory's drive. Proposed (for the owner and the wasm area's agent): on Windows a wasm program names a host path `X:\p` as `/X:/p`, the shim's NodeFs maps a path `/X:/…` to `X:/…` before each `fs` call (a `/x` without a drive as today), `run.mjs`'s `PWD` and the driver's `MYLA_TEST_DIR` are given so, and test_wasm's `under_the_runner` writes that spelling. Every drive is then reachable, not only the working directory's.
