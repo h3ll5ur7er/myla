@@ -2,7 +2,7 @@
 id: MYLA-932
 title: "The self-hosted interpreter tool (interp_main) loads Linux's std.path_style on Windows: `fs.canonical` fails there"
 type: bug
-status: todo
+status: in-progress
 priority: high
 labels: [interpreter, loader, windows]
 ---
@@ -12,7 +12,7 @@ Found by [[MYLA-926]] step 2's port of the burn suites (2026-11-24, the native W
 
 Reproduced under Wine with `build/myla build selfhost/interp_main.my --target x86_64-windows`: a program printing `std.path_style.WINDOWS`, `fs.current_dir()` and `fs.canonical("t/f.txt")` prints `false`, `Z:\…\w`, `NotFound` in interp_main.exe, and `true`, `Z:\…\w`, `Z:\…\w\t\f.txt` built for Windows and in `main.exe run` (which goes through `for_host`).
 
-The test is right and stays failing until this is fixed.
+The test is right.
 
-- [ ] interp_main loads the program with `for_host(argv[1], opts)` (as the driver's `load_for_host` does); the other tools that interpret or check a program on the host (`play_main`?) checked for the same
-- [ ] Evidence: under Wine interp_main.exe prints `true` and the canonical path for the program above; test_fs `DirectoryParity` passes on the `burn-windows` job; on Linux nothing changes (the bootstrap's fixed point, test_fs, test_selfhost_cases)
+- [x] interp_main loads the program with `for_host(argv[1], opts)` (as the driver's `load_for_host` does); the other tools that interpret or check a program on the host checked for the same: the driver's loads go through `load_for_host`/`load_for_target`, the REPL's through `for_host`; `play_main` runs only as wasm (its host's library is WASI's, the default), so it stays
+- [ ] Evidence: under Wine interp_main.exe now gives the canonical path (`Z:\…\w\t\f.txt`, before `NotFound`); on Linux the bootstrap's fixed point, check-seed, test_fs, test_selfhost_interp, test_platform_interface, test_stdio, test_std_modules pass. Left: test_fs `DirectoryParity` passes on the `burn-windows` job; on Linux nothing changes (the bootstrap's fixed point, test_fs, test_selfhost_cases)
