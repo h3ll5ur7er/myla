@@ -232,11 +232,16 @@ Sorted map and set (B+ tree in an arena; O(log n)). `import std.btree as btree`.
   - `.insert(var self, x) -> bool` · `.remove(var self, x) -> bool` · `.contains(x)` · `.len()` · `.is_empty()` · `.first() -> Option<T>` · `.last()` · `.floor(x)` · `.ceiling(x)` · `.range(lo, hi) -> [T]` · `.items() -> [T]` · `.iter() -> SortedSetIter<T>` · `.pop_first(var self) -> Option<T>` · `.pop_last(var self)` · `.union(o)` · `.intersection(o)` · `.difference(o)` · `.is_subset(o) -> bool`
 - Gotcha: the set constructors are `set_new`/`set_of`, not `new`/`of`. Not `Eq`-comparable with `==` (no impl).
 
-## std.bytes: `[uint8]` and `str` conversion, UTF-8
+## std.bytes: `[uint8]` and `str` conversion, UTF-8, binary data
 Import: `import std.bytes as bytes`.
 - `pub fun from_str(s: str) -> [uint8]` (same as `s.bytes()`), `pub fun to_str(b: [uint8]) -> str` (no UTF-8 check)
 - `pub fun is_utf8(b: [uint8]) -> bool`, `pub fun utf8_error(b: [uint8]) -> Option<int>`
 - `pub fun encode_char(c: char) -> [uint8]`, `pub fun decode_char(b: [uint8], at: int) -> Option<(char, int)>`
+- `struct ByteReader { data: [uint8], pos: int }` · `fun reader(data: [uint8]) -> ByteReader`. Every read is a `var self` method giving an `Option`, `None` past the end with `pos` unchanged: `.u8()`, `.i8()`, `.u16_be()`/`_le`, `.i16_be()`/`_le`, `.u24_be()`/`_le` (a `uint32`), `.u32_be()`/`_le`, `.i32_*`, `.u64_*`, `.i64_*`, `.f32_be()`/`_le` (`float32`), `.f64_*`; `.take(n) -> Option<[uint8]>`, `.take_rest() -> [uint8]`, `.eat(sig: [uint8]) -> bool` (reads `sig` if it is next), `.peek_u8()`, `.skip(n) -> bool` (negative goes back), `.seek(p) -> bool`, `.has(n) -> bool`, `.remaining() -> int`, `.at_end() -> bool`
+- `struct ByteWriter { out: [uint8] }` · `fun writer() -> ByteWriter` · `.put_u8(v)` … `.put_f64_le(v)` (the same names with `put_`, each taking the type its read gives), `.put_bytes(b)`, `.put_str(s)`, `.put_zeros(n)`, `.set_u8(at, v)`/`set_u16_be`/`_le`/`set_u32_be`/`_le` (patch a length; out of range is a runtime error), `.len()`, `.finish() -> [uint8]`
+- Bit readers, `MsbBitReader` (each byte's highest bit first: JPEG, TIFF LZW) and `LsbBitReader` (lowest first: DEFLATE, GIF LZW): `fun msb_reader(data, start: int = 0)`, `fun lsb_reader(data, start: int = 0)`, `fun jpeg_reader(data, start: int = 0) -> MsbBitReader` (0xFF 0x00 read as 0xFF, the data ends at the first marker). Methods: `.bits(k) -> Option<uint32>` (k 0 to 32; `None` and nothing read if fewer left), `.peek(k) -> uint32` (0 bits past the end), `.skip_bits(k) -> bool`, `.align_byte()`, `.bits_left() -> int64`, `.byte_pos() -> int`, `.refill()`; MSB only: `.marker() -> Option<uint8>`, `.marker_pos() -> int`, `.skip_marker() -> Option<uint8>` (past a restart marker to the next segment)
+- Bit writers: `fun msb_writer() -> MsbBitWriter`, `fun jpeg_writer() -> MsbBitWriter` (0xFF stuffed with 0x00, padding 1 bits), `fun lsb_writer() -> LsbBitWriter` · `.put_bits(v: uint32, k: int)` (the low k bits, k 0 to 32, else a panic), `.align_byte()`, `.put_bytes(b)` (aligned, raw), `.put_marker(code)` (MSB), `.bit_len() -> int64`, `.finish(var self) -> [uint8]`
+- Gotcha: a decoder can't take a reader as a parameter and advance it (parameters are immutable): keep it in a field of the decoder's struct and read in `var self` methods, `self.r.u16_be()`. Reads are calls the compiler doesn't inline, about 2x a hand-written loop: a hot bit loop may keep the documented fields `acc`, `n`, `next` in locals (page, "In a hot loop")
 - Prose: `docs/Language/Standard-library/Bytes.md`
 
 ## std.cache
