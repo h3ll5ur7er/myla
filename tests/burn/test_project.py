@@ -22,6 +22,7 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
+from ._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -466,7 +467,7 @@ class ProjectModelParity(unittest.TestCase):
             asm = subprocess.run([gen, source, STDLIB_ROOT], capture_output=True, text=True, check=True)
             with open(sh_native + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm.stdout)
-            subprocess.run(["as", "--64", "-o", sh_native + ".o", sh_native + ".s"], check=True)
+            subprocess.run([*AS_CMD, "-o", sh_native + ".o", sh_native + ".s"], check=True)
             subprocess.run(["ld", "-o", sh_native, sh_native + ".o"], check=True)
             drivers = {
                 "native": [selfhost_tool("project_main")],

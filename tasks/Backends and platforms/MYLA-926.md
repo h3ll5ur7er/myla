@@ -2,7 +2,7 @@
 id: MYLA-926
 title: "CI's tests on native runners: Windows on windows-latest, aarch64 on ubuntu-24.04-arm (D296)"
 type: chore
-status: todo
+status: in-progress
 priority: medium
 labels: [ci, windows, aarch64, testing]
 ---
@@ -23,8 +23,20 @@ On `windows-latest` these need to wait for what they read (a poll of the listene
 
 Each step drops the emulated job only once the native one has been green beside it for a while, so no coverage is lost on the way.
 
-- [ ] aarch64: the burn suite on `ubuntu-24.04-arm`, host-architecture keys for the x86-64-only tests
+- [x] aarch64: the burn suite on `ubuntu-24.04-arm`, host-architecture keys for the x86-64-only tests
 - [ ] aarch64: qemu off CI (the `targets` job's entry, apt, emulator-only limits)
 - [ ] Windows: the burn suites on `windows-latest`, each POSIX-only test ported or marked with its reason
 - [ ] Windows: Wine off CI (the Wine job, Wine in the Linux jobs' apt)
 - [ ] `docs/Development/Testing.md`, the skill's CI table and [[Language/Targets]] say where each target is tested
+
+## Evidence (step 1, 2026-11-22)
+
+The `burn-arm64` job on `ubuntu-24.04-arm` (`scripts/test-target.py host`), on the branch:
+
+| Run | Head | Result |
+|---|---|---|
+| 45004595333 | `20088f5` | cancelled at 75 min (`unittest discover`, serial); some 70 tests failed, no tracebacks |
+| 45011729950 | `7725ae0` | 105 of 114 suites, 35 min |
+| 45016466400 | `43e721a` | 113 of 114 (`test_wasm.test_compiler`, its reference the machine's own default), 33 min |
+
+What the tests assumed of an x86-64 machine, now keyed on it (`_native.HOST_TARGET`, `AS_CMD`, `READS_X86`): the x86-64 seed and `as --64` (`_tools`, sixteen suites), the x86-64 assembly and registers read (codegen, float registers, loop overhead, register arguments, small and byte copies, packed lists, overflow, `test_raw_memory`'s `call`, gdb's `$rdi`), `-g` (x86-64 Linux's and Windows' alone: `test_debug_info`, `test_installed`, the debugger, a project's `-g` build), the host's name in messages (`test_selfhost_cli`, `test_test_native`, `test_label_names`), and an x86-64 reference build (`test_wasm`). Two tests were too slow for the slower machine and changed: `test_selfhost_parser`'s linear-time bound is relative now, and `num`'s `pow10_sig_is_exact` makes each power of ten from the one before (15.8 s interpreted on x86-64, 10.3 s now). The slowness itself is [[MYLA-929]].

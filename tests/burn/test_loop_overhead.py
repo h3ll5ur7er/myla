@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, READS_X86, X86_REASON
 from tests.burn._tools import _REPO, STDLIB_ROOT, selfhost_tool
 
 _PROGRAM = """fun odd(n: int) -> bool {
@@ -69,10 +69,12 @@ class LoopOverhead(unittest.TestCase):
         return subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,
                               check=True).stdout
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_a_negated_flag_branches_directly(self):
         body = _function(self.asm(os.path.join(_REPO, "benchmarks", "sieve", "sieve.my")), "count_primes")
         self.assertNotIn("sete", body)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_the_last_block_falls_into_the_epilogue(self):
         body = _function(self.asm(self.path), "fib")
         lines = [l.strip() for l in body.splitlines() if l.strip()]
@@ -89,6 +91,7 @@ class LoopOverhead(unittest.TestCase):
         self.assertEqual(built.returncode, 0, built.stderr)
         self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, ran.stdout)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_the_copy_on_write_check_is_made_before_the_loop(self):
         # MYLA-251: `composite[j] = true` in the sieve's inner loop checks
         # once, before the loop, that the list is held once; the loop itself
@@ -100,6 +103,7 @@ class LoopOverhead(unittest.TestCase):
         self.assertIn("movb $1, ", loop)
         self.assertNotIn("__clone_list", loop, loop)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_copies_on_write_around_loops_print_the_same(self):
         # a list shared before the loop is still copied (once); a loop that
         # shares it again, calls something or puts another list in its place
@@ -115,6 +119,7 @@ class LoopOverhead(unittest.TestCase):
         self.assertEqual(built.returncode, 0, built.stderr)
         self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, ran.stdout)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_a_counting_loops_increment_is_not_re_extended(self):
         # MYLA-251: `i + 1` where `i < n` held (n an int32) can't overflow, so
         # it is a 64-bit add, with no sign extension after it
@@ -125,6 +130,7 @@ class LoopOverhead(unittest.TestCase):
         self.assertRegex(body, r"addq \$1, %r\w+\n")
         self.assertNotRegex(body, r"addq \$1, (%r\w+)\n\tmovslq %\w+, \1\n", body)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_a_remainder_and_a_sum_before_it_are_not_re_extended(self):
         # MYLA-251: a remainder is in its operands' range already, and `y + n`
         # re-extended just before `- 1` overwrites the register was moot

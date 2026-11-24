@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, run_argv, selfhost_run, target_flags,
-                                write_program)
+                                write_program, READS_X86, X86_REASON)
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 _RUN_MJS = os.path.join(os.path.dirname(STDLIB_ROOT), "tools", "wasm", "run.mjs")
@@ -321,6 +321,7 @@ class TestOverflow(unittest.TestCase):
                 self.assertEqual((code, err.split("\n")[0]), (1, f"runtime error: {OVER}"))
                 k += 1
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_64_bit_checks_take_the_flags(self):
         # MYLA-430 (M27): a checked 64-bit `*` divided to find an overflow
         # (std.rt's `mul_overflows_i64`); now the target's flags, or on

@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, READS_X86, X86_REASON
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 _PROGRAM = """enum Tree {
@@ -68,6 +68,7 @@ def _function(asm: str, name: str) -> str:
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(READS_X86, X86_REASON)
 class SmallCopies(unittest.TestCase):
     def test_small_values_are_moved_and_big_ones_copied_as_before(self):
         with tempfile.TemporaryDirectory() as tmp:

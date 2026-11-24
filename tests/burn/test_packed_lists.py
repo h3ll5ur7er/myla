@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, READS_X86, X86_REASON
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 _PROGRAM = """struct Board {
@@ -353,6 +353,7 @@ class PackedLists(unittest.TestCase):
         self.assertEqual((native.stdout, native.returncode), (expected, 0), native.stderr)
         return path
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_bool_lists_print_the_same(self):
         path = self.same("bools", _PROGRAM, EXPECTED)
         asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,
@@ -362,6 +363,7 @@ class PackedLists(unittest.TestCase):
         self.assertRegex(_function(asm, "flip_all"), r"movb %\w+, ")
         self.assertNotIn("16(%rax,%rcx,8)", _function(asm, "count"))
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_lists_of_every_width_print_the_same(self):
         path = self.same("widths", _WIDTHS, WIDTHS_EXPECTED)
         asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,

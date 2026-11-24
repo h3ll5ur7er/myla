@@ -737,29 +737,40 @@ pub fun decimal_bits(m: uint64, e: int32) -> uint64 {
     return big_literal_bits(f"{m}e{e}")
 }
 
-// Every entry of POW10_SIG, from big integers.
+// Every entry of POW10_SIG, from big integers: each power of ten made from
+// the one before (one multiplication by ten, not q of them: interpreted the
+// case took 15.8 s, MYLA-926), its 128 leading bits compared.
 #test
 fun pow10_sig_is_exact() {
-    var q = -342
+    var p: [uint64] = [1]
+    var q = 0
     while q <= 308 {
-        var v: [uint64] = []
-        if q >= 0 {
-            v = big_mul_pow10([1], q)
-        } else {
-            let d = big_mul_pow10([1], -q)
-            v = big_divmod(big_shl([1], big_bitlen(d) + 129), d).q
-        }
-        let bl = big_bitlen(v)
-        if bl > 128 {
-            v = big_shr(v, bl - 128)
-        } else {
-            v = big_shl(v, 128 - bl)
-        }
-        let want_hi = big_to_u64(big_shr(v, 64))
-        let want_lo = big_to_u64(v)
-        assert(pow10_sig(q, false) == want_hi && pow10_sig(q, true) == want_lo, f"10^{q}")
+        pow10_sig_matches(q, p)
+        p = big_mul_pow10(p, 1)
         q += 1
     }
+    var d: [uint64] = [10]
+    q = -1
+    while q >= -342 {
+        pow10_sig_matches(q, big_divmod(big_shl([1], big_bitlen(d) + 129), d).q)
+        d = big_mul_pow10(d, 1)
+        q -= 1
+    }
+}
+
+// That POW10_SIG's entry for 10^`q` is the 128 leading bits of `v`
+// (10^q, or for a negative q its reciprocal scaled past 128 bits).
+fun pow10_sig_matches(q: int, v0: [uint64]) {
+    var v = v0
+    let bl = big_bitlen(v)
+    if bl > 128 {
+        v = big_shr(v, bl - 128)
+    } else {
+        v = big_shl(v, 128 - bl)
+    }
+    let want_hi = big_to_u64(big_shr(v, 64))
+    let want_lo = big_to_u64(v)
+    assert(pow10_sig(q, false) == want_hi && pow10_sig(q, true) == want_lo, f"10^{q}")
 }
 
 // f64_literal_bits in big integers: the digits a big integer, scaled by a

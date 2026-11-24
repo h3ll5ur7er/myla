@@ -84,6 +84,56 @@ jobs:
           MYLA_REQUIRE_TARGETS: "1"
         run: python3 -m unittest discover -s tests/burn -t . -v
 
+  burn-arm64:
+    # the burn suites natively on an aarch64 runner (MYLA-926 step 1, D296):
+    # tests run on a native runner, an emulator only for local experiments.
+    # Beside the targets job's aarch64-linux suites under qemu until this has
+    # been green a while, then those go. The tests that read x86-64 code key
+    # on the host (tests/burn/_native.py's READS_X86) and are skipped here;
+    # no MYLA_REQUIRE_TARGETS, which asks for qemu and Wine
+    name: Burn tests on aarch64 (native, ubuntu-24.04-arm)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editor/tree-sitter-myla/package-lock.json
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: gdb for the debug-information tests (MYLA-156); clang and lld for the wasm32 ones (MYLA-158), llvm-dlltool and lld-link for the Windows builds some read (MYLA-702)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gdb clang lld llvm
+          gdb --version | head -1
+          clang --version | head -1
+          ld.lld --version | head -1
+      - uses: actions/cache@v6
+        with:
+          path: build/test-tools
+          key: test-tools-${{ runner.arch }}-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed-aarch64.s') }}
+      - name: tree-sitter CLI for the editor-grammar tests (MYLA-77)
+        run: |
+          npm ci --no-audit --no-fund --ignore-scripts --prefix editor/tree-sitter-myla
+          cd editor/tree-sitter-myla/node_modules/tree-sitter-cli && node install.js
+      - name: Toolchain versions
+        run: |
+          uname -m
+          python3 --version
+          as --version | head -1
+          ld --version | head -1
+          go version
+          editor/tree-sitter-myla/node_modules/.bin/tree-sitter --version
+      # every suite of tests/burn, in parallel, each within its time limit,
+      # its failures printed as it ends (a hang fails its suite, named, rather
+      # than the job at its limit with nothing said)
+      - name: Burn tests
+        run: python3 scripts/test-target.py host
+
   generated:
     # the generated tests (MYLA-555) at full size on every push to master
     # (D262): every case of each generator, where a pull request's burn job

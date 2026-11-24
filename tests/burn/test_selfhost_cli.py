@@ -20,7 +20,7 @@ import tempfile
 import unittest
 
 from ._golden import answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, HOST_TARGET, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -203,7 +203,7 @@ class SelfHostedCli(_Layout):
         proc = subprocess.run([self.myla, "build", "prog.my", "-o", out], cwd=self.work, capture_output=True,
                               text=True, env=dict(os.environ, PATH=empty))
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("myla: 'as' was not found: building for x86_64-linux here needs GNU as and ld (binutils)", proc.stderr)
+        self.assertIn(f"myla: 'as' was not found: building for {HOST_TARGET} here needs GNU as and ld (binutils)", proc.stderr)
 
     @unittest.skipUnless(shutil.which("clang"), "needs clang")
     def test_build_without_the_linker_on_path(self):

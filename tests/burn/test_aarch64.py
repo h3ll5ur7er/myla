@@ -18,7 +18,7 @@ import tempfile
 import unittest
 
 from ._hang import run_watched
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import AS_CMD, CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, native_compiler
 from . import test_builtin_impls, test_defer, test_format_specs, test_float_keys, test_float_methods, test_linalg, test_loop_overhead, test_operator_traits, test_register_args, test_router, test_slices, test_time, test_unit_type
 
@@ -41,9 +41,12 @@ NOT_YET: set[str] = set()
 
 
 def build_x86(src: str, out: str) -> None:
+    """`src` built for the machine itself, the reference the other targets'
+    runs are compared with: x86-64's on an x86-64 machine (the name's), the
+    machine's own on an aarch64 one (MYLA-926)."""
     with open(out + ".s", "wb") as fh:
         subprocess.run([native_compiler(), src, STDLIB_ROOT], stdout=fh, check=True, cwd=_REPO)
-    subprocess.run(["as", "--64", "-o", out + ".o", out + ".s"], check=True)
+    subprocess.run([*AS_CMD, "-o", out + ".o", out + ".s"], check=True)
     subprocess.run(["ld", "-o", out, out + ".o"], check=True)
 
 

@@ -24,6 +24,7 @@ import unittest
 from ._golden import golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
+from ._native import AS_CMD, HOST_TARGET  # the machine's assembler and target (MYLA-926)
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _MYLA = os.path.join(_REPO, "myla.py")
@@ -285,7 +286,7 @@ class NativeRuntime(unittest.TestCase):
                              capture_output=True, text=True, check=True).stdout
         sh = os.path.join(cwd, name + "_self")
         self.write(name + "_self.s", asm, cwd)
-        subprocess.run(["as", "--64", "-o", sh + ".o", sh + ".s"], check=True)
+        subprocess.run([*AS_CMD, "-o", sh + ".o", sh + ".s"], check=True)
         subprocess.run(["ld", "-o", sh, sh + ".o"], check=True)
         return [("self-hosted", sh)]
 
@@ -390,8 +391,10 @@ class NativeRuntime(unittest.TestCase):
         for name, source in (("exit_plain", plain), ("exit_tasks", tasks)):
             for backend, binary in self.binaries(name, source):
                 with self.subTest(program=name, backend=backend):
+                    # the first argument's register: x86-64's %rdi, aarch64's x0
+                    reg = "$x0" if HOST_TARGET == "aarch64-linux" else "$rdi"
                     proc = subprocess.run(["gdb", "-q", "-batch", "-nx", "-ex", "break __exit_program", "-ex", "run",
-                                           "-ex", "printf \"code %ld\\n\", $rdi", binary],
+                                           "-ex", f"printf \"code %ld\\n\", {reg}", binary],
                                           capture_output=True, text=True, timeout=120)
                     self.assertIn("code -1\n", proc.stdout, proc.stdout + proc.stderr)
                     self.assertEqual(subprocess.run([binary]).returncode, 255)

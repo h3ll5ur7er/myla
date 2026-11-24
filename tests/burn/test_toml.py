@@ -55,6 +55,7 @@ import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, check_file, native_build, run_argv
 from ._tools import STDLIB_ROOT, selfhost_tool
+from ._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 VENDORED = os.path.join(os.path.dirname(__file__), "data", "toml_test_1.0.json")
 
@@ -621,7 +622,7 @@ def _build(gen: str, source: str, out: str) -> list[str]:
     asm = subprocess.run([gen, source, STDLIB_ROOT], capture_output=True, text=True, check=True)
     with open(out + ".s", "w", encoding="utf-8") as fh:
         fh.write(asm.stdout)
-    subprocess.run(["as", "--64", "-o", out + ".o", out + ".s"], check=True)
+    subprocess.run([*AS_CMD, "-o", out + ".o", out + ".s"], check=True)
     subprocess.run(["ld", "-o", out, out + ".o"], check=True)
     return [out]
 

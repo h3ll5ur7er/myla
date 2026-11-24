@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, READS_X86, X86_REASON
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 _MANDEL = """fun inside(cr: float64, ci: float64) -> bool {
@@ -101,6 +101,7 @@ def _function(asm: str, name: str) -> str:
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(READS_X86, X86_REASON)
 class FloatRegisters(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

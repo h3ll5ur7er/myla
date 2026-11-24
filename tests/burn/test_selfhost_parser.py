@@ -365,19 +365,26 @@ class SelfHostedParserParity(unittest.TestCase):
         # `x < y, x < y, …` from every `<` to the end (32,000 in a list: 25 s
         # in the review, 13 s here); a comma ends it in a literal's element,
         # and a budget of tokens in a call's arguments
-        n = 32000
+        # Linear against the same run a quarter as long, on this machine (an
+        # absolute bound failed a slower one, 5.02 s against 5, MYLA-926):
+        # four times the comparisons take about four times as long, not 16
+        def parse(tmp: str, name: str, n: int) -> float:
+            path = os.path.join(tmp, f"{name}{n}.my")
+            body = ", ".join(["x < y"] * n)
+            line = f"    let t = [{body}]\n" if name == "list" else f"    let t = f({body})\n"
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("fun main() {\n    let x = 1\n    let y = 2\n" + line + "}\n")
+            start = time.monotonic()
+            proc = subprocess.run([self._binary, path], capture_output=True, text=True)
+            took = time.monotonic() - start
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stdout.count('(binary "<" (name "x") (name "y"))'), n, name)
+            return took
         with tempfile.TemporaryDirectory() as tmp:
-            for name, line in [("list", "    let t = [" + ", ".join(["x < y"] * n) + "]\n"),
-                               ("call", "    let t = f(" + ", ".join(["x < y"] * n) + ")\n")]:
-                path = os.path.join(tmp, name + ".my")
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write("fun main() {\n    let x = 1\n    let y = 2\n" + line + "}\n")
-                start = time.monotonic()
-                proc = subprocess.run([self._binary, path], capture_output=True, text=True)
-                took = time.monotonic() - start
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertEqual(proc.stdout.count('(binary "<" (name "x") (name "y"))'), n, name)
-                self.assertLess(took, 5.0, name)
+            for name in ("list", "call"):
+                quarter = parse(tmp, name, 8000)
+                whole = parse(tmp, name, 32000)
+                self.assertLess(whole, 8 * quarter + 0.5, f"{name}: {whole:.2f} s, a quarter as many {quarter:.2f} s")
 
     def test_type_arguments_have_no_budget_of_tokens(self) -> None:
         # MYLA-545: the scan looked at 128 tokens, so a tuple of 63 types was
