@@ -343,6 +343,10 @@ jobs:
     defaults:
       run:
         shell: bash
+    # Python's UTF-8 mode: the tests' text pipes and files are UTF-8, as on
+    # Linux, not the ANSI code page (cp1252)
+    env:
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v7
       - name: The checkout's line endings are LF
