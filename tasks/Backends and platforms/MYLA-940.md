@@ -2,7 +2,7 @@
 id: MYLA-940
 title: "run.mjs gives a wasm program Windows' working directory: its relative paths aren't found under Node on Windows"
 type: bug
-status: todo
+status: in-progress
 priority: medium
 labels: [wasm, windows, testing]
 ---
@@ -14,5 +14,5 @@ An absolute Windows path given to such a program (`D:\a\myla\myla\examples\maps.
 
 The fix is in the runner (`tools/wasm/`, the website's area, so not made by the port): on Windows, `PWD` in the same spelling, the working directory on its drive without the drive and with `/` (`process.cwd().replace(/^[A-Za-z]:/, "").replaceAll("\\", "/")`; a share's `\\srv\share\…` has no such spelling, and needs a decision if it matters), and run.mjs's comment saying that on Windows the program's `/` is the root of the working directory's drive.
 
-- [ ] run.mjs: `PWD` on Windows as above (Linux's unchanged)
+- [x] run.mjs: `PWD` on Windows as above (Linux's unchanged): made by the lead as a minimal named change in the website's area (MYLA-926 step 2)
 - [ ] Evidence: `test_wasm.WasmParity.test_files` passes on the `burn-windows` job; test_wasm passes on Linux as before
