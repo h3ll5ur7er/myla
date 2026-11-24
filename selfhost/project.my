@@ -15,7 +15,10 @@
 //
 // Every directory is absolute and lexically normalised (no `.`, `..` or `//`),
 // so two requests for one package directory compare equal; symbolic links are
-// not resolved, as neither loader resolves them. A Git dependency whose locked
+// not resolved, as neither loader resolves them. Paths follow the machine's
+// rules through std.path: on Windows `\` separates too and a drive (`C:`) or a
+// share (`//server/share`) is a root, and a path is written with `/`, as the
+// loader writes it (MYLA-930). A Git dependency whose locked
 // commit isn't checked out yet is not an error here: it is in
 // `Project.missing`, for `myla fetch` and the commands to check out
 // (MYLA-94, MYLA-95). One without a current lock entry is an error, unless the
@@ -26,6 +29,8 @@
 
 from std.fs import read_to_string, is_dir, is_file, current_dir, IoError
 from std.toml import parse_doc, Toml, TomlDoc, TomlPos, key_pos, value_pos
+import std.path as stdpath         // the machine's paths: Windows' on Windows (MYLA-930)
+import std.path_style as style     // `WINDOWS`: the machine the tools run on
 from .tokens import keywords, SrcSpan
 from .diag import Report, render
 
@@ -234,9 +239,20 @@ pub fun is_commit_id(s: str) -> bool {
 
 // --- Paths ----------------------------------------------------------------------
 
+// `p` with `/` for each `\` on Windows, where both separate a path's parts, so
+// that a path is written with `/` there, as the loader writes one (MYLA-930,
+// MYLA-931); a verbatim path (`\\?\C:\w`) as it is, as `/` is a name's byte
+// in one. As it is elsewhere.
+#test("/a/b")["/a/b"]
+fun slashed(p: str) -> str {
+    if !style.WINDOWS || p.starts_with("\\\\?\\") { return p }
+    return p.replace("\\", "/")
+}
+
 // `p` without `.` components, empty components and trailing slashes, and with
 // each `..` taking away the component before it (at the root, nothing). A
-// relative path keeps the `..` it can't take away; an empty one is ".".
+// relative path keeps the `..` it can't take away; an empty one is ".". On
+// Windows a drive or a share is the root, and `\` is written `/` (MYLA-930).
 #test("/a/b/../c/./d/")["/a/c/d"]
 #test("/a//b")["/a/b"]
 #test("/..")["/"]
@@ -248,62 +264,19 @@ pub fun is_commit_id(s: str) -> bool {
 #test("")["."]
 #test("./")["."]
 pub fun normalize_path(p: str) -> str {
-    let absolute = p.len() > 0 && p[0] == '/'
-    var parts: [str] = []
-    for part in split_path(p) {
-        if part == "" || part == "." {
-            // nothing
-        } else if part == ".." {
-            if parts.len() > 0 && parts[parts.len() - 1] != ".." {
-                parts.pop()
-            } else if !absolute {
-                parts.push(part)
-            }
-        } else {
-            parts.push(part)
-        }
-    }
-    var sb = StringBuilder()
-    if absolute { sb.append("/") }
-    var first = true
-    for part in parts {
-        if !first { sb.append("/") }
-        sb.append(part)
-        first = false
-    }
-    if sb.len() == 0 { return "." }
-    return sb.build()
-}
-
-// The components of `p` between its slashes (empty ones included).
-#test("/work/myla/build/harvest/proj/app")[["", "work", "myla", "build", "harvest", "proj", "app"]]
-#test("/work/myla/build/harvest/proj/tidy/myla.toml")[["", "work", "myla", "build", "harvest", "proj", "tidy", "myla.toml"]]
-#test("/work/myla/build/harvest/proj/gitapp/myla.toml/..")[["", "work", "myla", "build", "harvest", "proj", "gitapp", "myla.toml", ".."]]
-fun split_path(p: str) -> [str] {
-    var out: [str] = []
-    var start = 0
-    var i = 0
-    while i <= p.len() {
-        if i == p.len() || p[i] == '/' {
-            var sb = StringBuilder()
-            sb.append(p, start, i)
-            out.push(sb.build())
-            start = i + 1
-        }
-        i = i + 1
-    }
-    return out
+    return stdpath.normalize(slashed(p))
 }
 
 // `rel` taken from the directory `base` (`rel` itself if it is absolute),
-// normalised.
+// normalised; on Windows one with a root but no drive (`\x`) is on `base`'s
+// drive, as std.path's `join` takes it.
 #test("/a/b", "../c")["/a/c"]
 #test("/a/b", "/x/./y")["/x/y"]
 #test("/", "myla.toml")["/myla.toml"]
 #test("/a", "")["/a"]
+#test("/a", "b/")["/a/b"]
 pub fun join_path(base: str, rel: str) -> str {
-    if rel.len() > 0 && rel[0] == '/' { return normalize_path(rel) }
-    return normalize_path(base + "/" + rel)
+    return normalize_path(stdpath.join(slashed(base), slashed(rel)))
 }
 
 // The directory that holds `p` (normalised; the root's is the root).
@@ -311,38 +284,46 @@ pub fun join_path(base: str, rel: str) -> str {
 #test("/a")["/"]
 #test("/")["/"]
 pub fun parent_dir(p: str) -> str {
-    return normalize_path(p + "/..")
+    return join_path(p, "..")
 }
 
-// The last component of `p`.
+// Whether the normalised absolute path `p` is a root, the one directory that
+// is its own parent: `/`, and on Windows a drive's (`C:/`) or a share's.
+#test("/")[true]
+#test("/a")[false]
+fun is_root(p: str) -> bool {
+    return parent_dir(p) == p
+}
+
+// The last component of `p` ("" for a root).
 #test("/a/b/myla.lock")["myla.lock"]
 #test("myla.toml")["myla.toml"]
+#test("/")[""]
 fun base_name(p: str) -> str {
-    let parts = split_path(p)
-    return parts[parts.len() - 1]
+    return stdpath.file_name(slashed(p)).unwrap_or("")
 }
 
-// Whether the normalised path `p` is the directory `dir` or inside it.
+// Whether the normalised path `p` is the directory `dir` or inside it (on
+// Windows, a drive's letter of either case).
 #test("/a/b", "/a/b")[true]
 #test("/a/b", "/a/b/c")[true]
 #test("/a/b", "/a/bc")[false]
 #test("/a/b", "/a")[false]
 #test("/", "/a")[true]
+#test("/a", "/a/..b")[true]
+#test("/a/b", "/c")[false]
 pub fun is_inside(dir: str, p: str) -> bool {
-    if p == dir || dir == "/" { return true }
-    let prefix = dir + "/"
-    if p.len() < prefix.len() { return false }
-    var i = 0
-    while i < prefix.len() {
-        if p[i] != prefix[i] { return false }
-        i = i + 1
+    let r = match stdpath.relative(slashed(dir), slashed(p)) {
+        Some(r) => r
+        None => { return false }
     }
-    return true
+    return r != ".." && !r.starts_with("../")
 }
 
 // The normalised absolute path `p` as seen from the directory `base` (also
-// absolute and normalised): below it without a prefix, elsewhere with one
-// `..` per level up to their common directory.
+// absolute; normalised but for its separators): below it without a prefix,
+// elsewhere with one `..` per level up to their common directory; `p` itself
+// when they have no common root (on Windows, two drives).
 #test("/a/b", "/a/b/src/main.my")["src/main.my"]
 #test("/a/b", "/a/b")["."]
 #test("/a/b/src/util", "/a/b/src/main.my")["../main.my"]
@@ -350,55 +331,76 @@ pub fun is_inside(dir: str, p: str) -> bool {
 #test("/", "/a")["a"]
 #test("/a", "/")[".."]
 pub fun relative_path(base: str, p: str) -> str {
-    if p == base { return "." }
-    if is_inside(base, p) {
-        if base == "/" { return part_from(p, 1) }
-        return part_from(p, base.len() + 1)
+    return match stdpath.relative(slashed(base), slashed(p)) {
+        Some(r) => r
+        None => normalize_path(p)
     }
-    let fs = split_path(base)
-    let ps = split_path(p)
-    var common = 0
-    while common < fs.len() && common < ps.len() && fs[common] == ps[common] { common = common + 1 }
-    var parts: [str] = []
-    var i = common
-    while i < fs.len() {
-        if fs[i] != "" { parts.push("..") }
-        i = i + 1
-    }
-    i = common
-    while i < ps.len() {
-        if ps[i] != "" { parts.push(ps[i]) }
-        i = i + 1
-    }
-    var sb = StringBuilder()
-    for q in parts {
-        if sb.len() > 0 { sb.append("/") }
-        sb.append(q)
-    }
-    return sb.build()
-}
-
-// `s` from the byte `start` on.
-#test("/work/myla/build/harvest/proj/app/src", 34)["src"]
-#test("/work/myla/build/harvest/proj/app/src/main.my", 34)["src/main.my"]
-#test("/work/myla/build/harvest/proj/app/src/util/strings.my", 34)["src/util/strings.my"]
-fun part_from(s: str, start: int32) -> str {
-    var sb = StringBuilder()
-    sb.append(s, start, s.len())
-    return sb.build()
 }
 
 // `p` as an absolute, normalised path (a relative one is taken from the
-// working directory); None if the working directory can't be found.
-#test("/work/myla/build/harvest/proj/app")[Some("/work/myla/build/harvest/proj/app")]
-#test("/work/myla/build/harvest/proj/gitapp")[Some("/work/myla/build/harvest/proj/gitapp")]
-#test("/work/myla/build/harvest/proj/gitapp/myla.toml")[Some("/work/myla/build/harvest/proj/gitapp/myla.toml")]
+// working directory); None if the working directory can't be found. (Its
+// cases are the machine's, below.)
 pub fun absolute_path(p: str) -> Option<str> {
-    if p.len() > 0 && p[0] == '/' { return Some(normalize_path(p)) }
+    if stdpath.is_absolute(slashed(p)) { return Some(normalize_path(p)) }
     return match current_dir() {
         Ok(d) => Some(join_path(d, p))
         Err(e) => None
     }
+}
+
+// The cases of the paths that differ between the machines: Linux's (and
+// WASI's) where `/a` is absolute and `\` a name's byte, Windows' where `/a`
+// is on the working directory's drive (MYLA-930). Each runs on its machine:
+// `myla test selfhost/project.my --target x86_64-windows` runs Windows' (on
+// Linux under Wine).
+#test
+fun posix_paths() {
+    if style.WINDOWS { return }
+    expect_path(slashed("a\\b"), "a\\b")
+    expect_path(normalize_path("a\\..\\b"), "a\\..\\b")
+    expect_path(absolute_path("/work/myla/build/harvest/proj/app").unwrap_or(""), "/work/myla/build/harvest/proj/app")
+    expect_path(absolute_path("/work/myla/build/harvest/proj/gitapp/myla.toml").unwrap_or(""), "/work/myla/build/harvest/proj/gitapp/myla.toml")
+    expect_path(absolute_path("/a/./b/..").unwrap_or(""), "/a")
+    expect_path(join_path("/a", "C:/b"), "/a/C:/b")
+}
+
+#test
+fun windows_paths() {
+    if !style.WINDOWS { return }
+    expect_path(slashed("C:\\w\\app"), "C:/w/app")
+    expect_path(slashed("\\\\?\\C:\\w"), "\\\\?\\C:\\w") // verbatim: as it is
+    expect_path(normalize_path("C:\\w\\app\\..\\lib\\"), "C:/w/lib")
+    expect_path(normalize_path("C:\\.."), "C:/")
+    expect_path(normalize_path("\\\\srv\\share\\a\\..\\b"), "//srv/share/b")
+    // the working directory joined onto itself (MYLA-930)
+    expect_path(join_path("Z:\\w\\app", "myla.toml"), "Z:/w/app/myla.toml")
+    expect_path(join_path("Z:/w/app", "..\\geo"), "Z:/w/geo")
+    expect_path(join_path("Z:/w/app", "\\x"), "Z:/x") // on the base's drive
+    expect_path(join_path("Z:/w/app", "D:\\x"), "D:/x")
+    expect_path(parent_dir("Z:/w"), "Z:/")
+    expect_path(parent_dir("Z:/"), "Z:/")
+    expect_path(parent_dir("/"), "/")
+    expect_path(parent_dir("//srv/share/a"), "//srv/share/")
+    expect_bool(is_root("Z:/"), true)
+    expect_bool(is_root("//srv/share/"), true)
+    expect_bool(is_root("Z:/w"), false)
+    expect_path(base_name("C:\\w\\myla.lock"), "myla.lock")
+    expect_bool(is_inside("C:/w", "c:/w/src"), true)
+    expect_bool(is_inside("C:/w", "D:/w/src"), false)
+    expect_path(relative_path("Z:\\w\\app\\src\\deep", "Z:/w/app/src/main.my"), "../main.my")
+    expect_path(relative_path("Z:\\w\\app", "Z:/w/app/myla.toml"), "myla.toml")
+    expect_path(relative_path("C:/w", "D:/x"), "D:/x")
+    expect_path(absolute_path("Z:\\w\\.\\app").unwrap_or(""), "Z:/w/app")
+    expect_path(absolute_path("//srv/share/a").unwrap_or(""), "//srv/share/a")
+}
+
+// `got` is `want`, or the case fails.
+fun expect_path(got: str, want: str) {
+    if got != want { panic(f"got '{got}', expected '{want}'") }
+}
+
+fun expect_bool(got: bool, want: bool) {
+    if got != want { panic(f"got {got}, expected {want}") }
 }
 
 // --- Finding the manifest -------------------------------------------------------
@@ -413,7 +415,7 @@ pub fun find_manifest(start: str) -> Option<str> {
     while true {
         let candidate = join_path(dir, "myla.toml")
         if is_file(candidate) { return Some(candidate) }
-        if dir == "/" { return None }
+        if is_root(dir) { return None }
         dir = parent_dir(dir)
     }
     return None

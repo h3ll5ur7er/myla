@@ -79,8 +79,12 @@ class ProjectModel(unittest.TestCase):
         command = argv if argv is not None else [self.tool]
         proc = subprocess.run([*command, *args], cwd=os.path.join(root, cwd),
                               capture_output=True, timeout=120)
-        return (proc.stdout.decode().replace(root, "{root}"),
-                proc.stderr.decode().replace(root, "{root}"), proc.returncode)
+        out, err = proc.stdout.decode(), proc.stderr.decode()
+        # (the tool writes a Windows path with `/`, as the loader writes one:
+        # `C:/t/app`, MYLA-930; on Linux the two spellings are one)
+        for spelling in dict.fromkeys([root, root.replace("\\", "/")]):
+            out, err = out.replace(spelling, "{root}"), err.replace(spelling, "{root}")
+        return out, err, proc.returncode
 
     def project(self, files: dict[str, str], dirs: tuple[str, ...] = (), cwd: str = "app",
                 args: tuple[str, ...] = ()) -> str:
