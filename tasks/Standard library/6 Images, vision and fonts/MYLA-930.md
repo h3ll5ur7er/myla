@@ -26,3 +26,13 @@ Each has the page's recommendation first. The owner accepted every recommendatio
 - [x] The questions decided, the decision recorded, the page updated to match (D311)
 - [ ] The tasks moved to `todo` in the page's order, step 1 first (three waves of parallel lanes, below)
 - [ ] After std.png and std.jpeg: the embedded library's growth measured, before the rest goes ahead
+
+## Waves (2026-11-24)
+
+The owner asked for everything to be built in parallel by agents, as far as the dependencies allow. Each lane works in a worktree of its own on a branch `stdlib/MYLA-<n>`; the integrator merges a wave's branches, replaces private helpers, regenerates `selfhost/embedded_std.my` and runs the suite before the next wave starts.
+
+| Wave | Lanes | Why then |
+| --- | --- | --- |
+| 1 | [[MYLA-931]], [[MYLA-932]], [[MYLA-933]], [[MYLA-945]], [[MYLA-941]], [[MYLA-942]] | The groundwork, the core, and the two lanes that only need std.image's types (a skeleton committed first, `lib/std/image.my`) |
+| 2 | [[MYLA-934]], [[MYLA-935]], [[MYLA-936]], [[MYLA-938]], [[MYLA-939]], [[MYLA-943]] | The codecs need the byte readers, LZW and the corpus; fonts need std.draw |
+| 3 | [[MYLA-937]], [[MYLA-940]], [[MYLA-944]] | The JPEG encoder after its decoder, std.imageio after the codecs, tier B in imgproc.my after tier A |
