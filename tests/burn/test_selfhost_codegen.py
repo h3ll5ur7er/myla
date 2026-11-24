@@ -40,9 +40,10 @@ import tempfile
 import unittest
 
 from ._golden import NoGolden, answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE, READS_X86, SKIP_REASON, TEST_TARGET, X86_REASON, assemble, run_argv, target_flags
+from ._native import (CAN_BUILD_NATIVE, ON_WINDOWS, READS_X86, SKIP_REASON, TEST_TARGET, X86_REASON, assemble,
+                      run_argv, target_flags)
 from ._targets import program_excuse
-from ._tools import STDLIB_ROOT, measure_script, selfhost_tool
+from ._tools import EXE, STDLIB_ROOT, measure_script, selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -2175,7 +2176,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             path = os.path.join(tmp, "par.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(PARALLEL_WORK)
-            exe = os.path.join(tmp, "par")
+            exe = os.path.join(tmp, "par" + EXE)
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(self._emit_asm(path, STDLIB_ROOT))
             assemble(exe + ".s", exe)
@@ -2190,14 +2191,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                                     text=True, env=many)
             try:
                 self.assertEqual(held.stdout.readline(), "1\n")
-                ticks = []
-                for tid in os.listdir(f"/proc/{held.pid}/task"):
-                    try:
-                        with open(f"/proc/{held.pid}/task/{tid}/stat", encoding="ascii") as fh:
-                            fields = fh.read().rsplit(")", 1)[1].split()
-                    except OSError:
-                        continue
-                    ticks.append(int(fields[11]) + int(fields[12]))
+                ticks = _thread_cpu_times(held.pid)
             finally:
                 held.stdin.close()
                 held.wait(timeout=120)
@@ -2428,16 +2422,75 @@ async fun main() {
 }
 """
 
-# The program's CPU time (user and system) and wall time, on stderr.
+# The program's CPU time (user and system; -1 on Windows, which has no
+# getrusage) and wall time, on stderr.
 _CPU_AND_WALL = (
-    "import resource, subprocess, sys, time\n"
+    "import subprocess, sys, time\n"
     "t = time.time()\n"
     "p = subprocess.run(sys.argv[1:], capture_output=True, text=True)\n"
     "wall = time.time() - t\n"
-    "u = resource.getrusage(resource.RUSAGE_CHILDREN)\n"
+    "try:\n"
+    "    import resource\n"
+    "    u = resource.getrusage(resource.RUSAGE_CHILDREN)\n"
+    "    cpu = u.ru_utime + u.ru_stime\n"
+    "except ImportError:\n"
+    "    cpu = -1\n"
     "sys.stdout.write(p.stdout)\n"
-    "sys.stderr.write(f'{u.ru_utime + u.ru_stime} {wall}')\n"
+    "sys.stderr.write(f'{cpu} {wall}')\n"
 )
+
+
+def _thread_cpu_times(pid: int) -> list[int]:
+    """The CPU time (user and system) each thread of the process `pid` has
+    used so far, in the system's units: Linux's /proc clock ticks, or on
+    Windows (MYLA-926) GetThreadTimes' 100 ns of each thread a snapshot of
+    the system's threads names the process's."""
+    if not ON_WINDOWS:
+        ticks = []
+        for tid in os.listdir(f"/proc/{pid}/task"):
+            try:
+                with open(f"/proc/{pid}/task/{tid}/stat", encoding="ascii") as fh:
+                    fields = fh.read().rsplit(")", 1)[1].split()
+            except OSError:
+                continue
+            ticks.append(int(fields[11]) + int(fields[12]))
+        return ticks
+    import ctypes
+    from ctypes import wintypes
+
+    class ThreadEntry(ctypes.Structure):   # THREADENTRY32
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ThreadID", wintypes.DWORD),
+                    ("th32OwnerProcessID", wintypes.DWORD), ("tpBasePri", wintypes.LONG),
+                    ("tpDeltaPri", wintypes.LONG), ("dwFlags", wintypes.DWORD)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k32.Thread32First.argtypes = k32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+    k32.OpenThread.restype = wintypes.HANDLE
+    k32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetThreadTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    snap = k32.CreateToolhelp32Snapshot(0x4, 0)           # TH32CS_SNAPTHREAD
+    if snap is None or snap == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    times = []
+    try:
+        entry = ThreadEntry()
+        entry.dwSize = ctypes.sizeof(entry)
+        more = k32.Thread32First(snap, ctypes.byref(entry))
+        while more:
+            if entry.th32OwnerProcessID == pid:
+                thread = k32.OpenThread(0x0800, False, entry.th32ThreadID)   # THREAD_QUERY_LIMITED_INFORMATION
+                if thread:
+                    ft = [wintypes.FILETIME() for _ in range(4)]          # created, exited, kernel, user
+                    if k32.GetThreadTimes(thread, *(ctypes.byref(t) for t in ft)):
+                        times.append(sum(t.dwHighDateTime << 32 | t.dwLowDateTime for t in ft[2:]))
+                    k32.CloseHandle(thread)
+            more = k32.Thread32Next(snap, ctypes.byref(entry))
+    finally:
+        k32.CloseHandle(snap)
+    return times
 
 
 DEEP_TASKS = """\

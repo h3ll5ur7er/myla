@@ -11,9 +11,10 @@ import os
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
-from tests.burn._tools import STDLIB_ROOT, selfhost_tool
+from tests.burn._native import CAN_BUILD_NATIVE, ON_WINDOWS, SKIP_REASON
+from tests.burn._tools import EXE, STDLIB_ROOT, peak_memory, selfhost_tool
 
 _ORDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sched_order.my")
 
@@ -21,6 +22,8 @@ _ORDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sched
 # `ru_maxrss` counts the image `fork` copied from the test's process too
 # (Linux takes the old image's high-water mark at `exec`), so it read 234 MB
 # under the full suite, whose one process had grown that big (MYLA-611).
+# Windows has no /proc: there the peak is its peak working set, read by
+# `_tools.peak_memory`'s helper (MYLA-926).
 _WIDE = """import std.task as task
 import std.fs as fs
 
@@ -46,7 +49,11 @@ async fun main() {
 
 def _peak_mb(cmd, env) -> tuple[str, float]:
     """(its first line, its peak resident memory in MB) of running `cmd`,
-    which prints them (`_WIDE`)."""
+    which prints them (`_WIDE`; on Windows the first alone)."""
+    if ON_WINDOWS:
+        with mock.patch.dict(os.environ, env, clear=True):
+            out, kb = peak_memory(cmd)
+        return out.split("\n")[0] + "\n", kb / 1024
     out = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120, check=True).stdout
     first, peak = out.split("\n")[:2]
     assert peak.endswith(" kB"), out
@@ -56,7 +63,7 @@ def _peak_mb(cmd, env) -> tuple[str, float]:
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class Scheduling(unittest.TestCase):
     def build(self, src_path: str, tmp: str) -> str:
-        exe = os.path.join(tmp, "prog")
+        exe = os.path.join(tmp, "prog" + EXE)
         subprocess.run([selfhost_tool("main"), "build", src_path, "-o", exe, "--stdlib", STDLIB_ROOT],
                        check=True, capture_output=True)
         return exe

@@ -22,11 +22,10 @@ import tempfile
 import unittest
 
 from ._golden import answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-from ._native import AS_CMD  # the machine's assembler (MYLA-926)
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, assemble, linux_only
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-from ._tools import STDLIB_ROOT, myla_tool, selfhost_tool
+from ._tools import EXE, STDLIB_ROOT, myla_tool, selfhost_tool
 from ._lsp_scenarios import (LspScenarios, LspRequestHelpers, LspRequestScenarios, ProjectScenarios,
                              WorkspaceScanScenarios, _Client, _uri, rng)
 
@@ -36,14 +35,13 @@ _TMP = tempfile.TemporaryDirectory()
 
 def _self_hosted_build() -> str:
     """The server compiled by the self-hosted compiler (once per run)."""
-    binary = os.path.join(_TMP.name, "myla-lsp")
+    binary = os.path.join(_TMP.name, "myla-lsp" + EXE)
     if not os.path.exists(binary):
         asm = subprocess.run([selfhost_tool("gen_main"), os.path.join(_REPO, "tools", "lsp", "main.my"),
                               STDLIB_ROOT], capture_output=True, text=True, check=True)
         with open(binary + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
-        subprocess.run([*AS_CMD, "-o", binary + ".o", binary + ".s"], check=True)
-        subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
+        assemble(binary + ".s", binary)
     return binary
 
 
@@ -83,6 +81,7 @@ class TestMylaLsp(LspScenarios, unittest.TestCase):
         self.client.response(rid)                     # no other diagnostics came first
         self.assertTrue(self.client.messages.empty())
 
+    @linux_only("reads the server's resident size in /proc")
     def test_memory_stays_flat(self):
         # std/json.my matches on Option and Result throughout: checking it
         # leaked about 7 kB a time before loops released what they iterate on
@@ -1079,6 +1078,7 @@ def _node_strips_types() -> bool:
 _EXTENSION = os.path.join(_REPO, "vscode-extension", "myla")
 
 
+@linux_only("the extension's choice is checked with POSIX paths (`/r/build/myla-lsp`) and links")
 @unittest.skipUnless(CAN_BUILD_NATIVE and _node_strips_types(), "needs a native toolchain and node 22.6+")
 class TestExtensionStartsTheServer(unittest.TestCase):
     """The VS Code extension's server command (`vscode-extension/myla/src/
