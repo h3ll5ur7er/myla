@@ -29,7 +29,7 @@ from ._native import CAN_BUILD_NATIVE, SKIP_REASON, shown
 from ._continuation import continues_a_line
 from ._tools import selfhost_tool
 from .test_aarch64 import A64_SKIP, HAVE_A64, build_a64
-from .test_wasm import HAVE_WASM, WASM_SKIP, build_wasm
+from .test_wasm import HAVE_WASM, WASM_SKIP, build_wasm, under_the_runner
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -294,7 +294,9 @@ class SelfHostedParserParity(unittest.TestCase):
         cls._binary = selfhost_tool("parse_main")
 
     def _myla_parse_source(self, source: str) -> str:
-        with tempfile.NamedTemporaryFile("w", suffix=".my", encoding="utf-8", delete=False) as fh:
+        # (newline="": the source as given, its line ends not made CRLF on
+        # Windows, where the columns an error at one gives would differ)
+        with tempfile.NamedTemporaryFile("w", suffix=".my", encoding="utf-8", newline="", delete=False) as fh:
             fh.write(source)
         try:
             return self._myla_parse(fh.name)
@@ -425,12 +427,15 @@ class SelfHostedParserParity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             wasm = os.path.join(tmp, "myla.wasm")
             build_wasm("selfhost/main.my", wasm)
-            self.check_long_chains(["node", os.path.join(_REPO, "tools", "wasm", "run.mjs"), wasm], 256)
+            self.check_long_chains(["node", os.path.join(_REPO, "tools", "wasm", "run.mjs"), wasm], 256, wasi=True)
 
-    def check_long_chains(self, tool: list[str], limit: int, env: dict[str, str] | None = None) -> None:
+    def check_long_chains(self, tool: list[str], limit: int, env: dict[str, str] | None = None,
+                          wasi: bool = False) -> None:
         """`limit` operators, fields and `else if` arms, a call counted twice
         and a `|>` three times, parse, are checked and run by the tools
-        `tool`; one more is a parse error there."""
+        `tool`; one more is a parse error there. `wasi`: `tool` runs under
+        run.mjs, so it is given the files as it names them, run on their
+        drive (`under_the_runner`, MYLA-926)."""
         head = "fun id(x: int) -> int { return x }\nfun main() {\n    let x = 1\n    let y = 2\n    let c = x < y\n"
         calls = limit // 3    # a field and a call each, or a `|>`
         cases = (
@@ -448,14 +453,18 @@ class SelfHostedParserParity(unittest.TestCase):
         )
         error = (f"parse error: more than {limit} operators, calls, fields and 'else if' arms in one expression"
                  " (a call counts two, a '|>' three): split it with a 'let' or a 'match'\n")
+        given = under_the_runner if wasi else (lambda p: p)
         with tempfile.TemporaryDirectory() as tmp:
+            cwd = tmp if wasi else None
             for name, text, out, line in cases:
                 path = os.path.join(tmp, f"{name}.my")
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(head + "    let t = " + text + "\n    print(t)\n}\n")
+                path = given(path)
                 for cmd in ("check", "run"):
                     with self.subTest(name=name, cmd=cmd):
-                        proc = subprocess.run(tool + [cmd, path], capture_output=True, text=True, timeout=300, env=env)
+                        proc = subprocess.run(tool + [cmd, path], capture_output=True, text=True, timeout=300, env=env,
+                                              cwd=cwd)
                         if not line:
                             self.assertEqual((proc.stdout, proc.stderr), ("ok\n" if cmd == "check" else out + "\n", ""))
                         else:
@@ -468,7 +477,8 @@ class SelfHostedParserParity(unittest.TestCase):
                     fh.write("fun main() {\n    let c = 1 < 2\n    if !c { print(0) }"
                              + " else if !c { }" * arms + " else { }\n    print(1)\n}\n")
                 with self.subTest(arms=arms):
-                    proc = subprocess.run(tool + ["run", path], capture_output=True, text=True, timeout=300, env=env)
+                    proc = subprocess.run(tool + ["run", given(path)], capture_output=True, text=True, timeout=300,
+                                          env=env, cwd=cwd)
                     if ok:
                         self.assertEqual((proc.stdout, proc.stderr), ("1\n", ""))
                     else:

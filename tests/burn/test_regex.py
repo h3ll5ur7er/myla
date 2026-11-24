@@ -424,9 +424,11 @@ class RegexDifferentialTest(unittest.TestCase):
             argv = [self.native]
         else:
             argv = [selfhost_tool("main"), "run", self.path, "--stdlib", STDLIB_ROOT]
-        proc = subprocess.run(argv, input="\n".join(lines) + "\n", capture_output=True, text=True, timeout=900)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        out = proc.stdout.splitlines()
+        # the lines as bytes: in text mode Windows would end each with CRLF,
+        # and the driver splits at LF (a `\r` left is no hex, MYLA-926)
+        proc = subprocess.run(argv, input=("\n".join(lines) + "\n").encode(), capture_output=True, timeout=900)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode(errors="replace"))
+        out = proc.stdout.decode().splitlines()
         self.assertEqual(len(out), len(lines))
         return out
 
