@@ -1,0 +1,212 @@
+[
+ {
+  "name": "gif_pillow_noise_64",
+  "kind": "gif",
+  "min_code_size": 8,
+  "producer": "Pillow 13.0.0",
+  "length": 4096
+ },
+ {
+  "name": "gif_pillow_picture_200x150",
+  "kind": "gif",
+  "min_code_size": 8,
+  "producer": "Pillow 13.0.0",
+  "length": 30000
+ },
+ {
+  "name": "gif_pillow_picture_16_160x160",
+  "kind": "gif",
+  "min_code_size": 8,
+  "producer": "Pillow 13.0.0",
+  "length": 25600
+ },
+ {
+  "name": "gif_pillow_flat_200x100",
+  "kind": "gif",
+  "min_code_size": 8,
+  "producer": "Pillow 13.0.0",
+  "length": 20000
+ },
+ {
+  "name": "gif_pillow_1x1",
+  "kind": "gif",
+  "min_code_size": 8,
+  "producer": "Pillow 13.0.0",
+  "length": 1
+ },
+ {
+  "name": "gif_imagemagick_2",
+  "kind": "gif",
+  "min_code_size": 2,
+  "producer": "ImageMagick 6.9",
+  "length": 38400
+ },
+ {
+  "name": "gif_imagemagick_4",
+  "kind": "gif",
+  "min_code_size": 2,
+  "producer": "ImageMagick 6.9",
+  "length": 38400
+ },
+ {
+  "name": "gif_imagemagick_16",
+  "kind": "gif",
+  "min_code_size": 4,
+  "producer": "ImageMagick 6.9",
+  "length": 38400
+ },
+ {
+  "name": "gif_imagemagick_64",
+  "kind": "gif",
+  "min_code_size": 6,
+  "producer": "ImageMagick 6.9",
+  "length": 38400
+ },
+ {
+  "name": "gif_imagemagick_256",
+  "kind": "gif",
+  "min_code_size": 8,
+  "producer": "ImageMagick 6.9",
+  "length": 38400
+ },
+ {
+  "name": "tiff_pillow_gray_200x120_tiff_0",
+  "kind": "tiff",
+  "min_code_size": 8,
+  "producer": "Pillow (libtiff)",
+  "length": 24000
+ },
+ {
+  "name": "tiff_pillow_gray_200x120_packbits_0",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "Pillow (libtiff)",
+  "length": 24000
+ },
+ {
+  "name": "tiff_ffmpeg_gray_200x120_tiff_0",
+  "kind": "tiff",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 24000
+ },
+ {
+  "name": "tiff_ffmpeg_gray_200x120_packbits_0",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 8000
+ },
+ {
+  "name": "tiff_ffmpeg_gray_200x120_packbits_1",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 8000
+ },
+ {
+  "name": "tiff_ffmpeg_gray_200x120_packbits_2",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 8000
+ },
+ {
+  "name": "tiff_pillow_rgb_160x100_tiff_0",
+  "kind": "tiff",
+  "min_code_size": 8,
+  "producer": "Pillow (libtiff)",
+  "length": 48000
+ },
+ {
+  "name": "tiff_pillow_rgb_160x100_packbits_0",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "Pillow (libtiff)",
+  "length": 48000
+ },
+ {
+  "name": "tiff_ffmpeg_rgb_160x100_tiff_0",
+  "kind": "tiff",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 48000
+ },
+ {
+  "name": "tiff_ffmpeg_rgb_160x100_packbits_0",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 8160
+ },
+ {
+  "name": "tiff_ffmpeg_rgb_160x100_packbits_1",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 8160
+ },
+ {
+  "name": "tiff_ffmpeg_rgb_160x100_packbits_2",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 8160
+ },
+ {
+  "name": "tiff_ffmpeg_rgb_160x100_packbits_5",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 7200
+ },
+ {
+  "name": "tiff_pillow_rgbnoise_64x48_tiff_0",
+  "kind": "tiff",
+  "min_code_size": 8,
+  "producer": "Pillow (libtiff)",
+  "length": 9216
+ },
+ {
+  "name": "tiff_pillow_rgbnoise_64x48_packbits_0",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "Pillow (libtiff)",
+  "length": 9216
+ },
+ {
+  "name": "tiff_ffmpeg_rgbnoise_64x48_tiff_0",
+  "kind": "tiff",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 9216
+ },
+ {
+  "name": "tiff_ffmpeg_rgbnoise_64x48_packbits_0",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 8064
+ },
+ {
+  "name": "tiff_ffmpeg_rgbnoise_64x48_packbits_1",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "ffmpeg",
+  "length": 1152
+ },
+ {
+  "name": "tiff_pillow_bilevel_203x101_tiff_0",
+  "kind": "tiff",
+  "min_code_size": 8,
+  "producer": "Pillow (libtiff)",
+  "length": 2626
+ },
+ {
+  "name": "tiff_pillow_bilevel_203x101_packbits_0",
+  "kind": "packbits",
+  "min_code_size": 8,
+  "producer": "Pillow (libtiff)",
+  "length": 2626
+ }
+]
