@@ -1787,7 +1787,9 @@ pub fun make_dir(path: str, mode: int64) -> int64 {
 // The file (or symbolic link) at `path` removed (`DeleteFileW`). A
 // directory is IS_A_DIRECTORY, as Linux's unlink says (Windows: access
 // denied), but a link to one is removed as Windows removes one
-// (`RemoveDirectoryW`).
+// (`RemoveDirectoryW`). A read-only file is removed too, as Linux removes
+// one (Windows: access denied; Git makes its objects so, MYLA-937): its
+// read-only attribute cleared first, and put back if it still can't go.
 pub fun remove_file(path: str) -> int64 {
     let w = path_wide(path)
     var r: int64 = 0
@@ -1800,12 +1802,43 @@ pub fun remove_file(path: str) -> int64 {
             }
         } else if e == 5 && is_dir_attr(a) {
             r = -IS_A_DIRECTORY
+        } else if e == 5 && a != NO_ATTRIBUTES && (a & ATTR_READONLY) != 0 {
+            r = remove_read_only(w, a)
         } else {
             r = path_failed(w, e)
         }
     }
     __free(w)
     return r
+}
+
+// The read-only file at the path `w`, whose attributes are `a`, removed:
+// made writable (`SetFileAttributesW`) and deleted. 0, or minus the cause,
+// its attributes as they were.
+fun remove_read_only(w: int64, a: int64) -> int64 {
+    let set = __rt_get("__imp_SetFileAttributesW")
+    if !ok(__syscall(set, w, writable_attributes(a), 0)) {
+        return path_failed(w, 5)
+    }
+    if ok(__syscall(__rt_get("__imp_DeleteFileW"), w, 0, 0)) {
+        return 0
+    }
+    let e = last_error()
+    let back = __syscall(set, w, a, 0)
+    return path_failed(w, e)
+}
+
+// The attributes `a` without the read-only one, as SetFileAttributesW takes
+// them: FILE_ATTRIBUTE_NORMAL (128) for none left.
+#test(33)[32]
+#test(1)[128]
+#test(3)[2]
+fun writable_attributes(a: int64) -> int64 {
+    let left = a & ~ATTR_READONLY
+    if left == 0 {
+        return 128
+    }
+    return left
 }
 
 // The empty directory at `path` removed (`RemoveDirectoryW`).

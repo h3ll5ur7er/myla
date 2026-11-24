@@ -21,10 +21,12 @@
 pub struct TestProgram { input: str, output: str, exit: int32, stderr: Option<str> }
 
 // The trailing comment block of `source`: its lines, each without its `//`
-// and one space, newest last; [] without one.
+// and one space, newest last; [] without one. A line may end in CRLF (a
+// Windows checkout, MYLA-936): the `\r` isn't part of its text.
 #test("fun main() {}\n// output:\n// hi\n")[["output:", "hi"]]
 #test("fun main() {}\n")[[]]
 #test("// a\nfun main() {}\n//\n// b\n")[["", "b"]]
+#test("fun main() {}\r\n// output:\r\n// hi\r\n")[["output:", "hi"]]
 pub fun trailing_block(source: str) -> [str] {
     let lines = split_lines(source)
     var k = lines.len() - 1
@@ -32,10 +34,19 @@ pub fun trailing_block(source: str) -> [str] {
     var out: [str] = []
     var i = k + 1
     while i < lines.len() {
-        out.push(comment_text(lines[i]))
+        out.push(comment_text(without_cr(lines[i])))
         i = i + 1
     }
     return out
+}
+
+// `line` without a `\r` it ends with.
+#test("a\r")["a"]
+#test("a")["a"]
+#test("\r")[""]
+fun without_cr(line: str) -> str {
+    if line.len() > 0 && line[line.len() - 1] == '\r' { return line[:line.len() - 1] }
+    return line
 }
 
 // `source`'s lines, a last line without a newline included.
@@ -83,6 +94,7 @@ fun comment_text(line: str) -> str {
 #test("fun main() {}\n// input:\n// a\n// b\n// output:\n// exit: 3\n// stderr:\n// runtime error: boom\n")[Some(TestProgram { input: "a\nb\n", output: "", exit: 3, stderr: Some("runtime error: boom\n") })]
 #test("fun main() {}\n// a comment\n")[None]
 #test("fun main() {}\n")[None]
+#test("fun main() {}\r\n// input:\r\n// a\r\n// output:\r\n// b\r\n// exit: 2\r\n")[Some(TestProgram { input: "a\n", output: "b\n", exit: 2, stderr: None })]
 pub fun test_program_of(source: str) -> Option<TestProgram> {
     let block = trailing_block(source)
     var has_output = false

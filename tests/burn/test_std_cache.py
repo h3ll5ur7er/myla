@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, shown
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -40,6 +40,16 @@ PANIC = """fun main() {
 # the examples built for the other targets too (all of them build for x86-64)
 OTHER_TARGETS = ["aarch64-linux", "wasm32-wasi"]
 ON_EVERY_TARGET = ["hello.my", "maps.my", "strings.my", "slices_and_formats.my", "traits_on_builtins.my"]
+
+
+def _named(path: str) -> str:
+    """`path` as an outcome's key names it: relative to the checkout, with
+    `/`; as it is when it can't be (on Windows the temporary directory may
+    be on another drive, MYLA-926)."""
+    try:
+        return os.path.relpath(path, _REPO).replace(os.sep, "/")
+    except ValueError:
+        return path
 
 
 def _programs() -> list[str]:
@@ -91,23 +101,24 @@ class WithAndWithoutTheCache(unittest.TestCase):
         builds += [(os.path.join(_REPO, "examples", e), t) for e in ON_EVERY_TARGET for t in OTHER_TARGETS]
         builds += [(cls.panic, None)]
         for path, target in builds:
-            exe = os.path.join(bins, "prog")
+            # (a program for this machine is run: on Windows an .exe)
+            exe = os.path.join(bins, "prog" + (EXE if target is None else ""))
             if os.path.exists(exe):
                 os.remove(exe)
             args = ["build", path, "-o", exe] + (["--target", target] if target else [])
             result = cls._run(args)
             with open(exe, "rb") as fh:
                 binary = fh.read()
-            out[f"build {os.path.relpath(path, _REPO)} {target or 'x86_64-linux'}"] = (result, binary)
+            out[f"build {_named(path)} {target or 'x86_64-linux'}"] = (result, binary)
             if path == cls.panic:
                 p = subprocess.run([exe], capture_output=True, text=True)
-                out["panic native"] = (p.returncode, p.stdout, p.stderr.replace(cls.lib, "LIB"))
+                out["panic native"] = (p.returncode, p.stdout, p.stderr.replace(shown(cls.lib), "LIB"))
         out["panic run"] = cls._run(["run", cls.panic])
         for path in sorted(glob.glob(os.path.join(_REPO, "examples", "errors", "*.my"))):
-            out[f"check {os.path.relpath(path, _REPO)}"] = cls._run(["check", path])
+            out[f"check {_named(path)}"] = cls._run(["check", path])
             with open(path, encoding="utf-8") as fh:
                 if "runtime error" in fh.readline():
-                    out[f"run {os.path.relpath(path, _REPO)}"] = cls._run(["run", path])
+                    out[f"run {_named(path)}"] = cls._run(["run", path])
         return out
 
     def _same(self, prefix: str) -> None:

@@ -12,7 +12,9 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
+import sys
 import unittest
 
 from ._native import CAN_BUILD_NATIVE, EXE, ON_WINDOWS, SKIP_REASON
@@ -25,6 +27,24 @@ def _write(path: str, text: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
+
+
+def _remove_tree(path: str) -> None:
+    """`shutil.rmtree(path)`; on Windows the read-only files Git makes its
+    objects are made writable and removed again (deleting one is access
+    denied there, MYLA-937)."""
+    if not ON_WINDOWS:
+        shutil.rmtree(path)
+        return
+
+    def writable_again(func, name, _exc) -> None:
+        os.chmod(name, stat.S_IWRITE)
+        func(name)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable_again)
+    else:
+        shutil.rmtree(path, onerror=writable_again)
 
 
 def git(cwd: str, *args: str) -> str:
@@ -153,7 +173,7 @@ class TestFetch(_Layout):
         commit = git(repo, "rev-parse", "HEAD")
         app = self.app(f'greet = {{ git = "{url}" }}\n')
         self.assertEqual(self.run_in(app, "fetch").returncode, 0)
-        shutil.rmtree(os.path.join(app, ".myla"))
+        _remove_tree(os.path.join(app, ".myla"))
         # an interrupted checkout is cloned again
         partial = os.path.join(app, ".myla", "deps", f"greet-{commit}.partial")
         os.makedirs(partial)
