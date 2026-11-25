@@ -8,6 +8,8 @@ import std.font as font
 import std.draw as draw
 import std.image as image
 import std.fs as fs
+import std.png as png
+import std.process as process
 from std.font import Align
 from std.draw import Canvas, Paint
 
@@ -72,4 +74,15 @@ fun main() {
         print(line)
     }
     print(f"{l.glyphs.len()} glyphs drawn, {cache.count()} masks rasterised")
+
+    // with a file name, the paragraph rendered into a PNG
+    let argv = process.args()
+    if argv.len() > 1 {
+        var page = draw.blank((para.width as int) + 8, (para.height as int) + 8, image.rgb(255u8, 255u8, 255u8))
+        page.fill_masks(cache.masks(para, 4.0, 4.0), Paint.Solid(image.rgb(20u8, 40u8, 120u8)))
+        match fs.write_bytes(argv[1], png.encode(page.image)) {
+            Ok(()) => print(f"wrote {argv[1]}")
+            Err(e) => print(f"{argv[1]}: {e}")
+        }
+    }
 }

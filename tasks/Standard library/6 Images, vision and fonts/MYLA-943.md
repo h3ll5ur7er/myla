@@ -16,7 +16,7 @@ Step 5 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]].
 - [x] Glyph outlines as `draw.Path`s; rasterised masks at a quarter-pixel offset; equal to the outline's exact area within a tolerance, and visually checked against Pillow's FreeType rendering of the vendored font (unhinted)
 - [x] `layout`, `measure`: cmap, advances, kerning, wrapping at spaces within `max_width`, `\n`, alignment, line height
 - [x] `GlyphCache` and `masks`; `Canvas.fill_mask` draws them
-- [ ] An example: a paragraph rendered to a PNG. `examples/font_text.my` measures, lays out a wrapped paragraph and draws a word on a canvas, printed as text (one character a pixel), because std.png ([[MYLA-935]]) isn't on this lane's base; with it, `fs.write_bytes("text.png", png.encode(c.image))` is the one line to add
+- [x] An example: a paragraph rendered to a PNG. `examples/font_text.my` measures, lays out a wrapped paragraph and draws a word on a canvas, printed as text (one character a pixel); given a file name (`myla run examples/font_text.my para.png`), it renders the centred paragraph into that PNG through std.png (added by the integrator after [[MYLA-935]] merged; checked by eye and by Pillow opening it, 150×35 RGB).
 - [ ] Later steps, each its own box when it starts: `GPOS` pair kerning, `CFF` outlines, WOFF 1
 - [x] Its corpus and fuzz cases in [[MYLA-945]]'s harness: truncations and seeded mutations are `Ok` or `Err`, never a runtime error, natively plain and `--checked`
 - [x] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node)
