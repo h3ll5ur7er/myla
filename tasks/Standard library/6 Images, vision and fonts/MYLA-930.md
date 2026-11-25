@@ -25,7 +25,7 @@ Each has the page's recommendation first. The owner accepted every recommendatio
 
 - [x] The questions decided, the decision recorded, the page updated to match (D311)
 - [ ] The tasks moved to `todo` in the page's order, step 1 first (three waves of parallel lanes, below)
-- [ ] After std.png and std.jpeg: the embedded library's growth measured, before the rest goes ahead
+- [x] After std.png and std.jpeg: the embedded library's growth measured, before the rest goes ahead (below, 2026-11-25)
 
 ## Waves (2026-11-24)
 
@@ -36,3 +36,17 @@ The owner asked for everything to be built in parallel by agents, as far as the 
 | 1 | [[MYLA-931]], [[MYLA-932]], [[MYLA-933]], [[MYLA-945]], [[MYLA-941]], [[MYLA-942]] | The groundwork, the core, and the two lanes that only need std.image's types (a skeleton committed first, `lib/std/image.my`) |
 | 2 | [[MYLA-934]], [[MYLA-935]], [[MYLA-936]], [[MYLA-938]], [[MYLA-939]], [[MYLA-943]] | The codecs need the byte readers, LZW and the corpus; fonts need std.draw |
 | 3 | [[MYLA-937]], [[MYLA-940]], [[MYLA-944]] | The JPEG encoder after its decoder, std.imageio after the codecs, tier B in imgproc.my after tier A |
+
+## The embedded library's growth (2026-11-25, at f5821ba)
+
+Measured with every module of waves 1 and 2 merged (std.image, std.bytes's readers, LZW and PackBits, std.draw, std.imgproc A and B, std.pnm, std.bmp, std.qoi, std.png, std.jpeg's decoder, std.gif, std.tiff, std.font): 22,366 lines in the twelve new modules and 1,890 more in std.bytes and std.compress.
+
+| | Before (cc6539e) | After | Growth |
+| --- | --- | --- | --- |
+| `selfhost/embedded_std.my` | 4,018,295 bytes | 5,033,880 bytes | +25 % |
+| `build/myla` | 7,406,648 bytes | 8,392,864 bytes | +13 % |
+| `myla check` of a hello world (best of 7) | 6 ms | 5 ms | none measurable |
+| `myla build` of it (best of 5) | 64 ms | 66 ms | within noise |
+| `myla run` of it (best of 7) | 6 ms | 6 ms | none |
+
+A program that doesn't import the new modules pays nothing measurable; the toolchain binary carries about 1 MB more text. That matches the plan's estimate (about 20 %), so nothing here argues for moving the modules into packages now ([[MYLA-245]] can revisit it).

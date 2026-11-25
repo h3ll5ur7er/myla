@@ -350,7 +350,7 @@ The first useful milestone is step 2 plus std.png: load a PNG, change it, save i
 
 - **Speed.** Bounds checks on every index, no SIMD, and a value per sample in the interpreter. The native numbers above suggest that decoding and filtering a photo take a fraction of a second up to a few seconds, which is fine for tools and tests, though not for video. If profiling shows bounds checks dominate, removing them inside `for i in 0..xs.len()` loops is compiler work that helps all of std, not this library alone. That would be a task of its own, measured here first.
 - **Interpreted runs.** `myla run` on a real photo takes minutes. The docs say to build first (`myla build`) for real images, and `#test` cases stay tiny.
-- **Embedded size.** About 20 % more library text in every toolchain binary (decision 1). That should be measured once std.png and std.jpeg exist, before the rest.
+- **Embedded size.** Measured on 2026-11-25 with waves 1 and 2 merged ([[MYLA-930]]): `selfhost/embedded_std.my` grew 25 % (4.0 to 5.0 MB), `build/myla` 13 % (7.4 to 8.4 MB); checking, building and running a program that doesn't import these modules costs the same as before.
 - **Scope creep.** OpenCV is millions of lines. Tier A is the target, tier B is optional, and anything not on this page needs a reason and a task.
 
 ## Left out
