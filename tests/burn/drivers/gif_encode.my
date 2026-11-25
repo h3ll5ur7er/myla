@@ -1,0 +1,185 @@
+// std.gif's encoder driver for tests/burn/test_gif.py (MYLA-938). It reads
+// lines from stdin until an empty one or the end, each `<input>\t<output>`:
+// the input a GIF file, decoded with `decode_all`, or `synth:<w>:<h>:<n>:<kind>`,
+// an animation of `n` frames made here (`few` colours or `many`, with a
+// moving square and, from the third frame, a moving transparent hole: each
+// frame cleared to the transparent background once shown). It
+// writes `encode_all`'s GIF to `<output>`, what `composite` shows of that
+// file again to `<output>.pam` (RGBA PAM images one after the other) and,
+// for a made animation, its own frames as shown to `<output>.src.pam`. For
+// each line it prints
+//
+//     ok <frames> <same>
+//     err <message>
+//
+// `same` is `true` if the frames decoded from the output are the input's
+// as shown, alpha all or nothing (alpha below 128 transparent), exactly.
+
+import std.gif as gif
+from std.gif import Animation, Frame, Disposal
+import std.image as image
+from std.image import Image, Image8, Layout
+import std.fs as fs
+import std.num as num
+from std.io import stdin, println, Reader
+
+struct Lines { r: Reader }
+
+impl Lines {
+    fun next(var self) -> Option<(str, str)> {
+        let line = match self.r.read_line() {
+            Ok(Some(l)) => l
+            _ => ""
+        }
+        if line.len() == 0 {
+            return None
+        }
+        let parts = line.split("\t")
+        if parts.len() < 2 {
+            return None
+        }
+        return Some((parts[0], parts[1]))
+    }
+}
+
+// An animation of `n` frames of `w` by `h`, `many` colours or few.
+fun synth(w: int, h: int, n: int, many: bool) -> Animation {
+    var frames: [Frame] = []
+    for i in 0..n {
+        var img = image.new(w, h, Layout.Rgba, 255u8)
+        for y in 0..h {
+            for x in 0..w {
+                let o = (y * w + x) * 4
+                if many {
+                    img.data[o] = ((x * 255) / max1(w - 1)) as uint8
+                    img.data[o + 1] = ((y * 255) / max1(h - 1)) as uint8
+                    img.data[o + 2] = (((x + y) * 4) % 256) as uint8
+                } else {
+                    let k = ((x / 8) + (y / 8)) % 4
+                    img.data[o] = (k * 60) as uint8
+                    img.data[o + 1] = (200 - k * 40) as uint8
+                    img.data[o + 2] = 90u8
+                }
+            }
+        }
+        // a square moving right
+        let sx = (i * 5) % max1(w - 8)
+        for y in 2..min(h, 10) {
+            for x in sx..min(w, sx + 8) {
+                let o = (y * w + x) * 4
+                img.data[o] = 250u8
+                img.data[o + 1] = 20u8
+                img.data[o + 2] = 20u8
+            }
+        }
+        // a transparent hole moving down, from the third frame
+        if i >= 2 {
+            let hy = (i * 3) % max1(h - 6)
+            for y in hy..min(h, hy + 6) {
+                for x in 0..min(w, 6) {
+                    img.data[(y * w + x) * 4 + 3] = 0u8
+                }
+            }
+        }
+        frames.push(Frame { image: img, x: 0, y: 0, delay_ms: 30 + 10 * i, disposal: Disposal.Background })
+    }
+    return Animation { width: w, height: h, loops: 0, background: image.rgba(0u8, 0u8, 0u8, 0u8), frames: frames }
+}
+
+fun max1(v: int) -> int {
+    return if v < 1 { 1 } else { v }
+}
+
+fun min(a: int, b: int) -> int {
+    return if a < b { a } else { b }
+}
+
+// The input: a GIF file or a made animation.
+fun source(spec: str) -> Result<Animation, str> {
+    if spec.starts_with("synth:") {
+        let p = spec.split(":")
+        if p.len() != 5 {
+            return Err("synth:<w>:<h>:<n>:<few|many>")
+        }
+        let w = num.parse_int(p[1]).unwrap_or(0) as int
+        let h = num.parse_int(p[2]).unwrap_or(0) as int
+        let n = num.parse_int(p[3]).unwrap_or(0) as int
+        return Ok(synth(w, h, n, p[4] == "many"))
+    }
+    var data: [uint8] = []
+    match fs.read_bytes(spec) {
+        Ok(d) => { data = d }
+        Err(e) => { return Err(f"cannot read {spec}: {e}") }
+    }
+    return match gif.decode_all(data, image.MAX_PIXELS) {
+        Ok(a) => Ok(a)
+        Err(e) => Err(f"{e}")
+    }
+}
+
+// The frames with alpha all or nothing, transparent pixels black.
+fun thresholded(frames: [Image8]) -> [Image8] {
+    var out: [Image8] = []
+    for f in frames {
+        var d = f.data
+        var i = 0
+        while i < d.len() {
+            if d[i + 3] < 128u8 {
+                d[i] = 0u8
+                d[i + 1] = 0u8
+                d[i + 2] = 0u8
+                d[i + 3] = 0u8
+            } else {
+                d[i + 3] = 255u8
+            }
+            i += 4
+        }
+        out.push(Image { width: f.width, height: f.height, layout: Layout.Rgba, data: d })
+    }
+    return out
+}
+
+fun pam(frames: [Image8]) -> [uint8] {
+    var out: [uint8] = []
+    for f in frames {
+        out.extend(f"P7\nWIDTH {f.width}\nHEIGHT {f.height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n".bytes())
+        out.extend(f.data)
+    }
+    return out
+}
+
+fun run(input: str, output: str) -> str {
+    var a = Animation { width: 0, height: 0, loops: 0, background: image.rgba(0u8, 0u8, 0u8, 0u8), frames: [] }
+    match source(input) {
+        Ok(x) => { a = x }
+        Err(e) => { return "err " + e }
+    }
+    let b = gif.encode_all(a, true)
+    var back = a
+    match gif.decode_all(b, image.MAX_PIXELS) {
+        Ok(x) => { back = x }
+        Err(e) => { return f"err our own output: {e}" }
+    }
+    let shown = thresholded(gif.composite(back))
+    let want = thresholded(gif.composite(a))
+    if let Err(e) = fs.write_bytes(output, b) {
+        return f"err {e}"
+    }
+    if let Err(e) = fs.write_bytes(output + ".pam", pam(shown)) {
+        return f"err {e}"
+    }
+    if input.starts_with("synth:") {
+        if let Err(e) = fs.write_bytes(output + ".src.pam", pam(want)) {
+            return f"err {e}"
+        }
+    }
+    let same = if shown == want { "true" } else { "false" }
+    return f"ok {shown.len()} {same}"
+}
+
+fun main() {
+    var lines = Lines { r: stdin() }
+    while let Some(req) = lines.next() {
+        println(run(req.0, req.1))
+    }
+}

@@ -1,0 +1,99 @@
+// An animated GIF with std.gif (MYLA-938): a ball rolling over a striped
+// floor, made frame by frame, written with `encode_all` and read back with
+// `decode_all`. The encoder writes each frame after the first as the
+// rectangle that changed, so the frames read back are small; `composite`
+// shows them on the whole canvas again.
+import std.gif as gif
+from std.gif import Animation, Frame, Disposal
+import std.image as image
+from std.image import Color, Layout
+
+const W: int = 20
+const H: int = 8
+
+// The colour index of the pixel `x`, `y` of frame `t`: 0 the sky, 1 and 2
+// the floor's stripes, 3 the ball, a 3-pixel square rolling right two
+// pixels a frame.
+#test(0, 0, 0)[0]
+#test(0, 7, 0)[1]
+#test(3, 7, 0)[2]
+#test(2, 4, 0)[3]
+#test(6, 4, 2)[3]
+fun scene(x: int, y: int, t: int) -> int {
+    let bx = 1 + 2 * t
+    if x >= bx && x < bx + 3 && y >= 3 && y < 6 {
+        return 3
+    }
+    if y >= 6 {
+        return if (x / 2) % 2 == 0 { 1 } else { 2 }
+    }
+    return 0
+}
+
+// The colour of the pixel `x`, `y` of frame `t`.
+#test(2, 4, 0)[image.rgb(230u8, 50u8, 40u8)]
+#test(2, 0, 0)[image.rgb(120u8, 180u8, 255u8)]
+fun colour(x: int, y: int, t: int) -> Color {
+    let colours = [image.rgb(120u8, 180u8, 255u8), image.rgb(60u8, 140u8, 60u8), image.rgb(40u8, 100u8, 40u8), image.rgb(230u8, 50u8, 40u8)]
+    return colours[scene(x, y, t)]
+}
+
+// A pixel as a character: the ball `@`, the floor `=` or `-`, the sky `.`.
+#test(230, 50)['@']
+#test(60, 140)['=']
+#test(40, 100)['-']
+#test(120, 180)['.']
+fun glyph(r: int, g: int) -> char {
+    if r > 200 {
+        return '@'
+    }
+    if g == 140 {
+        return '='
+    }
+    if g == 100 {
+        return '-'
+    }
+    return '.'
+}
+
+fun main() {
+    var frames: [Frame] = []
+    for t in 0..4 {
+        var img = image.new(W, H, Layout.Rgba, 255u8)
+        for y in 0..H {
+            for x in 0..W {
+                img.set_color(x, y, colour(x, y, t))
+            }
+        }
+        frames.push(Frame { image: img, x: 0, y: 0, delay_ms: 120, disposal: Disposal.Unspecified })
+    }
+    let a = Animation { width: W, height: H, loops: 0, background: image.rgba(0u8, 0u8, 0u8, 0u8), frames: frames }
+    let file = gif.encode_all(a, false)
+    print(f"{file.len()} bytes, {a.frames.len()} frames of {W}x{H}")
+
+    match gif.decode_all(file, image.MAX_PIXELS) {
+        Ok(back) => {
+            print(f"loops {back.loops} (0: forever)")
+            for f in back.frames {
+                print(f"frame at ({f.x}, {f.y}), {f.image.width}x{f.image.height}, {f.delay_ms} ms, {f.disposal}")
+            }
+            let shown = gif.composite(back)
+            print(f"shown as made: {shown == gif.composite(a)}")
+            let last = shown[shown.len() - 1]
+            for y in 0..H {
+                var sb = StringBuilder()
+                for x in 0..W {
+                    let c = last.color_at(x, y)
+                    sb.append(f"{glyph(c.r as int, c.g as int)}", 0, 1)
+                }
+                print(sb.build())
+            }
+        }
+        Err(e) => print(f"error: {e}")
+    }
+
+    match gif.info(file) {
+        Ok(i) => print(f"info: {i.width}x{i.height}, {i.frames} frames")
+        Err(e) => print(f"error: {e}")
+    }
+}
