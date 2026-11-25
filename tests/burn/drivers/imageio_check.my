@@ -16,8 +16,8 @@
 //                            decoded image turned by `jpeg.apply_orientation`
 //     roundtrip <path> <dir> the file decoded, then saved in `dir` as every
 //                            format and loaded back: `ok <formats>` if each
-//                            lossless one gave the same image (BMP and QOI
-//                            make gray RGB), GIF the same size, and JPEG the
+//                            lossless one gave the same pixels (in any
+//                            layout), GIF the same size, and JPEG the
 //                            same size or `Unsupported` (`jpeg=no` or
 //                            `jpeg=yes` at the end), `differ <what>` if not
 //     roundtrip16 <path> <dir> the file by `decode16`, saved as PNG, TIFF and
@@ -27,7 +27,7 @@
 // prints it.
 
 import std.image as image
-from std.image import Image, Image8, Image16, ImageError, Layout
+from std.image import Image, Image8, Image16, ImageError, Layout, Sample
 import std.imageio as imageio
 from std.imageio import Format
 import std.png as png
@@ -87,6 +87,11 @@ fun same(path: str, fmt: str) -> str {
     let ours = imageio.decode(b)
     let theirs = codec_decode(b, fmt)
     if ours != theirs {
+        if let Err(e) = ours {
+            if let Err(d) = theirs {
+                return one_line(f"differ errors: {e} / {d}")
+            }
+        }
         return "differ decode"
     }
     if imageio.info(b) != codec_info(b, fmt) {
@@ -134,12 +139,11 @@ fun loaded(path: str) -> str {
     return "ok " + described(img)
 }
 
-// What a lossless format gives back of `img`: BMP and QOI make gray RGB.
-fun kept(img: Image8, f: Format) -> Image8 {
-    if (f == Format.Bmp || f == Format.Qoi) && !img.layout.is_color() {
-        return img.convert(if img.layout.has_alpha() { Layout.Rgba } else { Layout.Rgb })
-    }
-    return img
+// Whether `a` and `b` show the same pixels, whatever their layouts: the
+// encoders write the smallest layout that loses nothing (PNG gray for gray
+// pixels and no alpha for an opaque one), BMP and QOI gray as RGB.
+fun same_pixels<S: Sample + Eq>(a: Image<S>, b: Image<S>) -> bool {
+    return a.width == b.width && a.height == b.height && a.convert(Layout.Rgba) == b.convert(Layout.Rgba)
 }
 
 fun roundtrip(path: str, dir: str) -> str {
@@ -173,7 +177,7 @@ fun roundtrip(path: str, dir: str) -> str {
             }
         }
         if f.lossless() {
-            if back != kept(img, f) {
+            if !same_pixels(back, img) {
                 return f"differ {f.name()}: not the same image"
             }
         } else if back.width != img.width || back.height != img.height {
@@ -204,7 +208,7 @@ fun roundtrip16(path: str, dir: str) -> str {
         }
         match imageio.load16(out) {
             Ok(back) => {
-                if back != img {
+                if !same_pixels(back, img) {
                     return f"differ {f.name()}: not the same image"
                 }
             }
