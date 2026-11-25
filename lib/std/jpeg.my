@@ -2631,3 +2631,70 @@ fun the_tables_are_annex_k() {
     assert(d.set_huffman(7, [3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [1, 2, 3]) != Ok(()))
     assert(d.set_huffman(7, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], []) == Ok(()))
 }
+
+// The encoder's tests' image: `w` by `h` pixels of `layout`, each sample a
+// pattern of its position and channel.
+fun pattern(w: int, h: int, layout: Layout) -> Image8 {
+    let ch = layout.channels()
+    var data: [uint8] = []
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..ch {
+                data.push(((x * 29 + y * 47 + c * 71 + ((x * y) % 13) * 9) % 256) as uint8)
+            }
+        }
+    }
+    return Image { width: w, height: h, layout: layout, data: data }
+}
+
+// Whether `pattern(w, h, layout)` encodes to `n` bytes whose CRC-32 is
+// `crc`, and decodes again to an image of its size.
+fun encodes_to(w: int, h: int, layout: Layout, quality: int, s: Subsampling, n: int, crc: uint32) -> bool {
+    let b = encode(pattern(w, h, layout), quality, s)
+    let gray = !layout.is_color()
+    return decodes_to_size(b, w, h, gray) && b.len() == n && checksum_m.crc32_bytes(b) == crc
+}
+
+fun decodes_to_size(b: [uint8], w: int, h: int, gray: bool) -> bool {
+    return match decode(b, image.MAX_PIXELS) {
+        Ok(img) => img.width == w && img.height == h && img.layout == (if gray { Layout.Gray } else { Layout.Rgb })
+        Err(_) => false
+    }
+}
+
+// Each the bytes Pillow 13 (libjpeg-turbo 3.2) writes for the same pixels
+// (RGBA as RGB, gray + alpha as gray) at the same quality and subsampling,
+// `optimize` off.
+#test
+fun encodes_as_libjpeg_does() {
+    assert(encodes_to(16, 16, Layout.Rgb, 75, Subsampling.S420, 770, 0x5680e196u32), "16x16 4:2:0")
+    assert(encodes_to(13, 9, Layout.Rgb, 90, Subsampling.S422, 835, 0x04bbcda2u32), "13x9 4:2:2")
+    assert(encodes_to(9, 7, Layout.Rgb, 50, Subsampling.S444, 709, 0x5c8dc58cu32), "9x7 4:4:4")
+    assert(encodes_to(11, 10, Layout.Gray, 85, Subsampling.S420, 483, 0x47b2eb33u32), "11x10 gray")
+    assert(encodes_to(1, 1, Layout.Rgb, 85, Subsampling.S420, 634, 0x1cc6a35eu32), "1x1")
+    assert(encodes_to(17, 17, Layout.Rgba, 60, Subsampling.S420, 826, 0xffc0a9a4u32), "17x17 RGBA")
+    assert(encodes_to(5, 3, Layout.GrayAlpha, 95, Subsampling.S444, 390, 0x6eec7218u32), "5x3 gray + alpha")
+    assert(encodes_to(8, 8, Layout.Rgb, 1, Subsampling.S420, 632, 0xfbf5e6deu32), "quality 1")
+    assert(encodes_to(8, 8, Layout.Rgb, 100, Subsampling.S420, 866, 0x121d39a0u32), "quality 100")
+    assert(encodes_to(24, 18, Layout.Rgb, 85, Subsampling.S420, 1060, 0x6630c790u32), "24x18, dummy blocks")
+}
+
+#test
+fun encodes_what_it_can_and_nothing_else() {
+    // the headers as libjpeg writes them
+    let b = encode(pattern(3, 2, Layout.Gray), 50, Subsampling.S420)
+    assert(b[0:20] == [0xFFu8, 0xD8u8, 0xFFu8, 0xE0u8, 0u8, 16u8, 0x4Au8, 0x46u8, 0x49u8, 0x46u8, 0u8, 1u8, 1u8, 0u8, 0u8, 1u8, 0u8, 1u8, 0u8, 0u8])
+    assert(b[^2] == 0xFFu8 && b[^1] == 0xD9u8)
+    assert(info(b) == Ok(ImageInfo { width: 3, height: 2, layout: Layout.Gray, bit_depth: 8, frames: 1, format: "jpeg" }))
+    // every quality makes a file the decoder reads, and is clamped to 1..100
+    let img = pattern(5, 4, Layout.Rgb)
+    for q in [-5, 0, 1, 2, 10, 49, 50, 51, 99, 100, 101] {
+        assert(decodes_to_size(encode(img, q, Subsampling.S420), 5, 4, false), f"quality {q}")
+    }
+    assert(encode(img, 0, Subsampling.S420) == encode(img, 1, Subsampling.S420))
+    assert(encode(img, 120, Subsampling.S422) == encode(img, 100, Subsampling.S422))
+    // what JPEG can't hold, or an image whose data doesn't fit its size
+    assert(encode(Image { width: 0, height: 3, layout: Layout.Gray, data: [] }, 85, Subsampling.S420) == [])
+    assert(encode(Image { width: 70000, height: 1, layout: Layout.Gray, data: list_m.filled(70000, 0u8) }, 85, Subsampling.S420) == [])
+    assert(encode(Image { width: 2, height: 2, layout: Layout.Rgb, data: [1u8, 2u8, 3u8] }, 85, Subsampling.S420) == [])
+}

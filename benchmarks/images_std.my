@@ -43,6 +43,7 @@ from std.bench import Report
 import std.fs as fs
 import std.image as image
 import std.jpeg as jpeg
+from std.jpeg import Subsampling
 from std.image import Image8
 import std.num as num
 import std.process as process
@@ -166,9 +167,11 @@ fun main() {
     print(f"png: {png_bytes.len()} bytes")
     show(bench.run_n("png encode (level 6)", 3, () => png.encode(img)))
     show(bench.run_n("png decode", 3, () => png.decode(png_bytes)))
-    // MYLA-936, MYLA-937: let jpeg_bytes = jpeg.encode(img, 85)
-    //     show(bench.run_n("jpeg encode (q85, 4:2:0)", 3, () => jpeg.encode(img, 85)))
-    //     show(bench.run_n("jpeg decode", 3, () => jpeg.decode(jpeg_bytes)))
+    let jpeg_bytes = jpeg.encode(img, 85, Subsampling.S420)
+    print(f"jpeg (q85, 4:2:0): {jpeg_bytes.len()} bytes")
+    show(bench.run_n("jpeg encode (q85, 4:2:0)", 5, () => jpeg.encode(img, 85, Subsampling.S420)))
+    show(bench.run_n("jpeg encode (q85, 4:4:4)", 5, () => jpeg.encode(img, 85, Subsampling.S444)))
+    show(bench.run_n("jpeg decode (our q85, 4:2:0)", 5, () => jpeg.decode(jpeg_bytes)))
     if jpeg_path.len() > 0 {
         match fs.read_bytes(jpeg_path) {
             Ok(b) => {
