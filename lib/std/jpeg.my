@@ -1962,12 +1962,14 @@ fun huffman_codes(counts: [int], symbols: [int], size: int) -> [int] {
     return t
 }
 
-// A component's tables in the encoder: the quantisation's (`reciprocal`) by
-// zigzag position and the Huffman codes (`huffman_codes`) of DC and AC.
+// A component's tables in the encoder, by zigzag position: the
+// quantisation's (`reciprocal`) and the smallest magnitude that doesn't
+// quantise to 0; and the Huffman codes (`huffman_codes`) of DC and AC.
 struct EncTable {
     fq: [int],
     cq: [int],
     rq: [int],
+    th: [int],
     dc: [int],
     ac: [int],
 }
@@ -1979,15 +1981,25 @@ fun enc_table(q: [int], luma: bool) -> EncTable {
     var fq: [int] = []
     var cq: [int] = []
     var rq: [int] = []
+    var th: [int] = []
     for k in 0..64 {
         let (f, c, r) = reciprocal(q[nat[k]])
         fq.push(f)
         cq.push(c)
         rq.push(r)
+        // about 4q: ((x + c) * f) >> r is 1 from there
+        var x = 4 * q[nat[k]] - 2
+        while x > 0 && ((x - 1 + c) * f) >> r > 0 {
+            x -= 1
+        }
+        while ((x + c) * f) >> r == 0 {
+            x += 1
+        }
+        th.push(x)
     }
     let (dcn, dcs) = std_huffman(luma, false)
     let (acn, acs) = std_huffman(luma, true)
-    return EncTable { fq: fq, cq: cq, rq: rq, dc: huffman_codes(dcn, dcs, 16), ac: huffman_codes(acn, acs, 256) }
+    return EncTable { fq: fq, cq: cq, rq: rq, th: th, dc: huffman_codes(dcn, dcs, 16), ac: huffman_codes(acn, acs, 256) }
 }
 
 // The entropy coder: the bytes so far, and the bits not yet a byte (the low
@@ -1996,8 +2008,7 @@ struct Enc {
     out: [uint8],
     acc: uint64,
     n: int,
-    ws: [int],          // the DCT's 64 values
-    zz: [int],          // the quantised coefficients in zigzag order
+    ws: [int],          // the DCT's 64 values, row by row
     nbits: [int],       // the bits of each magnitude 0 to 2047
     nat: [int],         // natural_order()
     last_dc: [int],     // each component's DC, for the next block's difference
@@ -2008,14 +2019,14 @@ fun new_enc(out: [uint8]) -> Enc {
     for i in 1..2048 {
         nbits[i] = nbits[i >> 1] + 1
     }
-    return Enc { out: out, acc: 0, n: 0, ws: list_m.filled(64, 0), zz: list_m.filled(64, 0), nbits: nbits, nat: natural_order(), last_dc: [0, 0, 0] }
+    return Enc { out: out, acc: 0, n: 0, ws: list_m.filled(64, 0), nbits: nbits, nat: natural_order(), last_dc: [0, 0, 0] }
 }
 
 impl Enc {
-    // The 8x8 samples at `off` in `s` (rows `stride` apart) as a block of
-    // component `c`: the islow forward DCT (jfdctint.c), quantised by `t`
-    // as libjpeg-turbo does, then Huffman coded (jchuff.c).
-    fun block(var self, t: EncTable, c: int, s: [int], off: int, stride: int) {
+    // The 8x8 samples at `off` in `s` (rows `stride` apart) through
+    // libjpeg's islow forward DCT (jfdctint.c) into `ws`, row by row: 8
+    // times the true DCT's coefficients.
+    fun fdct(var self, s: [int], off: int, stride: int) {
         var ws = self.ws
         self.ws = []
         // pass 1: the rows, scaled up by 2^PASS1_BITS (2)
@@ -2057,8 +2068,7 @@ impl Enc {
             ws[w + 3] = (tmp6 * FX_3_072711026 + o2 + o3 + 1024) >> 11
             ws[w + 1] = (tmp7 * FX_1_501321110 + o1 + o4 + 1024) >> 11
         }
-        // pass 2: the columns, the PASS1_BITS taken off again (the result is
-        // 8 times the true DCT)
+        // pass 2: the columns, the PASS1_BITS taken off again
         for x in 0..8 {
             let tmp0 = ws[x] + ws[56 + x]
             let tmp7 = ws[x] - ws[56 + x]
@@ -2087,52 +2097,35 @@ impl Enc {
             ws[24 + x] = (tmp6 * FX_3_072711026 + o2 + o3 + 16384) >> 15
             ws[8 + x] = (tmp7 * FX_1_501321110 + o1 + o4 + 16384) >> 15
         }
-        // quantised, in zigzag order
-        var zz = self.zz
-        self.zz = []
-        let nat = self.nat
-        let fq = t.fq
-        let cq = t.cq
-        let rq = t.rq
-        for k in 0..64 {
-            let v = ws[nat[k]]
-            zz[k] = if v < 0 { -(((cq[k] - v) * fq[k]) >> rq[k]) } else { ((v + cq[k]) * fq[k]) >> rq[k] }
-        }
         self.ws = ws
-        self.code(t, c, zz)
-        self.zz = zz
     }
 
-    // A block of component `c` past the image's edge in a partial MCU, as
-    // libjpeg makes it: the AC coefficients zero and the DC the previous
-    // block's, so its difference is 0.
-    fun dummy(var self, t: EncTable, c: int) {
-        var zz = self.zz
-        self.zz = []
-        zz[0] = self.last_dc[c]
-        for k in 1..64 {
-            zz[k] = 0
-        }
-        self.code(t, c, zz)
-        self.zz = zz
-    }
-
-    // The quantised coefficients `zz` (zigzag order) of a block of component
-    // `c` Huffman coded with `t`'s tables, as libjpeg's `encode_one_block`:
-    // the DC's difference from the component's last, then the AC
-    // coefficients as runs of zeros (ZRL for 16) and an EOB after the last
-    // that isn't zero. The bits go into `acc`, whole bytes out when it holds
-    // 32 or more, each 0xFF followed by a stuffed 0x00.
-    fun code(var self, t: EncTable, c: int, zz: [int]) {
+    // The 8x8 samples at `off` in `s` (rows `stride` apart) as a block of
+    // component `c`: `fdct`, then each coefficient quantised by `t` as
+    // libjpeg-turbo does and Huffman coded as libjpeg's `encode_one_block`
+    // (jchuff.c): the DC's difference from the component's last, then the
+    // AC coefficients as runs of zeros (ZRL for 16) and an EOB after the
+    // last that isn't zero. The bits go into `acc`, whole bytes out when it
+    // holds 32 or more, each 0xFF followed by a stuffed 0x00.
+    fun block(var self, t: EncTable, c: int, s: [int], off: int, stride: int) {
+        self.fdct(s, off, stride)
+        let ws = self.ws
         var out = self.out
         self.out = []
         var acc = self.acc
         var n = self.n
+        let nat = self.nat
         let nbits = self.nbits
+        let fq = t.fq
+        let cq = t.cq
+        let rq = t.rq
+        let th = t.th
         let ac = t.ac
         // the DC: its magnitude's category, then the bits (one less if negative)
-        let diff = zz[0] - self.last_dc[c]
-        self.last_dc[c] = zz[0]
+        let v0 = ws[0]
+        let dc = if v0 < 0 { -(((cq[0] - v0) * fq[0]) >> rq[0]) } else { ((v0 + cq[0]) * fq[0]) >> rq[0] }
+        let diff = dc - self.last_dc[c]
+        self.last_dc[c] = dc
         var mag = if diff < 0 { -diff } else { diff }
         var nb = if mag < 2048 { nbits[mag] } else { 11 }
         var hc = t.dc[nb]
@@ -2140,29 +2133,17 @@ impl Enc {
         var bits = ((hc >> 8) << nb) | ((if diff < 0 { diff - 1 } else { diff }) & ((1 << nb) - 1))
         acc = (acc << (len as uint64)) | (bits as uint64)
         n += len
-        if n >= 32 {
-            for _ in 0..4 {
-                n -= 8
-                let b = ((acc >> (n as uint64)) & 255u64) as uint8
-                out.push(b)
-                if b == 0xFFu8 {
-                    out.push(0u8)
-                }
-            }
-        }
         var run = 0
         for k in 1..64 {
-            let v = zz[k]
-            if v == 0 {
+            let v = ws[nat[k]]
+            let tk = th[k]
+            if v < tk && v > -tk {
                 run += 1
                 continue
             }
+            let z = if v < 0 { -(((cq[k] - v) * fq[k]) >> rq[k]) } else { ((v + cq[k]) * fq[k]) >> rq[k] }
             while run > 15 {
                 // ZRL, sixteen zeros
-                hc = ac[0xF0]
-                len = hc & 255
-                acc = (acc << (len as uint64)) | ((hc >> 8) as uint64)
-                n += len
                 if n >= 32 {
                     for _ in 0..4 {
                         n -= 8
@@ -2173,15 +2154,13 @@ impl Enc {
                         }
                     }
                 }
+                hc = ac[0xF0]
+                len = hc & 255
+                acc = (acc << (len as uint64)) | ((hc >> 8) as uint64)
+                n += len
                 run -= 16
             }
-            mag = if v < 0 { -v } else { v }
-            nb = if mag < 2048 { nbits[mag] } else { 11 }
-            hc = ac[(run << 4) + nb]
-            len = (hc & 255) + nb
-            bits = ((hc >> 8) << nb) | ((if v < 0 { v - 1 } else { v }) & ((1 << nb) - 1))
-            acc = (acc << (len as uint64)) | (bits as uint64)
-            n += len
+            // at most 26 bits more: fewer than 32 in `acc` first
             if n >= 32 {
                 for _ in 0..4 {
                     n -= 8
@@ -2192,28 +2171,52 @@ impl Enc {
                     }
                 }
             }
+            mag = if z < 0 { -z } else { z }
+            nb = if mag < 2048 { nbits[mag] } else { 11 }
+            hc = ac[(run << 4) + nb]
+            len = (hc & 255) + nb
+            bits = ((hc >> 8) << nb) | ((if z < 0 { z - 1 } else { z }) & ((1 << nb) - 1))
+            acc = (acc << (len as uint64)) | (bits as uint64)
+            n += len
             run = 0
         }
         if run > 0 {
             // EOB
             hc = ac[0]
-            len = hc & 255
-            acc = (acc << (len as uint64)) | ((hc >> 8) as uint64)
-            n += len
-            if n >= 32 {
-                for _ in 0..4 {
-                    n -= 8
-                    let b = ((acc >> (n as uint64)) & 255u64) as uint8
-                    out.push(b)
-                    if b == 0xFFu8 {
-                        out.push(0u8)
-                    }
+            acc = (acc << ((hc & 255) as uint64)) | ((hc >> 8) as uint64)
+            n += hc & 255
+        }
+        if n >= 32 {
+            for _ in 0..4 {
+                n -= 8
+                let b = ((acc >> (n as uint64)) & 255u64) as uint8
+                out.push(b)
+                if b == 0xFFu8 {
+                    out.push(0u8)
                 }
             }
         }
         self.acc = acc
         self.n = n
         self.out = out
+    }
+
+    // A block of component `c` past the image's edge in a partial MCU, as
+    // libjpeg makes it: the AC coefficients zero and the DC the previous
+    // block's, so a DC difference of 0 and an EOB.
+    fun dummy(var self, t: EncTable, c: int) {
+        let d = t.dc[0]
+        let e = t.ac[0]
+        self.acc = (((self.acc << ((d & 255) as uint64)) | ((d >> 8) as uint64)) << ((e & 255) as uint64)) | ((e >> 8) as uint64)
+        self.n += (d & 255) + (e & 255)
+        while self.n >= 8 {
+            self.n -= 8
+            let b = ((self.acc >> (self.n as uint64)) & 255u64) as uint8
+            self.out.push(b)
+            if b == 0xFFu8 {
+                self.out.push(0u8)
+            }
+        }
     }
 
     // The bytes, the last one filled up with 1 bits (T.81, F.1.2.3).
@@ -2260,9 +2263,13 @@ const FX_3_072711026: int = 25172
 #test(list_m.filled(64, 0), list_m.filled(64, 1))[[-1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
 fun fdct_block(samples: [int], q: [int]) -> [int] {
     var e = new_enc([])
-    let t = enc_table(q, true)
-    e.block(t, 0, samples, 0, 8)
-    return e.zz
+    e.fdct(samples, 0, 8)
+    let nat = natural_order()
+    var zz: [int] = []
+    for k in 0..64 {
+        zz.push(quantize(e.ws[nat[k]], q[nat[k]]))
+    }
+    return zz
 }
 
 // The headers before the entropy-coded data, as libjpeg writes them: SOI, a
