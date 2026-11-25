@@ -1,6 +1,6 @@
 # std.imgproc
 
-Image processing over std.image's `Image<S>` ([[MYLA-941]], tier A of [[Project/Standard-library-roadmap/Images-vision-and-fonts#std.imgproc (MYLA-941, MYLA-944)]]): colour and point operations, resizing and warps, filters and derivatives, morphology, Canny's edges, corners, template matching, connected components, the distance transform and quality measures. Contours, Hough transforms, features, RANSAC and optical flow are tier B ([[MYLA-944]]). The module imports std.image, std.vector32, std.matrix32, std.unionfind, std.float, std.list, std.option and std.math.
+Image processing over std.image's `Image<S>` ([[Project/Standard-library-roadmap/Images-vision-and-fonts#std.imgproc (MYLA-941, MYLA-944)]]). Tier A ([[MYLA-941]]): colour and point operations, resizing and warps, filters and derivatives, morphology, Canny's edges, corners, template matching, connected components, the distance transform and quality measures. Tier B ([[MYLA-944]]): contours and shapes, Hough transforms, FAST and ORB features and their matching, robust homographies and affine maps (RANSAC), optical flow, and the bilateral filter, fast rectangle morphology, the watershed and CLAHE. The module imports std.image, std.vector32, std.matrix32, std.unionfind, std.random, std.float, std.list, std.option and std.math.
 
 ```myla
 import std.image as image
@@ -129,7 +129,7 @@ Integer images are filtered in integers where the kernel allows: the derivatives
 | Function | What it gives |
 | --- | --- |
 | `rect(w: int, h: int) -> Element`, `cross(w: int, h: int) -> Element`, `ellipse(w: int, h: int) -> Element` | Structuring elements (OpenCV's shapes), anchored at the middle |
-| `erode(img: Image8, se: Element) -> Image8`, `dilate(img: Image8, se: Element) -> Image8` | The minimum, or maximum, under the element; pixels past the edge don't count |
+| `erode(img: Image8, se: Element) -> Image8`, `dilate(img: Image8, se: Element) -> Image8` | The minimum, or maximum, under the element; pixels past the edge don't count. A rectangle whose sides add up to 8 or more goes by van Herk and Gil-Werman's algorithm (three comparisons a sample at any size: 33 ms at 1024 by 1024 for 5 by 5 as for 15 by 15), other elements by the runs of their rows |
 | `morph(img: Image8, op: Morph, se: Element) -> Image8` | `Morph { Open, Close, Gradient, TopHat, BlackHat }`; the second step of an opening or a closing uses the element reflected, so an even-sized one opens too |
 
 ## Edges, corners, matching
@@ -153,6 +153,100 @@ Integer images are filtered in integers where the kernel allows: the derivatives
 | `mse<S>(a, b) -> Result<float64, ImageError>`, `psnr<S>(a, b) -> Result<float64, ImageError>` | The mean squared difference, and 10·log10(max² / mse) (infinite for equal images) |
 | `ssim<S>(a, b) -> Result<float64, ImageError>` | Wang et al.'s structural similarity: an 11 by 11 Gaussian window of σ 1.5, K1 0.01, K2 0.03, the mean over the windows inside the image |
 
+## Contours and shapes
+
+```myla
+import std.image as image
+from std.image import Image8, Layout
+import std.imgproc as imgproc
+from std.imgproc import RetrievalMode
+import std.float as fl
+
+fun main() {
+    // a ring with a dot in its hole, and a diagonal bar
+    var img: Image8 = image.new(20, 12, Layout.Gray, 0u8)
+    for y in 0..12 {
+        for x in 0..20 {
+            let d = (x - 5) * (x - 5) + (y - 5) * (y - 5)
+            let ring = d <= 16 && d > 4 || d == 0
+            let bar = x - y >= 9 && x - y <= 11 && y <= 10
+            if ring || bar {
+                img[(x, y, 0)] = 255u8
+            }
+        }
+    }
+    for c in imgproc.find_contours(img, RetrievalMode.Tree) {
+        let kind = if c.hole { "hole" } else { "outer" }
+        let r = imgproc.bounding_rect(c.points)
+        print(f"{kind} in {c.parent}: {c.points.len()} pixels, area {imgproc.contour_area(c.points)}, {r.w}x{r.h} at ({r.x}, {r.y})")
+    }
+    for c in imgproc.find_contours(img, RetrievalMode.External) {
+        let hull = imgproc.convex_hull(c.points)
+        let box = imgproc.min_area_rect(c.points)
+        print(f"hull of {hull.len()} corners, {imgproc.approx_poly(c.points, 1.0f32).len()} simplified, in {box.size.x:.2} by {box.size.y:.2} turned {box.angle:.1}")
+    }
+    let lines = imgproc.hough_lines(img, 1.0f32, (fl.PI / 180.0) as float32, 8)
+    let l = lines[0]
+    print(f"strongest line: rho {l.rho}, theta {(l.theta as float64).to_degrees():.0} degrees, {l.votes} votes")
+}
+// output:
+// outer in -1: 20 pixels, area 38, 9x9 at (1, 1)
+// hole in 0: 12 pixels, area 18, 7x7 at (2, 2)
+// outer in 1: 1 pixels, area 0, 1x1 at (5, 5)
+// outer in -1: 22 pixels, area 18, 11x11 at (9, 0)
+// hull of 12 corners, 4 simplified, in 7.07 by 7.07 turned 45.0
+// hull of 4 corners, 4 simplified, in 14.14 by 1.41 turned 45.0
+// strongest line: rho -7, theta 136 degrees, 19 votes
+```
+
+| Function | What it gives |
+| --- | --- |
+| `find_contours(img: Image8, mode: RetrievalMode = RetrievalMode.Tree) -> [Contour]` | The borders of the regions of pixels that aren't 0 (8-connected, their holes 4-connected; pixels past the edge are 0), by Suzuki and Abe's border following: OpenCV's `findContours` with `CHAIN_APPROX_NONE`, the same points in the same order. `RetrievalMode { External, List, Tree }`: the outer borders no other border surrounds, every border flat, or every border with its parent. `Contour { points: [(int, int)], hole: bool, parent: int }`: every border pixel (x, y), from the first in raster order, an outer border counterclockwise on the screen (down its left side first), a hole's clockwise; `parent` the index of the border around it (-1 for none, and always outside `Tree`). For `Tree` the order is a depth-first walk with the later of two siblings first, else the borders found later first, as OpenCV's |
+| `contour_area(points: [(int, int)], oriented: bool = false) -> float64` | The shoelace area; oriented, negative for an outer border and positive for a hole (as `contourArea`) |
+| `arc_length(points, closed: bool = true) -> float64` | The perimeter, or the polyline's length |
+| `bounding_rect(points) -> Rect` | The upright box, its `w` and `h` counting pixels |
+| `convex_hull(points) -> [(int, int)]` | Andrew's monotone chain: the corners only, from the smallest (x, y), with a positive oriented area (OpenCV's orientation) |
+| `approx_poly(points, epsilon: float32, closed: bool = true) -> [(int, int)]` | Ramer, Douglas and Peucker: no original point farther than `epsilon`; a closed one is split at the point farthest from the first and the one farthest from that, and starts at the former |
+| `min_area_rect(points) -> RotatedRect` | The box of least area (the hull's sides as calipers); `RotatedRect { center: Vec2, size: Vec2, angle: float32 }`, `angle` in degrees from 0 up to 90, from the x axis toward y, `size.x` along it; `r.corners() -> [Vec2]` |
+| `moments(points) -> Moments`, `image_moments(img: Image8, binary: bool = false) -> Moments` | A polygon's area moments (Green's theorem, the same either way round) or an image's (its first channel, or 1 where it isn't 0); `Moments` holds OpenCV's 24: `m00` … `m03`, the central `mu20` … `mu03` and the normalised `nu20` … `nu03`, float64 |
+| `hu_moments(m: Moments) -> [float64]` | Hu's seven invariants |
+| `point_in_polygon(points, p: Vec2) -> int`, `polygon_distance(points, p: Vec2) -> float64` | 1 inside, 0 on the border, -1 outside (even-odd); the signed distance to the border, positive inside (`pointPolygonTest`) |
+
+## Lines and circles
+
+| Function | What it gives |
+| --- | --- |
+| `hough_lines(img: Image8, rho: float32, theta: float32, threshold: int) -> [Line]` | The standard Hough transform of the pixels that aren't 0: `Line { rho, theta: float32, votes: int }` (x·cos θ + y·sin θ = ρ, θ from 0 to π in steps of `theta` radians, ρ in steps of `rho`), those with more than `threshold` votes that are local maxima, strongest first. It votes in float32 as OpenCV's `HoughLines` does, and gives its lines |
+| `hough_segments(img: Image8, rho: float32, theta: float32, threshold: int, min_length: int, max_gap: int, seed: uint64 = 1u64) -> [Segment]` | The progressive probabilistic transform (OpenCV's `HoughLinesP`): pixels in a random order (std.random seeded by `seed`) vote until a line has `threshold`; its segment is walked both ways across gaps of up to `max_gap`, kept if it spans `min_length` in x or y, and its pixels removed. `Segment { x0, y0, x1, y1: int }` |
+| `hough_circles(img: Image8, min_radius: int, max_radius: int, min_dist: float32, canny_high: float32 = 100.0f32, threshold: int = 20, support: float32 = 0.3f32) -> [Circle]` | The gradient method: Canny's edges of the gray vote along their gradient (both ways, every radius) for centres; a centre with more than `threshold` votes that is a local maximum, not within `min_dist` of one found before, gets the radius most edge pixels around it agree on, if they cover `support` of its circumference; centre and radius are refined by a least-squares circle (Kåsa's) through those pixels. `Circle { center: Vec2, radius: float32, votes: int }`, strongest first |
+
+## Features
+
+| Function | What it gives |
+| --- | --- |
+| `fast(img: Image8, threshold: int, nms: bool = true) -> [Keypoint]` | FAST-9 corners of the gray (Rosten and Drummond): nine contiguous pixels of the circle of radius 3 all brighter by more than `threshold`, or all darker; with `nms` those whose score beats their eight neighbours'. OpenCV's `FAST` (`TYPE_9_16`) exactly, with its score (the largest threshold at which the pixel stays a corner, minus 1) also without the suppression, where OpenCV gives 0. `Keypoint { pt: Vec2, score: float32, angle: float32, octave: int }`, row by row |
+| `orb(img: Image8, n: int = 500) -> [Feature]` | ORB (Rublee et al.): FAST-9 (threshold 20) on eight levels each 1.2 times smaller, 20 pixels clear of each level's edge, the best by Harris's response (a 7 by 7 block), `n` shared by the levels' areas; each oriented by its intensity centroid (a disc of radius 15) and described by 256 comparisons of pairs of points of the level blurred (a 7 by 7 Gaussian of σ 2, in integers), the pattern turned by the orientation. `Feature { keypoint: Keypoint, descriptor: [uint64] }` (four words, test k in bit k % 64 of word k / 64), the keypoints in the image's pixels |
+| `match_features(a: [Feature], b: [Feature], cross_check: bool = true) -> [FeatureMatch]` | Each of `a` with its nearest of `b` by the Hamming distance (the first of equals), brute force; with `cross_check` only mutual nearest. `FeatureMatch { a: int, b: int, distance: int }`, in `a`'s order |
+| `hamming(a: [uint64], b: [uint64]) -> int` | The bits that differ |
+
+ORB's pattern isn't OpenCV's learnt table: it is 256 pairs of points whose coordinates are drawn from a normal distribution of σ 6.2 (a fifth of the 31-pixel patch, as BRIEF draws them), rounded and held to -13..13, by Box and Muller's method over `random.seeded(0x4F5242)`. The descriptors are therefore not interchangeable with OpenCV's, though they behave alike: 300 features of a scene and of the scene turned 15° and scaled by 0.9 match, cross-checked, with more than 60% of the matches within 3 pixels of the true place (the burn test's case).
+
+## Estimation and motion
+
+| Function | What it gives |
+| --- | --- |
+| `find_homography(src: [Vec2], dst: [Vec2], threshold: float32 = 3.0f32, seed: uint64 = 1u64, max_iters: int = 2000) -> Option<(Mat3, [bool])>` | The homography taking `src` to `dst` despite outliers: RANSAC over samples of four (std.random seeded by `seed`, so the result is reproducible; at most `max_iters` samples, fewer once a 0.995 confidence is reached; collinear samples skipped), the one that takes the most points within `threshold` pixels of their match, refitted to those by the normalised direct linear transform (Hartley; the smallest eigenvector of AᵀA by Jacobi's rotations) until they stay the same. The matrix (bottom right 1, source to destination as `warp_perspective` takes it) and the inliers; None for fewer than four pairs, lists of different lengths or only degenerate samples |
+| `find_affine(src, dst, threshold = 3.0f32, seed = 1u64, max_iters = 2000) -> Option<(Mat3, [bool])>` | The same for an affine map: samples of three, a least-squares refit |
+| `optical_flow(prev: Image8, next: Image8, points: [Vec2], window: int = 21, levels: int = 3) -> Result<[(Vec2, bool)], ImageError>` | Bouguet's pyramidal Lucas and Kanade (as `calcOpticalFlowPyrLK`): coarse to fine over `levels` levels of `pyr_down` (fewer once a level is smaller than the window), each point's `window` by `window` neighbourhood (odd) matched by Newton steps (Scharr's derivatives of `prev`, bilinear samples, the border replicated; at most 30 steps a level, until a step is under 0.01 pixel). Each point's new place and whether it was tracked: false where its neighbourhood has too little texture (the structure tensor's smaller eigenvalue a pixel under OpenCV's `minEigThreshold`, 10⁻⁴ in its units) or the point left the image. `Err(Mismatch)` for images of different sizes |
+
+## More filters
+
+| Function | What it gives |
+| --- | --- |
+| `bilateral(img: Image8, d: int, sigma_color: float32, sigma_space: float32) -> Image8` | Tomasi and Manduchi's filter (OpenCV's `bilateralFilter`): the weighted mean of the disc of radius `d / 2` (round(1.5·σs) if `d` <= 0), each neighbour weighted by exp(-r² / 2σs²) and exp(-c² / 2σc²), c the sum of the colour channels' absolute differences; alpha takes the colours' weights; the border `Reflect101`. A gray image is filtered in fixed point (weights of 2⁻²⁰) |
+| `watershed(img: Image8, markers: [int32]) -> [int32]` | Meyer's flooding (OpenCV's `watershed`): from the seeds (labels above 0; 0 unknown) over 4-connected pixels in the order of the colour difference (the largest channel difference) to the pixel each is reached from; each pixel its region's label, or -1 where regions meet. As OpenCV, the image's outermost pixels are -1 |
+| `clahe(img: Image8, clip: float32 = 40.0f32, tiles: int = 8) -> Image8` | Contrast-limited adaptive histogram equalisation (OpenCV's `CLAHE`): a table a tile of `tiles` by `tiles`, its histogram clipped at `clip` times its mean bin (the excess spread evenly, `clip` 0 for none), each pixel the bilinear blend of its four nearest tiles' tables; an image whose size isn't a multiple of `tiles` is extended (`Reflect101`) for the tables, as OpenCV does. In float32 as OpenCV, so its results; each colour channel alike |
+
 ## How it is tested and how fast it is
 
 `tests/burn/test_imgproc.py` runs 108 cases natively against references independent of the module, vendored once by `python3 -m tests.burn.test_imgproc --vendor` (Pillow and numpy, which the test itself doesn't need): Pillow's `convert`, `ImageOps.invert`, `histogram`, `ImageChops.difference`, `resize` with each filter (gray and RGB, shrinking and enlarging), `BOX`, `MedianFilter`, `MinFilter` and `MaxFilter`, which std.imgproc matches exactly; `colorsys`; `numpy.pad` (each border, exactly) and `numpy.linalg.solve`; and textbook numpy for the rest. All but four cases match exactly: `resize` with `Area` at a fraction and `gaussian_blur` of an `Image8` (gray and RGB) are within 1 (fixed point), and the float `resize` within 10⁻⁷.
@@ -175,3 +269,20 @@ Natively at 1024 by 1024 gray (x86-64, `myla build`, 2026-11-25; the best of fiv
 | `warp_affine` (a turn) | 59 ms | 10 ms (`rotate(17, BILINEAR)`) |
 
 C with SIMD and no bounds checks is 4 to 10 times faster per pixel at the regular kernels; Huang's median and the run-based morphology are faster than Pillow's rank filters.
+
+Tier B's `tests/burn/test_imgproc_b.py` runs 39 cases natively against references vendored once by `python -m tests.burn.test_imgproc_b --vendor` with OpenCV 5.1 (`opencv-python-headless` and numpy, which the test doesn't need), or against ground truth where std.imgproc's method is its own. OpenCV's results are matched exactly by `find_contours` (each mode, the nesting, every point in order), `bounding_rect`, `convex_hull` (up to the start), `hough_lines` (lines, angles and votes), `fast` (keypoints and scores), `erode` and `dilate` with large rectangles, `watershed` and `clahe`; within 10⁻¹² to 10⁻⁶ relative by `contour_area`, `arc_length`, both `moments`, `hu_moments` and `polygon_distance`; `min_area_rect`'s area within 10⁻³, its box OpenCV's or another of the same area holding every point; `bilateral` within 1. Ground truth: `approx_poly` finds the corners of four polygons within 1.5 pixels; `hough_segments` gives only segments within 3 pixels of five drawn lines and covers 80% of each; `hough_circles` finds three discs at subpixel centres within 1 pixel, their radii within 1; `orb` as above; `find_homography` and `find_affine` of 1000 pairs, half of them outliers, find exactly the inliers and a map within 0.01 pixel of the true one (0.25 with noise of ±0.5); `optical_flow` follows a smooth scene's subpixel move (2.3, -1.6) within 0.05 pixel at 54 points (0.1 with a 9 by 9 window).
+
+Natively at 1024 by 1024 gray (x86-64, `myla build`, 2026-11-25, the best of five, with five other jobs on the machine's four cores), beside OpenCV 5.1 on one thread:
+
+| Work | std.imgproc | OpenCV |
+| --- | --- | --- |
+| `find_contours` of a threshold (8,900 borders) | 8.0 ms | 12 ms |
+| `hough_lines` of Canny's edges (1°, 36 lines) | 48 ms | 8.6 ms |
+| `fast` (threshold 20, 800 corners) | 11 ms | 0.33 ms |
+| `orb`, 500 features | 124 ms | 9.0 ms |
+| `find_homography`, 1000 pairs, 50% outliers | 3.8 ms | 1.7 ms |
+| `optical_flow`, 200 points, window 21, 3 levels | 42 ms | 4.8 ms |
+| `bilateral`, d 9 | 134 ms | 25 ms |
+| `erode` 15 by 15 | 33 ms | 0.44 ms |
+| `clahe` | 44 ms | 4.4 ms |
+| `watershed`, 64 seeds | 97 ms | 58 ms |

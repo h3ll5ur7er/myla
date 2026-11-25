@@ -1,0 +1,103 @@
+// A photo of a page, flattened (MYLA-944): a page is drawn with std.draw,
+// then photographed at an angle (a homography puts its corners on a
+// quadrilateral of a dark desk). std.imgproc finds the page's outline
+// (Otsu's threshold, the outer contours), its four corners (Ramer, Douglas
+// and Peucker's simplification), and warps the page flat again.
+
+import std.image as image
+from std.image import Image8, Layout
+import std.draw as draw
+import std.imgproc as imgproc
+from std.imgproc import Border, Filter, RetrievalMode
+import std.vector32 as v32
+from std.vector32 import Vec2
+
+// Four corners in the order top left, top right, bottom right, bottom left:
+// the smallest and largest x + y, and the smallest and largest y - x.
+#test([(9, 1), (2, 3), (3, 8), (10, 9)])[[(2, 3), (9, 1), (10, 9), (3, 8)]]
+fun ordered(ps: [(int, int)]) -> [(int, int)] {
+    var tl = ps[0]
+    var br = ps[0]
+    var tr = ps[0]
+    var bl = ps[0]
+    for (x, y) in ps {
+        if x + y < tl.0 + tl.1 {
+            tl = (x, y)
+        }
+        if x + y > br.0 + br.1 {
+            br = (x, y)
+        }
+        if y - x < tr.1 - tr.0 {
+            tr = (x, y)
+        }
+        if y - x > bl.1 - bl.0 {
+            bl = (x, y)
+        }
+    }
+    return [tl, tr, br, bl]
+}
+
+// The contour of the largest area.
+#test([[(0, 0), (1, 0), (1, 1)], [(0, 0), (4, 0), (4, 4), (0, 4)]])[[(0, 0), (4, 0), (4, 4), (0, 4)]]
+fun largest(cs: [[(int, int)]]) -> [(int, int)] {
+    var best: [(int, int)] = []
+    var area = -1.0
+    for c in cs {
+        let a = imgproc.contour_area(c)
+        if a > area {
+            area = a
+            best = c
+        }
+    }
+    return best
+}
+
+// A row of a gray image as text: dark samples as `#`, light ones as `.`.
+#test(image.from_data<uint8>(3, 1, Layout.Gray, [10u8, 200u8, 90u8]).expect("3 samples"), 0)["#.#"]
+fun row_text(img: Image8, y: int) -> str {
+    var sb = StringBuilder()
+    for x in 0..img.width {
+        sb.append(if img[(x, y, 0)] < 128u8 { "#" } else { "." })
+    }
+    return sb.build()
+}
+
+fun main() {
+    // the page: 36 by 16 pixels of paper, a word, and a rule under it
+    let pw = 36
+    let ph = 16
+    var page = draw.blank(pw, ph, image.rgb(240u8, 236u8, 220u8))
+    page.text_bitmap("MYLA", 6, 2, image.rgb(20u8, 20u8, 30u8))
+    page.fill_rect(6.0, 13.0, 24.0, 1.0, draw.Paint.Solid(image.rgb(20u8, 20u8, 30u8)))
+    let flat = page.image.convert(Layout.Rgb)
+    // the photo: the page's corner pixels land on a quadrilateral of a desk
+    let w = 100
+    let h = 64
+    let span = [v32.vec2(0.0, 0.0), v32.vec2(35.0, 0.0), v32.vec2(35.0, 15.0), v32.vec2(0.0, 15.0)]
+    let quad = [v32.vec2(14.0, 9.0), v32.vec2(88.0, 15.0), v32.vec2(80.0, 55.0), v32.vec2(9.0, 47.0)]
+    let shot = imgproc.perspective_from(span, quad).expect("four corners")
+    let photo = imgproc.warp_perspective(flat, shot, w, h, Filter.Bilinear, Border.Constant(40.0))
+    // its outline and corners
+    let g = imgproc.gray(photo)
+    let t = imgproc.otsu(g)
+    let outlines = imgproc.find_contours(imgproc.threshold(g, t), RetrievalMode.External)
+    let outline = largest(outlines.map((c: imgproc.Contour) => c.points))
+    let eps = 0.02 * imgproc.arc_length(outline)
+    let simple = imgproc.approx_poly(outline, eps as float32)
+    let corners = ordered(simple)
+    print(f"threshold {t}: {outlines.len()} outline of {outline.len()} pixels, simplified to {simple.len()} corners")
+    var found: [Vec2] = []
+    for k in 0..4 {
+        let (x, y) = corners[k]
+        print(f"  corner ({x}, {y}), true ({quad[k].x}, {quad[k].y})")
+        found.push(v32.vec2(x as float32, y as float32))
+    }
+    // flattened again
+    let back = imgproc.perspective_from(found, span).expect("four corners")
+    let scan = imgproc.gray(imgproc.warp_perspective(photo, back, pw, ph, Filter.Bilinear, Border.Replicate))
+    for y in 0..ph {
+        print(row_text(scan, y))
+    }
+    let psnr = imgproc.psnr(scan, imgproc.gray(flat)).expect("the same size")
+    print(f"against the page drawn: PSNR {psnr:.1} dB")
+}
