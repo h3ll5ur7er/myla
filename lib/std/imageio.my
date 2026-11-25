@@ -356,31 +356,53 @@ pub fun load16(path: str, max_pixels: int64 = image.MAX_PIXELS) -> Result<Image1
     return Ok(img)
 }
 
-// Whether `encode` can write JPEG yet: std.jpeg's encoder is MYLA-937's.
-const JPEG_ENCODER: bool = false
+// `img` as a JPEG file at `quality`, or None while std.jpeg can't write
+// one. A private helper to be replaced by `jpeg.encode(img, quality)` once
+// MYLA-937 has written it (`return Some(jpeg.encode(img, quality))`); the
+// tests here and tests/burn/test_imageio.py switch themselves on then.
+fun encode_jpeg(img: Image8, quality: int) -> Option<[uint8]> {
+    return None
+}
 
-// `img` as a JPEG file at `quality`. A private helper to be replaced by
-// `jpeg.encode(img, quality)` once MYLA-937 has written it.
-fun encode_jpeg(img: Image8, quality: int) -> [uint8] {
-    panic("JPEG encoding needs MYLA-937")
+// `encode`'s bytes, or `Unsupported("jpeg encoding")` while std.jpeg can't
+// write JPEG.
+fun encoded(img: Image8, f: Format, quality: int) -> Result<[uint8], ImageError> {
+    return match f {
+        Png => Ok(png.encode(img))
+        Jpeg => match encode_jpeg(img, quality) {
+            Some(b) => Ok(b)
+            None => Err(ImageError.Unsupported("jpeg encoding"))
+        }
+        Gif => Ok(gif.encode(img))
+        Tiff => Ok(tiff.encode(img))
+        Bmp => Ok(bmp.encode(img))
+        Pnm => Ok(pnm.encode(img))
+        Qoi => Ok(qoi.encode(img))
+    }
 }
 
 // `img` as a file of the format `f`, written as its codec's `encode`
 // writes it by default: PNG at zlib level 6 with adaptive filters, JPEG at
 // `quality` (1 to 100; the other formats ignore it), GIF dithered to 256
 // colours if it has more, TIFF with LZW, BMP 24 or 32 bits, Netpbm the
-// image's own kind (PGM, PPM or PAM), QOI.
+// image's own kind (PGM, PPM or PAM), QOI. JPEG is a failure until std.jpeg
+// can encode (MYLA-937); `save` gives `Unsupported` for it instead.
 #test(Image { width: 2, height: 1, layout: Layout.Gray, data: [7u8, 200u8] }, Format.Pnm, 90)[[80u8, 53u8, 10u8, 50u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 7u8, 200u8]]
 #test(Image { width: 1, height: 1, layout: Layout.Rgb, data: [1u8, 2u8, 3u8] }, Format.Qoi, 90)[[113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 3u8, 0u8, 162u8, 121u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8]] // a luma difference from black
 pub fun encode(img: Image8, f: Format, quality: int = 90) -> [uint8] {
+    return match encoded(img, f, quality) {
+        Ok(b) => b
+        Err(e) => panic(f"imageio.encode: {e}: std.jpeg can't encode yet (MYLA-937)")
+    }
+}
+
+// `encode16`'s bytes, or `Unsupported` as for `encoded`.
+fun encoded16(img: Image16, f: Format, quality: int) -> Result<[uint8], ImageError> {
     return match f {
-        Png => png.encode(img)
-        Jpeg => encode_jpeg(img, quality)
-        Gif => gif.encode(img)
-        Tiff => tiff.encode(img)
-        Bmp => bmp.encode(img)
-        Pnm => pnm.encode(img)
-        Qoi => qoi.encode(img)
+        Png => Ok(png.encode16(img))
+        Tiff => Ok(tiff.encode16(img))
+        Pnm => Ok(pnm.encode16(img))
+        Jpeg | Gif | Bmp | Qoi => encoded(img.to_u8(), f, quality)
     }
 }
 
@@ -390,17 +412,14 @@ pub fun encode(img: Image8, f: Format, quality: int = 90) -> [uint8] {
 #test(Image { width: 2, height: 1, layout: Layout.Gray, data: [258u16, 65535u16] }, Format.Pnm, 90)[[80u8, 53u8, 10u8, 50u8, 32u8, 49u8, 10u8, 54u8, 53u8, 53u8, 51u8, 53u8, 10u8, 1u8, 2u8, 255u8, 255u8]]
 #test(Image { width: 1, height: 1, layout: Layout.Rgb, data: [257u16, 514u16, 65535u16] }, Format.Qoi, 90)[[113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 3u8, 0u8, 162u8, 117u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8]] // rounded to (1, 2, 255), a luma difference
 pub fun encode16(img: Image16, f: Format, quality: int = 90) -> [uint8] {
-    return match f {
-        Png => png.encode16(img)
-        Tiff => tiff.encode16(img)
-        Pnm => pnm.encode16(img)
-        Jpeg | Gif | Bmp | Qoi => encode(img.to_u8(), f, quality)
+    return match encoded16(img, f, quality) {
+        Ok(b) => b
+        Err(e) => panic(f"imageio.encode16: {e}: std.jpeg can't encode yet (MYLA-937)")
     }
 }
 
 // The format to write `path` in, by its extension: `Unsupported` for an
-// extension no format has (or none), and for JPEG while it can't be
-// written.
+// extension no format has (or none).
 #test("a/b.PNG")[Ok(Format.Png)]
 #test("a/b.webp")[Err(ImageError.Unsupported("extension .webp"))]
 #test("a/b")[Err(ImageError.Unsupported("a file name without an extension"))]
@@ -411,9 +430,6 @@ fun format_to_write(path: str) -> Result<Format, ImageError> {
             return Err(ImageError.Unsupported("a file name without an extension"))
         }
         return Err(ImageError.Unsupported(f"extension .{ext}"))
-    }
-    if f == Format.Jpeg && !JPEG_ENCODER {
-        return Err(ImageError.Unsupported("JPEG encoding (MYLA-937)"))
     }
     return Ok(f)
 }
@@ -438,7 +454,7 @@ pub fun save(path: str, img: Image8, quality: int = 90) -> Result<(), ImageError
     if let Some(kind) = pnm_kind_of(path) {
         return write_file(path, pnm.encode_as(img, kind, false))
     }
-    return write_file(path, encode(img, f, quality))
+    return write_file(path, encoded(img, f, quality)?)
 }
 
 // `save` with 16-bit samples (`encode16`): PNG, TIFF and the Netpbm
@@ -448,7 +464,7 @@ pub fun save16(path: str, img: Image16, quality: int = 90) -> Result<(), ImageEr
     if let Some(kind) = pnm_kind_of(path) {
         return write_file(path, pnm.encode16_as(img, kind, false))
     }
-    return write_file(path, encode16(img, f, quality))
+    return write_file(path, encoded16(img, f, quality)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -495,7 +511,7 @@ fun every_lossless_format_round_trips_in_memory() {
 }
 
 #test
-fun gif_keeps_few_colours_and_jpeg_isnt_written_yet() {
+fun gif_keeps_few_colours() {
     // GIF is exact up to 256 colours with alpha full or none
     var img: Image8 = image.new(4, 3, Layout.Rgba, 255u8)
     img.set_color(1, 1, image.rgba(0u8, 0u8, 0u8, 0u8))
@@ -503,7 +519,56 @@ fun gif_keeps_few_colours_and_jpeg_isnt_written_yet() {
     let back = decode(encode(img, Format.Gif)).expect("gif")
     assert(back.color_at(2, 1) == image.rgba(200u8, 10u8, 30u8, 255u8) && back.color_at(1, 1).a == 0u8)
     assert(back.color_at(0, 0) == image.rgba(255u8, 255u8, 255u8, 255u8))
-    assert(save("never-written.jpg", img) == Err(ImageError.Unsupported("JPEG encoding (MYLA-937)")))
+}
+
+// The largest difference of a sample between `a` and `b`, of the same size
+// and layout.
+fun max_difference(a: Image8, b: Image8) -> int {
+    var m = 0
+    for i in 0..a.data.len() {
+        let d = (a.data[i] as int) - (b.data[i] as int)
+        if d > m {
+            m = d
+        } else if -d > m {
+            m = -d
+        }
+    }
+    return m
+}
+
+#test
+fun jpeg_is_saved_once_std_jpeg_encodes() -> Result<(), ImageError> {
+    // Until MYLA-937's `jpeg.encode` is wired into `encode_jpeg`, saving a
+    // JPEG is `Unsupported` and writes nothing; after, it round trips
+    // closely (a smooth gradient at quality 95).
+    let dir = match fs.make_temp_dir() {
+        Ok(d) => d
+        Err(e) => {
+            return Err(ImageError.Io(e))
+        }
+    }
+    defer {
+        let gone = fs.remove_dir_all(dir)
+    }
+    var img: Image8 = image.new(16, 16, Layout.Rgb, 0u8)
+    for y in 0..16 {
+        for x in 0..16 {
+            img.set_color(x, y, image.rgb((x * 8 + 40) as uint8, (y * 8 + 40) as uint8, 128u8))
+        }
+    }
+    let path = dir + "/a.JPEG"
+    if encode_jpeg(img, 95) == None {
+        assert(save(path, img, 95) == Err(ImageError.Unsupported("jpeg encoding")), "unsupported")
+        assert(save16(path, img.to_u16(), 95) == Err(ImageError.Unsupported("jpeg encoding")), "unsupported at 16")
+        assert(!fs.exists(path), "nothing written")
+        return Ok(())
+    }
+    save(path, img, 95)?
+    let back = load(path)?
+    assert(sniff(fs.read_bytes(path).expect("written")) == Some(Format.Jpeg), "a JPEG")
+    assert(back.width == 16 && back.height == 16 && back.layout == Layout.Rgb, "its size")
+    assert(max_difference(back, img) <= 8, "close")
+    return Ok(())
 }
 
 #test
