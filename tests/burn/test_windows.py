@@ -27,7 +27,11 @@ scripts/host.sh finds Windows and its seed, `BootstrapLink` that it builds a
 stage by `myla build --target x86_64-windows`'s command lines.
 
 Skipped where clang, llvm-dlltool, lld-link or Wine is missing (CI installs
-them, and MYLA_REQUIRE_TARGETS makes a missing one fail there).
+them, and MYLA_REQUIRE_TARGETS makes a missing one fail there). On Windows
+itself (MYLA-926 step 2) `wine()` is [] and `[*wine(), exe]` runs the
+program directly: the classes that only need a Windows program to run run
+there too; what is Wine's (its prefix, its console on a Unix pty, /proc,
+pgrep) is Linux's (`linux_only`).
 """
 from __future__ import annotations
 
@@ -37,16 +41,25 @@ import shutil
 import signal
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, wine, wine_env, wine_run
+from ._native import CAN_BUILD_NATIVE, ON_WINDOWS, SKIP_REASON, linux_only, wine, wine_env, wine_run
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 TOOLS = ("clang", "llvm-dlltool", "lld-link")
-HAVE_WINDOWS = all(shutil.which(t) for t in TOOLS) and bool(wine())
-WINDOWS_SKIP = "the Windows tests need clang, llvm-dlltool, lld-link and Wine"
+# (on Windows its programs run as they are, with no Wine)
+HAVE_WINDOWS = all(shutil.which(t) for t in TOOLS) and (ON_WINDOWS or bool(wine()))
+WINDOWS_SKIP = "the Windows tests need clang, llvm-dlltool, lld-link and Wine (or Windows itself)"
+
+
+def emulator_env() -> dict:
+    """This process's environment with MYLA_EMULATOR naming Wine for `myla
+    test --target x86_64-windows`'s runs, on Windows itself as it is (the
+    harness runs as it is there)."""
+    return dict(os.environ, MYLA_EMULATOR=" ".join(wine())) if wine() else dict(os.environ)
 
 
 @unittest.skipUnless(os.environ.get("MYLA_REQUIRE_TARGETS"), "MYLA_REQUIRE_TARGETS is not set")
@@ -113,6 +126,7 @@ def coff_imports(path: str) -> dict[str, list[str]]:
     return out
 
 
+@linux_only("Wine's own prefix and server")
 @unittest.skipUnless(bool(wine()), "Wine isn't installed")
 class WinePrefix(unittest.TestCase):
     def test_a_fresh_prefix_is_made_before_its_server_is_kept(self):
@@ -416,7 +430,7 @@ fun main() {
     def test_windows_paths(self):
         # D215: std.path is Windows' there (a `\` separates, a drive or a
         # UNC share starts a path) and writes `/`; the working directory is
-        # Windows' own path (Wine's drive Z: is the root)
+        # Windows' own path (Wine's drive Z: is the root; on Windows its own)
         src = r'''import std.path as path
 import std.fs as fs
 import std.glob as glob
@@ -433,7 +447,7 @@ fun main() {
         Err(e) => panic(f"{e}")
     }
     print(cwd)
-    print(path.is_absolute(cwd) && path.anchor(cwd) == "Z:\\")
+    print(path.is_absolute(cwd) && path.anchor(cwd) == "DRIVE\\")
     print(fs.is_file(path.join(cwd, "main.my")))
     print(glob.matches("*/*.my", "src\\main.my"))
     match fs.make_dir_all(cwd + "\\deep\\er") {
@@ -442,8 +456,12 @@ fun main() {
     }
 }
 '''
-        ran = self.build_and_run(src)
-        work = "Z:" + os.path.realpath(self.tmp).replace("/", "\\")
+        if ON_WINDOWS:
+            # the directory it was started in, as Windows names it
+            work = self.tmp
+        else:
+            work = "Z:" + os.path.realpath(self.tmp).replace("/", "\\")
+        ran = self.build_and_run(src.replace("DRIVE", work[:2]))
         want = f"a\\b\nC:\\y\nC:\\a\nnone\nC:/b/c\ntrue\n../d\n{work}\ntrue\ntrue\ntrue\ntrue\n"
         self.assertEqual((ran.stdout.decode(), ran.stderr, ran.returncode), (want, b"", 0))
 
@@ -836,9 +854,12 @@ class Children(unittest.TestCase):
         with open(os.path.join(self.tmp, "echo-args.bat"), "w") as fh:
             fh.write("@echo [%1] [%2] [%3] [%4]\r\n")
         # the helper's directory on PATH: Wine makes a program's PATH of its
-        # registry's and WINEPATH (drive Z: is the Unix root), Windows would
-        # take PATH as it is
-        env = dict(os.environ, WINEPATH="Z:" + self.tmp.replace("/", "\\"), MYLA_B="kept")
+        # registry's and WINEPATH (drive Z: is the Unix root), Windows
+        # takes PATH as it is
+        if ON_WINDOWS:
+            env = dict(os.environ, PATH=self.tmp + os.pathsep + os.environ.get("PATH", ""), MYLA_B="kept")
+        else:
+            env = dict(os.environ, WINEPATH="Z:" + self.tmp.replace("/", "\\"), MYLA_B="kept")
         ran = subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe")], capture_output=True, cwd=self.tmp,
                              timeout=300, env=env)
         self.maxDiff = None
@@ -860,7 +881,8 @@ class Children(unittest.TestCase):
         # D217's `spawns` now true: `myla test --target x86_64-windows` runs
         # the harness once, which starts a child of itself for each case
         # (its scratch directory `c<k>`, where runs of the harness, MYLA-370,
-        # have one for all), under Wine without Wine named again
+        # have one for all), under Wine without Wine named again (on
+        # Windows itself as they are)
         source = ('from std.process import exit, env\nimport std.test as test\nimport std.fs as fs\n\n'
                   '#test(1)[panic("boom")]\n#test(2)[2]\n#test(3)[panic("boom")]\n#test(4)[5]\n'
                   'fun f(x: int) -> int {\n    print(f"f {x}")\n    if x % 2 == 1 { panic("boom") }\n    return x\n}\n\n'
@@ -877,9 +899,8 @@ class Children(unittest.TestCase):
                   '    test.expect(fs.write_to_file(d + "\\\\f.txt", "x").is_ok())\n}\n')
         with open(os.path.join(self.tmp, "t.my"), "w", encoding="utf-8") as fh:
             fh.write(source)
-        env = dict(os.environ, MYLA_EMULATOR=" ".join(wine()))
         ran = subprocess.run([selfhost_tool("main"), "test", "t.my", "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT],
-                             capture_output=True, text=True, cwd=self.tmp, timeout=600, env=env)
+                             capture_output=True, text=True, cwd=self.tmp, timeout=600, env=emulator_env())
         want = ("PASS  f #1\nPASS  f #2\nPASS  f #3\nFAIL  f #4: expected 5, got 4\n      | f 4\n"
                 "PASS  g #1\nPASS  last\nPASS  case_dir #1\nPASS  under_temp #1\nPASS  a_temp_dir\n\n8/9 passed.\n")
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (want, "", 1))
@@ -1377,6 +1398,14 @@ async fun main() {
 # second, then closes; the client reads 35 s later. Without a limit the
 # send went on until then and the client got every byte; with it, the send
 # going on was cancelled at 30 s and the client gets less (then the end).
+# That is Wine's closesocket, which cancels the send still going on. On
+# Windows itself (run 277) the client read every byte: the close at 30 s
+# ends the program's hold on the socket, its handle and its copy of the
+# bytes, but what Winsock has taken of the send it delivers as a graceful
+# close does, a TCP send not being one it can take back from the middle
+# of a stream (or the send ended within the 30 s, the client's window
+# growing). Either way the program ends with the client's every byte read
+# (MYLA-926).
 CLOSE_GIVES_UP = r"""import std.task as task
 import std.net as net
 import std.bytes as bytes
@@ -1538,8 +1567,9 @@ class Sockets(unittest.TestCase):
         # MYLA-798: at BASE the client read every byte 35 s later
         self.build("prog", CLOSE_GIVES_UP)
         ran = self.run_exe(threads="2", timeout=90)
+        all_read = b"true" if ON_WINDOWS else b"false"
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode),
-                         (b"sent true, all read false, some read true\n", b"", 0))
+                         (b"sent true, all read " + all_read + b", some read true\n", b"", 0))
 
     def test_a_childs_input_written_while_its_output_is_read(self):
         # at BASE (9738e37) one worker never ended (`timeout 30`: 124)
@@ -1807,12 +1837,17 @@ class PlatformFollowUps(unittest.TestCase):
         ran = subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe")], capture_output=True, cwd=self.tmp,
                              timeout=120, env=dict(os.environ, WINEDEBUG="+file"))
         self.assertEqual(ran.stdout, b"true true true true\n")
+        if ON_WINDOWS:
+            # Windows itself refuses the path given as it was: the four
+            # results say it took them (there is no trace of Wine's)
+            return
         made = [line for line in ran.stderr.decode(errors="replace").splitlines()
                 if "CreateDirectoryW" in line and ("rxxx" in line or '"short"' in line)]
         self.assertEqual(len(made), 2, made)
         self.assertIn('L"\\\\\\\\?\\\\', made[0])   # the absolute path after \\?\
         self.assertIn('L"short"', made[1])          # a short one as given
 
+    @linux_only("it reads Wine's mappings in /proc")
     def test_the_rings_are_reserved_not_committed(self):
         # H12: a program of 16 workers committed their rings of ready frames,
         # 8 MiB each, which Windows counts against the system's limit (Wine
@@ -1836,6 +1871,7 @@ class PlatformFollowUps(unittest.TestCase):
             proc.wait()
         self.assertGreaterEqual(biggest, 120 << 20, f"the largest reserved mapping: {biggest >> 20} MiB")
 
+    @linux_only("it reads Wine's mappings in /proc")
     def test_the_heap_is_committed_as_it_is_used(self):
         # MYLA-861: each worker that allocated at all (every one that read
         # the clock while a timer waited) committed a 16 MiB chunk of the
@@ -1860,6 +1896,7 @@ class PlatformFollowUps(unittest.TestCase):
             proc.wait()
         self.assertEqual(chunks, 0, "chunks of the heap committed whole")
 
+    @linux_only("pgrep finds the child among Wine's processes")
     def test_a_job_of_its_own_takes_its_children_along(self):
         # MYLA-819: std.test's test child is in a job of its own on Windows
         # (`own_job`, killing what is in it once its one handle closes), as
@@ -1930,6 +1967,7 @@ class Workers(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             self.run_exe(threads="1", timeout=3)
 
+    @linux_only("it reads Wine's mappings in /proc")
     @unittest.skipUnless(os.path.isdir("/proc/self"), "it reads Wine's mappings in /proc")
     def test_big_cells_go_back_whole_with_tasks(self):
         # a cell bigger than a chunk is a mapping of its own, aligned with
@@ -2057,10 +2095,32 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pa
 _HOST_SH = os.path.join(_REPO, "scripts", "host.sh")
 
 
+def bash() -> str:
+    """bash: on Windows Git's (Git Bash, which scripts/host.sh is for), found
+    beside `git`, as a bare `bash` may be System32's, WSL's."""
+    if not ON_WINDOWS:
+        return "bash"
+    git = shutil.which("git")
+    # (git.exe is in Git's cmd\, bin\ or mingw64\bin\; bash.exe in its bin\)
+    up = os.path.dirname(os.path.realpath(git)) if git else ""
+    for _ in range(3):
+        up = os.path.dirname(up)
+        found = os.path.join(up, "bin", "bash.exe")
+        if up and os.path.isfile(found):
+            return found
+    return os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Git", "bin", "bash.exe")
+
+
+def sh_path(path: str) -> str:
+    """`path` as bash reads it in a script: on Windows with `/` (Git Bash
+    takes `C:/…`)."""
+    return path.replace("\\", "/") if ON_WINDOWS else path
+
+
 def host_sh(script: str, env: dict | None = None, cwd: str | None = None) -> subprocess.CompletedProcess:
     """`script` run by bash after sourcing scripts/host.sh, with `env` added
     to this process's environment."""
-    return subprocess.run(["bash", "-c", f'. "{_HOST_SH}"\n{script}'], capture_output=True, text=True,
+    return subprocess.run([bash(), "-c", f'. "{sh_path(_HOST_SH)}"\n{script}'], capture_output=True, text=True,
                           env={**os.environ, **(env or {})}, cwd=cwd or _REPO, timeout=300)
 
 
@@ -2101,6 +2161,39 @@ done
 exec "{real}" "$@"
 """
 
+# On Windows (MYLA-926) a tool's stub is this Python script, `{name}.bat`
+# for `myla build` (which finds it by PATHEXT before the tool itself) and
+# `{name}`, a shell script, for Git Bash, both running it
+_STUB_PY = """import os, shutil, subprocess, sys
+name, real, args = {name!r}, {real!r}, sys.argv[1:]
+with open(os.environ["STUB_LOG"], "a", encoding="utf-8", newline="\\n") as fh:
+    fh.write(name + " " + " ".join(args) + "\\n")
+for a in args:
+    if a.endswith((".s", ".def")):
+        shutil.copy(a, os.environ["STUB_KEEP"])
+sys.exit(subprocess.run([real, *args]).returncode)
+"""
+
+
+def write_stub(stubs: str, name: str) -> None:
+    """The stub of the tool `name` in the directory `stubs`: its command
+    lines logged in $STUB_LOG, the assembly and import lists it reads kept
+    in $STUB_KEEP, then the tool run."""
+    real = shutil.which(name)
+    if not ON_WINDOWS:
+        path = os.path.join(stubs, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_STUB.format(name=name, real=real))
+        os.chmod(path, 0o755)
+        return
+    script = os.path.join(stubs, name + "-stub.py")
+    with open(script, "w", encoding="utf-8") as fh:
+        fh.write(_STUB_PY.format(name=name, real=real))
+    with open(os.path.join(stubs, name + ".bat"), "w", encoding="utf-8") as fh:
+        fh.write(f'@"{sys.executable}" "{script}" %*\n')
+    with open(os.path.join(stubs, name), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(f'#!/bin/sh\nexec "{sh_path(sys.executable)}" "{sh_path(script)}" "$@"\n')
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
@@ -2119,10 +2212,7 @@ class BootstrapLink(unittest.TestCase):
         stubs = os.path.join(self.tmp, "stubs")
         os.mkdir(stubs)
         for name in TOOLS:
-            path = os.path.join(stubs, name)
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(_STUB.format(name=name, real=shutil.which(name)))
-            os.chmod(path, 0o755)
+            write_stub(stubs, name)
         self.path = stubs + os.pathsep + os.environ.get("PATH", "")
 
     def logged(self, where: str, argv: list[str], env: dict | None = None) -> tuple[list[str], dict]:
@@ -2165,7 +2255,7 @@ class BootstrapLink(unittest.TestCase):
         booted = os.path.join(self.tmp, "booted")
         os.mkdir(booted)
         shutil.copy(os.path.join(built, "keep", "prog.exe.s"), booted)
-        by_host, defs_host = self.logged(booted, ["bash", "-c", f'. "{_HOST_SH}"; asm_to_bin prog.exe.s prog.exe'],
+        by_host, defs_host = self.logged(booted, [bash(), "-c", f'. "{sh_path(_HOST_SH)}"; asm_to_bin prog.exe.s prog.exe'],
                                          {"MYLA_OS": "windows", "MYLA_ARCH": "x86_64"})
         self.assertEqual(by_host, by_myla)
         self.assertEqual(defs_host, defs_myla)
@@ -2282,6 +2372,7 @@ class HostModules(unittest.TestCase):
     def test_check(self):
         self.assertEqual(self.myla("check", "c.my"), ("ok\n", "", 0))
 
+    @linux_only("pgrep finds the child among Wine's processes")
     def test_killed_it_takes_what_its_cases_started_along(self):
         # MYLA-819: `myla test` is in a job object of its own (`own_job`,
         # driver.my's `test_in_own_job`), so killed it takes what it
@@ -2341,10 +2432,15 @@ class HostModules(unittest.TestCase):
     def test_a_native_harness_is_built_under_temp(self):
         # MYLA-729: under %TEMP%, joined with `\`; Wine has no LLVM for
         # Windows, so the build fails and the harness is kept, its path in
-        # the message (Windows' runner builds and runs it: tools/myla-build)
+        # the message (Windows' runner builds and runs it: tools/myla-build;
+        # so does Windows itself, MYLA-926)
         with open(os.path.join(self.tmp, "sq.my"), "w", encoding="utf-8") as fh:
             fh.write("#test(2)[4]\nfun sq(x: int) -> int {\n    return x * x\n}\n")
         out, err, code = self.myla("test", "sq.my", "--native")
+        if ON_WINDOWS:
+            # Windows has LLVM: the harness is built and run
+            self.assertEqual((out, err, code), ("PASS  sq #1\n\n1/1 passed.\n", "", 0))
+            return
         self.assertEqual((out, code), ("", 1))
         import re
         kept = re.search(r"\(kept at (C:\\users\\[^\\]+\\Temp\\myla-test-\d+)\\harness\.exe\.my\)\n$", err)
@@ -2901,6 +2997,7 @@ class ConsolePty:
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+@linux_only("a Unix pty as Wine's console (Windows' own is the runner's, RUNNER_CASES)")
 class Console(unittest.TestCase):
     """MYLA-707 (D216) under Wine, whose console is a pseudo-terminal this
     side opens: the console as a terminal, raw mode on its input mode, the
@@ -3121,6 +3218,7 @@ fun ctrl_counted() -> (int64, int64) {
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+@linux_only("the count under Wine's console (Windows' own is the runner's terminal/06-readline)")
 class ControlHandler(unittest.TestCase):
     """MYLA-708: Windows gives a read of the console's lines that a Ctrl-C
     ended 0 bytes and no error, which `read` tells from the end by the
@@ -3138,7 +3236,7 @@ class ControlHandler(unittest.TestCase):
                 fh.write(CTRL_COUNTED)
             ran = subprocess.run([selfhost_tool("main"), "test", module, "--target", "x86_64-windows", "--stdlib", tmp,
                                   "--only", "ctrl_counted"], capture_output=True, text=True, timeout=600,
-                                 env=dict(os.environ, MYLA_EMULATOR=" ".join(wine())))
+                                 env=emulator_env())
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("PASS  ctrl_counted #1\n\n1/1 passed.\n", "", 0))
 
 
@@ -3210,7 +3308,7 @@ class PollerBacklog(unittest.TestCase):
                 fh.write(POLLER_DRAINS)
             ran = subprocess.run([selfhost_tool("main"), "test", module, "--target", "x86_64-windows", "--stdlib", tmp,
                                   "--only", "poller_drains"], capture_output=True, text=True, timeout=600,
-                                 env=dict(os.environ, MYLA_EMULATOR=" ".join(wine())))
+                                 env=emulator_env())
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("PASS  poller_drains #1\n\n1/1 passed.\n", "", 0))
 
 

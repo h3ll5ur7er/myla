@@ -39,8 +39,9 @@ import urllib.parse
 import urllib.request
 import zlib
 
-from ._native import (
+from ._native import (BUILD_TARGET,
     CAN_BUILD_NATIVE,
+    ON_WINDOWS,
     SKIP_REASON,
     TEST_TARGET,
     Program,
@@ -377,6 +378,14 @@ class PythonServer:
         self.server.server_close()
 
 
+def stop(proc: subprocess.Popen) -> None:
+    """The server `proc` killed and waited for: on Windows a program still
+    running (TerminateProcess doesn't wait) can't have its file removed with
+    the test's directory."""
+    proc.kill()
+    proc.wait()
+
+
 def free_port() -> int:
     """A port nothing listens on (bound, then closed)."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -665,7 +674,7 @@ class MylaServer(unittest.TestCase):
                         python_clients(self, int(port))
                         rest, err = proc.communicate(timeout=60)
                     finally:
-                        proc.kill()
+                        stop(proc)
                     self.assertEqual((rest, err, proc.returncode), (f"served {SERVER_REQUESTS}\n", "", 0))
 
 
@@ -743,7 +752,7 @@ class KeepAlive(unittest.TestCase):
                             self.assertTrue(0.25 < elapsed < 3, elapsed)
                         rest, err = proc.communicate(timeout=30)
                     finally:
-                        proc.kill()
+                        stop(proc)
                     self.assertEqual((rest, err, proc.returncode), ("stopped\n", "", 0))
 
 
@@ -877,6 +886,28 @@ def socket_states(pid: int) -> str:
     return "; ".join(out) or "none"
 
 
+def windows_cpu_seconds(pid: int) -> float:
+    """The CPU time (user and kernel) the Windows process `pid` has used,
+    from GetProcessTimes (MYLA-926: no /proc there)."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = k32.OpenProcess(0x1000, False, pid)      # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        times = [wintypes.FILETIME() for _ in range(4)]   # created, exited, kernel, user
+        if not k32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return sum(t.dwHighDateTime << 32 | t.dwLowDateTime for t in times[2:]) / 1e7   # 100 ns units
+    finally:
+        k32.CloseHandle(handle)
+
+
 def wait_for_sockets(pid: int, n: int, limit: float) -> int:
     """Waits, at most `limit` seconds, until the process `pid` has at most
     `n` sockets open; how many it has."""
@@ -930,7 +961,7 @@ class TimeLimits(unittest.TestCase):
             check(port)
             rest, err = proc.communicate(timeout=60)
         finally:
-            proc.kill()
+            stop(proc)
         self.assertEqual((rest, err, proc.returncode), ("stopped\n", "", 0))
 
     def test_idle_non_reading_and_slow_handled_connections(self):
@@ -964,10 +995,11 @@ class TimeLimits(unittest.TestCase):
             # (the condition waited for, at most 30 s: 10 s once weren't
             # enough under a full run's load, MYLA-745; the sockets left
             # say which connection the server kept)
-            if TEST_TARGET == "x86_64-windows":
+            if BUILD_TARGET == "x86_64-windows":
                 # (Wine keeps a socket parked on the reactor in its server,
-                # not always among the program's descriptors, MYLA-833: so
-                # the time the server takes, write_ms and its keeper's look)
+                # not always among the program's descriptors, MYLA-833; and
+                # Windows itself has no /proc to count them in: so the time
+                # the server takes, write_ms and its keeper's look)
                 time.sleep(2)
             else:
                 self.assertEqual(wait_for_sockets(self.server_pid, 1, 30), 1, socket_states(self.server_pid))
@@ -1051,10 +1083,13 @@ class TimeLimits(unittest.TestCase):
         def check(port, d):
             cases = [("fifo", b"HTTP/1.1 404 Not Found\r\n"), ("link", b"HTTP/1.1 404 Not Found\r\n"),
                      ("a.txt", b"HTTP/1.1 200 OK\r\n")]
-            if TEST_TARGET == "x86_64-windows":
+            if BUILD_TARGET == "x86_64-windows" and not ON_WINDOWS:
                 # Wine shows a Unix link as what it names (the Windows
                 # runner's `files/links` opens a link on Windows itself)
                 cases = [c for c in cases if c[0] != "link"]
+            if ON_WINDOWS:
+                # (Windows has no FIFOs)
+                cases = [c for c in cases if c[0] != "fifo"]
             for name, want in cases:
                 path = urllib.parse.quote(os.path.join(d, name)).encode()
                 with socket.create_connection(("127.0.0.1", port), timeout=3) as s:
@@ -1071,7 +1106,8 @@ class TimeLimits(unittest.TestCase):
             os.mkdir(d)
             with open(os.path.join(d, "a.txt"), "w") as f:
                 f.write("hello")
-            os.mkfifo(os.path.join(d, "fifo"))
+            if not ON_WINDOWS:
+                os.mkfifo(os.path.join(d, "fifo"))
             os.symlink("a.txt", os.path.join(d, "link"))
             for name, (argv, exe) in self.forms(tmp, ["4000", "1", "-", "5000", "5000", "5000"]).items():
                 with self.subTest(server=name):
@@ -1405,6 +1441,8 @@ class TimeLimits(unittest.TestCase):
         # the CPU it costs now. It is read on where it is kept: a piece
         # costs about the same after 4 MB as after 4 KB.
         def cpu_seconds(pid: int) -> float:
+            if ON_WINDOWS:
+                return windows_cpu_seconds(pid)
             with open(f"/proc/{pid}/stat") as f:
                 fields = f.read().rsplit(")", 1)[1].split()
             return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")

@@ -20,21 +20,26 @@ import sys
 import tempfile
 
 from tests.burn._golden import golden
-from tests.burn._tools import STDLIB_ROOT, selfhost_tool
+from tests.burn._tools import EXE, STDLIB_ROOT, link_windows, selfhost_tool, windows_imports  # noqa: F401
 
 # The machine's own target, as `myla build` names it without `--target`
-# (x86-64 or aarch64 Linux, MYLA-163; "" for another machine), and whether
-# its programs can be built and run here: Linux, with `as` and `ld`.
-HOST_TARGET = {"x86_64": "x86_64-linux", "aarch64": "aarch64-linux"}.get(
-    platform.machine(), "") if sys.platform.startswith("linux") else ""
+# (x86-64 or aarch64 Linux, MYLA-163; x86-64 Windows, MYLA-926 step 2; ""
+# for another machine), and whether its programs can be built and run here:
+# on Linux with `as` and `ld`, on Windows with LLVM's clang, llvm-dlltool and
+# lld-link (D211).
+if sys.platform == "win32":
+    HOST_TARGET = "x86_64-windows" if platform.machine().upper() in ("AMD64", "X86_64") else ""
+    _HOST_TOOLS = ["clang", "llvm-dlltool", "lld-link"]
+elif sys.platform.startswith("linux"):
+    HOST_TARGET = {"x86_64": "x86_64-linux", "aarch64": "aarch64-linux"}.get(platform.machine(), "")
+    _HOST_TOOLS = ["as", "ld"]
+else:
+    HOST_TARGET, _HOST_TOOLS = "", []
 
-CAN_BUILD_NATIVE = (
-    HOST_TARGET != ""
-    and shutil.which("as") is not None
-    and shutil.which("ld") is not None
-)
+CAN_BUILD_NATIVE = HOST_TARGET != "" and all(shutil.which(t) is not None for t in _HOST_TOOLS)
 
-SKIP_REASON = "native build requires x86-64 or aarch64 Linux with `as` and `ld`"
+SKIP_REASON = ("native build requires x86-64 or aarch64 Linux with `as` and `ld`, "
+               "or x86-64 Windows with clang, llvm-dlltool and lld-link")
 
 # The target native builds are for (MYLA-268): the machine's, or the one
 # MYLA_TEST_TARGET names (aarch64-linux, run under qemu-aarch64; wasm32-wasi,
@@ -50,6 +55,25 @@ TEST_TARGET = os.environ.get("MYLA_TEST_TARGET", "")
 BUILD_TARGET = TEST_TARGET or HOST_TARGET
 READS_X86 = CAN_BUILD_NATIVE and BUILD_TARGET == "x86_64-linux"
 X86_REASON = "it reads x86-64 Linux code (built for x86-64 Linux only)"
+
+# A test that can't run on Windows itself (a pty, a Unix signal, /proc, a
+# FIFO, a Linux tool), marked so with its reason, never skipped silently
+# (MYLA-926 step 2): `@linux_only("Unix ptys and termios")`.
+ON_WINDOWS = sys.platform == "win32"
+
+
+def shown(path: str) -> str:
+    """`path` as myla's messages write a source file's path: with `/` for each
+    `\\` on Windows, as the loader keeps paths there (MYLA-931; `--> C:/w/main.my:2:5`);
+    as it is elsewhere (MYLA-926)."""
+    return path.replace("\\", "/") if ON_WINDOWS else path
+
+
+def linux_only(reason: str):
+    """The decorator that skips a test or class on Windows, saying why."""
+    import unittest
+    return unittest.skipIf(ON_WINDOWS, f"Linux-only: {reason}")
+
 
 # The machine's assembler as the tests call it: `--64` is only x86-64's flag.
 AS_CMD = ["as", "--64"] if HOST_TARGET == "x86_64-linux" else ["as"]
@@ -141,20 +165,6 @@ def wine_env(persist: str = "60") -> None:
     subprocess.run([*wine(), "wineboot"], timeout=300, **quiet)
 
 
-def windows_imports(asm: str) -> list[tuple[str, list[str]]]:
-    """The system DLLs the Windows assembly `asm` calls into, each with the
-    functions it calls of it through their import slots: the lists its import
-    libraries are made from (D211, D212), as the code generator names them at
-    the assembly's end (`# import <dll> <function> ...`, its `windows_dlls`,
-    MYLA-722)."""
-    out = []
-    for line in asm.splitlines():
-        if line.startswith("# import "):
-            words = line.split()
-            out.append((words[2], words[3:]))
-    return out
-
-
 def target_flags() -> list[str]:
     """The `--target` a build for TEST_TARGET takes (none for the machine)."""
     return ["--target", TEST_TARGET] if TEST_TARGET else []
@@ -185,23 +195,11 @@ def assemble(asm_path: str, out: str) -> None:
                         "-msign-ext", "-c", "-o", obj, asm_path], check=True, capture_output=True, text=True)
         subprocess.run(["wasm-ld", "--stack-first", "-z", "stack-size=8388608", "-o", out, obj], check=True,
                        capture_output=True, text=True)
-    elif TEST_TARGET == "x86_64-windows":
+    elif BUILD_TARGET == "x86_64-windows":
         # as `myla build` does (D211): an import library of each DLL the
-        # program calls, made from the functions it calls of it (MYLA-722)
-        with open(asm_path, encoding="utf-8") as fh:
-            dlls = windows_imports(fh.read())
-        subprocess.run(["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", obj, asm_path], check=True,
-                       capture_output=True, text=True)
-        libs = []
-        for dll, names in dlls:
-            stem = f"{out}.{dll.removesuffix('.dll')}"
-            with open(stem + ".def", "w", encoding="utf-8") as fh:
-                fh.write(f"LIBRARY {dll}\nEXPORTS\n" + "".join(n + "\n" for n in names))
-            subprocess.run(["llvm-dlltool", "-m", "i386:x86-64", "-d", stem + ".def", "-l", stem + ".lib"], check=True,
-                           capture_output=True, text=True)
-            libs.append(stem + ".lib")
-        subprocess.run(["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib",
-                        "/stack:125829120", "/out:" + out, obj, *libs], check=True, capture_output=True, text=True)
+        # program calls, made from the functions it calls of it (MYLA-722);
+        # under Wine on Linux, or on Windows itself (MYLA-926)
+        link_windows(asm_path, out)
     else:
         subprocess.run([*AS_CMD, "-o", obj, asm_path], check=True, capture_output=True, text=True)
         subprocess.run(["ld", "-o", out, obj], check=True, capture_output=True, text=True)

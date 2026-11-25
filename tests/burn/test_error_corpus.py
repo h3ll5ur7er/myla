@@ -67,7 +67,7 @@ import subprocess
 import unittest
 
 from ._golden import NoGolden, golden
-from ._native import CAN_BUILD_NATIVE, build_and_run_full, check_file
+from ._native import CAN_BUILD_NATIVE, build_and_run_full, check_file, shown
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 ERRORS_DIR = os.path.abspath(
@@ -312,9 +312,10 @@ class TestErrorCorpus(unittest.TestCase):
 def _rendered_stderr(phase: str, name: str) -> str:
     """The whole of what `myla check` (`myla run` for a runtime error) of the
     corpus file `name` writes to stderr, run from the repository so that the
-    file is named `examples/errors/<name>`."""
+    file is named `examples/errors/<name>`: with `/` on every machine (Windows
+    takes it too), so a pinned file reads the same there (MYLA-926)."""
     command = "run" if phase == "runtime" else "check"
-    proc = subprocess.run([selfhost_tool("main"), command, os.path.join("examples", "errors", name), "--stdlib", "lib"],
+    proc = subprocess.run([selfhost_tool("main"), command, "examples/errors/" + name, "--stdlib", "lib"],
                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60, cwd=_REPO)
     return proc.stderr
 
@@ -406,7 +407,7 @@ def _make(name: str):
                 checked = any(_CHECKED.match(line.strip()) for line in source.splitlines())
                 out, err, code = build_and_run_full(check_file(path), entry_path=path, checked=checked)
                 self.assertEqual(code, 1, f"{name}: the native binary should exit 1")
-                where = f"  --> {path}:{diag['line']}:{diag['column']}"
+                where = f"  --> {shown(path)}:{diag['line']}:{diag['column']}"
                 self.assertEqual(err, f"{native}\n{where}\n", f"{name}: native stderr")
         else:
             self.assertIsNone(native, f"{name}: '//~ native:' only goes with a runtime error")

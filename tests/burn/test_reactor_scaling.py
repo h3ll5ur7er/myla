@@ -42,7 +42,8 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, Program, native_build, run_argv, selfhost_run, write_program
+from ._native import (CAN_BUILD_NATIVE, ON_WINDOWS, SKIP_REASON, Program, native_build, run_argv, selfhost_run,
+                      write_program)
 
 # A lot's primitives (MYLA-468, std.http's parked connections) on both
 # runners: sockets parked with deadlines and tags, two made readable in
@@ -453,6 +454,19 @@ async fun main() {
 """
 
 
+def _ended_cpu_seconds(p: subprocess.Popen) -> float:
+    """The CPU time (user and kernel) of the ended Windows process `p`,
+    from its handle (GetProcessTimes; MYLA-926: Windows has no wait4)."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    times = [wintypes.FILETIME() for _ in range(4)]   # created, exited, kernel, user
+    if not k32.GetProcessTimes(int(p._handle), *(ctypes.byref(t) for t in times)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return sum(t.dwHighDateTime << 32 | t.dwLowDateTime for t in times[2:]) / 1e7   # 100 ns units
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class _Built(unittest.TestCase):
     binary = ""
@@ -501,12 +515,17 @@ class Accepts(_Built):
         env = dict(os.environ, MYLA_THREADS="2")
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             p = subprocess.Popen(argv, executable=exe, stdout=out, stderr=err, env=env)
-            _, status, usage = os.wait4(p.pid, 0)
-            p.returncode = os.waitstatus_to_exitcode(status)
+            if ON_WINDOWS:
+                p.wait()
+                cpu = _ended_cpu_seconds(p)
+            else:
+                _, status, usage = os.wait4(p.pid, 0)
+                p.returncode = os.waitstatus_to_exitcode(status)
+                cpu = usage.ru_utime + usage.ru_stime
             out.seek(0)
             err.seek(0)
             self.assertEqual((err.read().decode(), p.returncode, out.read().decode().strip()), ("", 0, "200"))
-        return usage.ru_utime + usage.ru_stime
+        return cpu
 
     def test_a_connection_wakes_one_accepting_task(self):
         few = min(self.cpu(200) for _ in range(3))

@@ -36,6 +36,10 @@ try {
 } catch {
   pwd = process.env.PWD ?? "";
 }
+// on Windows the program's `/` is the root of the working directory's drive
+// (Node reads a path from `/` there), so its working directory is the same
+// path without the drive and with `/` (MYLA-940)
+if (process.platform === "win32") pwd = pwd.replace(/^[A-Za-z]:/, "").replaceAll("\\", "/");
 const wasi = new Wasi({ args: [argv0 ?? file, ...rest], env: { ...process.env, PWD: pwd }, fs: new NodeFs(), ...nodeStdio });
 const module = new WebAssembly.Module(readFileSync(file));
 const instance = new WebAssembly.Instance(module, wasi.imports());

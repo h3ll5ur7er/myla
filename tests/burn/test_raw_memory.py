@@ -13,9 +13,8 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, SKIP_REASON, assemble, shown
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
-from tests.burn._native import AS_CMD, HOST_TARGET  # the machine's assembler and target (MYLA-926)
 
 PROGRAM = """// MYLA-162's prototype: string concatenation and equality written in Myla
 // over raw memory, against the runtime's assembly (`+`, `==`).
@@ -142,15 +141,14 @@ class RawMemory(unittest.TestCase):
             path = os.path.join(tmp, "concat.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(PROGRAM)
-            exe = os.path.join(tmp, "concat")
+            exe = os.path.join(tmp, "concat" + EXE)
             # a program may call them only for the toolchain's tests
             # (`--primitives`; the review of 2026-11-06, R4)
             asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT, "--primitives"], capture_output=True,
                                  text=True, check=True).stdout
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm)
-            subprocess.run([*AS_CMD, "-o", exe + ".o", exe + ".s"], check=True)
-            subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
+            assemble(exe + ".s", exe)   # for the machine (MYLA-926: Windows' too)
             outs = [subprocess.run([exe, mode], capture_output=True, text=True).stdout
                     for mode in ("asm", "myla", "intrinsic")]
             self.assertEqual(outs, ["1360000\n8000\n"] * 3)
@@ -204,7 +202,7 @@ class RawMemory(unittest.TestCase):
                         fh.write(main)
                     ran = subprocess.run([selfhost_tool("main"), "check", path, "--stdlib", STDLIB_ROOT],
                                          capture_output=True, text=True)
-                    where = os.path.join(tmp, directory, module)
+                    where = shown(os.path.join(tmp, directory, module))   # (as myla writes it)
                     if module == "raw.my":
                         self.assertEqual(ran.returncode, 1, ran.stderr)
                         self.assertTrue(ran.stderr.startswith("type error: '__addr_of' reads or writes raw memory: "

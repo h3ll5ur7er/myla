@@ -63,7 +63,9 @@ TOOLS = {
 def missing_tools(target: str) -> list[str]:
     """The tools `target`'s runs need that aren't on PATH (Wine for Windows'
     wherever `_native.wine` finds it)."""
-    missing = [t for t in ["as", "ld", *TOOLS.get(target, [])] if shutil.which(t) is None]
+    # (the machine's own tools for `host`: as and ld, or Windows' LLVM tools)
+    base = _native._HOST_TOOLS if target == "host" else ["as", "ld"]
+    missing = [t for t in [*base, *TOOLS.get(target, [])] if shutil.which(t) is None]
     if target == "x86_64-windows" and not _native.wine():
         missing.append("wine")
     return missing
@@ -90,6 +92,15 @@ def prepare_wine() -> None:
         os.environ["MYLA_EMULATOR"] = " ".join(wine)
 
 
+def stop_tree(proc: subprocess.Popen) -> None:
+    """`proc` and everything it started stopped: its process group's SIGKILL,
+    or on Windows `taskkill /F /T`, which ends the tree."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
 def run_one(module: str) -> int:
     """Run one suite in this process (the target is in MYLA_TEST_TARGET)."""
     suite = _excused(unittest.defaultTestLoader.loadTestsFromName(module))
@@ -99,6 +110,9 @@ def run_one(module: str) -> int:
 
 
 def main() -> int:
+    # the suites' logs are UTF-8; a console in another code page (Windows'
+    # cp1252) must not end the run before it prints them (MYLA-926)
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("target", choices=[*_targets.TARGETS, "host"])
     ap.add_argument("modules", nargs="*",
@@ -134,14 +148,17 @@ def main() -> int:
     def run(module: str) -> tuple[str, int, float, str]:
         start = time.monotonic()
         with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as log:
-            # its own process group, so that its programs stop with it
+            # its own process group, so that its programs stop with it (on
+            # Windows a new group, its tree ended by taskkill, MYLA-926)
+            group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+                     else {"start_new_session": True})
             proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), args.target, module, "--one"],
-                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                                    stdout=log, stderr=subprocess.STDOUT, **group)
             try:
                 code = proc.wait(timeout=args.limit)
                 note = ""
             except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
+                stop_tree(proc)
                 proc.wait()
                 code = 1
                 note = f"\nSTOPPED after its {args.limit} s (--limit): the test above it was still running"

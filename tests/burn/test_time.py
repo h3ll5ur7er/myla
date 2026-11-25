@@ -12,7 +12,7 @@ import threading
 import time
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble, linux_only
 from tests.burn._tools import STDLIB_ROOT
 
 # children asleep for 60, 20 and 40 ms wake in deadline order, the whole
@@ -451,10 +451,10 @@ class Time(unittest.TestCase):
         path = self.source(name, text)
         asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT],
                              capture_output=True, text=True, check=True).stdout
-        exe = os.path.join(self.dir, name)
+        exe = os.path.join(self.dir, name + EXE)
         with open(exe + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm)
-        subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+        assemble(exe + ".s", exe)      # for the machine (on Windows with LLVM's tools, MYLA-926)
         return exe
 
     def run_timed(self, cmd: list[str], **env: str) -> tuple[str, str, int, float]:
@@ -636,13 +636,14 @@ class Time(unittest.TestCase):
             with self.subTest(runner=label):
                 self.assertEqual(self.fed(cmd, late, **env), "timed out\ntrue\n")
         path = os.path.join(self.dir, "in.txt")
-        with open(path, "w", encoding="utf-8") as fh:
+        with open(path, "w", encoding="utf-8", newline="") as fh:     # (no "\r\n" on Windows)
             fh.write("from file\n")
         for label, cmd in [("native", [exe]), ("interpreter", interp)]:
             with self.subTest(file=label), open(path, encoding="utf-8") as fh:
                 out = subprocess.run(cmd, stdin=fh, capture_output=True, text=True, timeout=60).stdout
                 self.assertEqual(out, "from file\ntrue\n")
 
+    @linux_only("a non-blocking pipe is O_NONBLOCK's, EAGAIN; Windows' PIPE_NOWAIT reads as a broken pipe")
     def test_a_non_blocking_input_read_by_the_only_task(self):
         # the 2026-11-10 review's S4: with no other task, `read_line_async` of
         # a non-blocking stdin gave `Other(11)` (EAGAIN) natively, where the
@@ -669,6 +670,7 @@ class Time(unittest.TestCase):
                 self.assertEqual((out, err, proc.returncode),
                                  ("line 'first line'\nline 'second line'\nend\n", "", 0))
 
+    @linux_only("the children are /bin/sh, /bin/sleep, head and tr")
     def test_a_child_process_waited_for_without_blocking_the_worker(self):
         want = "t\nt\nt\nt\nt\n4 6 3\n5\n200000 200000\nnot found\ntimed out\ntrue\n5\n"
         exe = self.native("process", PROCESS)
@@ -682,6 +684,7 @@ class Time(unittest.TestCase):
         out, err, code, _ = self.interpreted("process", PROCESS)
         self.assertEqual((out, err, code), (want, "", 0))
 
+    @linux_only("the children are /bin/sh, /bin/sleep, head and tr")
     def test_child_processes_waited_for_by_programs_running_at_once(self):
         # MYLA-275: with the machine busy, a worker leaving `exec_idle` to take
         # the last queued frame could look idle to another worker's check,
