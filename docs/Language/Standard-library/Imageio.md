@@ -115,7 +115,7 @@ An extension is what follows the last `.` of the file name (the part after the l
 | Format | What it writes |
 | --- | --- |
 | PNG | zlib level 6, filters chosen a row at a time, the smallest colour type that loses nothing: gray if every pixel is gray, no alpha if every pixel is opaque |
-| JPEG | baseline at `quality`, once std.jpeg can encode ([[MYLA-937]]); until then `encode` is a failure and `save` `Unsupported("jpeg encoding")`, writing nothing |
+| JPEG | baseline 4:2:0 at `quality`, std.jpeg's `encode` ([[MYLA-937]], the bytes libjpeg writes); a side of 0 or past 65535 is a failure of `encode` and `Unsupported` from `save` |
 | GIF | one frame; at most 256 colours exactly, more reduced by `image.quantize` with dithering; alpha below 128 transparent, the rest opaque |
 | TIFF | LZW with the horizontal predictor, strips of about 8 KB, the image's layout |
 | BMP | 24 bits without alpha (gray as RGB), 32 bits with an alpha mask |

@@ -23,8 +23,7 @@ says which):
 - every readable 8-bit file saved in each format through a temporary
   directory and loaded back is the same image for the lossless ones (PNG,
   TIFF, BMP, PNM, QOI; BMP and QOI make gray RGB), the same size for GIF,
-  and for JPEG `Unsupported("jpeg encoding")` with nothing written until
-  std.jpeg encodes (MYLA-937), the same size after; every 16-bit file
+  and the same size for JPEG (std.jpeg's encoder, MYLA-937); every 16-bit file
   through `save16` and `load16` as PNG, TIFF and PNM is the same image;
 - with Pillow installed, Pillow reads what `save` wrote as the same pixels;
 - a missing file is `ImageError.Io`, a file of no known format
@@ -267,12 +266,9 @@ class ImageioCheck(unittest.TestCase):
             os.makedirs(d, exist_ok=True)
             requests.append(["roundtrip", im.path_of(e), d])
         lines = self.ask(requests)
-        jpeg = set()
         for e, line in zip(items, lines):
             with self.subTest(e["path"]):
-                self.assertRegex(line, "^ok png,(jpeg,)?gif,tiff,bmp,pnm,qoi, jpeg=(yes|no)$")
-                jpeg.add(line.endswith("jpeg=yes"))
-        self.assertEqual(len(jpeg), 1, "JPEG saved for some files only")
+                self.assertEqual(line, "ok png,jpeg,gif,tiff,bmp,pnm,qoi, jpeg=yes")
         sixteen = [e for e in items if e["bits"] == 16]
         self.assertGreater(len(sixteen), 10)
         requests = []

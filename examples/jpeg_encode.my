@@ -31,17 +31,19 @@ fun pixel(x: int, y: int) -> (int, int, int) {
     return (60 + y * 3, 110 + y * 3, 200 + y)
 }
 
-fun picture() -> Image8 {
+// The picture at `w` by `h` (64 by 48 below).
+#test(2, 1)[Image { width: 2, height: 1, layout: Layout.Rgb, data: [60u8, 110u8, 200u8, 60u8, 110u8, 200u8] }]
+fun picture(w: int, h: int) -> Image8 {
     var data: [uint8] = []
-    for y in 0..48 {
-        for x in 0..64 {
+    for y in 0..h {
+        for x in 0..w {
             let (r, g, b) = pixel(x, y)
             data.push(r as uint8)
             data.push(g as uint8)
             data.push(b as uint8)
         }
     }
-    return Image { width: 64, height: 48, layout: Layout.Rgb, data: data }
+    return Image { width: w, height: h, layout: Layout.Rgb, data: data }
 }
 
 #test(Subsampling.S444)["4:4:4"]
@@ -55,6 +57,7 @@ fun name(s: Subsampling) -> str {
 }
 
 // The picture encoded and decoded again: a line about it.
+#test(Image { width: 1, height: 1, layout: Layout.Rgb, data: [60u8, 110u8, 200u8] }, 90, Subsampling.S444)["quality  90, 4:4:4:   631 bytes, PSNR 52.9 dB"]
 fun trial(img: Image8, quality: int, s: Subsampling) -> str {
     let b = jpeg.encode(img, quality, s)
     let Ok(back) = jpeg.decode(b, image.MAX_PIXELS) else { return "can't read it back" }
@@ -63,7 +66,7 @@ fun trial(img: Image8, quality: int, s: Subsampling) -> str {
 }
 
 fun main() {
-    let img = picture()
+    let img = picture(64, 48)
     print(f"the picture: {img.width}x{img.height} {img.layout}, {img.data.len()} bytes of samples")
     for q in [50, 75, 90] {
         print(trial(img, q, Subsampling.S420))
