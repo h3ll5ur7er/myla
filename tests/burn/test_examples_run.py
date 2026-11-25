@@ -101,6 +101,25 @@ EXPECTED = {
     "png_badge.my": ("drawn: 48x20 rgba, pixels 64c3d222\nPNG: 441 bytes, 48x20 rgba, 8 bits\n"
                       "decoded back the same: true\npalette PNG: 13 colours, 279 bytes, 48x20 rgba, 4 bits\n"
                       "the same pixels: true\nerror: checksum mismatch\n"),
+    "tiff_files.my": ('none      37096 bytes, read back the same: true\n'
+                      'PackBits  37408 bytes, read back the same: true\n'
+                      'LZW        2980 bytes, read back the same: true\n'
+                      'Deflate    1108 bytes, read back the same: true\n'
+                      '1 page: 96x64 rgb, 16 bits\n'
+                      '  ImageWidth: 96\n'
+                      '  ImageLength: 64\n'
+                      '  BitsPerSample: 16, 16, 16\n'
+                      '  Compression: 5\n'
+                      '  PhotometricInterpretation: 2\n'
+                      '  SamplesPerPixel: 3\n'
+                      '  RowsPerStrip: 14\n'
+                      '  XResolution: 72/1\n'
+                      '  YResolution: 72/1\n'
+                      '  PlanarConfiguration: 1\n'
+                      '  ResolutionUnit: 2\n'
+                      '  Predictor: 2\n'
+                      '8 bits: pixel (48, 0) is #4000bfff\n'
+                      'not a TIFF: unsupported: CMYK\n'),
     "draw_chart.my": (
         '                                                \n'
         '          @@@@  @@@  @     @@@@@  @@@@          \n'

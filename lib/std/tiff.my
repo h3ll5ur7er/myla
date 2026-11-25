@@ -602,8 +602,12 @@ fun page_of(s: Src, ifd: Ifd) -> Result<Page, ImageError> {
         bh = rps
         per_plane = ceil_div(h, rps)
     }
-    let blocks = per_plane * (if planar == 2 { spp as int64 } else { 1i64 })
     let what = if tiled { "tile" } else { "strip" }
+    // each block's offset takes a byte of the file at least
+    if per_plane > (s.b.len() as int64) {
+        return Err(ImageError.Corrupt(f"{per_plane} {what}s a plane in a file of {s.b.len()} bytes"))
+    }
+    let blocks = per_plane * (if planar == 2 { spp as int64 } else { 1i64 })
     if !ifd.entries.contains(off_tag) {
         return Err(ImageError.Corrupt(f"no {what} offsets"))
     }
@@ -628,7 +632,7 @@ fun page_of(s: Src, ifd: Ifd) -> Result<Page, ImageError> {
         width: w as int, height: h as int, bits: bits as int, spp: spp, compression: compression,
         planar: planar, predictor: predictor, is_float: is_float, fill_order: fill_order,
         tiled: tiled, block_w: bw as int, block_h: bh as int, offsets: offsets, counts: counts,
-        layout: layout, base: if palette { 1 } else { base }, alpha: alpha, associated: associated,
+        layout: layout, base: base, alpha: alpha, associated: associated,
         invert: photometric == 0, palette: palette, colormap: colormap,
     })
 }
@@ -694,7 +698,8 @@ fun block(s: Src, p: Page, i: int, rows: int, row_bytes: int, pspp: int) -> Resu
             raw = reverse_bits(raw)
         }
         // room for a little more than the block, which some writers leave
-        let most = need + need / 4 + 256
+        let room = (need as int64) + (need as int64) / 4i64 + 256i64
+        let most = (if room > MAX_INT { MAX_INT } else { room }) as int
         let r = if p.compression == 5 {
             compress.lzw_decode_tiff(raw, most)
         } else if p.compression == 32773 {
@@ -1043,8 +1048,9 @@ fun float_samples<S: Sample>(raw: Raw) -> [S] {
         let row = float_row(raw, y)
         for x in 0..p.width {
             for c in 0..out_c {
-                var v = row[x * p.spp + source_of(p, c)]
-                if p.invert && c != p.alpha {
+                let src = source_of(p, c)
+                var v = row[x * p.spp + src]
+                if p.invert && src != p.alpha {
                     v = 1.0f32 - v
                 }
                 data.push(S.from_f32(v * full))
@@ -1644,7 +1650,8 @@ fun a_loop_in_the_ifd_chain() {
 #test(with_tag(unhex(GRAY8), 256, 0), 0, image.MAX_PIXELS)[Err(ImageError.Corrupt("an image of 0x3 pixels"))]
 #test(with_tag(unhex(GRAY8), 257, 7), 0, image.MAX_PIXELS)[Err(ImageError.Corrupt("2 strip offsets for 4 strips"))]
 #test(with_tag(unhex(GRAY8), 273, 1000), 0, image.MAX_PIXELS)[Err(ImageError.Truncated)] // the offsets' values moved past the end
-fun decode_errors(b: [uint8], page: int, max_pixels: int64) -> Result<Image8, ImageError> {
+#test(with_tag(unhex(TILES), 322, 1), 0, image.MAX_PIXELS)[Err(ImageError.Corrupt("2 tile offsets for 18 tiles"))]
+#test(with_tag(with_tag(unhex(TILES), 256, 0x7FFFFFFF), 322, 1), 0, image.MAX_PIXELS)[Err(ImageError.Corrupt("2147483647 tiles a plane in a file of 258 bytes"))]fun decode_errors(b: [uint8], page: int, max_pixels: int64) -> Result<Image8, ImageError> {
     return decode(b, page, max_pixels)
 }
 

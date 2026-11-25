@@ -987,6 +987,17 @@ Import: `import std.text as text`.
   - `Scanner.next` is a `var self` method, not `Iterator`.
 - Prose: `docs/Language/Standard-library/Text.md`
 
+## std.tiff
+Baseline TIFF read and written (MYLA-939). `import std.tiff as tiff`.
+- `decode(b, page: int = 0, max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError>`, `decode16(…) -> Result<Image16, …>` (8 bits ×257), `decode_f32(…) -> Result<ImageF, …>` (floats as stored, integers 0..1). Page 0 the first; past the last `Mismatch`.
+- Reads II and MM, the IFD chain (loop-guarded), strips and tiles (edges cropped), planar 1 and 2, none, PackBits, LZW, Deflate (8, 32946), predictors 2 (8/16/32-bit) and 3 (float32), 1–16-bit unsigned and float32 samples, FillOrder 2, photometric 0 (inverted), 1, 2, 3 (ColorMap: high byte at 8 bits, as Pillow); the first extra sample is alpha (associated unpremultiplied; `ExtraSamples` 0 dropped). Layouts `Gray`, `GrayAlpha`, `Rgb`, `Rgba` (palette → `Rgb`/`Rgba`).
+- `Unsupported(name)`: `"JPEG compression"`, `"old-style JPEG compression"`, `"CCITT G3 compression"` …, `"compression 99"`, `"BigTIFF"`, `"CMYK"`, `"YCbCr"`, …; signed samples, other float sizes, >16-bit integers.
+- `pages(b) -> Result<[ImageInfo], ImageError>` (each page, `frames` 1; a page it can't decode is an error), `info(b) -> Result<ImageInfo, ImageError>` (page 0, `frames` the page count), `tags(b, page: int = 0) -> Result<[int: TagValue], ImageError>` (every tag by number).
+- `enum TagValue { Ints([int64]), Rationals([(int64, int64)]), Floats([float64]), Ascii(str), Bytes([uint8]) }` (`Eq`, `Format`: `"8, 8, 8"`, `"72/1"`).
+- `encode(img: Image8, compression: Compression = Compression.Lzw) -> [uint8]`, `encode16(img: Image16, …)`: little endian, one page, strips of about 8 KB, predictor 2 with LZW and Deflate, `ExtraSamples` 2 for alpha. `enum Compression { Uncompressed, PackBits, Lzw, Deflate }`.
+- Gotchas: in `#test` arguments pass every parameter (MYLA-946). Pillow misreads big-endian float predictor-3 files; this module follows the spec (libtiff).
+- Prose: `docs/Language/Standard-library/Tiff.md`
+
 ## std.time: monotonic clock, `Duration`, `Instant`, UTC `DateTime`
 Import: `import std.time as time`. There is no sleep here: use `await task.sleep(ms)` from std.task. There are no time zones.
 - Clock: `pub fun now_ns() -> int64`, `pub fun now_ms() -> int64` (monotonic)
