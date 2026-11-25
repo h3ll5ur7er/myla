@@ -232,6 +232,15 @@ EXPECTED = {
         '  .%%.  \n========\n.====== \n .====. \n  .==.  \n        \n'
         'cut in the scan: still 16x8, as libjpeg reads it\n'
         'cut before the scan: truncated input\n',
+    "image_formats.my": "64x48 rgba: 12288 bytes of samples\n"
+        "png     392 bytes (lossless), read as png: the same\n"
+        "gif    3054 bytes (lossy), read as gif: not the same\n"
+        "tiff   1130 bytes (lossless), read as tiff: the same\n"
+        "bmp   12410 bytes (lossless), read as bmp: the same\n"
+        "pnm   12355 bytes (lossless), read as pnm: the same\n"
+        "qoi    5425 bytes (lossless), read as qoi: the same\n"
+        "holiday/IMG_0042.JPG: jpeg\nscan.tiff: tiff\nicon.dib: bmp\nframe.pam: pnm\nnotes.txt: no image format\n"
+        "<html>: not an image of this format\nno/such/picture.png: NotFound\n",
 }
 
 def run_file(path: str) -> str:

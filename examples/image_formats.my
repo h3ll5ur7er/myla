@@ -1,0 +1,66 @@
+// One picture in every image format through std.imageio (MYLA-940):
+// written in memory by `imageio.encode`, read back by `imageio.decode`,
+// which finds the format by the file's first bytes, and compared. Then the
+// formats file names ask for, and what goes wrong with a file that isn't an
+// image or isn't there.
+
+import std.image as image
+from std.image import Image8, Layout
+import std.imageio as imageio
+from std.imageio import Format
+
+// A 64x48 picture: a gradient, a disc and a half-transparent band.
+fun picture() -> Image8 {
+    var img: Image8 = image.new(64, 48, Layout.Rgba, 0u8)
+    for y in 0..48 {
+        for x in 0..64 {
+            let dx = x - 40
+            let dy = y - 20
+            var c = image.rgba((x * 4) as uint8, (y * 5) as uint8, 160u8, 255u8)
+            if dx * dx + dy * dy < 144 {
+                c = image.rgba(250u8, 200u8, 0u8, 255u8)
+            }
+            if y >= 36 {
+                c = c.with_alpha(128u8)
+            }
+            img.set_color(x, y, c)
+        }
+    }
+    return img
+}
+
+fun main() {
+    let img = picture()
+    print(f"{img.width}x{img.height} {img.layout}: {img.data.len()} bytes of samples")
+    for f in imageio.formats() {
+        if f == Format.Jpeg {
+            continue    // lossy, and std.jpeg's encoder is MYLA-937's
+        }
+        let file = imageio.encode(img, f)
+        let found = match imageio.sniff(file) {
+            Some(g) => g.name()
+            None => "nothing"
+        }
+        let same = match imageio.decode(file) {
+            Ok(back) => if back.convert(Layout.Rgba) == img { "the same" } else { "not the same" }
+            Err(e) => f"an error: {e}"
+        }
+        let kept = if f.lossless() { "lossless" } else { "lossy" }
+        print(f"{f.name():<4} {file.len():>6} bytes ({kept}), read as {found}: {same}")
+    }
+    for name in ["holiday/IMG_0042.JPG", "scan.tiff", "icon.dib", "frame.pam", "notes.txt"] {
+        let f = match imageio.format_of(name) {
+            Some(g) => g.name()
+            None => "no image format"
+        }
+        print(f"{name}: {f}")
+    }
+    match imageio.decode([60u8, 104u8, 116u8, 109u8, 108u8, 62u8]) {
+        Ok(_) => print("decoded")
+        Err(e) => print(f"<html>: {e}")
+    }
+    match imageio.load("no/such/picture.png") {
+        Ok(_) => print("loaded")
+        Err(e) => print(f"no/such/picture.png: {e}")
+    }
+}
