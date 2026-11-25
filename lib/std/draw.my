@@ -1045,7 +1045,7 @@ impl Shader {
         if iy < 0 {
             iy += h as int64
         }
-        return pixel_color(self.pattern, ix as int, iy as int)
+        return self.pattern.color_at(ix as int, iy as int)
     }
 }
 
@@ -1061,41 +1061,6 @@ fun table_index(t: float32) -> int {
         return 255
     }
     return (t * 255.0f32 + 0.5f32) as int
-}
-
-// The colour of the pixel `(x, y)` of an 8-bit image of any layout.
-// Private helper, to be replaced by std.image's `img.color_at(x, y)`
-// (MYLA-933).
-fun pixel_color(img: Image8, x: int, y: int) -> Color {
-    let n = img.layout.channels()
-    let i = (y * img.width + x) * n
-    let d = img.data
-    return match img.layout {
-        Gray => Color { r: d[i], g: d[i], b: d[i], a: 255u8 }
-        GrayAlpha => Color { r: d[i], g: d[i], b: d[i], a: d[i + 1] }
-        Rgb => Color { r: d[i], g: d[i + 1], b: d[i + 2], a: 255u8 }
-        Rgba => Color { r: d[i], g: d[i + 1], b: d[i + 2], a: d[i + 3] }
-    }
-}
-
-// The image as RGBA. Private helper, to be replaced by std.image's
-// `img.convert(Layout.Rgba)` (MYLA-933).
-fun to_rgba(img: Image8) -> Image8 {
-    if img.layout == Layout.Rgba {
-        return img
-    }
-    var out: [uint8] = list_m.filled(img.width * img.height * 4, 0u8)
-    for y in 0..img.height {
-        for x in 0..img.width {
-            let c = pixel_color(img, x, y)
-            let o = (y * img.width + x) * 4
-            out[o] = c.r
-            out[o + 1] = c.g
-            out[o + 2] = c.b
-            out[o + 3] = c.a
-        }
-    }
-    return Image { width: img.width, height: img.height, layout: Layout.Rgba, data: out }
 }
 
 // --- the canvas --------------------------------------------------------------
@@ -1129,7 +1094,7 @@ pub struct Canvas {
 
 // A canvas over `img`, converted to RGBA.
 pub fun canvas(img: Image8) -> Canvas {
-    let rgba = to_rgba(img)
+    let rgba = img.convert(Layout.Rgba)
     return Canvas { image: rgba, transform: Mat3.identity(), clip: Rect { x: 0, y: 0, w: rgba.width, h: rgba.height },
         stack: [], scratch: [] }
 }
@@ -1413,7 +1378,7 @@ impl Canvas {
         let w = self.image.width
         for py in r.y..r.y + r.h {
             for px in r.x..r.x + r.w {
-                let c = pixel_color(src, px - x, py - y)
+                let c = src.color_at(px - x, py - y)
                 self.blend((py * w + px) * 4, c.r as int, c.g as int, c.b as int, c.a as int, cov)
             }
         }
@@ -1435,7 +1400,7 @@ impl Canvas {
             for px in r.x..r.x + r.w {
                 let sx = ((px - dst.x) as float32 + 0.5f32) * kx
                 let c = if filter == Filter.Nearest {
-                    pixel_color(src, clamp_to(sx.floor(), 0, src.width - 1), clamp_to(sy.floor(), 0, src.height - 1))
+                    src.color_at(clamp_to(sx.floor(), 0, src.width - 1), clamp_to(sy.floor(), 0, src.height - 1))
                 } else {
                     bilinear(src, sx - 0.5f32, sy - 0.5f32)
                 }
@@ -1457,10 +1422,10 @@ fun bilinear(img: Image8, x: float32, y: float32) -> Color {
     let y0 = clamp_to(fy0, 0, img.height - 1)
     let x1 = clamp_to(fx0 + 1.0f32, 0, img.width - 1)
     let y1 = clamp_to(fy0 + 1.0f32, 0, img.height - 1)
-    let c00 = pixel_color(img, x0, y0)
-    let c10 = pixel_color(img, x1, y0)
-    let c01 = pixel_color(img, x0, y1)
-    let c11 = pixel_color(img, x1, y1)
+    let c00 = img.color_at(x0, y0)
+    let c10 = img.color_at(x1, y0)
+    let c01 = img.color_at(x0, y1)
+    let c11 = img.color_at(x1, y1)
     let w00 = (1.0f32 - tx) * (1.0f32 - ty) * (c00.a as float32)
     let w10 = tx * (1.0f32 - ty) * (c10.a as float32)
     let w01 = (1.0f32 - tx) * ty * (c01.a as float32)
@@ -2172,7 +2137,7 @@ fun mask_translation() {
 
 // The RGBA of the canvas pixel `(x, y)`.
 fun px(c: Canvas, x: int, y: int) -> Color {
-    return pixel_color(c.image, x, y)
+    return c.image.color_at(x, y)
 }
 
 // Source-over against the exact result, computed in float64: alpha and
