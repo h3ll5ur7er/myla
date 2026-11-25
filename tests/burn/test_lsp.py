@@ -875,6 +875,25 @@ class TestResolutionCorpus(unittest.TestCase):
             self.assertIn("use 15:22-23 A -> " + path + " 9:4 variant", lines)        # the pattern's variant
             self.assertEqual(self._resolves(path, lines), 24)
 
+    def test_aliases_defaults_and_wildcards(self) -> None:
+        # MYLA-955 (found by D311's image modules): an import's alias is a use
+        # of its module, a parameter's default is resolved (as the caller's
+        # expression), and `_` binds nothing, so a `_` pattern needn't resolve
+        source = ("import std.option as option\n\nenum Mode {\n    Fast\n    Slow\n}\n\n"
+                  "struct S { option: int }\n\n"
+                  "fun f(n: int, m: Mode = Mode.Fast) -> int {\n    var c = 0\n"
+                  "    for _ in 0..n {\n        c += 1\n    }\n"
+                  "    return match m {\n        Fast => c\n        _ => 0\n    }\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "aliases.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            lines = self._resolve(path)[path]
+            self.assertTrue(any(line.startswith("use 0:21-27 option -> ") and line.endswith(" module") for line in lines), lines)
+            self.assertIn("use 9:24-28 Mode -> " + path + " 2:5 global", lines)    # the default's type name
+            self.assertFalse([line for line in lines if line.split()[-1] == "_"], lines)
+            self._resolves(path, lines)
+
     def test_members_agree_with_the_checker(self) -> None:
         """Where the server resolves `x.f` or `x.m(…)` in an example, it is the
         field or method of the type the Python checker gives `x` (step 6)."""
