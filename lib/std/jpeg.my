@@ -1,4 +1,4 @@
-// std.jpeg: JPEG decoding (MYLA-936); the encoder is MYLA-937.
+// std.jpeg: JPEG decoding (MYLA-936) and baseline encoding (MYLA-937).
 //
 // The decoder reads baseline and extended sequential DCT (SOF0, SOF1) and
 // progressive DCT (SOF2), Huffman coded, 8 bits a sample, one, three or four
@@ -27,6 +27,14 @@
 // an `Err` (or, where libjpeg would go on, an image), never a runtime error.
 // Like libjpeg, a scan whose data ends early is decoded on as if zero bits
 // followed.
+//
+// The encoder (`encode`, near the end) writes a baseline JFIF file, byte for
+// byte the one libjpeg writes with the same settings (so Pillow with
+// `optimize` off): its RGB to YCbCr (jccolor.c), its edge padding and
+// downsampling (jcprepct.c, jcsample.c), the islow forward DCT
+// (jfdctint.c), libjpeg-turbo's quantisation by reciprocals (jcdctmgr.c),
+// the dummy blocks of partial MCUs (jccoefct.c) and the standard Huffman
+// tables (jchuff.c), an MCU row at a time.
 //
 // The tables the encoder shares are near the top: the zigzag order, the
 // Annex K quantisation and Huffman tables and IJG's quality scaling.

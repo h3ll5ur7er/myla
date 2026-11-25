@@ -632,12 +632,13 @@ Import: `import std.iter as iter`. Everything is a free function taking the iter
 - Prose: `docs/Language/Standard-library/Iter.md`
 
 ## std.jpeg
-JPEG decoding, bit-exact with libjpeg's defaults (islow IDCT, fancy upsampling, its YCbCr tables), so with Pillow (D311, MYLA-936). `import std.jpeg as jpeg`.
+JPEG decoding, bit-exact with libjpeg's defaults (islow IDCT, fancy upsampling, its YCbCr tables), so with Pillow (D311, MYLA-936), and baseline encoding byte for byte as libjpeg writes (MYLA-937). `import std.jpeg as jpeg`; `from std.jpeg import Subsampling`.
 - `info(b: [uint8]) -> Result<ImageInfo, ImageError>` (`Gray` for 1 component, `Rgb` for 3 or 4) · `decode(b, max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError>` (`Gray` or `Rgb`, the pixels as stored; CMYK and YCCK converted to RGB) · `decode_with_meta(b, max_pixels) -> Result<(Image8, JpegMeta), ImageError>`.
 - `struct JpegMeta { jfif: bool, density_unit: int, density_x: int, density_y: int, exif: [uint8], orientation: int, icc: [uint8], adobe_transform: int, progressive: bool, components: int }` (`exif` after "Exif\0\0"; `adobe_transform` -1 without APP14).
 - `orientation(b) -> int` (EXIF 1..8, 1 if none) · `apply_orientation<S: Sample>(img: Image<S>, o: int) -> Image<S>` (Pillow's `exif_transpose`: 6 is `rotate90`, 8 `rotate270`).
 - Reads SOF0/1/2 (baseline, extended, progressive), 8 bits, 1/3/4 components, any sampling factors that divide the largest, restart intervals, default Huffman tables (Motion JPEG). `Unsupported("arithmetic coding" | "lossless JPEG" | "hierarchical JPEG" | "12-bit samples")`. A scan cut short decodes on with zero bits (as libjpeg); cut before the first scan is `Truncated`.
-- Gotchas: `decode` doesn't apply the EXIF orientation. About 6x Pillow's time natively (12 MP baseline 0.42 s); the interpreter is slow, keep `#test` files tiny.
+- `#derive(Eq) enum Subsampling { S444, S422, S420 }` · `encode(img: Image8, quality: int = 85, subsampling: Subsampling = Subsampling.S420) -> [uint8]`: baseline JFIF, quality 1..100 (clamped; IJG's scaling of Annex K's tables), standard Huffman tables; Gray/GrayAlpha one component, RGB(A) YCbCr, alpha dropped. The bytes Pillow writes with `optimize=False` (libjpeg's conversion, downsampling, islow DCT, rounding). An image JPEG can't hold (a side 0 or over 65,535) or whose `data` doesn't fit gives `[]`.
+- Gotchas: `decode` doesn't apply the EXIF orientation. About 6x Pillow's time natively (12 MP baseline decode 0.42 s, encode at q85 4:2:0 0.3 s); the interpreter is slow, keep `#test` files tiny.
 - Prose: `docs/Language/Standard-library/Jpeg.md`
 
 ## std.json
