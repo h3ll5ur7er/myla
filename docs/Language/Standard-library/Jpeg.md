@@ -183,7 +183,7 @@ Step by step, each as libjpeg-turbo does it:
 - **edges** (jcprepct.c, jcsample.c): the image's last column is repeated out to whole blocks, and its last row to a whole row group (2 rows at 4:2:0); below that the last row of each component, *after* downsampling, is repeated to the bottom of the MCU row. A partial MCU's blocks wholly outside the image are dummies (jccoefct.c): AC zero and the DC of the block before.
 - **downsampling** (jcsample.c, smoothing off as Pillow leaves it): each Cb or Cr sample the mean of its 2 (4:2:2, `h2v1`) or 4 (4:2:0, `h2v2`) pixels, rounded with a bias that alternates along the row, 0 and 1 halves or 1 and 2 quarters, so the roundings even out.
 - **DCT** (jfdctint.c): the "islow" forward DCT, 13 bits of fraction, rows then columns with 2 bits more between them, the result 8 times the true DCT's; in `int` (it can't overflow for 8-bit samples).
-- **quantisation** (jcdctmgr.c): libjpeg-turbo divides by 8q with a reciprocal, `((|x| + c) * f) >> r` with its `compute_reciprocal`'s `f`, `c` and `r` (`reciprocal`), the sign put back after. For 8-bit samples that is exactly `(|x| + 4q) / 8q` (a half rounded away from zero; checked for every q from 1 to 255 and every |x| up to 8200), here by the same multiplication, which is faster than the division. A coefficient below the smallest magnitude that gives 1 is 0 without it.
+- **quantisation** (jcdctmgr.c): libjpeg-turbo divides by 8q with a reciprocal, `((|x| + c) * f) >> r` with its `compute_reciprocal`'s `f`, `c` and `r` (`reciprocal`), the sign put back after. For 8-bit samples that is exactly `(|x| + 4q) / 8q` (a half rounded away from zero; checked for every q from 1 to 255 and every |x| up to 8200), here by the same multiplication, which is faster than the division. A coefficient of a magnitude below 4q is 0 without it.
 - **Huffman coding** (jchuff.c): the DC's difference from the component's previous one, the AC coefficients as runs of zeros with ZRL and EOB, each 0xFF byte followed by 0x00, the last byte filled with 1 bits.
 
 The encoder works an MCU row at a time: the row's pixels converted into full-resolution strips (16 rows at 4:2:0, 8 otherwise), the chroma downsampled into strips of its own, then each MCU's blocks transformed, quantised and coded at once. The bit buffer is in local variables while a block is coded, and whole bytes go out when it holds 32 bits ([[Language/Standard-library/Bytes#In a hot loop]] says why not `jpeg_writer`).
@@ -194,10 +194,10 @@ Natively (`myla build`, bounds checks on), the fastest of 5 runs on the shared 4
 
 | Subsampling | std.jpeg | Pillow | Ratio | File (both) |
 | --- | --- | --- | --- | --- |
-| 4:2:0 | 300 to 310 ms | 45 ms | 6.8 | 3,278,764 bytes |
-| 4:4:4 | 410 to 430 ms | 59 ms | 7.1 | 3,467,440 bytes |
+| 4:2:0 | 300 to 305 ms | 45 ms | 6.7 | 3,278,764 bytes |
+| 4:4:4 | 390 to 430 ms | 59 ms | 7.0 | 3,467,440 bytes |
 
-Where the 4:2:0 encode's time goes (counted with callgrind): the DCT about 40 %, the colour conversion and downsampling 30 %, quantisation and Huffman coding 25 %. Fusing quantisation with the Huffman coding and skipping the coefficients that quantise to zero took it from 495 ms to 309 ms. Every sample, coefficient and table access is a bounds-checked list access, where libjpeg-turbo's SIMD code does 8 or 16 at once.
+Where a 4:2:0 encode's time goes (instructions counted with callgrind): the DCT about 40 %, the colour conversion and downsampling a third, quantisation and Huffman coding a quarter. The first version took 507 ms; quantising in the Huffman coder's loop, with the coefficients below a table's threshold taken as zero without the multiplication, made it 329 ms, and converting the colours and downsampling the chroma in one loop 300 ms. What remains is the compiler's: every sample, coefficient and table access is a bounds-checked list access and every value lives on the stack, where libjpeg-turbo's SIMD code does 8 or 16 at once.
 
 ### Tests of the encoder
 

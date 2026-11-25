@@ -1951,6 +1951,18 @@ fun quantize(x: int, q: int) -> int {
     return ((x + c) * fq) >> r
 }
 
+// For 8-bit samples (|x| at most 8192) the quantisation is the division
+// rounded to nearest, (|x| + 4q) / 8q with the sign put back, for every q.
+#test
+fun quantising_is_rounding() {
+    for q in 1..256 {
+        assert(quantize(4 * q - 1, q) == 0 && quantize(4 * q, q) == 1 && quantize(-4 * q, q) == -1, f"{q}")
+        for x in [12 * q - 1, 12 * q, 8192 - q, 8192] {
+            assert(quantize(x, q) == (x + 4 * q) / (8 * q) && quantize(-x, q) == -((x + 4 * q) / (8 * q)), f"{x} by {q}")
+        }
+    }
+}
+
 // The Huffman code of each symbol of a DHT table (`counts` of each length,
 // `symbols` in code order), as libjpeg's `jpeg_make_c_derived_tbl` assigns
 // them: (code << 8) | length, 0 for a symbol not in the table.
@@ -1995,15 +2007,9 @@ fun enc_table(q: [int], luma: bool) -> EncTable {
         fq.push(f)
         cq.push(c)
         rq.push(r)
-        // about 4q: ((x + c) * f) >> r is 1 from there
-        var x = 4 * q[nat[k]] - 2
-        while x > 0 && ((x - 1 + c) * f) >> r > 0 {
-            x -= 1
-        }
-        while ((x + c) * f) >> r == 0 {
-            x += 1
-        }
-        th.push(x)
+        // (x + c) * f >> r is (x + 4q) / 8q: 1 from 4q on
+        // (`quantising_is_rounding`)
+        th.push(4 * q[nat[k]])
     }
     let (dcn, dcs) = std_huffman(luma, false)
     let (acn, acs) = std_huffman(luma, true)
@@ -2129,7 +2135,9 @@ impl Enc {
         let rq = t.rq
         let th = t.th
         let ac = t.ac
-        // the DC: its magnitude's category, then the bits (one less if negative)
+        // the DC: its magnitude's category, then the bits (one less if
+        // negative); a DC is -1024 to 1016 and an AC coefficient smaller, so
+        // a category is at most 11 (the `else` only keeps `nbits` in bounds)
         let v0 = ws[0]
         let dc = if v0 < 0 { -(((cq[0] - v0) * fq[0]) >> rq[0]) } else { ((v0 + cq[0]) * fq[0]) >> rq[0] }
         let diff = dc - self.last_dc[c]

@@ -22,8 +22,8 @@
 //                                                       13.66 MB to Pillow's 14.7 MB
 //     png decode, 12 MP                       196 ms   MYLA-935: png.decode(b)
 //                                                       std.png 402 ms (std.compress's inflate 255 ms)
-//     jpeg encode (q85, 4:2:0), 12 MP          44 ms   MYLA-937: jpeg.encode(img, 85): 300-310 ms (2026-11-25),
-//                                                       Pillow's 3,278,764 bytes exactly; 4:4:4 410-430 ms
+//     jpeg encode (q85, 4:2:0), 12 MP          44 ms   MYLA-937: jpeg.encode(img, 85): 300-305 ms (2026-11-25),
+//                                                       Pillow's 3,278,764 bytes exactly; 4:4:4 390-430 ms
 //                                                       to Pillow's 59
 //     jpeg decode, 12 MP                       77 ms   MYLA-936: jpeg.decode(b): 418 ms (2026-11-25;
 //                                                       a third of it list.filled, MYLA-949)
