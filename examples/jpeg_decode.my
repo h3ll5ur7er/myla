@@ -1,0 +1,104 @@
+// Decoding JPEG files with std.jpeg (MYLA-936): a small picture the program
+// carries as hex, its size and metadata, its pixels as text, and the picture
+// turned upright as its EXIF orientation asks. Give the program JPEG files
+// as arguments to see theirs, with a preview in a truecolor terminal.
+
+import std.jpeg as jpeg
+import std.image as image
+from std.image import Image, Image8, Layout
+import std.encoding as encoding
+import std.fs as fs
+import std.process as process
+
+// 16x8 pixels by Pillow at quality 90, 4:2:0: a dark arrow pointing right
+// with an orange tip, 300 dpi, EXIF orientation 6 (turn it a quarter
+// clockwise to show it).
+const PICTURE: str = "ffd8ffe000104a46494600010101012c012c0000ffe100224578696600004d4d002a00000008000101120003000000010006000000000000ffdb0043000302020302020303030304030304050805050404050a070706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb00430103040405040509050509140d0b0d1414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414ffc00011080008001003012200021101031101ffc400160001010100000000000000000000000000000408ffc40026100001010604070000000000000000000012140011131516170306212201020405184161ffc40014010100000000000000000000000000000005ffc4002011000103030501000000000000000000000102112100030513223161a112ffda000c03010002110311003f00d4d993c9ca8bba482d2c89562cbe6533549cf8c28a1b620090e8f7bb4697235e6ba1d35634cae4d86b299532f427ce271f74738a2ef9e8d8c633249d64d943fcef4c8830e7de0f54a63d7a46ead81d860c8961e723baffd9"
+
+// The character of a gray level: the darker, the denser.
+#test(0u8)['@']
+#test(128u8)['=']
+#test(255u8)[' ']
+fun shade(v: uint8) -> char {
+    return "@%#*+=-:. ".chars()[(v as int) * 10 / 256]
+}
+
+// The image as lines of text, a character a pixel.
+#test(Image { width: 2, height: 2, layout: Layout.Gray, data: [0u8, 255u8, 128u8, 40u8] })[["@ ", "=%"]]
+#test(Image { width: 1, height: 1, layout: Layout.Rgb, data: [255u8, 255u8, 255u8] })[[" "]]
+fun text_lines(img: Image8) -> [str] {
+    let gray = img.convert(Layout.Gray)
+    var lines: [str] = []
+    for y in 0..gray.height {
+        var line = ""
+        for v in gray.row(y) {
+            line = line + f"{shade(v)}"
+        }
+        lines.push(line)
+    }
+    return lines
+}
+
+// What the metadata says, in a line.
+#test(1, 0, 0, 0, false)["orientation 1, no density"]
+#test(6, 1, 300, 300, true)["orientation 6, 300x300 dots per inch, progressive"]
+fun meta_line(orientation: int, unit: int, x: int, y: int, progressive: bool) -> str {
+    let units = ["no density", "dots per inch", "dots per centimetre"]
+    let density = if unit == 1 || unit == 2 { f"{x}x{y} {units[unit]}" } else { units[0] }
+    let kind = if progressive { ", progressive" } else { "" }
+    return f"orientation {orientation}, {density}{kind}"
+}
+
+// The JPEG file `b` decoded and described; its pixels as text if it is
+// small, else a preview.
+fun show(name: str, b: [uint8]) {
+    match jpeg.info(b) {
+        Ok(i) => print(f"{name}: {i.width}x{i.height} {i.layout}")
+        Err(e) => {
+            print(f"{name}: {e}")
+            return
+        }
+    }
+    match jpeg.decode_with_meta(b) {
+        Ok((img, m)) => {
+            print(meta_line(m.orientation, m.density_unit, m.density_x, m.density_y, m.progressive))
+            let upright = jpeg.apply_orientation(img, m.orientation)
+            if img.width <= 40 && img.height <= 40 {
+                for line in text_lines(img) {
+                    print(line)
+                }
+                print(f"upright: {upright.width}x{upright.height}, the tip's colour {upright.color_at(4, 13)}")
+                for line in text_lines(upright) {
+                    print(line)
+                }
+            } else {
+                print(image.ansi(upright, 60))
+            }
+        }
+        Err(e) => print(f"{name}: {e}")
+    }
+}
+
+fun main() {
+    let args = process.args()
+    if args.len() > 1 {
+        for path in args[1:] {
+            match fs.read_bytes(path) {
+                Ok(b) => show(path, b)
+                Err(e) => print(f"{path}: {e}")
+            }
+        }
+        return
+    }
+    show("the arrow", encoding.hex_decode(PICTURE).unwrap_or([]))
+    // the same file cut short in its scan, then cut before it
+    let b = encoding.hex_decode(PICTURE).unwrap_or([])
+    match jpeg.decode(b[:b.len() - 40]) {
+        Ok(img) => print(f"cut in the scan: still {img.width}x{img.height}, as libjpeg reads it")
+        Err(e) => print(f"cut in the scan: {e}")
+    }
+    match jpeg.decode(b[:300]) {
+        Ok(_) => print("cut before the scan: decoded?")
+        Err(e) => print(f"cut before the scan: {e}")
+    }
+}

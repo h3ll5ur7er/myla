@@ -4,7 +4,7 @@ Read from the source, `lib/std/*.my` (November 2026); the prose reference is `do
 
 Implicit modules (methods in every program, no import): `std.str`, `std.char`, `std.int`, `std.float`, `std.list`, `std.option`, `std.map`, `std.hash`.
 
-Other modules: `std.algebra`, `std.archive`, `std.args`, `std.bench`, `std.bigint`, `std.bitset`, `std.btree`, `std.bmp`, `std.bytes`, `std.cache`, `std.checksum`, `std.compress`, `std.csv`, `std.deque`, `std.digest`, `std.draw`, `std.encoding`, `std.fmt`, `std.font`, `std.fs`, `std.gif`, `std.glob`, `std.graph`, `std.grid`, `std.heap`, `std.http`, `std.image`, `std.imgproc`, `std.ini`, `std.io`, `std.ioerror`, `std.iter`, `std.json`, `std.log`, `std.math`, `std.net`, `std.num`, `std.path`, `std.platform` (with `std.rt`: internal), `std.png`, `std.pnm`, `std.process`, `std.qoi`, `std.random`, `std.regex`, `std.set`, `std.signal`, `std.slice`, `std.task`, `std.term`, `std.test`, `std.text`, `std.tiff`, `std.time`, `std.toml`, `std.unionfind`, `std.url`, `std.uuid`, `std.vector` (with `std.matrix`, `std.quaternion` and the `32` twins), `std.xml`, `std.yaml`, and the gdb helper `lib/debug/myla_gdb.py`.
+Other modules: `std.algebra`, `std.archive`, `std.args`, `std.bench`, `std.bigint`, `std.bitset`, `std.btree`, `std.bmp`, `std.bytes`, `std.cache`, `std.checksum`, `std.compress`, `std.csv`, `std.deque`, `std.digest`, `std.draw`, `std.encoding`, `std.fmt`, `std.font`, `std.fs`, `std.gif`, `std.glob`, `std.graph`, `std.grid`, `std.heap`, `std.http`, `std.image`, `std.imgproc`, `std.ini`, `std.io`, `std.ioerror`, `std.iter`, `std.jpeg`, `std.json`, `std.log`, `std.math`, `std.net`, `std.num`, `std.path`, `std.platform` (with `std.rt`: internal), `std.png`, `std.pnm`, `std.process`, `std.qoi`, `std.random`, `std.regex`, `std.set`, `std.signal`, `std.slice`, `std.task`, `std.term`, `std.test`, `std.text`, `std.tiff`, `std.time`, `std.toml`, `std.unionfind`, `std.url`, `std.uuid`, `std.vector` (with `std.matrix`, `std.quaternion` and the `32` twins), `std.xml`, `std.yaml`, and the gdb helper `lib/debug/myla_gdb.py`.
 
 ## Conventions
 
@@ -621,6 +621,15 @@ Import: `import std.iter as iter`. Everything is a free function taking the iter
   - `repeat` needs `take`, or a consumer that stops.
   - Inside your own adapter, loop `while let Some(v) = self.inner.next()`, because a `for` loop works on a copy.
 - Prose: `docs/Language/Standard-library/Iter.md`
+
+## std.jpeg
+JPEG decoding, bit-exact with libjpeg's defaults (islow IDCT, fancy upsampling, its YCbCr tables), so with Pillow (D311, MYLA-936). `import std.jpeg as jpeg`.
+- `info(b: [uint8]) -> Result<ImageInfo, ImageError>` (`Gray` for 1 component, `Rgb` for 3 or 4) · `decode(b, max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError>` (`Gray` or `Rgb`, the pixels as stored; CMYK and YCCK converted to RGB) · `decode_with_meta(b, max_pixels) -> Result<(Image8, JpegMeta), ImageError>`.
+- `struct JpegMeta { jfif: bool, density_unit: int, density_x: int, density_y: int, exif: [uint8], orientation: int, icc: [uint8], adobe_transform: int, progressive: bool, components: int }` (`exif` after "Exif\0\0"; `adobe_transform` -1 without APP14).
+- `orientation(b) -> int` (EXIF 1..8, 1 if none) · `apply_orientation<S: Sample>(img: Image<S>, o: int) -> Image<S>` (Pillow's `exif_transpose`: 6 is `rotate90`, 8 `rotate270`).
+- Reads SOF0/1/2 (baseline, extended, progressive), 8 bits, 1/3/4 components, any sampling factors that divide the largest, restart intervals, default Huffman tables (Motion JPEG). `Unsupported("arithmetic coding" | "lossless JPEG" | "hierarchical JPEG" | "12-bit samples")`. A scan cut short decodes on with zero bits (as libjpeg); cut before the first scan is `Truncated`.
+- Gotchas: `decode` doesn't apply the EXIF orientation. About 6x Pillow's time natively (12 MP baseline 0.42 s); the interpreter is slow, keep `#test` files tiny.
+- Prose: `docs/Language/Standard-library/Jpeg.md`
 
 ## std.json
 JSON values, parse/print (Python-compatible messages), typed encode/decode with `#derive(Json)`. `import std.json as json`; `from std.json import Json, JsonError` for the types.

@@ -224,6 +224,14 @@ EXPECTED = {
         "....................................\n"
         "....................................\n"
         "against the page drawn: PSNR 18.7 dB\n",
+    "jpeg_decode.my": 'the arrow: 16x8 rgb\norientation 6, 300x300 dots per inch\n'
+        '     .     =    \n           ==.  \n          .===. \n %%%%%%%%%%==== \n'
+        ' %%%%%%%%%%==== \n          .===. \n           ==.  \n     .     =.   \n'
+        "upright: 8x16, the tip's colour #d5782aff\n        \n   %%   \n   %%   \n"
+        '   %%   \n   %%   \n.  %%  .\n   %%   \n   %%   \n   %%   \n   %%   \n'
+        '  .%%.  \n========\n.====== \n .====. \n  .==.  \n        \n'
+        'cut in the scan: still 16x8, as libjpeg reads it\n'
+        'cut before the scan: truncated input\n',
 }
 
 def run_file(path: str) -> str:

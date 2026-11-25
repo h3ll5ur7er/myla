@@ -1,0 +1,9 @@
+// std.jpeg's driver (MYLA-936): `decode` over the corpus and the fuzz cases,
+// through image_driver's protocol.
+
+import std.jpeg as jpeg
+import image_driver as driver
+
+fun main() {
+    driver.serve8(jpeg.decode)
+}
