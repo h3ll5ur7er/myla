@@ -3,8 +3,8 @@
 // picture). `build/myla build benchmarks/images_std.my -o /tmp/images &&
 // /tmp/images` (natively: the interpreter would take minutes); `/tmp/images
 // 400 300` for a smaller picture. A JPEG file among the arguments is
-// decoded too (until MYLA-937's encoder makes one: the picture saved by
-// Pillow at quality 85, 4:2:0, as images_pillow.py does).
+// decoded too (the picture saved by Pillow at quality 85, 4:2:0, as
+// images_pillow.py does, is the same file as std.jpeg's).
 //
 // The picture is a 12-MP (4000x3000) RGB "photo": gradients, two discs and
 // a little noise from a hash of x and y, so it compresses as a photo does
@@ -22,7 +22,9 @@
 //                                                       13.66 MB to Pillow's 14.7 MB
 //     png decode, 12 MP                       196 ms   MYLA-935: png.decode(b)
 //                                                       std.png 402 ms (std.compress's inflate 255 ms)
-//     jpeg encode (q85, 4:2:0), 12 MP          44 ms   MYLA-937: jpeg.encode(img, 85)
+//     jpeg encode (q85, 4:2:0), 12 MP          44 ms   MYLA-937: jpeg.encode(img, 85): 300-310 ms (2026-11-25),
+//                                                       Pillow's 3,278,764 bytes exactly; 4:4:4 410-430 ms
+//                                                       to Pillow's 59
 //     jpeg decode, 12 MP                       77 ms   MYLA-936: jpeg.decode(b): 418 ms (2026-11-25;
 //                                                       a third of it list.filled, MYLA-949)
 //     resize 12 MP to 1155x866, bilinear       50 ms   MYLA-941: imgproc.resize(img, 1155, 866, Filter.Bilinear)
