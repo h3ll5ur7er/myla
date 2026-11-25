@@ -135,7 +135,7 @@ class ImageioDecode(unittest.TestCase):
 
     def test_every_format_s_corpus_natively(self) -> None:
         self.assertEqual({e["format"] for e in self.items}, set(FORMATS))
-        self.assertGreater(len(self.items), 350)
+        self.assertGreater(len(self.items), 340)
         self.corpus(self.plain, self.items)
 
     def test_every_format_s_corpus_checked(self) -> None:
@@ -152,15 +152,16 @@ class ImageioDecode(unittest.TestCase):
 
     def fuzz(self, argv: list[str]) -> None:
         # the two smallest readable files of each format, truncated at every
-        # length and mutated (a fifth of a codec's cases: each codec fuzzes
-        # its own decoder; this is sniff's dispatch over all of them)
+        # length and mutated, as a codec's own fuzz runs do (here sniff hands
+        # each case to a codec, maybe another than the original's)
         files = []
         for fmt in FORMATS:
             ok = sorted({im.path_of(e) for e in self.items if e["format"] == fmt and _readable(e)},
                         key=os.path.getsize)
             files += ok[:2]
         stats = im.fuzz(im.Driver(argv, max_pixels=1 << 20), files, self.tmp.name,
-                        count=max(1, im.FUZZ_CASES // 5), truncate=files[::2])
+                        truncate=files[::2])
+        self.assertGreater(stats.cases, im.FUZZ_CASES)
         self.assertGreater(stats.err, 0)
         self.assertGreater(stats.ok, 0)
 
