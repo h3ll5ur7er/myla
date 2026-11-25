@@ -284,24 +284,31 @@ impl Idct {
     // are all zero, so every sample is the same (as the full computation
     // gives).
     fun block(var self, blk: [int], dst: int, stride: int, dc_only: bool) {
+        // the lists in locals while they change (no field access each time)
+        var out = self.out
+        self.out = []
+        let lim = self.lim
         if dc_only {
             let w = (blk[0] as int64) << 2
-            let v = self.lim[(((w + 16) >> 5) & 1023i64) as int]
+            let v = lim[(((w + 16) >> 5) & 1023i64) as int]
             for y in 0..8 {
                 let o = dst + y * stride
                 for x in 0..8 {
-                    self.out[o + x] = v
+                    out[o + x] = v
                 }
             }
+            self.out = out
             return
         }
+        var ws = self.ws
+        self.ws = []
         // pass 1: the columns, into `ws`, scaled up by 2^PASS1_BITS (2)
         for c in 0..8 {
             if blk[8 + c] == 0 && blk[16 + c] == 0 && blk[24 + c] == 0 && blk[32 + c] == 0 &&
                 blk[40 + c] == 0 && blk[48 + c] == 0 && blk[56 + c] == 0 {
                 let d = (blk[c] as int64) << 2
                 for r in 0..8 {
-                    self.ws[r * 8 + c] = d
+                    ws[r * 8 + c] = d
                 }
                 continue
             }
@@ -339,31 +346,31 @@ impl Idct {
             tmp1 += z2 + z4
             tmp2 += z2 + z3
             tmp3 += z1 + z4
-            self.ws[c] = (tmp10 + tmp3 + 1024) >> 11
-            self.ws[56 + c] = (tmp10 - tmp3 + 1024) >> 11
-            self.ws[8 + c] = (tmp11 + tmp2 + 1024) >> 11
-            self.ws[48 + c] = (tmp11 - tmp2 + 1024) >> 11
-            self.ws[16 + c] = (tmp12 + tmp1 + 1024) >> 11
-            self.ws[40 + c] = (tmp12 - tmp1 + 1024) >> 11
-            self.ws[24 + c] = (tmp13 + tmp0 + 1024) >> 11
-            self.ws[32 + c] = (tmp13 - tmp0 + 1024) >> 11
+            ws[c] = (tmp10 + tmp3 + 1024) >> 11
+            ws[56 + c] = (tmp10 - tmp3 + 1024) >> 11
+            ws[8 + c] = (tmp11 + tmp2 + 1024) >> 11
+            ws[48 + c] = (tmp11 - tmp2 + 1024) >> 11
+            ws[16 + c] = (tmp12 + tmp1 + 1024) >> 11
+            ws[40 + c] = (tmp12 - tmp1 + 1024) >> 11
+            ws[24 + c] = (tmp13 + tmp0 + 1024) >> 11
+            ws[32 + c] = (tmp13 - tmp0 + 1024) >> 11
         }
         // pass 2: the rows, descaled by 2^(13 + 2 + 3), through the range limit
         for r in 0..8 {
             let w = r * 8
             let o = dst + r * stride
-            let w0 = self.ws[w]
-            let w1 = self.ws[w + 1]
-            let w2 = self.ws[w + 2]
-            let w3 = self.ws[w + 3]
-            let w4 = self.ws[w + 4]
-            let w5 = self.ws[w + 5]
-            let w6 = self.ws[w + 6]
-            let w7 = self.ws[w + 7]
+            let w0 = ws[w]
+            let w1 = ws[w + 1]
+            let w2 = ws[w + 2]
+            let w3 = ws[w + 3]
+            let w4 = ws[w + 4]
+            let w5 = ws[w + 5]
+            let w6 = ws[w + 6]
+            let w7 = ws[w + 7]
             if w1 == 0 && w2 == 0 && w3 == 0 && w4 == 0 && w5 == 0 && w6 == 0 && w7 == 0 {
-                let v = self.lim[(((w0 + 16) >> 5) & 1023i64) as int]
+                let v = lim[(((w0 + 16) >> 5) & 1023i64) as int]
                 for x in 0..8 {
-                    self.out[o + x] = v
+                    out[o + x] = v
                 }
                 continue
             }
@@ -394,15 +401,17 @@ impl Idct {
             tmp2 += z2 + z3
             tmp3 += z1 + z4
             let half = 131072i64
-            self.out[o] = self.lim[(((tmp10 + tmp3 + half) >> 18) & 1023i64) as int]
-            self.out[o + 7] = self.lim[(((tmp10 - tmp3 + half) >> 18) & 1023i64) as int]
-            self.out[o + 1] = self.lim[(((tmp11 + tmp2 + half) >> 18) & 1023i64) as int]
-            self.out[o + 6] = self.lim[(((tmp11 - tmp2 + half) >> 18) & 1023i64) as int]
-            self.out[o + 2] = self.lim[(((tmp12 + tmp1 + half) >> 18) & 1023i64) as int]
-            self.out[o + 5] = self.lim[(((tmp12 - tmp1 + half) >> 18) & 1023i64) as int]
-            self.out[o + 3] = self.lim[(((tmp13 + tmp0 + half) >> 18) & 1023i64) as int]
-            self.out[o + 4] = self.lim[(((tmp13 - tmp0 + half) >> 18) & 1023i64) as int]
+            out[o] = lim[(((tmp10 + tmp3 + half) >> 18) & 1023i64) as int]
+            out[o + 7] = lim[(((tmp10 - tmp3 + half) >> 18) & 1023i64) as int]
+            out[o + 1] = lim[(((tmp11 + tmp2 + half) >> 18) & 1023i64) as int]
+            out[o + 6] = lim[(((tmp11 - tmp2 + half) >> 18) & 1023i64) as int]
+            out[o + 2] = lim[(((tmp12 + tmp1 + half) >> 18) & 1023i64) as int]
+            out[o + 5] = lim[(((tmp12 - tmp1 + half) >> 18) & 1023i64) as int]
+            out[o + 3] = lim[(((tmp13 + tmp0 + half) >> 18) & 1023i64) as int]
+            out[o + 4] = lim[(((tmp13 - tmp0 + half) >> 18) & 1023i64) as int]
         }
+        self.out = out
+        self.ws = ws
     }
 }
 
@@ -1006,6 +1015,20 @@ impl Decoder {
         return Ok(sc)
     }
 
+    // The bit buffer `acc` (its low `n` bits not read yet) filled up through
+    // the scan's reader to at least 32 bits: when the data ends, with zero
+    // bits, as libjpeg goes on (the reader's buffer is the hot loops' locals,
+    // given back only here).
+    fun fill(var self, acc: uint64, n: int) -> (uint64, int) {
+        self.br.acc = acc
+        self.br.n = n
+        self.br.refill()
+        if self.br.n < 32 {
+            return (self.br.acc << ((32 - self.br.n) as uint64), 32)
+        }
+        return (self.br.acc, self.br.n)
+    }
+
     // At a restart boundary: past the RSTn marker if that is where the data
     // ends (else the data ran out and zero bits go on).
     fun next_restart(var self) {
@@ -1102,15 +1125,9 @@ impl Decoder {
                     let qo = ci * 64
                     // DC: a difference from the last block's
                     if n < 32 {
-                        self.br.acc = acc
-                        self.br.n = n
-                        self.br.refill()
-                        acc = self.br.acc
-                        n = self.br.n
-                        if n < 32 {
-                            acc = acc << ((32 - n) as uint64)
-                            n = 32
-                        }
+                        let (a, k) = self.fill(acc, n)
+                        acc = a
+                        n = k
                     }
                     let dt = dcl[b]
                     var sym = look[dt * 512 + (((acc >> ((n - 9) as uint64)) & 511u64) as int)]
@@ -1142,15 +1159,9 @@ impl Decoder {
                     var kmax = 0
                     while k < 64 {
                         if n < 32 {
-                            self.br.acc = acc
-                            self.br.n = n
-                            self.br.refill()
-                            acc = self.br.acc
-                            n = self.br.n
-                            if n < 32 {
-                                acc = acc << ((32 - n) as uint64)
-                                n = 32
-                            }
+                            let (a, k) = self.fill(acc, n)
+                            acc = a
+                            n = k
                         }
                         var rs = look[at * 512 + (((acc >> ((n - 9) as uint64)) & 511u64) as int)]
                         if rs != 0 {
@@ -1256,15 +1267,9 @@ impl Decoder {
                     if ss == 0 && refine {
                         // DC refinement: the next bit of each block's DC
                         if n < 32 {
-                            self.br.acc = acc
-                            self.br.n = n
-                            self.br.refill()
-                            acc = self.br.acc
-                            n = self.br.n
-                            if n < 32 {
-                                acc = acc << ((32 - n) as uint64)
-                                n = 32
-                            }
+                            let (a, k) = self.fill(acc, n)
+                            acc = a
+                            n = k
                         }
                         n -= 1
                         if ((acc >> (n as uint64)) & 1u64) != 0u64 {
@@ -1275,15 +1280,9 @@ impl Decoder {
                     if ss == 0 {
                         // DC first: a difference, shifted by Al
                         if n < 32 {
-                            self.br.acc = acc
-                            self.br.n = n
-                            self.br.refill()
-                            acc = self.br.acc
-                            n = self.br.n
-                            if n < 32 {
-                                acc = acc << ((32 - n) as uint64)
-                                n = 32
-                            }
+                            let (a, k) = self.fill(acc, n)
+                            acc = a
+                            n = k
                         }
                         var sym = look[t * 512 + (((acc >> ((n - 9) as uint64)) & 511u64) as int)]
                         if sym != 0 {
@@ -1323,15 +1322,9 @@ impl Decoder {
                         var k = ss
                         while k <= se {
                             if n < 32 {
-                                self.br.acc = acc
-                                self.br.n = n
-                                self.br.refill()
-                                acc = self.br.acc
-                                n = self.br.n
-                                if n < 32 {
-                                    acc = acc << ((32 - n) as uint64)
-                                    n = 32
-                                }
+                                let (a, k) = self.fill(acc, n)
+                                acc = a
+                                n = k
                             }
                             var rs = look[t * 512 + (((acc >> ((n - 9) as uint64)) & 511u64) as int)]
                             if rs != 0 {
@@ -1376,15 +1369,9 @@ impl Decoder {
                     if eobrun == 0 {
                         while k <= se {
                             if n < 32 {
-                                self.br.acc = acc
-                                self.br.n = n
-                                self.br.refill()
-                                acc = self.br.acc
-                                n = self.br.n
-                                if n < 32 {
-                                    acc = acc << ((32 - n) as uint64)
-                                    n = 32
-                                }
+                                let (a, k) = self.fill(acc, n)
+                                acc = a
+                                n = k
                             }
                             var rs = look[t * 512 + (((acc >> ((n - 9) as uint64)) & 511u64) as int)]
                             if rs != 0 {
@@ -1421,15 +1408,9 @@ impl Decoder {
                                 let cv = coef[z] as int
                                 if cv != 0 {
                                     if n < 1 {
-                                        self.br.acc = acc
-                                        self.br.n = n
-                                        self.br.refill()
-                                        acc = self.br.acc
-                                        n = self.br.n
-                                        if n < 32 {
-                                            acc = acc << ((32 - n) as uint64)
-                                            n = 32
-                                        }
+                                        let (a, k) = self.fill(acc, n)
+                                        acc = a
+                                        n = k
                                     }
                                     n -= 1
                                     if ((acc >> (n as uint64)) & 1u64) != 0u64 && (cv & p1) == 0 {
@@ -1456,15 +1437,9 @@ impl Decoder {
                             let cv = coef[z] as int
                             if cv != 0 {
                                 if n < 1 {
-                                    self.br.acc = acc
-                                    self.br.n = n
-                                    self.br.refill()
-                                    acc = self.br.acc
-                                    n = self.br.n
-                                    if n < 32 {
-                                        acc = acc << ((32 - n) as uint64)
-                                        n = 32
-                                    }
+                                    let (a, k) = self.fill(acc, n)
+                                    acc = a
+                                    n = k
                                 }
                                 n -= 1
                                 if ((acc >> (n as uint64)) & 1u64) != 0u64 && (cv & p1) == 0 {
@@ -1489,6 +1464,8 @@ impl Decoder {
         var idct = new_idct(self.pix)
         self.pix = []
         var blk = list_m.filled(64, 0)
+        let coef = self.coef
+        let cq = self.cq
         for ci in 0..self.comps.len() {
             let c = self.comps[ci]
             let stride = c.bw * 8
@@ -1496,11 +1473,12 @@ impl Decoder {
             for y in 0..(c.ch + 7) / 8 {
                 for x in 0..(c.cw + 7) / 8 {
                     let o = c.coef + (y * c.bw + x) * 64
+                    blk[0] = (coef[o] as int) * cq[qo]
                     var dc_only = true
-                    for k in 0..64 {
-                        let v = self.coef[o + k] as int
-                        blk[k] = v * self.cq[qo + k]
-                        if k > 0 && v != 0 {
+                    for k in 1..64 {
+                        let v = coef[o + k] as int
+                        blk[k] = v * cq[qo + k]
+                        if v != 0 {
                             dc_only = false
                         }
                     }
@@ -1537,6 +1515,11 @@ impl Decoder {
         var up = Up { buf: list_m.filled(nc * w2, 0u8) }
         let pix = self.pix
         let t = ycc_tables()
+        // clamping to 0..255 as a table, from -384 on (libjpeg's range limit)
+        var clip = list_m.filled(1024, 0u8)
+        for i in 0..1024 {
+            clip[i] = clamp255(i - 384) as uint8
+        }
         var out = list_m.filled(w * h * channels, 0u8)
         var o = 0
         for y in 0..h {
@@ -1559,12 +1542,12 @@ impl Decoder {
                 }
             } else if nc == 3 {
                 for x in 0..w {
-                    let yy = u[x] as int
+                    let yy = (u[x] as int) + 384
                     let cb = u[w2 + x] as int
                     let cr = u[2 * w2 + x] as int
-                    out[o] = clamp255(yy + t[cr]) as uint8
-                    out[o + 1] = clamp255(yy + ((t[768 + cb] + t[512 + cr]) >> SCALEBITS)) as uint8
-                    out[o + 2] = clamp255(yy + t[256 + cb]) as uint8
+                    out[o] = clip[yy + t[cr]]
+                    out[o + 1] = clip[yy + ((t[768 + cb] + t[512 + cr]) >> SCALEBITS)]
+                    out[o + 2] = clip[yy + t[256 + cb]]
                     o += 3
                 }
             } else {
@@ -1643,37 +1626,33 @@ struct Up {
 impl Up {
     // Row `y` of the image from a component's plane (at `base`, rows
     // `stride` apart, `cw` by `ch` samples), upsampled by `hr` across and
-    // `vr` down, as `w` samples at `at` in `buf`. libjpeg's triangle filters
-    // for 2x1 and 2x2 (when the component is more than 2 samples wide) and
-    // 1x2; other ratios repeat the samples. Rows and columns past the edges
-    // repeat the last ones.
+    // `vr` down, as at least `w` samples at `at` in `buf` (which has room
+    // for `2 * cw`). libjpeg's triangle filters for 2x1 and 2x2 (when the
+    // component is more than 2 samples wide) and 1x2; other ratios repeat
+    // the samples. Rows and columns past the edges repeat the last ones.
     fun row(var self, at: int, pix: [uint8], base: int, stride: int, cw: int, ch: int, hr: int, vr: int, y: int, w: int) {
+        var buf = self.buf
+        self.buf = []
         if hr == 1 && vr == 1 {
             let src = base + y * stride
             for x in 0..w {
-                self.buf[at + x] = pix[src + x]
+                buf[at + x] = pix[src + x]
             }
-            return
-        }
-        if hr == 2 && vr == 1 && cw > 2 {
+        } else if hr == 2 && vr == 1 && cw > 2 {
             // h2v1_fancy_upsample: 3/4 of the nearer sample, 1/4 of the further
             let src = base + y * stride
-            var x = 0
+            var left = pix[src] as int
+            var here = left
+            var o = at
             for i in 0..cw {
-                let here = (pix[src + i] as int) * 3
-                let left = pix[src + (if i > 0 { i - 1 } else { 0 })] as int
                 let right = pix[src + (if i + 1 < cw { i + 1 } else { i })] as int
-                if x < w {
-                    self.buf[at + x] = ((here + left + 1) >> 2) as uint8
-                }
-                if x + 1 < w {
-                    self.buf[at + x + 1] = ((here + right + 2) >> 2) as uint8
-                }
-                x += 2
+                buf[o] = ((here * 3 + left + 1) >> 2) as uint8
+                buf[o + 1] = ((here * 3 + right + 2) >> 2) as uint8
+                left = here
+                here = right
+                o += 2
             }
-            return
-        }
-        if vr == 2 && (hr == 1 || (hr == 2 && cw > 2)) {
+        } else if vr == 2 && (hr == 1 || (hr == 2 && cw > 2)) {
             // the nearer row and the further one (above for an even row)
             let near = y >> 1
             var far = if (y & 1) == 0 { near - 1 } else { near + 1 }
@@ -1685,34 +1664,31 @@ impl Up {
                 // h1v2_fancy_upsample
                 let bias = if (y & 1) == 0 { 1 } else { 2 }
                 for x in 0..w {
-                    self.buf[at + x] = (((pix[a + x] as int) * 3 + (pix[b + x] as int) + bias) >> 2) as uint8
+                    buf[at + x] = (((pix[a + x] as int) * 3 + (pix[b + x] as int) + bias) >> 2) as uint8
                 }
-                return
+            } else {
+                // h2v2_fancy_upsample: the columns' sums, then across
+                var last = (pix[a] as int) * 3 + (pix[b] as int)
+                var cur = last
+                var o = at
+                for i in 0..cw {
+                    let j = if i + 1 < cw { i + 1 } else { i }
+                    let next = (pix[a + j] as int) * 3 + (pix[b + j] as int)
+                    buf[o] = ((cur * 3 + last + 8) >> 4) as uint8
+                    buf[o + 1] = ((cur * 3 + next + 7) >> 4) as uint8
+                    last = cur
+                    cur = next
+                    o += 2
+                }
             }
-            // h2v2_fancy_upsample: the columns' sums, then across
-            var last = (pix[a] as int) * 3 + (pix[b] as int)
-            var cur = last
-            var x = 0
-            for i in 0..cw {
-                let j = if i + 1 < cw { i + 1 } else { i }
-                let next = (pix[a + j] as int) * 3 + (pix[b + j] as int)
-                if x < w {
-                    self.buf[at + x] = ((cur * 3 + last + 8) >> 4) as uint8
-                }
-                if x + 1 < w {
-                    self.buf[at + x + 1] = ((cur * 3 + next + 7) >> 4) as uint8
-                }
-                last = cur
-                cur = next
-                x += 2
+        } else {
+            // int_upsample (and h2v1, h2v2 of a narrow component): repeated
+            let src = base + (y / vr) * stride
+            for x in 0..w {
+                buf[at + x] = pix[src + x / hr]
             }
-            return
         }
-        // int_upsample (and h2v1, h2v2 of a narrow component): repeated
-        let src = base + (y / vr) * stride
-        for x in 0..w {
-            self.buf[at + x] = pix[src + x / hr]
-        }
+        self.buf = buf
     }
 }
 
@@ -1862,3 +1838,167 @@ pub fun apply_orientation<S: Sample>(img: Image<S>, o: int) -> Image<S> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// The tests' JPEG files, made by Pillow 13 (libjpeg-turbo 3.2), with the
+// CRC-32 of the samples Pillow decodes from them (Adobe CMYK converted to
+// RGB as `cmyk_to_rgb` does): 8x8 gray; 16x16 4:2:0; 13x9 4:2:2 (partial
+// MCUs); the 16x16 one progressive; 16x8 4:4:4 with a restart marker a
+// block; 8x8 Adobe CMYK; 2x1 4:2:0 (too narrow for the triangle filter);
+// 8x8 gray with JFIF at 72x96 dpi, EXIF orientation 6 and an ICC "profile".
+fun test_jpeg(name: str) -> [uint8] {
+    let hex = match name {
+        "gray8" => "ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080008000801011100ffc40014000100000000000000000000000000000001ffc40017100003010000000000000000000000000000074481ffda0008010100003f00121361ffd9"
+        "s420" => "ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffdb0043010909090c0b0c180d0d1832211c213232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232ffc00011080010001003012200021101031101ffc4001500010100000000000000000000000000000607ffc4001910000105000000000000000000000000000005062231a1ffc4001501010100000000000000000000000000000103ffc4001a110002020300000000000000000000000000030105062131ffda000c03010002110311003f009ea637aa182f4d6f5430509adea860bd35bf50c2ab7c063f7fcd9fffd9"
+        "s422" => "ffd8ffe000104a46494600010100000100010000ffdb00430006040506050406060506070706080a100a0a09090a140e0f0c1017141818171416161a1d251f1a1b231c1616202c20232627292a29191f2d302d283025282928ffdb0043010707070a080a130a0a13281a161a2828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828ffc00011080009000d03012100021101031101ffc4001500010100000000000000000000000000000607ffc40020100001020505000000000000000000000000050601020723a12431323481ffc40017010003010000000000000000000000000004050607ffc4001d110001020700000000000000000000000000010602052123313261ffda000c03010002110311003f0028dea6fc6ce0a3a5d37d3c2ce012098f46ed172db4a8bdbdb4be1464ceb934b8337686887fffd9"
+        "prog" => "ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffdb0043010909090c0b0c180d0d1832211c213232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232ffc20011080010001003012200021101031101ffc4001500010100000000000000000000000000000506ffc4001501010100000000000000000000000000000102ffda000c030100021003100000019e5d4628ffc400161000030000000000000000000000000000000304ffda00080101000105025ce2e71738b9cfffc400161100030000000000000000000000000000000405ffda0008010301013f019ef9ffc4001511010100000000000000000000000000000200ffda0008010201013f012effc40014100100000000000000000000000000000020ffda0008010100063f021fffc4001510010100000000000000000000000000000061ffda0008010100013f21924924ffda000c030100020003000000106fffc400161100030000000000000000000000000000002131ffda0008010301013f108b3fffc4001511010100000000000000000000000000000001ffda0008010201013f108bffc4001610000300000000000000000000000000000031c1ffda0008010100013f105c899132224fffd9"
+        "restart" => "ffd8ffe000104a46494600010100000100010000ffdb00430006040506050406060506070706080a100a0a09090a140e0f0c1017141818171416161a1d251f1a1b231c1616202c20232627292a29191f2d302d283025282928ffdb0043010707070a080a130a0a13281a161a2828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828ffc00011080008001003011100021101031101ffc4001500010100000000000000000000000000000506ffc4001910000105000000000000000000000000000005072332a1ffc400160101010100000000000000000000000000060304ffc4001c1100020202030000000000000000000000000502310622012151ffdd00040001ffda000c03010002110311003f009b446bab061822dfbb0eaaca6b63ffd07111aeac18460d79f44caf29ad8fffd9"
+        "cmyk" => "ffd8ffee000e41646f626500640000000000ffdb00430006040506050406060506070706080a100a0a09090a140e0f0c1017141818171416161a1d251f1a1b231c1616202c20232627292a29191f2d302d283025282928ffc000140800080008044311004d11005911004b1100ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffda000e0443004d0059004b00003f004fd967fe5d3f0a4ff867affa74ff00c76bce3c37a0614ac8acefc96c1dbc9c7e4303fce315f54d7fffd9"
+        "tiny" => "ffd8ffe000104a46494600010100000100010000ffdb0043000302020302020303030304030304050805050404050a070706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb00430103040405040509050509140d0b0d1414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414ffc00011080001000203012200021101031101ffc4001500010100000000000000000000000000000004ffc4001b100100000700000000000000000000000000010305063674b2ffc40014010100000000000000000000000000000008ffc4001f110000030900000000000000000000000000010402030533357173b1b2ffda000c03010002110311003f00a2ddc7e99ab2b88003b2a9ef2e7b02b8f5595e46fa31ffd9"
+        "meta" => "ffd8ffe000104a46494600010101004800600000ffe100224578696600004d4d002a00000008000101120003000000010006000000000000ffe200244943435f50524f46494c450001016e6f74207265616c6c7920612070726f66696c65ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080008000801011100ffc40014000100000000000000000000000000000001ffc400171000030100000000000000000000000000001764a2ffda0008010100003f001212e4ffd9"
+        _ => ""
+    }
+    return encoding_m.hex_decode(hex).unwrap_or([])
+}
+
+// Whether `b` decodes to a `w` by `h` image of `layout` whose samples'
+// CRC-32 is `crc`.
+fun decodes_to(b: [uint8], w: int, h: int, layout: Layout, crc: uint32) -> bool {
+    return match decode(b, image.MAX_PIXELS) {
+        Ok(img) => img.width == w && img.height == h && img.layout == layout && img.data.len() == w * h * layout.channels() && checksum_m.crc32_bytes(img.data) == crc
+        Err(_) => false
+    }
+}
+
+#test
+fun decodes_as_libjpeg_does() {
+    assert(decodes_to(test_jpeg("gray8"), 8, 8, Layout.Gray, 0xd0e6c7f1u32), "gray")
+    assert(decodes_to(test_jpeg("s420"), 16, 16, Layout.Rgb, 0x18dfb1deu32), "4:2:0")
+    assert(decodes_to(test_jpeg("s422"), 13, 9, Layout.Rgb, 0xa3065995u32), "4:2:2")
+    assert(decodes_to(test_jpeg("prog"), 16, 16, Layout.Rgb, 0x18dfb1deu32), "progressive")
+    assert(decodes_to(test_jpeg("restart"), 16, 8, Layout.Rgb, 0x5b3e792bu32), "restart markers")
+    assert(decodes_to(test_jpeg("cmyk"), 8, 8, Layout.Rgb, 0x679c96a0u32), "Adobe CMYK")
+    assert(decodes_to(test_jpeg("tiny"), 2, 1, Layout.Rgb, 0x0edd6215u32), "2x1")
+    assert(decodes_to(test_jpeg("meta"), 8, 8, Layout.Gray, 0xca7ed650u32), "with metadata")
+}
+
+#test
+fun reads_the_metadata() {
+    let b = test_jpeg("meta")
+    match decode_with_meta(b, image.MAX_PIXELS) {
+        Ok((img, m)) => {
+            assert(img.width == 8 && m.jfif && m.density_unit == 1 && m.density_x == 72 && m.density_y == 96)
+            assert(m.orientation == 6 && m.exif.len() == 26 && m.exif[0] == 0x4Du8)
+            assert(m.icc == [0x6Eu8, 0x6Fu8, 0x74u8, 0x20u8, 0x72u8, 0x65u8, 0x61u8, 0x6Cu8, 0x6Cu8, 0x79u8, 0x20u8, 0x61u8, 0x20u8, 0x70u8, 0x72u8, 0x6Fu8, 0x66u8, 0x69u8, 0x6Cu8, 0x65u8])
+            assert(m.adobe_transform == -1 && !m.progressive && m.components == 1)
+        }
+        Err(_) => assert(false, "meta")
+    }
+    assert(orientation(b) == 6)
+    match decode_with_meta(test_jpeg("prog"), image.MAX_PIXELS) {
+        Ok((_, m)) => assert(m.progressive && m.components == 3 && m.orientation == 1 && m.exif.len() == 0 && m.icc.len() == 0)
+        Err(_) => assert(false, "prog")
+    }
+    match decode_with_meta(test_jpeg("cmyk"), image.MAX_PIXELS) {
+        Ok((_, m)) => assert(!m.jfif && m.adobe_transform == 0 && m.components == 4)
+        Err(_) => assert(false, "cmyk")
+    }
+    assert(info(test_jpeg("s422")) == Ok(ImageInfo { width: 13, height: 9, layout: Layout.Rgb, bit_depth: 8, frames: 1, format: "jpeg" }))
+    assert(info(test_jpeg("gray8")) == Ok(ImageInfo { width: 8, height: 8, layout: Layout.Gray, bit_depth: 8, frames: 1, format: "jpeg" }))
+}
+
+#test
+fun refuses_what_it_does_not_read() {
+    var b = test_jpeg("gray8")
+    b[90] = 0xC9u8
+    assert(decode(b, image.MAX_PIXELS) == Err(ImageError.Unsupported("arithmetic coding")))
+    b[90] = 0xC3u8
+    assert(decode(b, image.MAX_PIXELS) == Err(ImageError.Unsupported("lossless JPEG")))
+    b[90] = 0xC5u8
+    assert(decode(b, image.MAX_PIXELS) == Err(ImageError.Unsupported("hierarchical JPEG")))
+    b[90] = 0xC0u8
+    b[93] = 12u8
+    assert(decode(b, image.MAX_PIXELS) == Err(ImageError.Unsupported("12-bit samples")))
+    b[93] = 8u8
+    assert(decode(b, 63i64) == Err(ImageError.TooLarge(64i64)))
+    assert(decode(b, 64i64) != Err(ImageError.TooLarge(64i64)))
+    // no SOI, nothing after it, no scan
+    assert(decode(b[1:], image.MAX_PIXELS) == Err(ImageError.BadSignature))
+    assert(decode(b[:2], image.MAX_PIXELS) == Err(ImageError.Truncated))
+    assert(decode(b[:149], image.MAX_PIXELS) == Err(ImageError.Truncated))
+    // a segment longer than the data
+    assert(decode(b[:100], image.MAX_PIXELS) == Err(ImageError.Truncated))
+}
+
+#test
+fun broken_files_are_errors_or_images() {
+    // cuts, and bytes changed: an Err or an image, never a runtime error
+    let s = test_jpeg("prog")
+    var i = 0
+    while i < s.len() {
+        match decode(s[:i], image.MAX_PIXELS) {
+            Ok(img) => assert(img.data.len() == 16 * 16 * 3)
+            Err(_) => {}
+        }
+        i += 9
+    }
+    var b = test_jpeg("s420")
+    for k in 0..40 {
+        let at = (k * 37 + 11) % b.len()
+        b[at] = b[at] ^ ((k * 53 + 1) as uint8)
+        match decode(b, 4096i64) {
+            Ok(img) => assert(img.data.len() == img.width * img.height * img.layout.channels())
+            Err(_) => {}
+        }
+    }
+}
+
+// A 3x2 Gray image 0 1 2 / 3 4 5 turned by orientation `o`: its width and
+// samples.
+#test(1)[(3, [0u8, 1u8, 2u8, 3u8, 4u8, 5u8])]
+#test(2)[(3, [2u8, 1u8, 0u8, 5u8, 4u8, 3u8])]
+#test(3)[(3, [5u8, 4u8, 3u8, 2u8, 1u8, 0u8])]
+#test(4)[(3, [3u8, 4u8, 5u8, 0u8, 1u8, 2u8])]
+#test(5)[(2, [0u8, 3u8, 1u8, 4u8, 2u8, 5u8])]
+#test(6)[(2, [3u8, 0u8, 4u8, 1u8, 5u8, 2u8])]
+#test(7)[(2, [5u8, 2u8, 4u8, 1u8, 3u8, 0u8])]
+#test(8)[(2, [2u8, 5u8, 1u8, 4u8, 0u8, 3u8])]
+#test(9)[(3, [0u8, 1u8, 2u8, 3u8, 4u8, 5u8])]
+fun oriented(o: int) -> (int, [uint8]) {
+    let img: Image8 = Image { width: 3, height: 2, layout: Layout.Gray, data: [0u8, 1u8, 2u8, 3u8, 4u8, 5u8] }
+    let t = apply_orientation(img, o)
+    return (t.width, t.data)
+}
+
+#test
+fun orientation_of_any_sample_type() {
+    let img: Image<uint16> = Image { width: 2, height: 1, layout: Layout.Gray, data: [7u16, 9u16] }
+    let t = apply_orientation(img, 6)
+    assert(t.width == 1 && t.height == 2 && t.data == [7u16, 9u16])
+    let f: Image<float32> = Image { width: 2, height: 1, layout: Layout.Gray, data: [0.5f32, 1.0f32] }
+    assert(apply_orientation(f, 2).data == [1.0f32, 0.5f32])
+}
+
+#test
+fun the_tables_are_annex_k() {
+    let nat = natural_order()
+    assert(nat.len() == 80 && nat[63] == 63 && nat[79] == 63)
+    var seen = list_m.filled(64, false)
+    for k in 0..64 {
+        seen[nat[k]] = true
+    }
+    for k in 0..64 {
+        assert(seen[k])
+    }
+    assert(luma_quant().len() == 64 && chroma_quant().len() == 64)
+    // each standard table is a complete code that libjpeg accepts
+    var d = new_decoder([], image.MAX_PIXELS, false)
+    for t in [0, 1, 4, 5] {
+        assert(d.hdef[t])
+    }
+    let (counts, symbols) = std_huffman(true, true)
+    assert(d.set_huffman(6, counts, symbols) == Ok(()))
+    assert(d.set_huffman(6, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], []) == Ok(()))
+    assert(d.set_huffman(6, [2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [1, 2, 3]) != Ok(()))
+    assert(d.set_huffman(6, [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [1, 2]) == Ok(()))
+    assert(d.set_huffman(6, [1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [1, 2, 3]) != Ok(()))
+}
