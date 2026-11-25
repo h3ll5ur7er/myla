@@ -4,6 +4,24 @@ The plan for image files (PNG, JPEG, GIF, TIFF and a few simple formats), image 
 
 [TOC]
 
+## Status (2026-11-25)
+
+Built, merged and in review: every module below, by parallel lanes in three waves ([[MYLA-930]]). Each module has its page under [[Language/Standard-library]]; the numbers there were measured natively against Pillow and OpenCV.
+
+| Module | Task | In short |
+| --- | --- | --- |
+| std.image | [[MYLA-933]] | `Image<S>`, layouts, conversions (Pillow's luma exactly), geometry, `quantize`, `ansi` |
+| std.bytes, std.compress | [[MYLA-931]], [[MYLA-932]] | byte and bit readers and writers; LZW (GIF, TIFF), PackBits |
+| std.pnm, std.bmp, std.qoi | [[MYLA-934]] | read and write; QOI byte for byte as the reference encoder |
+| std.png | [[MYLA-935]] | every PNG of PngSuite as Pillow reads it, the broken ones refused; encoder within 1 % of Pillow's size |
+| std.jpeg | [[MYLA-936]], [[MYLA-937]] | baseline and progressive decoding bit-identical to Pillow (D311); encoding byte for byte as libjpeg writes |
+| std.gif, std.tiff | [[MYLA-938]], [[MYLA-939]] | animations composited as Pillow does; baseline TIFF with pages and float samples |
+| std.imageio | [[MYLA-940]] | `load`, `save`, `sniff` over all of them |
+| std.imgproc | [[MYLA-941]], [[MYLA-944]] | tiers A and B, most of them exact against Pillow or OpenCV |
+| std.draw, std.font | [[MYLA-942]], [[MYLA-943]] | coverage rasteriser and canvas; TrueType within 5 levels of FreeType |
+
+Speed: the codecs and filters take 2 to 7 times Pillow's or OpenCV's time (a few, such as median filtering and contours, are faster). The causes found are the compiler's ([[MYLA-947]], [[MYLA-949]], [[MYLA-950]], [[MYLA-951]]), not the modules'.
+
 ## Decisions
 
 The owner accepted every recommendation below on 2026-11-24 (D311, [[MYLA-930]]).

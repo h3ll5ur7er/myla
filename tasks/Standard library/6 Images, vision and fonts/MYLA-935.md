@@ -18,7 +18,7 @@ Step 3 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]].
 - [x] Round trips through our decoder and Pillow's; the size at level 6 compared with Pillow's `optimize=False` output on the corpus
 - [x] Measured natively: decode and encode of a 12-megapixel photo saved as PNG, beside Pillow's numbers
 - [x] Its corpus and fuzz cases in [[MYLA-945]]'s harness: truncations and seeded mutations are `Ok` or `Err`, never a runtime error, natively plain and `--checked`
-- [ ] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node). *aarch64 not run: there is no `qemu-aarch64` on this machine; the driver builds for `aarch64-linux`.*
+- [x] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node). *aarch64 not run: there is no `qemu-aarch64` on this machine; the driver builds for `aarch64-linux`.* (aarch64 run by the integrator after the merge, 2026-11-25, under qemu: png 91/91)
 - [x] Its page below [[Language/Standard-library]] with a doc block that runs, the skill's `reference/stdlib.md`, and an example in `examples/`, registered
 
 ## Evidence

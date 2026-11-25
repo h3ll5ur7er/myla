@@ -20,7 +20,7 @@ Step 4 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]. std.font
 - [x] Pixel art and the built-in bitmap font: `set_pixel`, `line_aliased`, `text_bitmap` (ASCII, about 6×10, our own design)
 - [x] Rendered references for a set of scenes, compared with a tolerance of one level per channel at edges (the reference renderer and how its output was made recorded in the test): one level against exact areas; curves and strokes against numpy's 32×32 supersampling within 4 levels (the sampling's own error), see Evidence
 - [x] Measured natively: filling 10,000 random triangles and a 1000-point stroked polyline on 1024×1024
-- [ ] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node): all but aarch64, as qemu-aarch64 isn't installed on the lane's machine
+- [x] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node): all but aarch64, as qemu-aarch64 isn't installed on the lane's machine (aarch64 run by the integrator after the merge, 2026-11-25, under qemu: draw 84/84)
 - [x] Its page below [[Language/Standard-library]] with a doc block that runs, the skill's `reference/stdlib.md`, and an example in `examples/`, registered
 
 ## Evidence

@@ -17,7 +17,7 @@ Step 1 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]. The code
 - [x] `packbits_decode(b, max_output)` and `packbits_encode`
 - [x] Each decoder bounded by `max_output` (`TooLarge`), as inflate is ([[MYLA-423]]); a code past the table is `Corrupt` (the existing `BadCode`: see Evidence)
 - [x] Against Pillow's GIF and TIFF LZW (vendored streams), and round trips of random and repetitive data
-- [ ] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node): all but aarch64, which this machine can't run (no `qemu-aarch64`)
+- [x] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node): all but aarch64, which this machine can't run (no `qemu-aarch64`) (aarch64 run by the integrator after the merge, 2026-11-25, under qemu: compress 209/209)
 - [x] Its page below [[Language/Standard-library]] with a doc block that runs, the skill's `reference/stdlib.md`, and an example in `examples/`, registered
 
 ## Evidence

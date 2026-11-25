@@ -2,7 +2,7 @@
 id: MYLA-930
 title: "Images, vision and fonts in std: the owner's decisions and the umbrella"
 type: chore
-status: in-progress
+status: review
 priority: medium
 labels: [stdlib, images, design]
 ---
@@ -24,7 +24,7 @@ Each has the page's recommendation first. The owner accepted every recommendatio
 ## Steps
 
 - [x] The questions decided, the decision recorded, the page updated to match (D311)
-- [ ] The tasks moved to `todo` in the page's order, step 1 first (three waves of parallel lanes, below)
+- [x] The tasks moved to `todo` in the page's order, step 1 first (three waves of parallel lanes, below)
 - [x] After std.png and std.jpeg: the embedded library's growth measured, before the rest goes ahead (below, 2026-11-25)
 
 ## Waves (2026-11-24)
@@ -50,3 +50,13 @@ Measured with every module of waves 1 and 2 merged (std.image, std.bytes's reade
 | `myla run` of it (best of 7) | 6 ms | 6 ms | none |
 
 A program that doesn't import the new modules pays nothing measurable; the toolchain binary carries about 1 MB more text. That matches the plan's estimate (about 20 %), so nothing here argues for moving the modules into packages now ([[MYLA-245]] can revisit it).
+
+## Result (2026-11-25)
+
+Every task of the plan, [[MYLA-931]] to [[MYLA-945]], is built, merged into the plan branch and in `review`. The integrator's checks after the last merge:
+
+- `scripts/test.sh all`: 2038 tests, 489 skipped; the 8 failures were `test_lsp`'s resolution corpus on the new modules, three gaps of the language server's resolver, fixed in [[MYLA-955]] (`test_lsp` 171 OK).
+- `scripts/check-seed.sh`: the seeds bootstrap the sources (the fixed point); no new seed needed (D207).
+- Module cases on aarch64 under qemu for the lanes that couldn't run it: all pass.
+
+Toolchain findings filed on the way: [[MYLA-946]], [[MYLA-947]], [[MYLA-948]], [[MYLA-949]], [[MYLA-950]], [[MYLA-951]], [[MYLA-952]], [[MYLA-953]], [[MYLA-954]], [[MYLA-955]].

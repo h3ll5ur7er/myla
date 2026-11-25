@@ -17,7 +17,7 @@ Step 2 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]. Three sm
 - [x] std.qoi: read and write the whole specification, checked against the reference test images
 - [x] Each of them: `max_pixels` checked before allocating
 - [x] Its corpus and fuzz cases in [[MYLA-945]]'s harness: truncations and seeded mutations are `Ok` or `Err`, never a runtime error, natively plain and `--checked`
-- [ ] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node) — all but aarch64: qemu-aarch64 isn't installed on the lane's machine
+- [x] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node) — all but aarch64: qemu-aarch64 isn't installed on the lane's machine (aarch64 run by the integrator after the merge, 2026-11-25, under qemu: pnm 43/43, bmp 21/21, qoi 12/12)
 - [x] Its page below [[Language/Standard-library]] with a doc block that runs, the skill's `reference/stdlib.md`, and an example in `examples/`, registered
 
 ## What was built

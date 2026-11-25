@@ -21,7 +21,7 @@ Step 4 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]: what mos
 - [x] Quality: `mse`, `psnr`, `ssim`
 - [x] A reference for each function, independent of the code: Pillow's where it has one (resize filters, Gaussian blur, rank filters, histograms) through vendored outputs, otherwise the textbook formula in a short Python reference over a few small images, with the tolerance stated per function
 - [x] Measured natively at 1 MP: `resize` (each filter), `gaussian_blur` at sigma 2, `median` of radius 2, `canny`, `components`, beside Pillow where it has them
-- [ ] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node) — all but aarch64: qemu-aarch64 isn't installed on the lane's machine
+- [x] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node) — all but aarch64: qemu-aarch64 isn't installed on the lane's machine (aarch64 run by the integrator after the merge, 2026-11-25, under qemu: imgproc 168/168 with tier B (MYLA-944's run))
 - [x] Its page below [[Language/Standard-library]] with a doc block that runs, the skill's `reference/stdlib.md`, and an example in `examples/`, registered
 
 Not ticked: the aarch64 run (no qemu here; the integrator's CI `targets` job runs `test_std_modules` there).

@@ -21,7 +21,7 @@ Step 2 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]: the type
 - [x] Colours: `rgb`, `rgba`, `parse_color`, `with_alpha`, `lerp`, `Format`
 - [x] Sizes in `int64` wherever a product of dimensions is formed; `new` past 2^31 − 1 samples a named failure (as `grid.new`, D184)
 - [x] Measured: `convert` RGBA to gray and `flip_h` of a 4096×4096 image natively, against the loops by hand
-- [ ] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node) — all but aarch64: this machine has no `qemu-aarch64`
+- [x] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node) — all but aarch64: this machine has no `qemu-aarch64` (aarch64 run by the integrator after the merge, 2026-11-25, under qemu: image 121/121)
 - [x] Its page below [[Language/Standard-library]] with a doc block that runs, the skill's `reference/stdlib.md`, and an example in `examples/`, registered
 
 ## Evidence
