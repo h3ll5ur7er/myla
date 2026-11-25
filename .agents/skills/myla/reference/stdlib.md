@@ -222,6 +222,12 @@ Sets of small non-negative ints, a bit each. `import std.bitset as bitset`.
 - `#derive(Eq, Hash) struct BitSet` · `fun new() -> BitSet` (growable) · `fun fixed(n: int) -> BitSet` (0..n-1; inserting outside is a failure) · `fun of(xs: [int]) -> BitSet`
 - `.insert(var self, i: int) -> bool`, `.remove(var self, i) -> bool`, `.toggle(var self, i) -> bool`, `.contains(i) -> bool`, `.popcount() -> int`, `.is_empty()`, `.capacity() -> int`, `.cleared() -> BitSet`, `.items() -> [int]`, `.next_from(i: int) -> Option<int>`, `.union(o)`, `.intersection(o)`, `.difference(o)`, `.symmetric_difference(o)`, `.complemented()` (fixed sets), `.is_subset(o) -> bool`, `.is_disjoint(o) -> bool`
 
+## std.bmp
+Windows bitmaps (MYLA-934). `import std.bmp as bmp`; images and errors are std.image's.
+- `fun info(b: [uint8]) -> Result<ImageInfo, ImageError>` (`bit_depth`: palette index bits, widest mask, or 8) · `fun decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError>` (`Rgb`, or `Rgba` with an alpha mask; palettes become `Rgb`) · `fun encode(img: Image8) -> [uint8]` (24-bit `BI_RGB`, or 32-bit `BI_BITFIELDS` with a V4 header when the image has alpha; gray repeated)
+- Reads 1/4/8 bits with a palette (`BI_RGB`, `BI_RLE4`, `BI_RLE8`), 16 (5-5-5 or bit fields), 24, 32 (`BI_RGB` is opaque RGB; `BI_BITFIELDS`/`BI_ALPHABITFIELDS`); core (12-byte) to V5 headers; negative height top-down. Channels under 8 bits scale as Pillow, `v * 255 / (2^bits - 1)` truncated. RLE: skipped pixels are index 0, runs cut at the row's end. JPEG/PNG inside: `Unsupported`.
+- Prose: `docs/Language/Standard-library/Bmp.md`
+
 ## std.btree
 Sorted map and set (B+ tree in an arena; O(log n)). `import std.btree as btree`.
 - `struct SortedMap<K, V>` (`K: Ord`) · `fun new<K: Ord, V>() -> SortedMap<K, V>` · `fun of<K: Ord, V>(pairs: [(K, V)]) -> SortedMap<K, V>`
@@ -689,6 +695,13 @@ Import: `import std.path as path`.
 ## std.platform, std.linux_calls, std.platform_wasm, std.platform_windows, std.rt
 Runtime internals, not for programs. `std.rt` is the runtime written in Myla that a native build loads with every program (string concat/compare, maps, printing, files, processes, sockets `sock_*`, the heap, the executor/timers/notifiers, `exit_program`); it uses the `__load64`/`__store64`/`__syscall`… primitives that only the standard library may call (D152). `std.platform` is its OS layer: Linux, on x86-64 and aarch64 alike (the generic system calls, their numbers and layouts from `std.linux_calls`, whose copy `linux_calls_aarch64.my` stands in for it on aarch64, MYLA-758); `platform_wasm.my` and `platform_windows.my` stand in for it on `--target wasm32-wasi` (WASI preview 1: no processes, no sockets, one worker) and `x86_64-windows` (kernel32 and the system DLLs it names: the standard streams, memory, clocks, files and directories (MYLA-704; std.path is `path_windows.my` there), child processes (MYLA-705), random bytes over bcrypt (MYLA-722), the console as the terminal and Ctrl-C and the console's close as SIGINT and SIGTERM (MYLA-707), workers as on Linux (MYLA-703), sockets over Winsock with the poller on an I/O completion port (MYLA-706)); its interface is in Myla's terms (D209): errors as std.ioerror's cause codes, a file's kind, directory entries as names and kinds, `PROCESSES`/`SOCKETS` saying what a target lacks. The only thing a program can usefully take: `from std.platform import TARGET` (`pub const TARGET: str`, `"x86_64-linux"`, `"aarch64-linux"`, `"wasm32-wasi"` or `"x86_64-windows"`: the target being built for). Documented in `docs/Language/Standard-library/Rt.md`.
 
+## std.pnm
+Netpbm images (MYLA-934): PBM, PGM, PPM (plain P1 to P3, binary P4 to P6) and PAM (P7, tuple types of 1 to 4 channels), MAXVAL 1 to 65535. `import std.pnm as pnm`, `from std.pnm import Kind`; images and errors are std.image's.
+- `fun info(b: [uint8]) -> Result<ImageInfo, ImageError>` (`bit_depth` the bits of MAXVAL) · `fun decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError>` · `fun decode16(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image16, ImageError>`
+- `fun encode(img: Image8) -> [uint8]` (P5 for `Gray`, P6 for `Rgb`, P7 with alpha) · `fun encode_as(img: Image8, kind: Kind, ascii: bool = false) -> [uint8]` · `fun encode16(img: Image16) -> [uint8]` · `fun encode16_as(img: Image16, kind: Kind, ascii: bool = false) -> [uint8]` (MAXVAL 65535). `enum Kind { Pbm, Pgm, Ppm, Pam }`: PGM/PPM convert to gray/RGB (alpha dropped), PBM thresholds the gray at half scale, PAM keeps the layout and has no plain form (`ascii` ignored).
+- Samples scale rounded half up (`v * 255 / maxval`, `v * 65535 / maxval`); MAXVAL > 255 decodes through 16 bits then `to_unorm8`. PBM 1 is black; PAM `BLACKANDWHITE` 1 is white. Plain samples above MAXVAL are `Corrupt`, binary ones clamped. An unknown TUPLTYPE is read by DEPTH.
+- Prose: `docs/Language/Standard-library/Pnm.md`
+
 ## std.process: arguments, environment, exit, child processes
 Import: `import std.process as process`.
 - `pub fun args() -> [str]` (`[0]` is the program), `pub fun exit(code: int32)`, `pub fun env(name: str) -> Option<str>`
@@ -724,6 +737,11 @@ Import: `import std.process as process`.
   - On Windows there are no signals: `kill` ends a child with `Exited(1)`, never `Signaled`, and an exit code has 32 bits (`Exited(70000)`, D216).
   - A `Command` is an immutable value (D147).
 - Prose: `docs/Language/Standard-library/Process.md`
+
+## std.qoi
+The Quite OK Image format (MYLA-934), all of version 1.0. `import std.qoi as qoi`; images and errors are std.image's.
+- `fun info(b: [uint8]) -> Result<ImageInfo, ImageError>` · `fun decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError>` (`Rgb` for 3 channels, `Rgba` for 4; the end marker not required) · `fun encode(img: Image8) -> [uint8]` (the reference encoder's bytes; 3 channels for gray and RGB, 4 with alpha; colour space 0)
+- Prose: `docs/Language/Standard-library/Qoi.md`
 
 ## std.random: xoshiro256** generator (not for secrets)
 Import: `import std.random as random`.

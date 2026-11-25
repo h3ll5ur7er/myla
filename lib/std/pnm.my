@@ -1,0 +1,718 @@
+// std.pnm: the Netpbm formats (MYLA-934). PBM (P1, P4), PGM (P2, P5),
+// PPM (P3, P6), each in its ASCII ("plain") and binary form, and PAM (P7)
+// with every tuple type of 1 to 4 channels; samples of 1 to 16 bits (any
+// MAXVAL from 1 to 65535). This is the format the image tests write their
+// expected pixels in.
+//
+// Decoding scales a sample to the full range of the result, rounded half
+// up: `v * 255 / maxval` for `decode`, `v * 65535 / maxval` for `decode16`.
+// A MAXVAL past 255 is read at 16 bits and then rounded to 8 by `decode`, as
+// std.image's `to_unorm8` does. PBM's 1 is black (0), PAM's BLACKANDWHITE 1
+// white (full scale). Every offset is checked: a short or broken file is an
+// `Err`, never a runtime error.
+
+import std.image as image
+from std.image import Image, Image8, Image16, ImageInfo, ImageError, Layout, Sample
+import std.bytes as bytes
+from std.bytes import ByteReader
+import std.num as num
+import std.list as list_m // `concat`
+import std.option as option_m // `unwrap_or`, `expect` in the tests
+import std.str as str_m // `words`, `starts_with`
+
+// What `encode_as` writes: PBM (bilevel), PGM (gray), PPM (RGB) or PAM
+// (any layout).
+#derive(Eq)
+pub enum Kind {
+    Pbm
+    Pgm
+    Ppm
+    Pam
+}
+
+// A parsed header: `magic` 1 to 7 for P1 to P7, the raster from `start` on.
+struct Header {
+    magic: int,
+    width: int,
+    height: int,
+    depth: int,
+    maxval: int,
+    layout: Layout,
+    start: int,
+}
+
+// Netpbm's whitespace: space, tab, line feed, vertical tab, form feed, CR.
+#test(32u8)[true]
+#test(11u8)[true]
+#test(48u8)[false]
+fun is_space(c: uint8) -> bool {
+    return c == 32u8 || (c >= 9u8 && c <= 13u8)
+}
+
+// The header's numbers, read through whitespace and `#` comments.
+struct Tokens {
+    r: ByteReader,
+}
+
+impl Tokens {
+    // Past whitespace and comments (a `#` to the end of its line).
+    fun skip_space(var self) {
+        while let Some(c) = self.r.peek_u8() {
+            if c == '#' {
+                while let Some(d) = self.r.u8() {
+                    if d == '\n' || d == '\r' {
+                        break
+                    }
+                }
+            } else if is_space(c) {
+                self.r.pos += 1
+            } else {
+                return
+            }
+        }
+    }
+
+    // The next decimal number, at most 2^31 - 1; `what` names it in an error.
+    fun number(var self, what: str) -> Result<int, ImageError> {
+        self.skip_space()
+        let start = self.r.pos
+        var v: int64 = 0
+        while let Some(c) = self.r.peek_u8() {
+            if c < '0' || c > '9' {
+                break
+            }
+            v = v * 10i64 + ((c - '0') as int64)
+            if v > 0x7FFFFFFFi64 {
+                return Err(ImageError.Corrupt(f"the {what} at {start} is too large"))
+            }
+            self.r.pos += 1
+        }
+        if self.r.pos == start {
+            if self.r.at_end() {
+                return Err(ImageError.Truncated)
+            }
+            return Err(ImageError.Corrupt(f"the {what} expected at {start}"))
+        }
+        return Ok(v as int)
+    }
+}
+
+// The header of `b`, its sizes not yet checked against a limit.
+fun header(b: [uint8]) -> Result<Header, ImageError> {
+    if b.len() == 0 {
+        return Err(ImageError.Truncated)
+    }
+    if b[0] != 'P' {
+        return Err(ImageError.BadSignature)
+    }
+    if b.len() < 3 {
+        return Err(ImageError.Truncated)
+    }
+    if b[1] < '1' || b[1] > '7' || !is_space(b[2]) {
+        return Err(ImageError.BadSignature)
+    }
+    let magic = (b[1] - '0') as int
+    if magic == 7 {
+        return pam_header(b)
+    }
+    var t = Tokens { r: bytes.reader(b) }
+    t.r.pos = 2
+    let w = t.number("width")?
+    let h = t.number("height")?
+    let maxval = if magic == 1 || magic == 4 { 1 } else { t.number("maxval")? }
+    if maxval < 1 || maxval > 65535 {
+        return Err(ImageError.Corrupt(f"maxval {maxval} isn't 1 to 65535"))
+    }
+    if magic >= 4 {
+        // one whitespace byte, then the raster
+        let Some(c) = t.r.u8() else {
+            return Err(ImageError.Truncated)
+        }
+        if !is_space(c) {
+            return Err(ImageError.Corrupt(f"no whitespace before the raster at {t.r.pos - 1}"))
+        }
+    }
+    let color = magic == 3 || magic == 6
+    let layout = if color { Layout.Rgb } else { Layout.Gray }
+    return Ok(Header { magic: magic, width: w, height: h, depth: layout.channels(), maxval: maxval, layout: layout, start: t.r.pos })
+}
+
+// The layout and the MAXVAL a PAM tuple type needs (0 for any), or None for
+// a type this module doesn't know.
+#test("RGB_ALPHA")[Some((Layout.Rgba, 0))]
+#test("BLACKANDWHITE")[Some((Layout.Gray, 1))]
+#test("CMYK")[None]
+fun tuple_type(t: str) -> Option<(Layout, int)> {
+    return match t {
+        "BLACKANDWHITE" => Some((Layout.Gray, 1))
+        "GRAYSCALE" => Some((Layout.Gray, 0))
+        "RGB" => Some((Layout.Rgb, 0))
+        "BLACKANDWHITE_ALPHA" => Some((Layout.GrayAlpha, 1))
+        "GRAYSCALE_ALPHA" => Some((Layout.GrayAlpha, 0))
+        "RGB_ALPHA" => Some((Layout.Rgba, 0))
+        _ => None
+    }
+}
+
+// A PAM header: "P7", then lines of a keyword and its value, up to ENDHDR.
+// An unknown tuple type is read by its depth.
+fun pam_header(b: [uint8]) -> Result<Header, ImageError> {
+    var pos = 2
+    var w = -1
+    var h = -1
+    var d = -1
+    var m = -1
+    var tuple = ""
+    while true {
+        var end = pos
+        while end < b.len() && b[end] != '\n' {
+            end += 1
+        }
+        if end >= b.len() {
+            return Err(ImageError.Truncated)
+        }
+        let line = bytes.to_str(b[pos:end])
+        let at = pos
+        pos = end + 1
+        let ws = line.words()
+        if ws.len() == 0 || ws[0].starts_with("#") {
+            continue
+        }
+        if ws[0] == "ENDHDR" {
+            break
+        }
+        if ws[0] == "TUPLTYPE" {
+            let rest = ws[1:].join(" ")
+            tuple = if tuple.len() == 0 { rest } else { tuple + " " + rest }
+            continue
+        }
+        if ws.len() != 2 {
+            return Err(ImageError.Corrupt(f"a PAM header line at {at}"))
+        }
+        let v = num.parse_int(ws[1]).unwrap_or(-1i64)
+        if v < 0i64 || v > 0x7FFFFFFFi64 || ws[1][0] < '0' || ws[1][0] > '9' {
+            return Err(ImageError.Corrupt(f"the {ws[0]} at {at} isn't a number"))
+        }
+        let n = v as int
+        if ws[0] == "WIDTH" {
+            w = n
+        } else if ws[0] == "HEIGHT" {
+            h = n
+        } else if ws[0] == "DEPTH" {
+            d = n
+        } else if ws[0] == "MAXVAL" {
+            m = n
+        } else {
+            return Err(ImageError.Corrupt(f"an unknown PAM keyword {ws[0]} at {at}"))
+        }
+    }
+    if w < 0 || h < 0 || d < 0 || m < 0 {
+        return Err(ImageError.Corrupt("WIDTH, HEIGHT, DEPTH or MAXVAL missing"))
+    }
+    if m < 1 || m > 65535 {
+        return Err(ImageError.Corrupt(f"maxval {m} isn't 1 to 65535"))
+    }
+    let Some(by_depth) = image.layout_of(d) else {
+        return Err(ImageError.Unsupported(f"PAM depth {d}"))
+    }
+    if let Some((layout, need)) = tuple_type(tuple) {
+        if layout != by_depth {
+            return Err(ImageError.Corrupt(f"TUPLTYPE {tuple} with DEPTH {d}"))
+        }
+        if need != 0 && m != need {
+            return Err(ImageError.Corrupt(f"TUPLTYPE {tuple} with MAXVAL {m}"))
+        }
+    }
+    return Ok(Header { magic: 7, width: w, height: h, depth: d, maxval: m, layout: by_depth, start: pos })
+}
+
+// The bits a sample of `maxval` takes: 1 for 1, 8 for 255, 16 for 65535.
+#test(1)[1]
+#test(15)[4]
+#test(255)[8]
+#test(1000)[10]
+#test(65535)[16]
+fun bits_of(maxval: int) -> int {
+    var n = 1
+    while (1 << n) - 1 < maxval {
+        n += 1
+    }
+    return n
+}
+
+// What `b` holds, from its header alone: size, layout, the bits of a
+// sample (from MAXVAL: 1 for PBM, 8 for 255, 16 for 65535), one frame.
+#test([80u8, 54u8, 10u8, 51u8, 32u8, 50u8, 10u8, 50u8, 53u8, 53u8, 10u8])[Ok(ImageInfo { width: 3, height: 2, layout: Layout.Rgb, bit_depth: 8, frames: 1, format: "pnm" })]
+#test([80u8, 49u8, 32u8, 35u8, 99u8, 10u8, 52u8, 32u8, 49u8, 32u8, 48u8])[Ok(ImageInfo { width: 4, height: 1, layout: Layout.Gray, bit_depth: 1, frames: 1, format: "pnm" })]
+#test([80u8, 57u8, 10u8])[Err(ImageError.BadSignature)]
+#test([80u8, 53u8, 10u8, 51u8])[Err(ImageError.Truncated)]
+pub fun info(b: [uint8]) -> Result<ImageInfo, ImageError> {
+    let h = header(b)?
+    return Ok(ImageInfo { width: h.width, height: h.height, layout: h.layout, bit_depth: bits_of(h.maxval), frames: 1, format: "pnm" })
+}
+
+// Each raw value to an 8-bit sample: 256 entries for one byte a sample,
+// 65536 for two (values above MAXVAL clamped to full scale); PBM's two.
+fun table8(h: Header) -> [uint8] {
+    if h.magic == 1 || h.magic == 4 {
+        return [255u8, 0u8]
+    }
+    let m = h.maxval as int64
+    let size = if h.maxval < 256 { 256 } else { 65536 }
+    var t: [uint8] = []
+    for i in 0..size {
+        let v = if (i as int64) > m { m } else { i as int64 }
+        if h.maxval < 256 {
+            t.push(((v * 510i64 + m) / (2i64 * m)) as uint8)
+        } else {
+            let s = (v * 131070i64 + m) / (2i64 * m)
+            t.push(((s * 255i64 + 32767i64) / 65535i64) as uint8)
+        }
+    }
+    return t
+}
+
+// The same to 16-bit samples.
+fun table16(h: Header) -> [uint16] {
+    if h.magic == 1 || h.magic == 4 {
+        return [65535u16, 0u16]
+    }
+    let m = h.maxval as int64
+    let size = if h.maxval < 256 { 256 } else { 65536 }
+    var t: [uint16] = []
+    for i in 0..size {
+        let v = if (i as int64) > m { m } else { i as int64 }
+        t.push(((v * 131070i64 + m) / (2i64 * m)) as uint16)
+    }
+    return t
+}
+
+// The raster of `h` in `b`, each value through `table`.
+fun raster<S: Sample>(b: [uint8], h: Header, table: [S]) -> Result<[S], ImageError> {
+    let n = h.width * h.height * h.depth
+    var out: [S] = []
+    if h.magic == 4 {
+        let row = (h.width + 7) / 8
+        if (h.start as int64) + (row as int64) * (h.height as int64) > (b.len() as int64) {
+            return Err(ImageError.Truncated)
+        }
+        for y in 0..h.height {
+            let base = h.start + y * row
+            for x in 0..h.width {
+                out.push(table[((b[base + (x >> 3)] >> ((7 - (x & 7)) as uint8)) & 1u8) as int])
+            }
+        }
+        return Ok(out)
+    }
+    if h.magic == 1 {
+        var i = h.start
+        while out.len() < n {
+            if i >= b.len() {
+                return Err(ImageError.Truncated)
+            }
+            let c = b[i]
+            if c == '0' || c == '1' {
+                out.push(table[(c - '0') as int])
+                i += 1
+            } else if is_space(c) {
+                i += 1
+            } else if c == '#' {
+                while i < b.len() && b[i] != '\n' && b[i] != '\r' {
+                    i += 1
+                }
+            } else {
+                return Err(ImageError.Corrupt(f"a byte {c} in a PBM raster at {i}"))
+            }
+        }
+        return Ok(out)
+    }
+    if h.magic == 2 || h.magic == 3 {
+        var i = h.start
+        while out.len() < n {
+            if i >= b.len() {
+                return Err(ImageError.Truncated)
+            }
+            let c = b[i]
+            if c >= '0' && c <= '9' {
+                let at = i
+                var v = 0
+                while i < b.len() && b[i] >= '0' && b[i] <= '9' {
+                    v = v * 10 + ((b[i] - '0') as int)
+                    if v > h.maxval {
+                        return Err(ImageError.Corrupt(f"a sample above maxval {h.maxval} at {at}"))
+                    }
+                    i += 1
+                }
+                out.push(table[v])
+            } else if is_space(c) {
+                i += 1
+            } else if c == '#' {
+                while i < b.len() && b[i] != '\n' && b[i] != '\r' {
+                    i += 1
+                }
+            } else {
+                return Err(ImageError.Corrupt(f"a byte {c} in a plain raster at {i}"))
+            }
+        }
+        return Ok(out)
+    }
+    let two = h.maxval > 255
+    let need = (h.start as int64) + (n as int64) * (if two { 2i64 } else { 1i64 })
+    if need > (b.len() as int64) {
+        return Err(ImageError.Truncated)
+    }
+    if two {
+        var i = h.start
+        for k in 0..n {
+            out.push(table[((b[i] as int) << 8) | (b[i + 1] as int)])
+            i += 2
+        }
+    } else {
+        for i in h.start..h.start + n {
+            out.push(table[b[i] as int])
+        }
+    }
+    return Ok(out)
+}
+
+// The header of `b`, its size checked against `max_pixels`.
+fun checked_header(b: [uint8], max_pixels: int64) -> Result<Header, ImageError> {
+    let h = header(b)?
+    image.check_size(h.width, h.height, h.depth, max_pixels)?
+    return Ok(h)
+}
+
+// The image in `b`, 8 bits a sample: Gray (PBM, PGM, PAM's gray types),
+// GrayAlpha, Rgb or Rgba. More than `max_pixels` pixels is `TooLarge`,
+// before anything is allocated.
+#test([80u8, 53u8, 10u8, 50u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 7u8, 200u8], 100i64)[Ok(Image { width: 2, height: 1, layout: Layout.Gray, data: [7u8, 200u8] })]
+#test([80u8, 50u8, 32u8, 50u8, 32u8, 49u8, 32u8, 49u8, 53u8, 32u8, 49u8, 53u8, 32u8, 49u8], 100i64)[Ok(Image { width: 2, height: 1, layout: Layout.Gray, data: [255u8, 17u8] })]
+#test([80u8, 49u8, 10u8, 51u8, 32u8, 49u8, 10u8, 49u8, 48u8, 49u8], 100i64)[Ok(Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 255u8, 0u8] })]
+#test([80u8, 52u8, 10u8, 57u8, 32u8, 49u8, 10u8, 170u8, 128u8], 100i64)[Ok(Image { width: 9, height: 1, layout: Layout.Gray, data: [0u8, 255u8, 0u8, 255u8, 0u8, 255u8, 0u8, 255u8, 0u8] })]
+#test([80u8, 53u8, 10u8, 50u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 7u8], 100i64)[Err(ImageError.Truncated)]
+#test([80u8, 53u8, 10u8, 50u8, 48u8, 32u8, 49u8, 48u8, 10u8, 50u8, 53u8, 53u8, 10u8], 100i64)[Err(ImageError.TooLarge(200i64))]
+#test([80u8, 50u8, 32u8, 49u8, 32u8, 49u8, 32u8, 57u8, 32u8, 49u8, 48u8], 100i64)[Err(ImageError.Corrupt("a sample above maxval 9 at 9"))]
+pub fun decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError> {
+    let h = checked_header(b, max_pixels)?
+    let n = h.width * h.height * h.depth
+    if h.maxval == 255 && h.magic >= 5 {
+        if (h.start as int64) + (n as int64) > (b.len() as int64) {
+            return Err(ImageError.Truncated)
+        }
+        return Ok(Image { width: h.width, height: h.height, layout: h.layout, data: b[h.start:h.start + n] })
+    }
+    let data = raster<uint8>(b, h, table8(h))?
+    return Ok(Image { width: h.width, height: h.height, layout: h.layout, data: data })
+}
+
+// The image in `b`, 16 bits a sample: MAXVAL 65535 as it is, any other
+// scaled to 0..65535 (so 8-bit files widen by 257).
+#test([80u8, 53u8, 10u8, 49u8, 32u8, 49u8, 10u8, 54u8, 53u8, 53u8, 51u8, 53u8, 10u8, 1u8, 2u8], 100i64)[Ok(Image { width: 1, height: 1, layout: Layout.Gray, data: [258u16] })]
+#test([80u8, 53u8, 10u8, 49u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 2u8], 100i64)[Ok(Image { width: 1, height: 1, layout: Layout.Gray, data: [514u16] })]
+#test([80u8, 49u8, 32u8, 50u8, 32u8, 49u8, 32u8, 48u8, 49u8], 100i64)[Ok(Image { width: 2, height: 1, layout: Layout.Gray, data: [65535u16, 0u16] })]
+#test([80u8, 53u8, 10u8, 49u8, 32u8, 49u8, 10u8, 49u8, 48u8, 48u8, 48u8, 10u8, 1u8], 100i64)[Err(ImageError.Truncated)]
+pub fun decode16(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image16, ImageError> {
+    let h = checked_header(b, max_pixels)?
+    let data = raster<uint16>(b, h, table16(h))?
+    return Ok(Image { width: h.width, height: h.height, layout: h.layout, data: data })
+}
+
+// -- writing --------------------------------------------------------------------
+
+// The PAM tuple type of `layout`.
+#test(Layout.GrayAlpha)["GRAYSCALE_ALPHA"]
+fun tuple_name(layout: Layout) -> str {
+    return match layout {
+        Gray => "GRAYSCALE"
+        GrayAlpha => "GRAYSCALE_ALPHA"
+        Rgb => "RGB"
+        Rgba => "RGB_ALPHA"
+    }
+}
+
+// The header of a `w` by `h` image of `kind` with samples up to `maxval`.
+#test(Kind.Ppm, false, 3, 2, Layout.Rgb, 255)["P6\n3 2\n255\n"]
+#test(Kind.Pbm, true, 3, 2, Layout.Gray, 1)["P1\n3 2\n"]
+#test(Kind.Pam, false, 1, 1, Layout.Rgba, 65535)["P7\nWIDTH 1\nHEIGHT 1\nDEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n"]
+fun header_text(kind: Kind, ascii: bool, w: int, h: int, layout: Layout, maxval: int) -> str {
+    return match kind {
+        Pbm => f"P{if ascii { 1 } else { 4 }}\n{w} {h}\n"
+        Pgm => f"P{if ascii { 2 } else { 5 }}\n{w} {h}\n{maxval}\n"
+        Ppm => f"P{if ascii { 3 } else { 6 }}\n{w} {h}\n{maxval}\n"
+        Pam => f"P7\nWIDTH {w}\nHEIGHT {h}\nDEPTH {layout.channels()}\nMAXVAL {maxval}\nTUPLTYPE {tuple_name(layout)}\nENDHDR\n"
+    }
+}
+
+// A plain raster being written: numbers apart by a space, a line per row of
+// the image and none longer than 70 bytes, as Netpbm writes them.
+struct Plain {
+    out: [uint8],
+    col: int,
+}
+
+impl Plain {
+    // `v` in decimal.
+    fun number(var self, v: uint32) {
+        var d = 1
+        var p = 1u32
+        while v / p >= 10u32 {
+            p *= 10u32
+            d += 1
+        }
+        if self.col > 0 && self.col + 1 + d > 70 {
+            self.out.push('\n')
+            self.col = 0
+        } else if self.col > 0 {
+            self.out.push(' ')
+            self.col += 1
+        }
+        while p > 0u32 {
+            self.out.push(((v / p) % 10u32) as uint8 + '0')
+            p /= 10u32
+        }
+        self.col += d
+    }
+
+    // A bit of plain PBM: no space between them.
+    fun bit(var self, black: bool) {
+        if self.col >= 70 {
+            self.out.push('\n')
+            self.col = 0
+        }
+        self.out.push(if black { '1' } else { '0' })
+        self.col += 1
+    }
+
+    // The end of a row.
+    fun newline(var self) {
+        self.out.push('\n')
+        self.col = 0
+    }
+}
+
+// The layout `kind` writes `layout` in.
+#test(Kind.Pgm, Layout.Rgba)[Layout.Gray]
+#test(Kind.Pam, Layout.Rgba)[Layout.Rgba]
+fun target_layout(kind: Kind, layout: Layout) -> Layout {
+    return match kind {
+        Pbm | Pgm => Layout.Gray
+        Ppm => Layout.Rgb
+        Pam => layout
+    }
+}
+
+// The kind `encode` writes a layout as: PGM, PPM, or PAM for alpha.
+#test(Layout.Rgb)[Kind.Ppm]
+#test(Layout.GrayAlpha)[Kind.Pam]
+fun natural_kind(layout: Layout) -> Kind {
+    return match layout {
+        Gray => Kind.Pgm
+        Rgb => Kind.Ppm
+        GrayAlpha | Rgba => Kind.Pam
+    }
+}
+
+// `img` as `kind` wants it: converted to gray or RGB (alpha dropped).
+fun prepared<S: Sample>(img: Image<S>, kind: Kind) -> Image<S> {
+    let layout = target_layout(kind, img.layout)
+    return if layout == img.layout { img } else { img.convert(layout) }
+}
+
+// A PBM file of the gray `img`: a sample below half scale is black.
+fun pbm_file<S: Sample>(img: Image<S>, ascii: bool) -> [uint8] {
+    let head = bytes.from_str(header_text(Kind.Pbm, ascii, img.width, img.height, Layout.Gray, 1))
+    if ascii {
+        var p = Plain { out: head, col: 0 }
+        var i = 0
+        for y in 0..img.height {
+            for x in 0..img.width {
+                p.bit(img.data[i].to_unorm8() < 128u8)
+                i += 1
+            }
+            p.newline()
+        }
+        return p.out
+    }
+    var out = head
+    var i = 0
+    for y in 0..img.height {
+        var acc = 0u8
+        var n = 0
+        for x in 0..img.width {
+            acc = (acc << 1u8) | (if img.data[i].to_unorm8() < 128u8 { 1u8 } else { 0u8 })
+            n += 1
+            i += 1
+            if n == 8 {
+                out.push(acc)
+                acc = 0u8
+                n = 0
+            }
+        }
+        if n > 0 {
+            out.push(acc << ((8 - n) as uint8))
+        }
+    }
+    return out
+}
+
+// A plain (ASCII) PGM or PPM file of `img`, already in its layout.
+fun plain_file<S: Sample>(img: Image<S>, kind: Kind, maxval: int) -> [uint8] {
+    var p = Plain { out: bytes.from_str(header_text(kind, true, img.width, img.height, img.layout, maxval)), col: 0 }
+    let per_row = img.width * img.layout.channels()
+    var k = 0
+    for s in img.data {
+        p.number(s.to_f32() as uint32)
+        k += 1
+        if k == per_row {
+            p.newline()
+            k = 0
+        }
+    }
+    return p.out
+}
+
+// `img` in the binary form of its own kind: PGM (P5) for gray, PPM (P6) for
+// RGB, PAM (P7) for a layout with alpha; MAXVAL 255.
+#test(image.from_data<uint8>(2, 1, Layout.Gray, [7u8, 200u8]).expect(""))[[80u8, 53u8, 10u8, 50u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 7u8, 200u8]]
+pub fun encode(img: Image8) -> [uint8] {
+    return encode_as(img, natural_kind(img.layout), false)
+}
+
+// `img` as `kind`, plain (ASCII: P1, P2, P3) if `ascii` (PAM has no plain
+// form, so `ascii` is ignored for it). PGM and PPM convert the image to gray
+// or RGB, dropping alpha; PBM writes a sample below 128 (of its gray) as
+// black.
+#test(image.from_data<uint8>(2, 1, Layout.Gray, [7u8, 200u8]).expect(""), Kind.Pgm, true)[[80u8, 50u8, 10u8, 50u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 55u8, 32u8, 50u8, 48u8, 48u8, 10u8]]
+#test(image.from_data<uint8>(2, 1, Layout.Gray, [7u8, 200u8]).expect(""), Kind.Pbm, false)[[80u8, 52u8, 10u8, 50u8, 32u8, 49u8, 10u8, 128u8]]
+pub fun encode_as(img: Image8, kind: Kind, ascii: bool = false) -> [uint8] {
+    let src = prepared<uint8>(img, kind)
+    if kind == Kind.Pbm {
+        return pbm_file<uint8>(src, ascii)
+    }
+    if ascii && kind != Kind.Pam {
+        return plain_file<uint8>(src, kind, 255)
+    }
+    let head = bytes.from_str(header_text(kind, false, src.width, src.height, src.layout, 255))
+    return head.concat(src.data)
+}
+
+// `img` at 16 bits (MAXVAL 65535, two bytes big endian a sample), in the
+// binary form of its own kind as `encode` chooses it.
+#test(image.from_data<uint16>(1, 1, Layout.Gray, [258u16]).expect(""))[[80u8, 53u8, 10u8, 49u8, 32u8, 49u8, 10u8, 54u8, 53u8, 53u8, 51u8, 53u8, 10u8, 1u8, 2u8]]
+pub fun encode16(img: Image16) -> [uint8] {
+    return encode16_as(img, natural_kind(img.layout), false)
+}
+
+// `img` at 16 bits as `kind`, as `encode_as` writes it; PBM's black is a
+// sample below 32768.
+#test(image.from_data<uint16>(1, 1, Layout.Gray, [40000u16]).expect(""), Kind.Pbm, false)[[80u8, 52u8, 10u8, 49u8, 32u8, 49u8, 10u8, 0u8]]
+pub fun encode16_as(img: Image16, kind: Kind, ascii: bool = false) -> [uint8] {
+    let src = prepared<uint16>(img, kind)
+    if kind == Kind.Pbm {
+        return pbm_file<uint16>(src, ascii)
+    }
+    if ascii && kind != Kind.Pam {
+        return plain_file<uint16>(src, kind, 65535)
+    }
+    var out = bytes.from_str(header_text(kind, false, src.width, src.height, src.layout, 65535))
+    for s in src.data {
+        out.push((s >> 8u16) as uint8)
+        out.push((s & 255u16) as uint8)
+    }
+    return out
+}
+
+// -- tests ----------------------------------------------------------------------
+
+// `img` as PBM gives it back: its gray, black below 128 and white above.
+fun bilevel(img: Image8) -> Image8 {
+    var g = img.convert(Layout.Gray)
+    for i in 0..g.data.len() {
+        g.data[i] = if g.data[i] < 128u8 { 0u8 } else { 255u8 }
+    }
+    return g
+}
+
+fun test_image() -> Image8 {
+    return image.from_data<uint8>(3, 2, Layout.Rgba, [0u8, 10u8, 20u8, 255u8, 200u8, 100u8, 50u8, 128u8, 255u8, 255u8, 255u8, 0u8,
+        1u8, 2u8, 3u8, 4u8, 127u8, 128u8, 129u8, 130u8, 90u8, 180u8, 250u8, 255u8]).expect("3x2")
+}
+
+#test
+fun every_kind_round_trips() {
+    let img = test_image()
+    for kind in [Kind.Pbm, Kind.Pgm, Kind.Ppm, Kind.Pam] {
+        let want = match kind {
+            Pbm => bilevel(img)
+            Pgm => img.convert(Layout.Gray)
+            Ppm => img.convert(Layout.Rgb)
+            Pam => img
+        }
+        for ascii in [false, true] {
+            let b = encode_as(img, kind, ascii)
+            assert(decode(b, image.MAX_PIXELS).expect("decoded") == want)
+            let i = info(b).expect("info")
+            assert(i.width == 3 && i.height == 2 && i.layout == want.layout)
+            assert(i.bit_depth == (if kind == Kind.Pbm { 1 } else { 8 }))
+            // at 16 bits, 8-bit files widen by 257
+            assert(decode16(b, image.MAX_PIXELS).expect("decoded") == want.to_u16())
+        }
+    }
+    assert(encode(img) == encode_as(img, Kind.Pam, false))
+    assert(encode(img.convert(Layout.Gray))[:2] == [80u8, 53u8])
+    assert(encode(img.convert(Layout.Rgb))[:2] == [80u8, 54u8])
+}
+
+#test
+fun sixteen_bits_round_trip() {
+    let img = image.from_data<uint16>(2, 2, Layout.GrayAlpha, [0u16, 65535u16, 258u16, 40000u16, 32767u16, 32768u16, 65534u16, 1u16]).expect("2x2")
+    assert(decode16(encode16(img), image.MAX_PIXELS).expect("decoded") == img)
+    let gray = img.convert(Layout.Gray)
+    for ascii in [false, true] {
+        assert(decode16(encode16_as(img, Kind.Pgm, ascii), image.MAX_PIXELS).expect("pgm") == gray)
+        assert(decode16(encode16_as(img, Kind.Ppm, ascii), image.MAX_PIXELS).expect("ppm") == img.convert(Layout.Rgb))
+        let pbm = decode16(encode16_as(img, Kind.Pbm, ascii), image.MAX_PIXELS).expect("pbm")
+        assert(pbm.data == [0u16, 0u16, 0u16, 65535u16])
+    }
+    // 8 bits of 16: rounded as std.image's to_unorm8 rounds
+    assert(decode(encode16(img), image.MAX_PIXELS).expect("decoded") == img.to_u8())
+    assert(info(encode16(img)).expect("info").bit_depth == 16)
+}
+
+#test
+fun what_is_written() {
+    let g = image.from_data<uint8>(2, 1, Layout.Gray, [7u8, 200u8]).expect("2x1")
+    assert(bytes.to_str(encode_as(g, Kind.Pgm, true)) == "P2\n2 1\n255\n7 200\n")
+    assert(bytes.to_str(encode_as(g, Kind.Pbm, true)) == "P1\n2 1\n10\n")
+    assert(encode_as(g, Kind.Pbm, false) == bytes.from_str("P4\n2 1\n").concat([0x80u8]))
+    // plain lines stop at 70 bytes
+    let wide: Image8 = image.new(30, 1, Layout.Gray, 255u8)
+    let text = bytes.to_str(encode_as(wide, Kind.Pgm, true))
+    for line in text.split("\n") {
+        assert(line.len() <= 70)
+    }
+    assert(decode(bytes.from_str(text), image.MAX_PIXELS).expect("wide") == wide)
+}
+
+#test
+fun headers_comments_and_pam() {
+    // comments and any whitespace in the header
+    let p = bytes.from_str("P5 # a comment\n2\t# another\r\n1 255\n").concat([1u8, 2u8])
+    assert(decode(p, image.MAX_PIXELS).expect("p5").data == [1u8, 2u8])
+    // PAM: a repeated TUPLTYPE, BLACKANDWHITE (1 is white), an unknown type by its depth
+    let bw = bytes.from_str("P7\nWIDTH 2\nHEIGHT 1\nDEPTH 1\nMAXVAL 1\n# hi\nTUPLTYPE BLACKANDWHITE\nENDHDR\n").concat([1u8, 0u8])
+    assert(decode(bw, image.MAX_PIXELS).expect("bw").data == [255u8, 0u8])
+    let odd = bytes.from_str("P7\nWIDTH 1\nHEIGHT 1\nDEPTH 2\nMAXVAL 255\nTUPLTYPE MY\nTUPLTYPE TYPE\nENDHDR\n").concat([3u8, 4u8])
+    assert(decode(odd, image.MAX_PIXELS).expect("odd").layout == Layout.GrayAlpha)
+    let wrong = bytes.from_str("P7\nWIDTH 1\nHEIGHT 1\nDEPTH 2\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n").concat([3u8, 4u8])
+    assert(decode(wrong, image.MAX_PIXELS) == Err(ImageError.Corrupt("TUPLTYPE RGB with DEPTH 2")))
+    let five = bytes.from_str("P7\nWIDTH 1\nHEIGHT 1\nDEPTH 5\nMAXVAL 255\nENDHDR\n").concat([1u8, 2u8, 3u8, 4u8, 5u8])
+    assert(decode(five, image.MAX_PIXELS) == Err(ImageError.Unsupported("PAM depth 5")))
+    assert(decode(bytes.from_str("P7\nWIDTH 1\nHEIGHT 1\n"), image.MAX_PIXELS) == Err(ImageError.Truncated))
+    assert(decode(bytes.from_str("P6\n1 1\n0\n"), image.MAX_PIXELS) == Err(ImageError.Corrupt("maxval 0 isn't 1 to 65535")))
+    assert(decode(bytes.from_str("P3\n1 1\n255\n1 2 x"), image.MAX_PIXELS) == Err(ImageError.Corrupt("a byte 120 in a plain raster at 15")))
+    // samples above MAXVAL in a binary file are clamped
+    let over = bytes.from_str("P5\n1 1\n100\n").concat([200u8])
+    assert(decode(over, image.MAX_PIXELS).expect("over").data == [255u8])
+}
+
