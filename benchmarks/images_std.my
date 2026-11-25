@@ -1,0 +1,143 @@
+// The image, vision and font modules timed (MYLA-945, D311), beside Pillow
+// doing the same work (benchmarks/images_pillow.py, which makes the same
+// picture). `build/myla build benchmarks/images_std.my -o /tmp/images &&
+// /tmp/images` (natively: the interpreter would take minutes); `/tmp/images
+// 400 300` for a smaller picture.
+//
+// The picture is a 12-MP (4000x3000) RGB "photo": gradients, two discs and
+// a little noise from a hash of x and y, so it compresses as a photo does
+// (Pillow's PNG of it is 14.7 MB, 41 % of the samples; its JPEG at quality 85
+// 3.3 MB). The `#test` cases check `photo_rgb` against the Python formula.
+//
+// Each codec and processing lane fills in its line below as its module
+// lands, beside Pillow's numbers for the same work, so a later optimisation
+// round has a baseline. Pillow 13.0 (libpng through zlib-ng, libjpeg-turbo
+// 3.2 with SIMD, FreeType 2.14), on the shared 4-core x86-64 machine of
+// 2026-11-24, the fastest of 5 runs:
+//
+//     png encode (level 6), 12 MP            3076 ms   MYLA-935: png.encode(img)
+//     png decode, 12 MP                       196 ms   MYLA-935: png.decode(b)
+//     jpeg encode (q85, 4:2:0), 12 MP          44 ms   MYLA-937: jpeg.encode(img, 85)
+//     jpeg decode, 12 MP                       77 ms   MYLA-936: jpeg.decode(b)
+//     resize 12 MP to 1155x866, bilinear       50 ms   MYLA-941: imgproc.resize(img, 1155, 866, Filter.Bilinear)
+//     resize 12 MP to 1155x866, box (area)     31 ms   MYLA-941: Filter.Area
+//     resize 12 MP to 1155x866, lanczos       125 ms   MYLA-941: Filter.Lanczos3
+//     gaussian blur 1 MP, sigma 2              28 ms   MYLA-941: imgproc.gaussian_blur(small, 2.0f32)
+//                                                       (Pillow's is three box blurs, not a true Gaussian)
+//     find edges 1 MP gray (3x3)               11 ms   MYLA-941: imgproc.canny(gray, 50.0f32, 150.0f32)
+//                                                       (Pillow has no Canny: a 3x3 kernel is no match)
+//     text: 804 characters at 16 px, wrapped   25 ms   MYLA-943: font.layout + glyph_cache masks + fill_mask
+//
+// Until then this times what exists: making the picture (std.image).
+
+import std.bench as bench
+from std.bench import Report
+import std.image as image
+from std.image import Image8
+import std.num as num
+import std.process as process
+
+// The pixel (x, y) of the `w` by `h` picture, as r << 16 | g << 8 | b: the
+// formula of images_pillow.py's `photo`.
+#test(0, 0, 4000, 3000)[231]
+#test(1, 0, 4000, 3000)[723967]
+#test(1333, 1500, 4000, 3000)[15017757] // inside the red disc
+#test(3999, 2999, 4000, 3000)[16641593]
+#test(2666, 1000, 4000, 3000)[1268167] // inside the blue disc
+#test(17, 2345, 4000, 3000)[1740981]
+fun photo_rgb(x: int, y: int, w: int, h: int) -> int {
+    let X = x as int64
+    let Y = y as int64
+    let W = w as int64
+    let H = h as int64
+    var m = ((X * 73856093i64) ^ (Y * 19349663i64)) & 0xFFFFFFFFi64
+    m = ((m ^ (m >> 13i64)) * 0x5BD1E995i64) & 0xFFFFFFFFi64
+    let n = ((m ^ (m >> 15i64)) & 31i64) - 16i64
+    var r = X * 200i64 / W + Y * 55i64 / H + n
+    var g = Y * 180i64 / H + (X + Y) * 60i64 / (W + H) + n
+    var b = 255i64 - X * 128i64 / W - Y * 64i64 / H + n - 8i64
+    if inside(X, Y, W / 3i64, H / 2i64, H / 5i64) {
+        r = 230i64 + n
+        g = 40i64 + n
+        b = 30i64 + n
+    } else if inside(X, Y, 2i64 * W / 3i64, H / 3i64, H / 7i64) {
+        r = 20i64 + n
+        g = 90i64 + n
+        b = 200i64 + n
+    }
+    return ((clamp8(r) << 16i64) | (clamp8(g) << 8i64) | clamp8(b)) as int
+}
+
+#test(3i64, 4i64, 0i64, 0i64, 5i64)[false]
+#test(3i64, 3i64, 0i64, 0i64, 5i64)[true]
+fun inside(x: int64, y: int64, cx: int64, cy: int64, r: int64) -> bool {
+    return (x - cx) * (x - cx) + (y - cy) * (y - cy) < r * r
+}
+
+#test(-3i64)[0i64]
+#test(300i64)[255i64]
+#test(17i64)[17i64]
+fun clamp8(v: int64) -> int64 {
+    if v < 0i64 {
+        return 0i64
+    }
+    if v > 255i64 {
+        return 255i64
+    }
+    return v
+}
+
+// The `w` by `h` picture.
+fun photo(w: int, h: int) -> Image8 {
+    var data: [uint8] = []
+    for y in 0..h {
+        for x in 0..w {
+            let p = photo_rgb(x, y, w, h)
+            data.push(((p >> 16) & 255) as uint8)
+            data.push(((p >> 8) & 255) as uint8)
+            data.push((p & 255) as uint8)
+        }
+    }
+    return match image.from_data(w, h, image.Layout.Rgb, data) {
+        Ok(img) => img
+        Err(e) => panic(f"{e}")
+    }
+}
+
+// The size the arguments ask for: 4000x3000 without them.
+#test(["prog"])[(4000, 3000)]
+#test(["prog", "400", "300"])[(400, 300)]
+fun size_of(argv: [str]) -> (int, int) {
+    if argv.len() == 3 {
+        let w = num.parse_int(argv[1])
+        let h = num.parse_int(argv[2])
+        if let Some(a) = w {
+            if let Some(b) = h {
+                return (a as int, b as int)
+            }
+        }
+    }
+    return (4000, 3000)
+}
+
+fun show(r: Report) {
+    print(r.line())
+}
+
+fun main() {
+    let (w, h) = size_of(process.args())
+    let img = photo(w, h)
+    print(f"{w}x{h} RGB, {img.data.len()} samples")
+    show(bench.run_n(f"make the {w}x{h} picture", 3, () => photo(w, h)))
+    // MYLA-935: let png_bytes = png.encode(img)
+    //     show(bench.run_n("png encode (level 6)", 3, () => png.encode(img)))
+    //     show(bench.run_n("png decode", 3, () => png.decode(png_bytes)))
+    // MYLA-936, MYLA-937: let jpeg_bytes = jpeg.encode(img, 85)
+    //     show(bench.run_n("jpeg encode (q85, 4:2:0)", 3, () => jpeg.encode(img, 85)))
+    //     show(bench.run_n("jpeg decode", 3, () => jpeg.decode(jpeg_bytes)))
+    // MYLA-941: resize to 1155x866 (bilinear, area, lanczos), then at
+    //     1024x1024: gaussian_blur(2.0f32), and gray |> canny(50.0f32, 150.0f32)
+    // MYLA-943: the paragraph of images_pillow.py at 16 px with
+    //     tests/burn/data/images/fonts/MylaTestSans.ttf, wrapped at 780 px:
+    //     layout, the glyph cache's masks, filled on an 800x400 canvas
+}

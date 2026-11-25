@@ -1,0 +1,7038 @@
+{
+ "about": "MYLA-945's image and font corpus: see tests/burn/_images.py for the fields and LICENSES.md for the sources; made by `python3 -m tests.burn.test_images --vendor`",
+ "pillow": "13.0.0",
+ "libjpeg_turbo": "3.2.0",
+ "freetype": "2.14.3",
+ "zlib": "1.3",
+ "images": [
+  {
+   "path": "png/pngsuite/PngSuite.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [],
+   "width": 256,
+   "height": 256,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "7fcf8ac366b5882df343a58c5f4eca3736ea8a69ee3a8cfa4227603199eea2a5",
+   "pam": null,
+   "notes": "PngSuite PngSuite; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi0g01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits1",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e61c0d2907693264ab8d875e0451880096322f07dc733a0dceaf28e810bdd2d5",
+   "pam": "expected/png/pngsuite/basi0g01.pam",
+   "notes": "PngSuite basi0g01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi0g02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits2",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c94bb4ae8f36ad2ece73a007c9d581bc1297723f299435ca98176526499ca46a",
+   "pam": "expected/png/pngsuite/basi0g02.pam",
+   "notes": "PngSuite basi0g02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c263f47ced16e00f8529c99b6e69904aef8eec72754b05ee89ec87d79bffd854",
+   "pam": "expected/png/pngsuite/basi0g04.pam",
+   "notes": "PngSuite basi0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits8",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "3f79224ccb00156a58645afcd6521d0facbf9cdec212b03935eb25e59e9dc532",
+   "pam": "expected/png/pngsuite/basi0g08.pam",
+   "notes": "PngSuite basi0g08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "bd5ce54014a325deabcef479b7b62639f5bd651e00741eaaa1dd37a66091778c",
+   "pam": "expected/png/pngsuite/basi0g16.pam",
+   "notes": "PngSuite basi0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "3ff78c7d0ac9033c81fbcc389478d7a594ef5508979e1b6a63cfd5b7f1949beb",
+   "pam": "expected/png/pngsuite/basi2c08.pam",
+   "notes": "PngSuite basi2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e2703f2e6722086d78e9f0da1d1dda2174f92bd7e27f45ae5177b282ec626eff",
+   "pam": "expected/png/pngsuite/basi2c16.pam",
+   "notes": "PngSuite basi2c16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/basi3p01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits1",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1cb2542b3bebf10172e0c9498dfeaa5460a8885fecd1482c5044fa6bbc026190",
+   "pam": "expected/png/pngsuite/basi3p01.pam",
+   "notes": "PngSuite basi3p01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "295fe76227f9704c45caa157576ae49e703ad9d1ebbd8c3c7cf65027e4f77a3a",
+   "pam": "expected/png/pngsuite/basi3p02.pam",
+   "notes": "PngSuite basi3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "93302575430e4e81bab5b40e7c6ba066762f14595859f08a1c5d02401605cacc",
+   "pam": "expected/png/pngsuite/basi3p04.pam",
+   "notes": "PngSuite basi3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "bc813894fd6e034b5c2c35bd5e0b97d821338ddf9c8e5b594c74a48f888b4dc4",
+   "pam": "expected/png/pngsuite/basi3p08.pam",
+   "notes": "PngSuite basi3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi4a08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray+alpha",
+    "bits8",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray+alpha",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "699c411e440723b7857255cab5d47cc617e61f3511866d8745f50fbcc24535e9",
+   "pam": "expected/png/pngsuite/basi4a08.pam",
+   "notes": "PngSuite basi4a08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi4a16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray+alpha",
+    "bits16",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray+alpha",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "efbbc333bdd49dec3f802d1f68ea1626a2300109809996ce4c0daa4696a46079",
+   "pam": "expected/png/pngsuite/basi4a16.pam",
+   "notes": "PngSuite basi4a16; Pillow reads 8 bits of it, the same high bytes (Pillow as rgba)"
+  },
+  {
+   "path": "png/pngsuite/basi6a08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits8",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2eb6a2cb3166e9c188add371157e9f81caa18fdf34d218844ed930b53b7431d2",
+   "pam": "expected/png/pngsuite/basi6a08.pam",
+   "notes": "PngSuite basi6a08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basi6a16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits16",
+    "interlaced",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "165b1f18ae3a6b43badb788ea6ee9040d4fcf1d47ee28ee66c48e36f6a52768b",
+   "pam": "expected/png/pngsuite/basi6a16.pam",
+   "notes": "PngSuite basi6a16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/basn0g01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits1",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e61c0d2907693264ab8d875e0451880096322f07dc733a0dceaf28e810bdd2d5",
+   "pam": "expected/png/pngsuite/basn0g01.pam",
+   "notes": "PngSuite basn0g01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn0g02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits2",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c94bb4ae8f36ad2ece73a007c9d581bc1297723f299435ca98176526499ca46a",
+   "pam": "expected/png/pngsuite/basn0g02.pam",
+   "notes": "PngSuite basn0g02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c263f47ced16e00f8529c99b6e69904aef8eec72754b05ee89ec87d79bffd854",
+   "pam": "expected/png/pngsuite/basn0g04.pam",
+   "notes": "PngSuite basn0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits8",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "3f79224ccb00156a58645afcd6521d0facbf9cdec212b03935eb25e59e9dc532",
+   "pam": "expected/png/pngsuite/basn0g08.pam",
+   "notes": "PngSuite basn0g08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "bd5ce54014a325deabcef479b7b62639f5bd651e00741eaaa1dd37a66091778c",
+   "pam": "expected/png/pngsuite/basn0g16.pam",
+   "notes": "PngSuite basn0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "3ff78c7d0ac9033c81fbcc389478d7a594ef5508979e1b6a63cfd5b7f1949beb",
+   "pam": "expected/png/pngsuite/basn2c08.pam",
+   "notes": "PngSuite basn2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e2703f2e6722086d78e9f0da1d1dda2174f92bd7e27f45ae5177b282ec626eff",
+   "pam": "expected/png/pngsuite/basn2c16.pam",
+   "notes": "PngSuite basn2c16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/basn3p01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits1",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1cb2542b3bebf10172e0c9498dfeaa5460a8885fecd1482c5044fa6bbc026190",
+   "pam": "expected/png/pngsuite/basn3p01.pam",
+   "notes": "PngSuite basn3p01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "295fe76227f9704c45caa157576ae49e703ad9d1ebbd8c3c7cf65027e4f77a3a",
+   "pam": "expected/png/pngsuite/basn3p02.pam",
+   "notes": "PngSuite basn3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "93302575430e4e81bab5b40e7c6ba066762f14595859f08a1c5d02401605cacc",
+   "pam": "expected/png/pngsuite/basn3p04.pam",
+   "notes": "PngSuite basn3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "bc813894fd6e034b5c2c35bd5e0b97d821338ddf9c8e5b594c74a48f888b4dc4",
+   "pam": "expected/png/pngsuite/basn3p08.pam",
+   "notes": "PngSuite basn3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn4a08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray+alpha",
+    "bits8",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray+alpha",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "699c411e440723b7857255cab5d47cc617e61f3511866d8745f50fbcc24535e9",
+   "pam": "expected/png/pngsuite/basn4a08.pam",
+   "notes": "PngSuite basn4a08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn4a16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray+alpha",
+    "bits16",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray+alpha",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "efbbc333bdd49dec3f802d1f68ea1626a2300109809996ce4c0daa4696a46079",
+   "pam": "expected/png/pngsuite/basn4a16.pam",
+   "notes": "PngSuite basn4a16; Pillow reads 8 bits of it, the same high bytes (Pillow as rgba)"
+  },
+  {
+   "path": "png/pngsuite/basn6a08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits8",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2eb6a2cb3166e9c188add371157e9f81caa18fdf34d218844ed930b53b7431d2",
+   "pam": "expected/png/pngsuite/basn6a08.pam",
+   "notes": "PngSuite basn6a08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/basn6a16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits16",
+    "basic"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "165b1f18ae3a6b43badb788ea6ee9040d4fcf1d47ee28ee66c48e36f6a52768b",
+   "pam": "expected/png/pngsuite/basn6a16.pam",
+   "notes": "PngSuite basn6a16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/bgai4a08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray+alpha",
+    "bits8",
+    "interlaced",
+    "background"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray+alpha",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "699c411e440723b7857255cab5d47cc617e61f3511866d8745f50fbcc24535e9",
+   "pam": "expected/png/pngsuite/bgai4a08.pam",
+   "notes": "PngSuite bgai4a08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/bgai4a16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray+alpha",
+    "bits16",
+    "interlaced",
+    "background"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray+alpha",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "efbbc333bdd49dec3f802d1f68ea1626a2300109809996ce4c0daa4696a46079",
+   "pam": "expected/png/pngsuite/bgai4a16.pam",
+   "notes": "PngSuite bgai4a16; Pillow reads 8 bits of it, the same high bytes (Pillow as rgba)"
+  },
+  {
+   "path": "png/pngsuite/bgan6a08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits8",
+    "background"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2eb6a2cb3166e9c188add371157e9f81caa18fdf34d218844ed930b53b7431d2",
+   "pam": "expected/png/pngsuite/bgan6a08.pam",
+   "notes": "PngSuite bgan6a08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/bgan6a16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits16",
+    "background"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "165b1f18ae3a6b43badb788ea6ee9040d4fcf1d47ee28ee66c48e36f6a52768b",
+   "pam": "expected/png/pngsuite/bgan6a16.pam",
+   "notes": "PngSuite bgan6a16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/bgbn4a08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray+alpha",
+    "bits8",
+    "background"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray+alpha",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "699c411e440723b7857255cab5d47cc617e61f3511866d8745f50fbcc24535e9",
+   "pam": "expected/png/pngsuite/bgbn4a08.pam",
+   "notes": "PngSuite bgbn4a08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/bggn4a16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray+alpha",
+    "bits16",
+    "background"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray+alpha",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "efbbc333bdd49dec3f802d1f68ea1626a2300109809996ce4c0daa4696a46079",
+   "pam": "expected/png/pngsuite/bggn4a16.pam",
+   "notes": "PngSuite bggn4a16; Pillow reads 8 bits of it, the same high bytes (Pillow as rgba)"
+  },
+  {
+   "path": "png/pngsuite/bgwn6a08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits8",
+    "background"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2eb6a2cb3166e9c188add371157e9f81caa18fdf34d218844ed930b53b7431d2",
+   "pam": "expected/png/pngsuite/bgwn6a08.pam",
+   "notes": "PngSuite bgwn6a08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/bgyn6a16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits16",
+    "background"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "165b1f18ae3a6b43badb788ea6ee9040d4fcf1d47ee28ee66c48e36f6a52768b",
+   "pam": "expected/png/pngsuite/bgyn6a16.pam",
+   "notes": "PngSuite bgyn6a16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/ccwn2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "chroma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "aa3f73251f6bbc2941340f7ec100cfdce91405f81b450f61f1988e34e34f4e31",
+   "pam": "expected/png/pngsuite/ccwn2c08.pam",
+   "notes": "PngSuite ccwn2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ccwn3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "chroma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "14246f63977d46f892ea09fb55e3c5e6a88f8c257c4697fced19530ec7a058ea",
+   "pam": "expected/png/pngsuite/ccwn3p08.pam",
+   "notes": "PngSuite ccwn3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cdfn2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "pixel-size"
+   ],
+   "width": 8,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1ee277423b26ef991e62d0a6e5135879fb2a5101a0559e087fca6f055902eb4a",
+   "pam": "expected/png/pngsuite/cdfn2c08.pam",
+   "notes": "PngSuite cdfn2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cdhn2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "pixel-size"
+   ],
+   "width": 32,
+   "height": 8,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2d5a7c970865c21cf33f521c6cfabf66edb8b47b4606f9ffe1edc284e49a1bd0",
+   "pam": "expected/png/pngsuite/cdhn2c08.pam",
+   "notes": "PngSuite cdhn2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cdsn2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "pixel-size"
+   ],
+   "width": 8,
+   "height": 8,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "b3e7927207f259f28f5f28560777087cb9bbe544638e6004f6dd354263696da4",
+   "pam": "expected/png/pngsuite/cdsn2c08.pam",
+   "notes": "PngSuite cdsn2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cdun2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "pixel-size"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "081245750052f6a4dba236e82d2abdc5a06fd60b3d78fabcb8c4a96b5b158526",
+   "pam": "expected/png/pngsuite/cdun2c08.pam",
+   "notes": "PngSuite cdun2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ch1n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "hist"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "93302575430e4e81bab5b40e7c6ba066762f14595859f08a1c5d02401605cacc",
+   "pam": "expected/png/pngsuite/ch1n3p04.pam",
+   "notes": "PngSuite ch1n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ch2n3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "hist"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "bc813894fd6e034b5c2c35bd5e0b97d821338ddf9c8e5b594c74a48f888b4dc4",
+   "pam": "expected/png/pngsuite/ch2n3p08.pam",
+   "notes": "PngSuite ch2n3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cm0n0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "time"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e37828348863430e164af11862103a3f63a654ace933953a0f17f1859ca2e54d",
+   "pam": "expected/png/pngsuite/cm0n0g04.pam",
+   "notes": "PngSuite cm0n0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cm7n0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "time"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e37828348863430e164af11862103a3f63a654ace933953a0f17f1859ca2e54d",
+   "pam": "expected/png/pngsuite/cm7n0g04.pam",
+   "notes": "PngSuite cm7n0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cm9n0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "time"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e37828348863430e164af11862103a3f63a654ace933953a0f17f1859ca2e54d",
+   "pam": "expected/png/pngsuite/cm9n0g04.pam",
+   "notes": "PngSuite cm9n0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cs3n2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "sbit"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "3c4215d3daa0f300b80f7dd890375122e9e4e8a754a2667fa65acc2a75082dfd",
+   "pam": "expected/png/pngsuite/cs3n2c16.pam",
+   "notes": "PngSuite cs3n2c16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/cs3n3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "sbit"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "b940944588ec117611df85a11d1a78ea34475b2b0099ea4bd7d43ce715720694",
+   "pam": "expected/png/pngsuite/cs3n3p08.pam",
+   "notes": "PngSuite cs3n3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cs5n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "sbit"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "086bb1fe427cb0494643404563367134d4ae449bf78ab64bd114c839f5c412f1",
+   "pam": "expected/png/pngsuite/cs5n2c08.pam",
+   "notes": "PngSuite cs5n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cs5n3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "sbit"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "086bb1fe427cb0494643404563367134d4ae449bf78ab64bd114c839f5c412f1",
+   "pam": "expected/png/pngsuite/cs5n3p08.pam",
+   "notes": "PngSuite cs5n3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cs8n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "sbit"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f7413c817fa3bd9e5f944dc3eb1ca5277ffbfd03e212b9760c0e90dc9334464a",
+   "pam": "expected/png/pngsuite/cs8n2c08.pam",
+   "notes": "PngSuite cs8n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cs8n3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "sbit"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f7413c817fa3bd9e5f944dc3eb1ca5277ffbfd03e212b9760c0e90dc9334464a",
+   "pam": "expected/png/pngsuite/cs8n3p08.pam",
+   "notes": "PngSuite cs8n3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ct0n0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "text"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e37828348863430e164af11862103a3f63a654ace933953a0f17f1859ca2e54d",
+   "pam": "expected/png/pngsuite/ct0n0g04.pam",
+   "notes": "PngSuite ct0n0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ct1n0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "text"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e37828348863430e164af11862103a3f63a654ace933953a0f17f1859ca2e54d",
+   "pam": "expected/png/pngsuite/ct1n0g04.pam",
+   "notes": "PngSuite ct1n0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cten0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "text"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "7e43aade2e9462e6868d677d934aa849b9773b9fd1d4b957e1f3494712777dee",
+   "pam": "expected/png/pngsuite/cten0g04.pam",
+   "notes": "PngSuite cten0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ctfn0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "text"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "423be57de93b8318fff7bee44770309ba26b1b1491c26ae74a6876969004bff1",
+   "pam": "expected/png/pngsuite/ctfn0g04.pam",
+   "notes": "PngSuite ctfn0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ctgn0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "text"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e943606c318ecb6cf83ff96d439abe78ae0e9f54a33acb1120b9a89fee329ee1",
+   "pam": "expected/png/pngsuite/ctgn0g04.pam",
+   "notes": "PngSuite ctgn0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/cthn0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "text"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "7692d169ce1815940b5aceb87c37abed094911139e2d8f97db61b73ab1a8d3a0",
+   "pam": "expected/png/pngsuite/cthn0g04.pam",
+   "notes": "PngSuite cthn0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ctjn0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "text"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "b6537660105fac861610b335515a305c2a8fb2d8a3723badd8cb65d7afdd8c69",
+   "pam": "expected/png/pngsuite/ctjn0g04.pam",
+   "notes": "PngSuite ctjn0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ctzn0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "text"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e37828348863430e164af11862103a3f63a654ace933953a0f17f1859ca2e54d",
+   "pam": "expected/png/pngsuite/ctzn0g04.pam",
+   "notes": "PngSuite ctzn0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/exif2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "exif"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e30c3d99987a4addf9d5c6dbdb818b9daa40266798d95730027f532b0af7c927",
+   "pam": "expected/png/pngsuite/exif2c08.pam",
+   "notes": "PngSuite exif2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/f00n0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits8",
+    "filter"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "7ba6cb6da925cf1aa5c00575ecaaba8e87689639d54cdc19aa1bdc7c7b851f6e",
+   "pam": "expected/png/pngsuite/f00n0g08.pam",
+   "notes": "PngSuite f00n0g08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/f00n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "filter"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "48ebbeec090aeee19eaf5c530de7206558ebeb7e764b3d64622b23f7d35d8c34",
+   "pam": "expected/png/pngsuite/f00n2c08.pam",
+   "notes": "PngSuite f00n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/f01n0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits8",
+    "filter"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "6722cab2e71779b316ef8eda1314dc314e6c02b07e4896e5ed0cafe30284a927",
+   "pam": "expected/png/pngsuite/f01n0g08.pam",
+   "notes": "PngSuite f01n0g08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/f01n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "filter"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "83c42af816dfbfe062ab0556496475918886770ae49282f0cf9772a0c0429006",
+   "pam": "expected/png/pngsuite/f01n2c08.pam",
+   "notes": "PngSuite f01n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/f02n0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits8",
+    "filter"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "b188c36f926b7284ecc9981dd054aec56af32846b2fb4434260b7bba57c3a6da",
+   "pam": "expected/png/pngsuite/f02n0g08.pam",
+   "notes": "PngSuite f02n0g08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/f02n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "filter"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e23c806d2ff0b835bf8106530be6fe47a9c252780904931525ce44a72c7e937e",
+   "pam": "expected/png/pngsuite/f02n2c08.pam",
+   "notes": "PngSuite f02n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/f03n0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits8",
+    "filter"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "b1bf13e1d1d30fd33f3b4222e239ef3b2cc35a7db2143246bb7a20231fc3ee2e",
+   "pam": "expected/png/pngsuite/f03n0g08.pam",
+   "notes": "PngSuite f03n0g08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/f03n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "filter"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "fa2426c1c6eae9e320c1dd24934dfd2174441e3d6c2c89b58f26568073715b4e",
+   "pam": "expected/png/pngsuite/f03n2c08.pam",
+   "notes": "PngSuite f03n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/f04n0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits8",
+    "filter"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "31dd33123e9c84b0ba4ac794bb1b4f93d84793e314ccd7b2d8f69e7993477a9e",
+   "pam": "expected/png/pngsuite/f04n0g08.pam",
+   "notes": "PngSuite f04n0g08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/f04n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "filter"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "0e5f940eb50e220ecc68536b9adc6dd8f408c7d069a080b7865a999e99e1a405",
+   "pam": "expected/png/pngsuite/f04n2c08.pam",
+   "notes": "PngSuite f04n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/f99n0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "filter"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "a3508d9f005d76c0be102af49582f49179e8b8f38bffcefcc4d8b708b3754d6b",
+   "pam": "expected/png/pngsuite/f99n0g04.pam",
+   "notes": "PngSuite f99n0g04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g03n0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "f82d481560a346ab2020caac6dc33b9c126fb932bb076158dac6a9d96e83b301",
+   "pam": "expected/png/pngsuite/g03n0g16.pam",
+   "notes": "PngSuite g03n0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g03n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f22d048d68c2abdd98bb34bb97be39d38c8151c0aa7f7971fb104916c1cee023",
+   "pam": "expected/png/pngsuite/g03n2c08.pam",
+   "notes": "PngSuite g03n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g03n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "849eddcdcf44379259e0df85c271816d87c21e4e7e8dea50745314f83a3f57c6",
+   "pam": "expected/png/pngsuite/g03n3p04.pam",
+   "notes": "PngSuite g03n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g04n0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "ad6b68d4fd2a55a06e0dae251178437bec9e5fa0245645477a3e4133f0d94607",
+   "pam": "expected/png/pngsuite/g04n0g16.pam",
+   "notes": "PngSuite g04n0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g04n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "0461849059574f457a0b641b55fe5a023a0d53770b232dffc23a7e8fec342eb6",
+   "pam": "expected/png/pngsuite/g04n2c08.pam",
+   "notes": "PngSuite g04n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g04n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "76d72a4b13566445dd22ab69342ea47a2f1af237d6a264ec51a575f81a14269a",
+   "pam": "expected/png/pngsuite/g04n3p04.pam",
+   "notes": "PngSuite g04n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g05n0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "86165aa0f850b034a22f225c8ac974804d0b24a0a7a95dbf7cc3932e61221fdc",
+   "pam": "expected/png/pngsuite/g05n0g16.pam",
+   "notes": "PngSuite g05n0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g05n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "42bd980a120391830c29454c51fb5f38cb65919be022ddb37616c2c9e8f247d2",
+   "pam": "expected/png/pngsuite/g05n2c08.pam",
+   "notes": "PngSuite g05n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g05n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "60ab922bfbba3ce27861778a868d602d5c48e08fcaa25665c5971366c35553db",
+   "pam": "expected/png/pngsuite/g05n3p04.pam",
+   "notes": "PngSuite g05n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g07n0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "3879a1bcc9408c781f7e73cec5c5833b4f5dea959bcc63f27052c2bf719679e4",
+   "pam": "expected/png/pngsuite/g07n0g16.pam",
+   "notes": "PngSuite g07n0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g07n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f8901763eec2444a6a8e063cfe69f80c8f9689db0d7929e594acad2cefd9f468",
+   "pam": "expected/png/pngsuite/g07n2c08.pam",
+   "notes": "PngSuite g07n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g07n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "74a089a806d422d3d44a76c9c6e81064c616bb48ff36e381fa93c3ea02937fe2",
+   "pam": "expected/png/pngsuite/g07n3p04.pam",
+   "notes": "PngSuite g07n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g10n0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "6a79369bf3c830dc2b35e7e98dc4761674b74922a4318dbe0bdc47b0feb54e60",
+   "pam": "expected/png/pngsuite/g10n0g16.pam",
+   "notes": "PngSuite g10n0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g10n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "0c9621d22a99c76d0b7bbba9fd5cb002ef6d16f935fb03cc7ad808fb68477805",
+   "pam": "expected/png/pngsuite/g10n2c08.pam",
+   "notes": "PngSuite g10n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g10n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f5d90b28ce1343630119780ddc1e46d38418e306a966cec73108374b86709c41",
+   "pam": "expected/png/pngsuite/g10n3p04.pam",
+   "notes": "PngSuite g10n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g25n0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "ad9c67a1d8d2994815cd738981a566a61c44e154e917605fcbcae59bb53def85",
+   "pam": "expected/png/pngsuite/g25n0g16.pam",
+   "notes": "PngSuite g25n0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g25n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "362ef50ba0995042b1967bab910f4ac7eaf7e972e189953c31b29944284e7749",
+   "pam": "expected/png/pngsuite/g25n2c08.pam",
+   "notes": "PngSuite g25n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/g25n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "gamma"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "fec2b82a2b23ba4df56b996b1bf806668bb3c952688a4f3e21ae2775b5effdc8",
+   "pam": "expected/png/pngsuite/g25n3p04.pam",
+   "notes": "PngSuite g25n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/oi1n0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "idat-split"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "bd5ce54014a325deabcef479b7b62639f5bd651e00741eaaa1dd37a66091778c",
+   "pam": "expected/png/pngsuite/oi1n0g16.pam",
+   "notes": "PngSuite oi1n0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/oi1n2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "idat-split"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e2703f2e6722086d78e9f0da1d1dda2174f92bd7e27f45ae5177b282ec626eff",
+   "pam": "expected/png/pngsuite/oi1n2c16.pam",
+   "notes": "PngSuite oi1n2c16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/oi2n0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "idat-split"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "bd5ce54014a325deabcef479b7b62639f5bd651e00741eaaa1dd37a66091778c",
+   "pam": "expected/png/pngsuite/oi2n0g16.pam",
+   "notes": "PngSuite oi2n0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/oi2n2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "idat-split"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e2703f2e6722086d78e9f0da1d1dda2174f92bd7e27f45ae5177b282ec626eff",
+   "pam": "expected/png/pngsuite/oi2n2c16.pam",
+   "notes": "PngSuite oi2n2c16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/oi4n0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "idat-split"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "bd5ce54014a325deabcef479b7b62639f5bd651e00741eaaa1dd37a66091778c",
+   "pam": "expected/png/pngsuite/oi4n0g16.pam",
+   "notes": "PngSuite oi4n0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/oi4n2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "idat-split"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e2703f2e6722086d78e9f0da1d1dda2174f92bd7e27f45ae5177b282ec626eff",
+   "pam": "expected/png/pngsuite/oi4n2c16.pam",
+   "notes": "PngSuite oi4n2c16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/oi9n0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "idat-split"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "bd5ce54014a325deabcef479b7b62639f5bd651e00741eaaa1dd37a66091778c",
+   "pam": "expected/png/pngsuite/oi9n0g16.pam",
+   "notes": "PngSuite oi9n0g16; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/oi9n2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "idat-split"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e2703f2e6722086d78e9f0da1d1dda2174f92bd7e27f45ae5177b282ec626eff",
+   "pam": "expected/png/pngsuite/oi9n2c16.pam",
+   "notes": "PngSuite oi9n2c16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/pp0n2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "palette-hist"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e2703f2e6722086d78e9f0da1d1dda2174f92bd7e27f45ae5177b282ec626eff",
+   "pam": "expected/png/pngsuite/pp0n2c16.pam",
+   "notes": "PngSuite pp0n2c16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/pp0n6a08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits8",
+    "palette-hist"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1acf3e2efa38d117e9b1d917edb8894af1e97701d635871e8ece690a542979e9",
+   "pam": "expected/png/pngsuite/pp0n6a08.pam",
+   "notes": "PngSuite pp0n6a08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ps1n0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits8",
+    "suggested-palette"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "3f79224ccb00156a58645afcd6521d0facbf9cdec212b03935eb25e59e9dc532",
+   "pam": "expected/png/pngsuite/ps1n0g08.pam",
+   "notes": "PngSuite ps1n0g08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ps1n2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "suggested-palette"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e2703f2e6722086d78e9f0da1d1dda2174f92bd7e27f45ae5177b282ec626eff",
+   "pam": "expected/png/pngsuite/ps1n2c16.pam",
+   "notes": "PngSuite ps1n2c16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/ps2n0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits8",
+    "suggested-palette"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "3f79224ccb00156a58645afcd6521d0facbf9cdec212b03935eb25e59e9dc532",
+   "pam": "expected/png/pngsuite/ps2n0g08.pam",
+   "notes": "PngSuite ps2n0g08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/ps2n2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "suggested-palette"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e2703f2e6722086d78e9f0da1d1dda2174f92bd7e27f45ae5177b282ec626eff",
+   "pam": "expected/png/pngsuite/ps2n2c16.pam",
+   "notes": "PngSuite ps2n2c16; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/pngsuite/s01i3p01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits1",
+    "interlaced",
+    "size"
+   ],
+   "width": 1,
+   "height": 1,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "ae974d4a74c2371d8cfe842b7aa4f6698de8570526eeb3db1941b0b72311d470",
+   "pam": "expected/png/pngsuite/s01i3p01.pam",
+   "notes": "PngSuite s01i3p01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s01n3p01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits1",
+    "size"
+   ],
+   "width": 1,
+   "height": 1,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "ae974d4a74c2371d8cfe842b7aa4f6698de8570526eeb3db1941b0b72311d470",
+   "pam": "expected/png/pngsuite/s01n3p01.pam",
+   "notes": "PngSuite s01n3p01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s02i3p01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits1",
+    "interlaced",
+    "size"
+   ],
+   "width": 2,
+   "height": 2,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f7606fde280d9577c963618cc2a8fa52b15315ff63ec185029cf66bda64435ab",
+   "pam": "expected/png/pngsuite/s02i3p01.pam",
+   "notes": "PngSuite s02i3p01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s02n3p01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits1",
+    "size"
+   ],
+   "width": 2,
+   "height": 2,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f7606fde280d9577c963618cc2a8fa52b15315ff63ec185029cf66bda64435ab",
+   "pam": "expected/png/pngsuite/s02n3p01.pam",
+   "notes": "PngSuite s02n3p01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s03i3p01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits1",
+    "interlaced",
+    "size"
+   ],
+   "width": 3,
+   "height": 3,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e32ca68c79bbada9f43c26341635087d4cf98502ddd8349f57ab2809a2ce182e",
+   "pam": "expected/png/pngsuite/s03i3p01.pam",
+   "notes": "PngSuite s03i3p01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s03n3p01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits1",
+    "size"
+   ],
+   "width": 3,
+   "height": 3,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e32ca68c79bbada9f43c26341635087d4cf98502ddd8349f57ab2809a2ce182e",
+   "pam": "expected/png/pngsuite/s03n3p01.pam",
+   "notes": "PngSuite s03n3p01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s04i3p01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits1",
+    "interlaced",
+    "size"
+   ],
+   "width": 4,
+   "height": 4,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1041017391cdd7003996fa3eb23ed3d9d324f2f83ce26906cd378b9c5c15593c",
+   "pam": "expected/png/pngsuite/s04i3p01.pam",
+   "notes": "PngSuite s04i3p01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s04n3p01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits1",
+    "size"
+   ],
+   "width": 4,
+   "height": 4,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1041017391cdd7003996fa3eb23ed3d9d324f2f83ce26906cd378b9c5c15593c",
+   "pam": "expected/png/pngsuite/s04n3p01.pam",
+   "notes": "PngSuite s04n3p01; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s05i3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "interlaced",
+    "size"
+   ],
+   "width": 5,
+   "height": 5,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "9847c302ca2ff44d2778686cd82e450b7ec3c5e9d4475b35bcb1da0b2304a790",
+   "pam": "expected/png/pngsuite/s05i3p02.pam",
+   "notes": "PngSuite s05i3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s05n3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "size"
+   ],
+   "width": 5,
+   "height": 5,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "9847c302ca2ff44d2778686cd82e450b7ec3c5e9d4475b35bcb1da0b2304a790",
+   "pam": "expected/png/pngsuite/s05n3p02.pam",
+   "notes": "PngSuite s05n3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s06i3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "interlaced",
+    "size"
+   ],
+   "width": 6,
+   "height": 6,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "0815c7f05957b9ee878ea585c2acc87731f27cf1234444d10801a24805418837",
+   "pam": "expected/png/pngsuite/s06i3p02.pam",
+   "notes": "PngSuite s06i3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s06n3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "size"
+   ],
+   "width": 6,
+   "height": 6,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "0815c7f05957b9ee878ea585c2acc87731f27cf1234444d10801a24805418837",
+   "pam": "expected/png/pngsuite/s06n3p02.pam",
+   "notes": "PngSuite s06n3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s07i3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "interlaced",
+    "size"
+   ],
+   "width": 7,
+   "height": 7,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "cb193232ab8559c5fb05f6182df25944777757be5311dc4396f3ec5436dae7e7",
+   "pam": "expected/png/pngsuite/s07i3p02.pam",
+   "notes": "PngSuite s07i3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s07n3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "size"
+   ],
+   "width": 7,
+   "height": 7,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "cb193232ab8559c5fb05f6182df25944777757be5311dc4396f3ec5436dae7e7",
+   "pam": "expected/png/pngsuite/s07n3p02.pam",
+   "notes": "PngSuite s07n3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s08i3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "interlaced",
+    "size"
+   ],
+   "width": 8,
+   "height": 8,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "64637d69a57950b8aea781e758b1810f86494b4cbe22210d41e0082f86d9a88f",
+   "pam": "expected/png/pngsuite/s08i3p02.pam",
+   "notes": "PngSuite s08i3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s08n3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "size"
+   ],
+   "width": 8,
+   "height": 8,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "64637d69a57950b8aea781e758b1810f86494b4cbe22210d41e0082f86d9a88f",
+   "pam": "expected/png/pngsuite/s08n3p02.pam",
+   "notes": "PngSuite s08n3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s09i3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "interlaced",
+    "size"
+   ],
+   "width": 9,
+   "height": 9,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "614d540ef9ce1af8f22c238a97d23aa43e69d3fc3365908b717b53ce31182497",
+   "pam": "expected/png/pngsuite/s09i3p02.pam",
+   "notes": "PngSuite s09i3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s09n3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "size"
+   ],
+   "width": 9,
+   "height": 9,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "614d540ef9ce1af8f22c238a97d23aa43e69d3fc3365908b717b53ce31182497",
+   "pam": "expected/png/pngsuite/s09n3p02.pam",
+   "notes": "PngSuite s09n3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s32i3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "interlaced",
+    "size"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1d040a1bb2f87150f8a472c0c8ed839c4bb9aa3811ebdc62aae9d197071b5f80",
+   "pam": "expected/png/pngsuite/s32i3p04.pam",
+   "notes": "PngSuite s32i3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s32n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "size"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1d040a1bb2f87150f8a472c0c8ed839c4bb9aa3811ebdc62aae9d197071b5f80",
+   "pam": "expected/png/pngsuite/s32n3p04.pam",
+   "notes": "PngSuite s32n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s33i3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "interlaced",
+    "size"
+   ],
+   "width": 33,
+   "height": 33,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e7541bd22e7477c63fa8a5e5bb2d37600a35d46ca6621f461840dd3aeed42ab3",
+   "pam": "expected/png/pngsuite/s33i3p04.pam",
+   "notes": "PngSuite s33i3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s33n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "size"
+   ],
+   "width": 33,
+   "height": 33,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e7541bd22e7477c63fa8a5e5bb2d37600a35d46ca6621f461840dd3aeed42ab3",
+   "pam": "expected/png/pngsuite/s33n3p04.pam",
+   "notes": "PngSuite s33n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s34i3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "interlaced",
+    "size"
+   ],
+   "width": 34,
+   "height": 34,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "5026a7e881c7fd46778cbc8d89dd91c1853390c546bbca11edbcb04c1d611dc5",
+   "pam": "expected/png/pngsuite/s34i3p04.pam",
+   "notes": "PngSuite s34i3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s34n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "size"
+   ],
+   "width": 34,
+   "height": 34,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "5026a7e881c7fd46778cbc8d89dd91c1853390c546bbca11edbcb04c1d611dc5",
+   "pam": "expected/png/pngsuite/s34n3p04.pam",
+   "notes": "PngSuite s34n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s35i3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "interlaced",
+    "size"
+   ],
+   "width": 35,
+   "height": 35,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "4d6f7a5627be191e4aebac38e85fc4b1888d1e5f25808adb4e5808fcbb330d86",
+   "pam": "expected/png/pngsuite/s35i3p04.pam",
+   "notes": "PngSuite s35i3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s35n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "size"
+   ],
+   "width": 35,
+   "height": 35,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "4d6f7a5627be191e4aebac38e85fc4b1888d1e5f25808adb4e5808fcbb330d86",
+   "pam": "expected/png/pngsuite/s35n3p04.pam",
+   "notes": "PngSuite s35n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s36i3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "interlaced",
+    "size"
+   ],
+   "width": 36,
+   "height": 36,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "038818342cebcb7de355c49f02190fa0120f7923ac226dd5df2b51375b2da6cb",
+   "pam": "expected/png/pngsuite/s36i3p04.pam",
+   "notes": "PngSuite s36i3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s36n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "size"
+   ],
+   "width": 36,
+   "height": 36,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "038818342cebcb7de355c49f02190fa0120f7923ac226dd5df2b51375b2da6cb",
+   "pam": "expected/png/pngsuite/s36n3p04.pam",
+   "notes": "PngSuite s36n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s37i3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "interlaced",
+    "size"
+   ],
+   "width": 37,
+   "height": 37,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "9b734436601a5aab4478f5222af8ba517772fb181e90a3849dc85a052d464698",
+   "pam": "expected/png/pngsuite/s37i3p04.pam",
+   "notes": "PngSuite s37i3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s37n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "size"
+   ],
+   "width": 37,
+   "height": 37,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "9b734436601a5aab4478f5222af8ba517772fb181e90a3849dc85a052d464698",
+   "pam": "expected/png/pngsuite/s37n3p04.pam",
+   "notes": "PngSuite s37n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s38i3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "interlaced",
+    "size"
+   ],
+   "width": 38,
+   "height": 38,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2bd4e4a636fd0ce82d437c72132bb3afc4dcb40b77dc316412bf76c09fc1a850",
+   "pam": "expected/png/pngsuite/s38i3p04.pam",
+   "notes": "PngSuite s38i3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s38n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "size"
+   ],
+   "width": 38,
+   "height": 38,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2bd4e4a636fd0ce82d437c72132bb3afc4dcb40b77dc316412bf76c09fc1a850",
+   "pam": "expected/png/pngsuite/s38n3p04.pam",
+   "notes": "PngSuite s38n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s39i3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "interlaced",
+    "size"
+   ],
+   "width": 39,
+   "height": 39,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c90477db0c8133deff5be340ddf753addf1569a38f21cc783d49ebbb7aa6c7b3",
+   "pam": "expected/png/pngsuite/s39i3p04.pam",
+   "notes": "PngSuite s39i3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s39n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "size"
+   ],
+   "width": 39,
+   "height": 39,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c90477db0c8133deff5be340ddf753addf1569a38f21cc783d49ebbb7aa6c7b3",
+   "pam": "expected/png/pngsuite/s39n3p04.pam",
+   "notes": "PngSuite s39n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s40i3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "interlaced",
+    "size"
+   ],
+   "width": 40,
+   "height": 40,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c54243b2a9ca1822fdd6b813d6790bd642a642171619c5f06420d47e28bbe648",
+   "pam": "expected/png/pngsuite/s40i3p04.pam",
+   "notes": "PngSuite s40i3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/s40n3p04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "size"
+   ],
+   "width": 40,
+   "height": 40,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c54243b2a9ca1822fdd6b813d6790bd642a642171619c5f06420d47e28bbe648",
+   "pam": "expected/png/pngsuite/s40n3p04.pam",
+   "notes": "PngSuite s40n3p04; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/tbbn0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits4",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray+alpha",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "4d2c5f34535da31d2fa3369eb96622204547d96fc5264c6c48285379e1aed7e1",
+   "pam": "expected/png/pngsuite/tbbn0g04.pam",
+   "notes": "PngSuite tbbn0g04; same as Pillow's (its colours: Pillow keeps tRNS aside)"
+  },
+  {
+   "path": "png/pngsuite/tbbn2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e0d03c739507b12f32a6bec0d8c44bb544afe08ccc628460f8b96dfbf788627b",
+   "pam": "expected/png/pngsuite/tbbn2c16.pam",
+   "notes": "PngSuite tbbn2c16; Pillow reads 8 bits of it, the same high bytes (its colours: Pillow keeps tRNS aside)"
+  },
+  {
+   "path": "png/pngsuite/tbbn3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "444403e441924fcd036c85bac271d92d399859bbba3dceb82f29ff90811fb138",
+   "pam": "expected/png/pngsuite/tbbn3p08.pam",
+   "notes": "PngSuite tbbn3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/tbgn2c16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e0d03c739507b12f32a6bec0d8c44bb544afe08ccc628460f8b96dfbf788627b",
+   "pam": "expected/png/pngsuite/tbgn2c16.pam",
+   "notes": "PngSuite tbgn2c16; Pillow reads 8 bits of it, the same high bytes (its colours: Pillow keeps tRNS aside)"
+  },
+  {
+   "path": "png/pngsuite/tbgn3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "444403e441924fcd036c85bac271d92d399859bbba3dceb82f29ff90811fb138",
+   "pam": "expected/png/pngsuite/tbgn3p08.pam",
+   "notes": "PngSuite tbgn3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/tbrn2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "053eb9d28b7ac85c3639b5169a175df61856cef7ffdaa7ad218cafdde9646d08",
+   "pam": "expected/png/pngsuite/tbrn2c08.pam",
+   "notes": "PngSuite tbrn2c08; same as Pillow's (its colours: Pillow keeps tRNS aside)"
+  },
+  {
+   "path": "png/pngsuite/tbwn0g16.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits16",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray+alpha",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "e0528556d0cd595c9dc81c91dfe84020b60c2a3b4a84ba7b2a8d424e0e41eeea",
+   "pam": "expected/png/pngsuite/tbwn0g16.pam",
+   "notes": "PngSuite tbwn0g16; same as Pillow's (its colours: Pillow keeps tRNS aside)"
+  },
+  {
+   "path": "png/pngsuite/tbwn3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "444403e441924fcd036c85bac271d92d399859bbba3dceb82f29ff90811fb138",
+   "pam": "expected/png/pngsuite/tbwn3p08.pam",
+   "notes": "PngSuite tbwn3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/tbyn3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "444403e441924fcd036c85bac271d92d399859bbba3dceb82f29ff90811fb138",
+   "pam": "expected/png/pngsuite/tbyn3p08.pam",
+   "notes": "PngSuite tbyn3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/tm3n3p02.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits2",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "9d08928c6d9fefddadc97f2a6b33e3691075d36d3c78b917e19dd29236cae822",
+   "pam": "expected/png/pngsuite/tm3n3p02.pam",
+   "notes": "PngSuite tm3n3p02; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/tp0n0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits8",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f208ac84d7c27049c22b5378df5835cd3f264fd6b4cb5f9556cb3909ef96a68e",
+   "pam": "expected/png/pngsuite/tp0n0g08.pam",
+   "notes": "PngSuite tp0n0g08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/tp0n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "da2c8f863ad0a1aa6a483fe1f84f8aa8837dc5e7c01b13279a1078ac8b60a494",
+   "pam": "expected/png/pngsuite/tp0n2c08.pam",
+   "notes": "PngSuite tp0n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/tp0n3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "ecfc48629a7098d119959b815391ed31ce5fc2b93f431d88da9f079ff8219d79",
+   "pam": "expected/png/pngsuite/tp0n3p08.pam",
+   "notes": "PngSuite tp0n3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/tp1n3p08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8",
+    "trns"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "444403e441924fcd036c85bac271d92d399859bbba3dceb82f29ff90811fb138",
+   "pam": "expected/png/pngsuite/tp1n3p08.pam",
+   "notes": "PngSuite tp1n3p08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/xc1n0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "gray",
+    "bits8",
+    "broken"
+   ],
+   "notes": "color type 1"
+  },
+  {
+   "path": "png/pngsuite/xc9n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "rgb",
+    "bits8",
+    "broken"
+   ],
+   "notes": "color type 9"
+  },
+  {
+   "path": "png/pngsuite/xcrn0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "gray",
+    "bits4",
+    "broken"
+   ],
+   "notes": "added cr bytes"
+  },
+  {
+   "path": "png/pngsuite/xcsn0g01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "gray",
+    "bits1",
+    "broken"
+   ],
+   "notes": "incorrect IDAT checksum (Pillow reads it anyway: it doesn't check IDAT's CRC)"
+  },
+  {
+   "path": "png/pngsuite/xd0n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "rgb",
+    "bits8",
+    "broken"
+   ],
+   "notes": "bit-depth 0"
+  },
+  {
+   "path": "png/pngsuite/xd3n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "rgb",
+    "bits8",
+    "broken"
+   ],
+   "notes": "bit-depth 3"
+  },
+  {
+   "path": "png/pngsuite/xd9n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "rgb",
+    "bits8",
+    "broken"
+   ],
+   "notes": "bit-depth 99"
+  },
+  {
+   "path": "png/pngsuite/xdtn0g01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "gray",
+    "bits1",
+    "broken"
+   ],
+   "notes": "missing IDAT chunk"
+  },
+  {
+   "path": "png/pngsuite/xhdn0g08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "gray",
+    "bits8",
+    "broken"
+   ],
+   "notes": "incorrect IHDR checksum"
+  },
+  {
+   "path": "png/pngsuite/xlfn0g04.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "gray",
+    "bits4",
+    "broken"
+   ],
+   "notes": "added lf bytes"
+  },
+  {
+   "path": "png/pngsuite/xs1n0g01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "gray",
+    "bits1",
+    "broken"
+   ],
+   "notes": "signature byte 1 MSBit reset"
+  },
+  {
+   "path": "png/pngsuite/xs2n0g01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "gray",
+    "bits1",
+    "broken"
+   ],
+   "notes": "signature byte 2 is a 'Q'"
+  },
+  {
+   "path": "png/pngsuite/xs4n0g01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "gray",
+    "bits1",
+    "broken"
+   ],
+   "notes": "signature byte 4 lowercase"
+  },
+  {
+   "path": "png/pngsuite/xs7n0g01.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "err",
+   "features": [
+    "gray",
+    "bits1",
+    "broken"
+   ],
+   "notes": "7th byte a space instead of control-Z"
+  },
+  {
+   "path": "png/pngsuite/z00n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "zlib-level"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2d2e86be37826088a285f0420d94744c522bdb162202ab5ea5fc3c14a1fb3aae",
+   "pam": "expected/png/pngsuite/z00n2c08.pam",
+   "notes": "PngSuite z00n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/z03n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "zlib-level"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2d2e86be37826088a285f0420d94744c522bdb162202ab5ea5fc3c14a1fb3aae",
+   "pam": "expected/png/pngsuite/z03n2c08.pam",
+   "notes": "PngSuite z03n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/z06n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "zlib-level"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2d2e86be37826088a285f0420d94744c522bdb162202ab5ea5fc3c14a1fb3aae",
+   "pam": "expected/png/pngsuite/z06n2c08.pam",
+   "notes": "PngSuite z06n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/pngsuite/z09n2c08.png",
+   "format": "png",
+   "source": "pngsuite",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "zlib-level"
+   ],
+   "width": 32,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2d2e86be37826088a285f0420d94744c522bdb162202ab5ea5fc3c14a1fb3aae",
+   "pam": "expected/png/pngsuite/z09n2c08.pam",
+   "notes": "PngSuite z09n2c08; same as Pillow's"
+  },
+  {
+   "path": "png/gen/filters-gray2.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits2",
+    "filter"
+   ],
+   "width": 17,
+   "height": 13,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "d4372378c918d1dc206c9b5a84278400827daa9f73c34b875c57a7f12b13b28f",
+   "pam": "expected/png/gen/filters-gray2.pam",
+   "notes": "2-bit gray, 17x13, row r filtered with filter r % 5; same as Pillow's"
+  },
+  {
+   "path": "png/gen/filters-rgb8.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "filter"
+   ],
+   "width": 19,
+   "height": 11,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "cc1c23a714cbc2a88b4f89415dc0a6667290a2bc185b902f455978cac1b74daa",
+   "pam": "expected/png/gen/filters-rgb8.pam",
+   "notes": "8-bit RGB, 19x11, filters 0 to 4 cycled; same as Pillow's"
+  },
+  {
+   "path": "png/gen/filters-rgba16.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits16",
+    "filter"
+   ],
+   "width": 9,
+   "height": 10,
+   "layout": "rgba",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "61cb57709c2c09277d897a350a3f4408deb85c634aa6da2fd91d08e7daf2834a",
+   "pam": "expected/png/gen/filters-rgba16.pam",
+   "notes": "16-bit RGBA, 9x10, filters cycled; Pillow keeps only 8 bits of it; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/gen/interlaced-filters-rgba16.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits16",
+    "interlaced",
+    "filter"
+   ],
+   "width": 9,
+   "height": 10,
+   "layout": "rgba",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "61cb57709c2c09277d897a350a3f4408deb85c634aa6da2fd91d08e7daf2834a",
+   "pam": "expected/png/gen/interlaced-filters-rgba16.pam",
+   "notes": "Adam7, 16-bit RGBA, each pass's rows filtered differently; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "png/gen/palette-trns-short.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4",
+    "trns"
+   ],
+   "width": 7,
+   "height": 5,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "69d148cdbfb022efe744ab7277dc11a71da7cf3c6a946f65d799bf389994bad2",
+   "pam": "expected/png/gen/palette-trns-short.pam",
+   "notes": "a 7-colour palette, tRNS for the first 3 only (the rest opaque); same as Pillow's"
+  },
+  {
+   "path": "png/gen/one-pixel.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "gray",
+    "bits8",
+    "size"
+   ],
+   "width": 1,
+   "height": 1,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "7c5bd2d144fdde498406edcb9fe60ce65b0dfa5f2dd7a7617f505e3d46d68bdb",
+   "pam": "expected/png/gen/one-pixel.pam",
+   "notes": "1x1; same as Pillow's"
+  },
+  {
+   "path": "png/gen/idat-split.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "idat-split"
+   ],
+   "width": 19,
+   "height": 11,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "cc1c23a714cbc2a88b4f89415dc0a6667290a2bc185b902f455978cac1b74daa",
+   "pam": "expected/png/gen/idat-split.pam",
+   "notes": "IDAT in 1-byte chunks, two empty, then the rest; same as Pillow's"
+  },
+  {
+   "path": "png/gen/photo-512x384.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8",
+    "medium"
+   ],
+   "width": 512,
+   "height": 384,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c74834972be338d4f10fbb87f1bd7acdfaa1a0b0fc45c7525c9e2d3bf503f1b8",
+   "pam": null,
+   "notes": "a medium photo-like image, Paeth on every row (hash only); same as Pillow's"
+  },
+  {
+   "path": "png/gen/bad-crc-idat.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "a byte of IDAT changed: the CRC doesn't match"
+  },
+  {
+   "path": "png/gen/cut-in-idat.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "cut inside IDAT: no IEND"
+  },
+  {
+   "path": "png/gen/no-iend.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "any",
+   "features": [
+    "broken"
+   ],
+   "notes": "IEND missing; every pixel is there"
+  },
+  {
+   "path": "png/gen/huge.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "IHDR says 65535x65535 RGBA: TooLarge before allocating"
+  },
+  {
+   "path": "png/gen/zero-width.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "width 0"
+  },
+  {
+   "path": "png/gen/unknown-critical.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "an unknown critical chunk ABCD: Unsupported"
+  },
+  {
+   "path": "png/gen/unknown-ancillary.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits8"
+   ],
+   "width": 19,
+   "height": 11,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "cc1c23a714cbc2a88b4f89415dc0a6667290a2bc185b902f455978cac1b74daa",
+   "pam": "expected/png/gen/unknown-ancillary.pam",
+   "notes": "an unknown ancillary chunk abCd, skipped"
+  },
+  {
+   "path": "png/gen/bad-filter.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "filter type 7 on the first row"
+  },
+  {
+   "path": "png/gen/bad-zlib.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "a zlib header that isn't one"
+  },
+  {
+   "path": "png/gen/short-idat.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "the image data stops 30 bytes short of the last row"
+  },
+  {
+   "path": "png/gen/palette-index-out-of-range.png",
+   "format": "png",
+   "source": "generated",
+   "expect": "any",
+   "features": [
+    "broken"
+   ],
+   "notes": "index 9 in a 3-colour palette (libpng: black)"
+  },
+  {
+   "path": "jpeg/photo-q50-s444.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s444"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "941ab5bebafde529f3916d2dfc1f864a94e0e9333ca8cf6632b3dd2d70befa8e",
+   "pam": "expected/jpeg/photo-q50-s444.pam",
+   "notes": "61x47 (partial MCUs), quality 50, 4:4:4; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/photo-q50-s422.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s422"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "8f9e66c96a35bf2360b61c81363de9721eca89be6cf5c74d45aaa604c6015af4",
+   "pam": "expected/jpeg/photo-q50-s422.pam",
+   "notes": "61x47 (partial MCUs), quality 50, 4:2:2; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/photo-q50-s420.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s420"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "70e3074d72099fca9d93136b4e0946bafa6722c2e1b3d89e8b35131fa887cf97",
+   "pam": "expected/jpeg/photo-q50-s420.pam",
+   "notes": "61x47 (partial MCUs), quality 50, 4:2:0; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/photo-q75-s444.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s444"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "bdbaf80b1282c9e6126f564755ef3c48dc9158a03b58c66196c68a4728aa4bd4",
+   "pam": "expected/jpeg/photo-q75-s444.pam",
+   "notes": "61x47 (partial MCUs), quality 75, 4:4:4; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/photo-q75-s422.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s422"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "42afff1ea2e3d1366657ea98178c7a97bf2747ce27992ec05bec31cb788f9095",
+   "pam": "expected/jpeg/photo-q75-s422.pam",
+   "notes": "61x47 (partial MCUs), quality 75, 4:2:2; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/photo-q75-s420.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s420"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "927541b553a9984c6a5e18e6b3eefed3856fc49b23a75542acf861c59192ca0c",
+   "pam": "expected/jpeg/photo-q75-s420.pam",
+   "notes": "61x47 (partial MCUs), quality 75, 4:2:0; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/photo-q95-s444.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s444"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "a40e2df76f18c9c2afcc4ddd1e0fd2cb54e3dbc384361bcd907a6d001fedbe21",
+   "pam": "expected/jpeg/photo-q95-s444.pam",
+   "notes": "61x47 (partial MCUs), quality 95, 4:4:4; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/photo-q95-s422.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s422"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "343f9519bd42a349f360874ff12bb77e52d21023b313fb5d77c10098b1cb2d44",
+   "pam": "expected/jpeg/photo-q95-s422.pam",
+   "notes": "61x47 (partial MCUs), quality 95, 4:2:2; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/photo-q95-s420.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s420"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "d3df29d9097ccb81edd79ad17783db302f1b29a875a74017176133af1ed4d0cc",
+   "pam": "expected/jpeg/photo-q95-s420.pam",
+   "notes": "61x47 (partial MCUs), quality 95, 4:2:0; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/gradient-q90-s444.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s444"
+   ],
+   "width": 48,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e0a29861b4ba563fd24772c8d9ea44cd67a2894584a05f610cb466ec20613840",
+   "pam": "expected/jpeg/gradient-q90-s444.pam",
+   "notes": "smooth gradients; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/noise-q60-s420.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s420"
+   ],
+   "width": 24,
+   "height": 16,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "35acdeb03ede39db9b5ce9180b68542cdbafcb30b1c7e7ae9c7675f09e81cdeb",
+   "pam": "expected/jpeg/noise-q60-s420.pam",
+   "notes": "noise: every coefficient; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/edges-q85-s422.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s422"
+   ],
+   "width": 40,
+   "height": 24,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "5f3970fcb52501171698edd1786279ed0120e40516b206701a7844eb15e845c9",
+   "pam": "expected/jpeg/edges-q85-s422.pam",
+   "notes": "sharp edges; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/text-q75-s420.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s420"
+   ],
+   "width": 96,
+   "height": 44,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "6404cb98a442217eda8c98dcd63ba3c0687fab77c4d0ee7679d70c8517d811cb",
+   "pam": "expected/jpeg/text-q75-s420.pam",
+   "notes": "dark text on white; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/gray-q80.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "gray"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "97553931486ed6391009742f54e22751458bce90926cea06f20029e9b385a0e4",
+   "pam": "expected/jpeg/gray-q80.pam",
+   "notes": "one component; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/gray-progressive.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "progressive",
+    "gray"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "97553931486ed6391009742f54e22751458bce90926cea06f20029e9b385a0e4",
+   "pam": "expected/jpeg/gray-progressive.pam",
+   "notes": "one component, progressive; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/progressive-s420.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "progressive",
+    "s420"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f4c4b4c92eb74dc1559ffd34228a6246060b53a467155b5c40ae4aff874a822b",
+   "pam": "expected/jpeg/progressive-s420.pam",
+   "notes": "progressive: spectral selection and successive approximation; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/progressive-s444-optimized.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "progressive",
+    "s444"
+   ],
+   "width": 40,
+   "height": 24,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "583b1c8d182b0350272bb44e42e661f95005155c45608749b574359fa9557091",
+   "pam": "expected/jpeg/progressive-s444-optimized.pam",
+   "notes": "progressive, optimised Huffman tables; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/optimized-s420.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s420"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f4c4b4c92eb74dc1559ffd34228a6246060b53a467155b5c40ae4aff874a822b",
+   "pam": "expected/jpeg/optimized-s420.pam",
+   "notes": "baseline, optimised Huffman tables; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/restart-blocks-s420.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s420",
+    "restart"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f4c4b4c92eb74dc1559ffd34228a6246060b53a467155b5c40ae4aff874a822b",
+   "pam": "expected/jpeg/restart-blocks-s420.pam",
+   "notes": "a restart marker every MCU; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/restart-rows-s444.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s444",
+    "restart"
+   ],
+   "width": 40,
+   "height": 24,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "583b1c8d182b0350272bb44e42e661f95005155c45608749b574359fa9557091",
+   "pam": "expected/jpeg/restart-rows-s444.pam",
+   "notes": "a restart marker every MCU row; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/restart-progressive.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "progressive",
+    "s420",
+    "restart"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "f4c4b4c92eb74dc1559ffd34228a6246060b53a467155b5c40ae4aff874a822b",
+   "pam": "expected/jpeg/restart-progressive.pam",
+   "notes": "progressive with restart markers; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/cmyk-adobe.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "adobe",
+    "baseline",
+    "s444",
+    "cmyk"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "d4c2203db4f8ab661c430cf815952e56a78b28ad92781e443f8b96bbeab825c1",
+   "pam": "expected/jpeg/cmyk-adobe.pam",
+   "notes": "Adobe CMYK (APP14, inverted samples); expected rgb = round((255 - C) * (255 - K) / 255) from Pillow's CMYK (which undoes Adobe's inversion); cmyk_sha256 is Pillow's CMYK samples; Pillow's decode (libjpeg-turbo islow, fancy upsampling)",
+   "cmyk_sha256": "cc958fc15ed666c32b5d1153c6a5bf1bdfcb82ef324bb3093c1250d24ff21453"
+  },
+  {
+   "path": "jpeg/exif-orientation-3.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "exif",
+    "baseline",
+    "s420"
+   ],
+   "width": 48,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "87dc2f9c2e79ea128d68681be79d3c36c7461d87da61d05bfd0e8e030308a0db",
+   "pam": "expected/jpeg/exif-orientation-3.pam",
+   "notes": "EXIF orientation 3; pixels as stored; Pillow's decode (libjpeg-turbo islow, fancy upsampling)",
+   "orientation": 3
+  },
+  {
+   "path": "jpeg/exif-orientation-6.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "exif",
+    "baseline",
+    "s420"
+   ],
+   "width": 48,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "87dc2f9c2e79ea128d68681be79d3c36c7461d87da61d05bfd0e8e030308a0db",
+   "pam": "expected/jpeg/exif-orientation-6.pam",
+   "notes": "EXIF orientation 6; pixels as stored; Pillow's decode (libjpeg-turbo islow, fancy upsampling)",
+   "orientation": 6
+  },
+  {
+   "path": "jpeg/exif-orientation-8.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "exif",
+    "baseline",
+    "s420"
+   ],
+   "width": 48,
+   "height": 32,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "87dc2f9c2e79ea128d68681be79d3c36c7461d87da61d05bfd0e8e030308a0db",
+   "pam": "expected/jpeg/exif-orientation-8.pam",
+   "notes": "EXIF orientation 8; pixels as stored; Pillow's decode (libjpeg-turbo islow, fancy upsampling)",
+   "orientation": 8
+  },
+  {
+   "path": "jpeg/one-pixel.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s420"
+   ],
+   "width": 1,
+   "height": 1,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1c97eb23a3d1bb8527a11821833591063c64fdaf00865942fb5be72a60f6d51d",
+   "pam": "expected/jpeg/one-pixel.pam",
+   "notes": "1x1, 4:2:0; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/mcu-16x16.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s420"
+   ],
+   "width": 16,
+   "height": 16,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "b5a9eecb3299d2b39367e5f6d699c1aa87e2fe319bde55542a764d703cb3edb4",
+   "pam": "expected/jpeg/mcu-16x16.pam",
+   "notes": "exactly one 4:2:0 MCU; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/photo-512x384-q85.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s420"
+   ],
+   "width": 512,
+   "height": 384,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "57b576351e03e5c5db9741a929ed2f4054ba1556f9b46faa23984c432b64e7a4",
+   "pam": null,
+   "notes": "a medium photo (hash only); Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/photo-256x192-q92-s444.jpg",
+   "format": "jpeg",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s444"
+   ],
+   "width": 256,
+   "height": 192,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "3255caa3e5ca61a04e9f7869ca69a377b5643e883f0988d06beeafb9d1c2b5d6",
+   "pam": null,
+   "notes": "a medium photo, 4:4:4; Pillow's decode (libjpeg-turbo islow, fancy upsampling)"
+  },
+  {
+   "path": "jpeg/photo-q85-s440.jpg",
+   "format": "jpeg",
+   "source": "imagemagick",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s440"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "3a0c8ac23a3980d72fa00f80f24d4e577430f55cee38c95f062f493f17e7c2c3",
+   "pam": "expected/jpeg/photo-q85-s440.pam",
+   "notes": "4:4:0 by ImageMagick (Pillow can't write it); Pillow's decode"
+  },
+  {
+   "path": "jpeg/photo-q85-s411.jpg",
+   "format": "jpeg",
+   "source": "imagemagick",
+   "expect": "ok",
+   "features": [
+    "baseline",
+    "s411"
+   ],
+   "width": 61,
+   "height": 47,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "01392e65df0f2fedd27b0ae871ee697a4bc88bcf1ad7162c81d05f730a0bb2f9",
+   "pam": "expected/jpeg/photo-q85-s411.pam",
+   "notes": "4:1:1 by ImageMagick (Pillow can't write it); Pillow's decode"
+  },
+  {
+   "path": "jpeg/not-jpeg.jpg",
+   "format": "jpeg",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "no SOI"
+  },
+  {
+   "path": "jpeg/soi-only.jpg",
+   "format": "jpeg",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "SOI and nothing else"
+  },
+  {
+   "path": "jpeg/cut-before-sos.jpg",
+   "format": "jpeg",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "cut before the scan: no image data"
+  },
+  {
+   "path": "jpeg/cut-in-scan.jpg",
+   "format": "jpeg",
+   "source": "generated",
+   "expect": "any",
+   "features": [
+    "broken"
+   ],
+   "notes": "cut halfway through the scan (libjpeg fills the rest and warns)"
+  },
+  {
+   "path": "jpeg/no-eoi.jpg",
+   "format": "jpeg",
+   "source": "generated",
+   "expect": "any",
+   "features": [
+    "broken"
+   ],
+   "notes": "EOI missing; all the data is there"
+  },
+  {
+   "path": "jpeg/huge.jpg",
+   "format": "jpeg",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "SOF says 65535x65535: TooLarge before allocating"
+  },
+  {
+   "path": "jpeg/zero-width.jpg",
+   "format": "jpeg",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "width 0"
+  },
+  {
+   "path": "jpeg/sof9.jpg",
+   "format": "jpeg",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "SOF9: arithmetic coding: Unsupported"
+  },
+  {
+   "path": "jpeg/sof3.jpg",
+   "format": "jpeg",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "SOF3: lossless: Unsupported"
+  },
+  {
+   "path": "jpeg/precision-12.jpg",
+   "format": "jpeg",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "12-bit samples in a baseline frame: Unsupported or Corrupt"
+  },
+  {
+   "path": "jpeg/bad-huffman-counts.jpg",
+   "format": "jpeg",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "a DHT whose code counts overflow its length"
+  },
+  {
+   "path": "gif/static-64.gif",
+   "format": "gif",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "GIF87a",
+    "interlaced"
+   ],
+   "width": 40,
+   "height": 30,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "fdb904383589efcb3d9a9476788bd7b61ddbea9487652ecc6497ee41cee8c570",
+   "pam": "expected/gif/static-64.pam",
+   "notes": "one frame, a 64-colour global palette; frames=1; Pillow's frames as RGBA, composited",
+   "disposals": []
+  },
+  {
+   "path": "gif/interlaced.gif",
+   "format": "gif",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "GIF87a",
+    "interlaced"
+   ],
+   "width": 40,
+   "height": 30,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "fdb904383589efcb3d9a9476788bd7b61ddbea9487652ecc6497ee41cee8c570",
+   "pam": "expected/gif/interlaced.pam",
+   "notes": "interlaced rows (4 passes); frames=1; Pillow's frames as RGBA, composited",
+   "disposals": []
+  },
+  {
+   "path": "gif/two-colours-13x7.gif",
+   "format": "gif",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "GIF87a"
+   ],
+   "width": 13,
+   "height": 7,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "59ef318ac292ac0b1234a11324acd9a3bc47089883fb3411cb4580590e4edb94",
+   "pam": "expected/gif/two-colours-13x7.pam",
+   "notes": "a 2-colour palette: the smallest LZW code size; frames=1; Pillow's frames as RGBA, composited",
+   "disposals": []
+  },
+  {
+   "path": "gif/transparent.gif",
+   "format": "gif",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "GIF89a",
+    "interlaced",
+    "transparent",
+    "disposal0"
+   ],
+   "width": 24,
+   "height": 16,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "432630f671aa0f86b833a0a065fc5ddea8e89e7908d3580b8ed91fc0598f8ebe",
+   "pam": "expected/gif/transparent.pam",
+   "notes": "palette index 0 transparent; frames=1; Pillow's frames as RGBA, composited",
+   "disposals": [
+    0
+   ]
+  },
+  {
+   "path": "gif/one-pixel.gif",
+   "format": "gif",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "GIF87a"
+   ],
+   "width": 1,
+   "height": 1,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "e3820096cb82366b860b8a4e668453a7aaaf423af03bdf289fa308ea03a79332",
+   "pam": "expected/gif/one-pixel.pam",
+   "notes": "1x1; frames=1; Pillow's frames as RGBA, composited",
+   "disposals": []
+  },
+  {
+   "path": "gif/animated-disposal0.gif",
+   "format": "gif",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "GIF89a",
+    "animated",
+    "local-palette",
+    "transparent",
+    "disposal0"
+   ],
+   "width": 32,
+   "height": 24,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 4,
+   "sha256": "4c76cd97f2d566fc3b28ff8307bf5f274413a20a739917f58937d3513bb129ad",
+   "pam": "expected/gif/animated-disposal0.pam",
+   "notes": "4 frames, disposal 0, index 31 transparent, frames cropped to what changed; frames=4; Pillow's frames as RGBA, composited",
+   "disposals": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "path": "gif/animated-disposal1.gif",
+   "format": "gif",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "GIF89a",
+    "animated",
+    "local-palette",
+    "transparent",
+    "disposal1"
+   ],
+   "width": 32,
+   "height": 24,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 4,
+   "sha256": "4c76cd97f2d566fc3b28ff8307bf5f274413a20a739917f58937d3513bb129ad",
+   "pam": "expected/gif/animated-disposal1.pam",
+   "notes": "4 frames, disposal 1, index 31 transparent, frames cropped to what changed; frames=4; Pillow's frames as RGBA, composited",
+   "disposals": [
+    1,
+    1,
+    1,
+    1
+   ]
+  },
+  {
+   "path": "gif/animated-disposal2.gif",
+   "format": "gif",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "GIF89a",
+    "animated",
+    "local-palette",
+    "transparent",
+    "disposal2"
+   ],
+   "width": 32,
+   "height": 24,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 4,
+   "sha256": "4c76cd97f2d566fc3b28ff8307bf5f274413a20a739917f58937d3513bb129ad",
+   "pam": "expected/gif/animated-disposal2.pam",
+   "notes": "4 frames, disposal 2, index 31 transparent, frames cropped to what changed; frames=4; Pillow's frames as RGBA, composited",
+   "disposals": [
+    2,
+    2,
+    2,
+    2
+   ]
+  },
+  {
+   "path": "gif/animated-disposal3.gif",
+   "format": "gif",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "GIF89a",
+    "animated",
+    "local-palette",
+    "transparent",
+    "disposal3"
+   ],
+   "width": 32,
+   "height": 24,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 4,
+   "sha256": "5451b8047a651098354af64a4dd35e4bacfb833f35bb4961135d830f10fb3950",
+   "pam": "expected/gif/animated-disposal3.pam",
+   "notes": "4 frames, disposal 3, index 31 transparent, frames cropped to what changed; frames=4; Pillow's frames as RGBA, composited",
+   "disposals": [
+    3,
+    3,
+    3,
+    3
+   ]
+  },
+  {
+   "path": "gif/local-palettes.gif",
+   "format": "gif",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "GIF89a",
+    "animated",
+    "local-palette",
+    "transparent",
+    "disposal0"
+   ],
+   "width": 20,
+   "height": 16,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 3,
+   "sha256": "ed9649af13814b2f418df30ed216beb73cf323f3df2d3b911bd7d2c5d9f51bb2",
+   "pam": "expected/gif/local-palettes.pam",
+   "notes": "3 frames, each with its own 16-colour palette; frames=3; Pillow's frames as RGBA, composited",
+   "disposals": [
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "path": "gif/not-gif.gif",
+   "format": "gif",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "a signature GIF88a"
+  },
+  {
+   "path": "gif/cut-in-header.gif",
+   "format": "gif",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "cut inside the logical screen descriptor"
+  },
+  {
+   "path": "gif/cut-in-palette.gif",
+   "format": "gif",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "cut inside the global palette"
+  },
+  {
+   "path": "gif/cut-in-data.gif",
+   "format": "gif",
+   "source": "generated",
+   "expect": "any",
+   "features": [
+    "broken"
+   ],
+   "notes": "cut inside the LZW data (no trailer)"
+  },
+  {
+   "path": "gif/huge-screen.gif",
+   "format": "gif",
+   "source": "generated",
+   "expect": "any",
+   "features": [
+    "broken"
+   ],
+   "notes": "a 65535x65535 screen around a 40x30 frame (TooLarge or the frame)"
+  },
+  {
+   "path": "gif/lzw-code-size-12.gif",
+   "format": "gif",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "an LZW minimum code size of 12 (GIF allows 2 to 8)"
+  },
+  {
+   "path": "gif/frame-outside-screen.gif",
+   "format": "gif",
+   "source": "generated",
+   "expect": "any",
+   "features": [
+    "broken"
+   ],
+   "notes": "a 60000x60000 frame on a 40x30 screen, with 40x30's data"
+  },
+  {
+   "path": "tiff/gray8-none.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "none",
+    "little-endian",
+    "strips",
+    "bits8",
+    "gray"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c5e4cfd59ee71f51bbae1fdc46a9f671891a938fe2b389becc6cff50a5aa9010",
+   "pam": "expected/tiff/gray8-none.pam",
+   "notes": "8-bit gray, strips of 5 rows, none; same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb8-none-mm.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "none",
+    "big-endian",
+    "strips",
+    "bits8",
+    "rgb"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "89d1f5b8f211fd08f2802c2a4c95c968391d789f8a821de5de0f7222ca6bd83b",
+   "pam": "expected/tiff/rgb8-none-mm.pam",
+   "notes": "8-bit RGB, big endian, strips of 7 rows, none; same as Pillow's"
+  },
+  {
+   "path": "tiff/gray8-lzw.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "lzw",
+    "little-endian",
+    "strips",
+    "bits8",
+    "gray"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c5e4cfd59ee71f51bbae1fdc46a9f671891a938fe2b389becc6cff50a5aa9010",
+   "pam": "expected/tiff/gray8-lzw.pam",
+   "notes": "8-bit gray, strips of 5 rows, lzw; same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb8-lzw-mm.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "lzw",
+    "big-endian",
+    "strips",
+    "bits8",
+    "rgb"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "89d1f5b8f211fd08f2802c2a4c95c968391d789f8a821de5de0f7222ca6bd83b",
+   "pam": "expected/tiff/rgb8-lzw-mm.pam",
+   "notes": "8-bit RGB, big endian, strips of 7 rows, lzw; same as Pillow's"
+  },
+  {
+   "path": "tiff/gray8-deflate.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "deflate",
+    "little-endian",
+    "strips",
+    "bits8",
+    "gray"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c5e4cfd59ee71f51bbae1fdc46a9f671891a938fe2b389becc6cff50a5aa9010",
+   "pam": "expected/tiff/gray8-deflate.pam",
+   "notes": "8-bit gray, strips of 5 rows, deflate; same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb8-deflate-mm.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "deflate",
+    "big-endian",
+    "strips",
+    "bits8",
+    "rgb"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "89d1f5b8f211fd08f2802c2a4c95c968391d789f8a821de5de0f7222ca6bd83b",
+   "pam": "expected/tiff/rgb8-deflate-mm.pam",
+   "notes": "8-bit RGB, big endian, strips of 7 rows, deflate; same as Pillow's"
+  },
+  {
+   "path": "tiff/gray8-packbits.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "packbits",
+    "little-endian",
+    "strips",
+    "bits8",
+    "gray"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c5e4cfd59ee71f51bbae1fdc46a9f671891a938fe2b389becc6cff50a5aa9010",
+   "pam": "expected/tiff/gray8-packbits.pam",
+   "notes": "8-bit gray, strips of 5 rows, packbits; same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb8-packbits-mm.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "packbits",
+    "big-endian",
+    "strips",
+    "bits8",
+    "rgb"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "89d1f5b8f211fd08f2802c2a4c95c968391d789f8a821de5de0f7222ca6bd83b",
+   "pam": "expected/tiff/rgb8-packbits-mm.pam",
+   "notes": "8-bit RGB, big endian, strips of 7 rows, packbits; same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb8-lzw-predictor.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "lzw",
+    "little-endian",
+    "strips",
+    "bits8",
+    "rgb",
+    "predictor2"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "89d1f5b8f211fd08f2802c2a4c95c968391d789f8a821de5de0f7222ca6bd83b",
+   "pam": "expected/tiff/rgb8-lzw-predictor.pam",
+   "notes": "LZW with the horizontal predictor; same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb8-deflate-old.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "deflate-old",
+    "little-endian",
+    "strips",
+    "bits8",
+    "rgb"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "89d1f5b8f211fd08f2802c2a4c95c968391d789f8a821de5de0f7222ca6bd83b",
+   "pam": "expected/tiff/rgb8-deflate-old.pam",
+   "notes": "the old Deflate code 32946, one strip; same as Pillow's"
+  },
+  {
+   "path": "tiff/rgba8-lzw.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "lzw",
+    "little-endian",
+    "strips",
+    "bits8",
+    "rgba"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "377d8a40194f4a6b2cf1b784e771f6153a9fd9cdc420b30bc2ca281b84d28448",
+   "pam": "expected/tiff/rgba8-lzw.pam",
+   "notes": "RGBA, ExtraSamples 2 (unassociated alpha); same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb8-tiles-lzw.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "lzw",
+    "little-endian",
+    "tiles",
+    "bits8",
+    "rgb"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "89d1f5b8f211fd08f2802c2a4c95c968391d789f8a821de5de0f7222ca6bd83b",
+   "pam": "expected/tiff/rgb8-tiles-lzw.pam",
+   "notes": "16x16 tiles over 37x23 (partial tiles padded); same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb8-tiles-deflate-mm.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "deflate",
+    "big-endian",
+    "tiles",
+    "bits8",
+    "rgb",
+    "predictor2"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "89d1f5b8f211fd08f2802c2a4c95c968391d789f8a821de5de0f7222ca6bd83b",
+   "pam": "expected/tiff/rgb8-tiles-deflate-mm.pam",
+   "notes": "16x32 tiles, Deflate, predictor, big endian; same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb8-planar.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "none",
+    "little-endian",
+    "strips",
+    "bits8",
+    "rgb",
+    "planar2"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "89d1f5b8f211fd08f2802c2a4c95c968391d789f8a821de5de0f7222ca6bd83b",
+   "pam": "expected/tiff/rgb8-planar.pam",
+   "notes": "planar configuration 2: a plane per channel; same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb8-planar-lzw-mm.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "lzw",
+    "big-endian",
+    "strips",
+    "bits8",
+    "rgb",
+    "predictor2",
+    "planar2"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "89d1f5b8f211fd08f2802c2a4c95c968391d789f8a821de5de0f7222ca6bd83b",
+   "pam": "expected/tiff/rgb8-planar-lzw-mm.pam",
+   "notes": "planar 2, LZW, predictor, big endian; same as Pillow's"
+  },
+  {
+   "path": "tiff/gray16-ii.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "none",
+    "little-endian",
+    "strips",
+    "bits16",
+    "gray"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "d727bf37261664f3a9dedfec0e7d0722925b161a801a20dc4ccb77197455a193",
+   "pam": "expected/tiff/gray16-ii.pam",
+   "notes": "16-bit gray, little endian; same as Pillow's"
+  },
+  {
+   "path": "tiff/gray16-lzw-predictor-ii.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "lzw",
+    "little-endian",
+    "strips",
+    "bits16",
+    "gray",
+    "predictor2"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "d727bf37261664f3a9dedfec0e7d0722925b161a801a20dc4ccb77197455a193",
+   "pam": "expected/tiff/gray16-lzw-predictor-ii.pam",
+   "notes": "16-bit gray, LZW, predictor; same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb16-deflate-ii.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "deflate",
+    "little-endian",
+    "strips",
+    "bits16",
+    "rgb",
+    "predictor2"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "75dd8283486f1d07b3751f91aaab699fa7cfa67def39435ba4884b4fb2b5a40c",
+   "pam": "expected/tiff/rgb16-deflate-ii.pam",
+   "notes": "16-bit RGB, Deflate, predictor; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "tiff/gray16-mm.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "none",
+    "big-endian",
+    "strips",
+    "bits16",
+    "gray"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "d727bf37261664f3a9dedfec0e7d0722925b161a801a20dc4ccb77197455a193",
+   "pam": "expected/tiff/gray16-mm.pam",
+   "notes": "16-bit gray, big endian; same as Pillow's"
+  },
+  {
+   "path": "tiff/gray16-lzw-predictor-mm.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "lzw",
+    "big-endian",
+    "strips",
+    "bits16",
+    "gray",
+    "predictor2"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "d727bf37261664f3a9dedfec0e7d0722925b161a801a20dc4ccb77197455a193",
+   "pam": "expected/tiff/gray16-lzw-predictor-mm.pam",
+   "notes": "16-bit gray, LZW, predictor; same as Pillow's"
+  },
+  {
+   "path": "tiff/rgb16-deflate-mm.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "deflate",
+    "big-endian",
+    "strips",
+    "bits16",
+    "rgb",
+    "predictor2"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "75dd8283486f1d07b3751f91aaab699fa7cfa67def39435ba4884b4fb2b5a40c",
+   "pam": "expected/tiff/rgb16-deflate-mm.pam",
+   "notes": "16-bit RGB, Deflate, predictor; Pillow reads 8 bits of it, the same high bytes"
+  },
+  {
+   "path": "tiff/bilevel-blackiszero.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "none",
+    "little-endian",
+    "strips",
+    "bits1",
+    "gray",
+    "bilevel"
+   ],
+   "width": 29,
+   "height": 9,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "027976a02296ed328f7e4e37fe162cfe96d57314b8dd29e1f145f68d07df3069",
+   "pam": "expected/tiff/bilevel-blackiszero.pam",
+   "notes": "1 bit, BlackIsZero, 29 wide (rows padded to a byte); same as Pillow's"
+  },
+  {
+   "path": "tiff/bilevel-whiteiszero-packbits.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "packbits",
+    "little-endian",
+    "strips",
+    "bits1",
+    "gray",
+    "bilevel"
+   ],
+   "width": 29,
+   "height": 9,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "bba33ab2e838cb39ebd3eee06f418b6cb24413949737cef393a2ae7612a1e8a8",
+   "pam": "expected/tiff/bilevel-whiteiszero-packbits.pam",
+   "notes": "1 bit, WhiteIsZero (0 is white), PackBits; same as Pillow's"
+  },
+  {
+   "path": "tiff/gray4.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "none",
+    "little-endian",
+    "strips",
+    "bits4",
+    "gray"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "5e0ad20df324b68501b1f48d2cb2f0fa6d0e284c7f7038c941a5c3d5621357d8",
+   "pam": "expected/tiff/gray4.pam",
+   "notes": "4-bit gray, scaled to 8; same as Pillow's"
+  },
+  {
+   "path": "tiff/palette8-lzw.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "lzw",
+    "little-endian",
+    "strips",
+    "bits8",
+    "palette"
+   ],
+   "width": 21,
+   "height": 11,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "c57f2a58bf9b640db9fb432b770b18188a7008e938d2299bd353e9c58934f2e9",
+   "pam": "expected/tiff/palette8-lzw.pam",
+   "notes": "an 8-bit palette (ColorMap 16-bit entries, here v * 257); same as Pillow's"
+  },
+  {
+   "path": "tiff/palette4-mm.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "none",
+    "big-endian",
+    "strips",
+    "bits4",
+    "palette"
+   ],
+   "width": 21,
+   "height": 11,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "63c589327268bf59dba5de0ed38992e14b4ccbceb120da0400dd15f79b903932",
+   "pam": "expected/tiff/palette4-mm.pam",
+   "notes": "a 4-bit palette, big endian; same as Pillow's"
+  },
+  {
+   "path": "tiff/float32.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "none",
+    "little-endian",
+    "strips",
+    "bits32",
+    "gray",
+    "float"
+   ],
+   "width": 13,
+   "height": 9,
+   "layout": "gray",
+   "bits": 32,
+   "frames": 1,
+   "sha256": "6637e8dacb75d092771c24b58007099e521ea36ca4e6fa1c0d51851394610eef",
+   "pam": null,
+   "notes": "float32 gray, SampleFormat 3 (hash only); same as Pillow's"
+  },
+  {
+   "path": "tiff/float32-deflate-predictor3-mm.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "deflate",
+    "big-endian",
+    "strips",
+    "bits32",
+    "gray",
+    "float",
+    "predictor3"
+   ],
+   "width": 13,
+   "height": 9,
+   "layout": "gray",
+   "bits": 32,
+   "frames": 1,
+   "sha256": "6637e8dacb75d092771c24b58007099e521ea36ca4e6fa1c0d51851394610eef",
+   "pam": null,
+   "notes": "float32 gray, Deflate, predictor 3; Pillow misreads it (it swaps the bytes libtiff's predictor made native); libtiff through ImageMagick reads the samples written (within its 16-bit quantum)"
+  },
+  {
+   "path": "tiff/multipage.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "lzw",
+    "little-endian",
+    "strips",
+    "bits8",
+    "multipage"
+   ],
+   "width": 37,
+   "height": 23,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "89d1f5b8f211fd08f2802c2a4c95c968391d789f8a821de5de0f7222ca6bd83b",
+   "pam": "expected/tiff/multipage.pam",
+   "notes": "3 pages: 37x23 RGB, 20x10 gray, 7x5 16-bit gray; the expected pixels are page 0's, `pages` the others'; same as Pillow's",
+   "pages": [
+    {
+     "width": 20,
+     "height": 10,
+     "layout": "gray",
+     "bits": 8,
+     "sha256": "f1164fa7c7517adcbf78c12f783c5d6b76138d6b78a9174d484f987a98e45cd0",
+     "pam": "expected/tiff/multipage-page1.pam"
+    },
+    {
+     "width": 7,
+     "height": 5,
+     "layout": "gray",
+     "bits": 16,
+     "sha256": "663fcbc2442c7e74e32ffc55874c797936133aa45fa689351fcc30934f790c63",
+     "pam": "expected/tiff/multipage-page2.pam"
+    }
+   ]
+  },
+  {
+   "path": "tiff/bad-byte-order.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "byte order IM"
+  },
+  {
+   "path": "tiff/bad-magic.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "magic 43 (BigTIFF): Unsupported"
+  },
+  {
+   "path": "tiff/ifd-out-of-range.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "the first IFD past the end"
+  },
+  {
+   "path": "tiff/cut-in-ifd.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "cut inside the IFD"
+  },
+  {
+   "path": "tiff/cut-in-strips.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "cut inside the strips (the IFD is after them)"
+  },
+  {
+   "path": "tiff/compression-7.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "JPEG: Unsupported"
+  },
+  {
+   "path": "tiff/compression-3.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "CCITT G3: Unsupported"
+  },
+  {
+   "path": "tiff/compression-4.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "CCITT G4: Unsupported"
+  },
+  {
+   "path": "tiff/compression-99.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "compression 99: Unsupported"
+  },
+  {
+   "path": "tiff/photometric-cmyk.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "photometric 5 (CMYK): Unsupported at first"
+  },
+  {
+   "path": "tiff/ifd-loop.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "any",
+   "features": [
+    "broken"
+   ],
+   "notes": "the IFD's next pointer is itself: page 0 reads, pages() must stop"
+  },
+  {
+   "path": "tiff/huge.tif",
+   "format": "tiff",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "65535x65535 with one small strip: TooLarge before allocating"
+  },
+  {
+   "path": "bmp/pal1-37x13.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits1"
+   ],
+   "width": 37,
+   "height": 13,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "927004aec37fefaf7a3f4298aa999044b56a492a425a9038309c422c1f402b79",
+   "pam": "expected/bmp/pal1-37x13.pam",
+   "notes": "1-bit palette, 37 wide (padded rows); same as Pillow's"
+  },
+  {
+   "path": "bmp/pal4-23x13.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits4"
+   ],
+   "width": 23,
+   "height": 13,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "d5567b3d8a4670b1f45af38404b1f7bbced6fc496d46b895bdb14ff04eca6a22",
+   "pam": "expected/bmp/pal4-23x13.pam",
+   "notes": "4-bit palette, 23 wide (padded rows); same as Pillow's"
+  },
+  {
+   "path": "bmp/pal8-21x13.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "bits8"
+   ],
+   "width": 21,
+   "height": 13,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "832a34fa794ab2a7c22bfe1379e955bcbcfe57494812d6ddf0d273321d33361d",
+   "pam": "expected/bmp/pal8-21x13.pam",
+   "notes": "8-bit palette, 21 wide (padded rows); same as Pillow's"
+  },
+  {
+   "path": "bmp/rgb24.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits24"
+   ],
+   "width": 21,
+   "height": 13,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "8591cfe737adcf0328716e1070c5b54bec566861e836b821100e95e4583b318f",
+   "pam": "expected/bmp/rgb24.pam",
+   "notes": "24-bit, bottom-up, 21 wide (rows padded); same as Pillow's"
+  },
+  {
+   "path": "bmp/rgb24-top-down.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits24",
+    "top-down"
+   ],
+   "width": 21,
+   "height": 13,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "8591cfe737adcf0328716e1070c5b54bec566861e836b821100e95e4583b318f",
+   "pam": "expected/bmp/rgb24-top-down.pam",
+   "notes": "24-bit, top-down (negative height); same as Pillow's"
+  },
+  {
+   "path": "bmp/rgb32.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits32"
+   ],
+   "width": 21,
+   "height": 13,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "8591cfe737adcf0328716e1070c5b54bec566861e836b821100e95e4583b318f",
+   "pam": "expected/bmp/rgb32.pam",
+   "notes": "32-bit BI_RGB: the 4th byte unused (0), so no alpha; same as Pillow's"
+  },
+  {
+   "path": "bmp/rgba32-bitfields-v4.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits32",
+    "bitfields"
+   ],
+   "width": 21,
+   "height": 13,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1d4c2aa37237ca4006b15b2ae76f017bc3b32a508bc77e2724fc2cc096824ae4",
+   "pam": "expected/bmp/rgba32-bitfields-v4.pam",
+   "notes": "32-bit BI_BITFIELDS with an alpha mask, BITMAPV4HEADER; same as Pillow's"
+  },
+  {
+   "path": "bmp/rgba32-bitfields-v5.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgba",
+    "bits32",
+    "bitfields"
+   ],
+   "width": 21,
+   "height": 13,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1d4c2aa37237ca4006b15b2ae76f017bc3b32a508bc77e2724fc2cc096824ae4",
+   "pam": "expected/bmp/rgba32-bitfields-v5.pam",
+   "notes": "32-bit BI_BITFIELDS with an alpha mask, BITMAPV5HEADER; same as Pillow's"
+  },
+  {
+   "path": "bmp/rgb16-555.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16"
+   ],
+   "width": 21,
+   "height": 13,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "984433b262cc994b53bb141a7063110e2ffb0655e930619ceeba079a18518a13",
+   "pam": "expected/bmp/rgb16-555.pam",
+   "notes": "16-bit BI_RGB, 5-5-5; Pillow's scaling of 5 bits to 8; same as Pillow's"
+  },
+  {
+   "path": "bmp/rgb16-565.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "rgb",
+    "bits16",
+    "bitfields"
+   ],
+   "width": 21,
+   "height": 13,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "2e4c61993097c79da1cc419eecc5b5b1cb626f804745927288988543c723ab7e",
+   "pam": "expected/bmp/rgb16-565.pam",
+   "notes": "16-bit BI_BITFIELDS 5-6-5; same as Pillow's"
+  },
+  {
+   "path": "bmp/rle8.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "rle8"
+   ],
+   "width": 19,
+   "height": 9,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "a44024856da49cb723583ac0c76c2081ab7733ca7d59029b0ba8dd036ca2b9b0",
+   "pam": "expected/bmp/rle8.pam",
+   "notes": "RLE8: runs and absolute stretches; same as Pillow's"
+  },
+  {
+   "path": "bmp/rle4.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "palette",
+    "rle4"
+   ],
+   "width": 19,
+   "height": 9,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "a44024856da49cb723583ac0c76c2081ab7733ca7d59029b0ba8dd036ca2b9b0",
+   "pam": "expected/bmp/rle4.pam",
+   "notes": "RLE4: runs and absolute stretches; same as Pillow's"
+  },
+  {
+   "path": "bmp/not-bmp.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "signature MB"
+  },
+  {
+   "path": "bmp/cut-in-header.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "cut inside BITMAPINFOHEADER"
+  },
+  {
+   "path": "bmp/cut-in-pixels.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "any",
+   "features": [
+    "broken"
+   ],
+   "notes": "half the rows"
+  },
+  {
+   "path": "bmp/offset-past-end.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "the pixel offset past the end"
+  },
+  {
+   "path": "bmp/huge.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "100000x100000: TooLarge before allocating"
+  },
+  {
+   "path": "bmp/bpp-7.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "7 bits a pixel"
+  },
+  {
+   "path": "bmp/rle8-overrun.bmp",
+   "format": "bmp",
+   "source": "generated",
+   "expect": "any",
+   "features": [
+    "broken"
+   ],
+   "notes": "an RLE8 run of 250 in a row of 19 pixels"
+  },
+  {
+   "path": "pnm/p1-ascii.pbm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pbm",
+    "ascii"
+   ],
+   "width": 13,
+   "height": 5,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1ea2fe696c063cc09900429b4e588fea63cf60f129414da8eb1da0bac9196838",
+   "pam": "expected/pnm/p1-ascii.pam",
+   "notes": "P1, a comment in the header (1 is black); same as Pillow's"
+  },
+  {
+   "path": "pnm/p4-binary.pbm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pbm",
+    "binary"
+   ],
+   "width": 13,
+   "height": 5,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "1ea2fe696c063cc09900429b4e588fea63cf60f129414da8eb1da0bac9196838",
+   "pam": "expected/pnm/p4-binary.pam",
+   "notes": "P4, 13 wide (rows padded to a byte); same as Pillow's"
+  },
+  {
+   "path": "pnm/p2-ascii.pgm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pgm",
+    "ascii"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "df4fc8f306227840a04f1308ab2f59d3d47430ff28678783082a69a9e2de4119",
+   "pam": "expected/pnm/p2-ascii.pam",
+   "notes": "P2; same as Pillow's"
+  },
+  {
+   "path": "pnm/p2-maxval15.pgm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pgm",
+    "ascii",
+    "maxval"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "7ebcd1b623ffbdfc731a2e35bd8761e933fa4b98dbdb75b364dbb249012563ed",
+   "pam": "expected/pnm/p2-maxval15.pam",
+   "notes": "P2 with MAXVAL 15: scaled to 0..255 (v * 255 / 15); same as Pillow's"
+  },
+  {
+   "path": "pnm/p5-binary.pgm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pgm",
+    "binary"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "df4fc8f306227840a04f1308ab2f59d3d47430ff28678783082a69a9e2de4119",
+   "pam": "expected/pnm/p5-binary.pam",
+   "notes": "P5; same as Pillow's"
+  },
+  {
+   "path": "pnm/p5-16bit.pgm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pgm",
+    "binary",
+    "bits16"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "dd7c1b7b8909737f36018c372d9c7a4129b773bf1ddea0d24c10dd640cc3e058",
+   "pam": "expected/pnm/p5-16bit.pam",
+   "notes": "P5, 16 bits big endian; same as Pillow's"
+  },
+  {
+   "path": "pnm/p5-maxval1000.pgm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pgm",
+    "binary",
+    "maxval"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "gray",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "2d48d92e34fa4ca8e9dc8d3c8136a3983a54b08758ad4f72933ca523b674ff45",
+   "pam": "expected/pnm/p5-maxval1000.pam",
+   "notes": "P5 with MAXVAL 1000: two bytes a sample, scaled to 16 bits (round(v * 65535 / 1000)); same as Pillow's"
+  },
+  {
+   "path": "pnm/p3-ascii.ppm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "ppm",
+    "ascii"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "19940cd45c044b9a2d4856d554ebeb29fefa4d589a32e255c534e0bb0a796c8b",
+   "pam": "expected/pnm/p3-ascii.pam",
+   "notes": "P3, the header on one line; same as Pillow's"
+  },
+  {
+   "path": "pnm/p6-binary.ppm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "ppm",
+    "binary"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "19940cd45c044b9a2d4856d554ebeb29fefa4d589a32e255c534e0bb0a796c8b",
+   "pam": "expected/pnm/p6-binary.pam",
+   "notes": "P6, a field a line; same as Pillow's"
+  },
+  {
+   "path": "pnm/p6-16bit.ppm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "ppm",
+    "binary",
+    "bits16"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "c30d2167b835c4211075e343aa96adf123233f2493bc028970ab2676e2bc40a2",
+   "pam": "expected/pnm/p6-16bit.pam",
+   "notes": "P6, 16 bits; Pillow reads 8 bits of it, the same rounded"
+  },
+  {
+   "path": "pnm/pam-gray.pam",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pam"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "gray",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "df4fc8f306227840a04f1308ab2f59d3d47430ff28678783082a69a9e2de4119",
+   "pam": "expected/pnm/pam-gray.pam",
+   "notes": "PAM, TUPLTYPE GRAYSCALE; Pillow can't read it"
+  },
+  {
+   "path": "pnm/pam-gray-alpha.pam",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pam"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "gray+alpha",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "a4734a2b40922acaa8ed10bb2d838c6cb3657c104502e001e75265fe83830cb0",
+   "pam": "expected/pnm/pam-gray-alpha.pam",
+   "notes": "PAM, TUPLTYPE GRAYSCALE_ALPHA; Pillow can't read it"
+  },
+  {
+   "path": "pnm/pam-rgb.pam",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pam"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "19940cd45c044b9a2d4856d554ebeb29fefa4d589a32e255c534e0bb0a796c8b",
+   "pam": "expected/pnm/pam-rgb.pam",
+   "notes": "PAM, TUPLTYPE RGB; Pillow can't read it"
+  },
+  {
+   "path": "pnm/pam-rgba.pam",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pam"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "514455b237bdda5855ce6c6a8e8aaf0141e93af36bdd236136c03841a8178d77",
+   "pam": "expected/pnm/pam-rgba.pam",
+   "notes": "PAM, TUPLTYPE RGB_ALPHA; Pillow can't read it"
+  },
+  {
+   "path": "pnm/pam-rgb16.pam",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "ok",
+   "features": [
+    "pam",
+    "bits16"
+   ],
+   "width": 11,
+   "height": 7,
+   "layout": "rgb",
+   "bits": 16,
+   "frames": 1,
+   "sha256": "c30d2167b835c4211075e343aa96adf123233f2493bc028970ab2676e2bc40a2",
+   "pam": "expected/pnm/pam-rgb16.pam",
+   "notes": "PAM, 16 bits, a comment; Pillow can't read it"
+  },
+  {
+   "path": "pnm/not-pnm.ppm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "magic P9"
+  },
+  {
+   "path": "pnm/cut-samples.ppm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "the samples cut short"
+  },
+  {
+   "path": "pnm/maxval-0.pgm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "MAXVAL 0"
+  },
+  {
+   "path": "pnm/maxval-70000.pgm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "MAXVAL past 65535"
+  },
+  {
+   "path": "pnm/huge.pgm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "100000x100000: TooLarge before allocating"
+  },
+  {
+   "path": "pnm/ascii-bad-number.pgm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "a sample that isn't a number"
+  },
+  {
+   "path": "pnm/ascii-over-maxval.pgm",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "a sample above MAXVAL"
+  },
+  {
+   "path": "pnm/pam-depth-mismatch.pam",
+   "format": "pnm",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "TUPLTYPE RGB with DEPTH 2"
+  },
+  {
+   "path": "qoi/photo-rgb.qoi",
+   "format": "qoi",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "rgb"
+   ],
+   "width": 23,
+   "height": 17,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "59fb6e937064f9820bd0913c3232ce21bc18f14060516c6a509f0fe790bcd221",
+   "pam": "expected/qoi/photo-rgb.pam",
+   "notes": "RGB, 3 channels; written by Pillow; same as Pillow's"
+  },
+  {
+   "path": "qoi/photo-rgba.qoi",
+   "format": "qoi",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "rgba"
+   ],
+   "width": 23,
+   "height": 17,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "956a789962227bdb59f2d424a0df62df19d1c95723676cdf413d0060cca99a85",
+   "pam": "expected/qoi/photo-rgba.pam",
+   "notes": "RGBA: alpha changes; written by Pillow; same as Pillow's"
+  },
+  {
+   "path": "qoi/edges-rgb.qoi",
+   "format": "qoi",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "rgb"
+   ],
+   "width": 40,
+   "height": 24,
+   "layout": "rgb",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "d639491ac37e1d872146a292e48a82c70544bf1c1928dac80a35b05d19bb7e4c",
+   "pam": "expected/qoi/edges-rgb.pam",
+   "notes": "runs and the index; written by Pillow; same as Pillow's"
+  },
+  {
+   "path": "qoi/noise-rgba.qoi",
+   "format": "qoi",
+   "source": "pillow",
+   "expect": "ok",
+   "features": [
+    "rgba"
+   ],
+   "width": 9,
+   "height": 7,
+   "layout": "rgba",
+   "bits": 8,
+   "frames": 1,
+   "sha256": "462b1c908525706372d0d50a3837d01e6f12913f674634c1f03623afdf0dcb20",
+   "pam": "expected/qoi/noise-rgba.pam",
+   "notes": "noise: QOI_OP_RGBA everywhere; written by Pillow; same as Pillow's"
+  },
+  {
+   "path": "qoi/not-qoi.qoi",
+   "format": "qoi",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "magic qoig"
+  },
+  {
+   "path": "qoi/cut-in-header.qoi",
+   "format": "qoi",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "cut inside the 14-byte header"
+  },
+  {
+   "path": "qoi/cut-in-data.qoi",
+   "format": "qoi",
+   "source": "generated",
+   "expect": "any",
+   "features": [
+    "broken"
+   ],
+   "notes": "half the data, no end marker"
+  },
+  {
+   "path": "qoi/channels-5.qoi",
+   "format": "qoi",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "5 channels"
+  },
+  {
+   "path": "qoi/huge.qoi",
+   "format": "qoi",
+   "source": "generated",
+   "expect": "err",
+   "features": [
+    "broken"
+   ],
+   "notes": "100000x100000: TooLarge before allocating"
+  }
+ ],
+ "fonts": [
+  {
+   "path": "fonts/MylaTestSans.ttf",
+   "faces": 1,
+   "bytes": 15560,
+   "sha256": "ff0d6d31c1ae5430da450a9f6a28cad1152080bdcad38b84a258e03fc8c0ebb7",
+   "family": "Myla Test Sans",
+   "styles": [
+    "Regular"
+   ],
+   "source": "Liberation Sans 2.1.5 (Regular, Bold), subset, renamed, hinting removed; OFL 1.1",
+   "advances": {
+    " ": 569,
+    "A": 1366,
+    "T": 1251,
+    "V": 1366,
+    "a": 1139,
+    "e": 1139,
+    "g": 1139,
+    "o": 1139,
+    "y": 1024,
+    "é": 1139
+   },
+   "ascender": 1854,
+   "cmap_formats": [
+    4
+   ],
+   "composite_glyphs": [
+    "À",
+    "Á",
+    "Â",
+    "Ä",
+    "Å",
+    "Ç",
+    "È",
+    "É",
+    "Ê",
+    "Ë",
+    "Ì",
+    "Í",
+    "Î",
+    "Ï",
+    "Ñ",
+    "Ò",
+    "Ó",
+    "Ô",
+    "Ö",
+    "Ù",
+    "Ú",
+    "Û",
+    "Ü",
+    "Ý",
+    "à",
+    "á",
+    "â",
+    "ä",
+    "å",
+    "ç",
+    "è",
+    "é",
+    "ê",
+    "ë",
+    "ì",
+    "í",
+    "î",
+    "ï",
+    "ñ",
+    "ò",
+    "ó",
+    "ô",
+    "ö",
+    "ù",
+    "ú",
+    "û",
+    "ü",
+    "ý",
+    "ÿ"
+   ],
+   "descender": -434,
+   "glyphs": 176,
+   "kern_pairs": 104,
+   "kern_sample": {
+    "AT": -152,
+    "AV": -152,
+    "AY": -152,
+    "LT": -152,
+    "P,": -264,
+    "Te": -227,
+    "To": -227,
+    "Ty": -113,
+    "VA": -152,
+    "Yo": -188
+   },
+   "line_gap": 67,
+   "made_with": "fontTools 4.68.0",
+   "tables": [
+    "GDEF",
+    "GPOS",
+    "GSUB",
+    "OS/2",
+    "cmap",
+    "glyf",
+    "head",
+    "hhea",
+    "hmtx",
+    "kern",
+    "loca",
+    "maxp",
+    "name",
+    "post"
+   ],
+   "units_per_em": 2048
+  },
+  {
+   "path": "fonts/MylaTestSans.ttc",
+   "faces": 2,
+   "bytes": 30876,
+   "sha256": "23d9695ddd851d455156abe56e9a7637863b58270f930619064ade9d0e657e86",
+   "family": "Myla Test Sans",
+   "styles": [
+    "Regular",
+    "Bold"
+   ],
+   "source": "Liberation Sans 2.1.5 (Regular, Bold), subset, renamed, hinting removed; OFL 1.1"
+  }
+ ],
+ "renders": [
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "Hello, World!",
+   "px": 16,
+   "origin": [
+    2,
+    17
+   ],
+   "width": 94,
+   "height": 23,
+   "pam": "expected/fonts/hello--world-16px.pam",
+   "sha256": "9f31f6bc3629e79d296e9d39897b4863b3c8e89850a0965abeda7a5d2e0156ab",
+   "engine": "pillow",
+   "notes": "Pillow 13.0.0, FreeType 2.14.3, basic layout (kern table pairs, glyphs at whole pixels, advances rounded); white on black coverage; FreeType autohints it (the font has no instructions, and Pillow can't turn hinting off): compare within a tolerance"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "Hello, World!",
+   "px": 32,
+   "origin": [
+    2,
+    31
+   ],
+   "width": 185,
+   "height": 40,
+   "pam": "expected/fonts/hello--world-32px.pam",
+   "sha256": "adbebd05dca7e1c9be95e548dc7eb138bdb7bb72b03d708a3493170cfa9caeaf",
+   "engine": "pillow",
+   "notes": "Pillow 13.0.0, FreeType 2.14.3, basic layout (kern table pairs, glyphs at whole pixels, advances rounded); white on black coverage; FreeType autohints it (the font has no instructions, and Pillow can't turn hinting off): compare within a tolerance"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "AVATAR To Yo",
+   "px": 24,
+   "origin": [
+    2,
+    24
+   ],
+   "width": 173,
+   "height": 32,
+   "pam": "expected/fonts/avatar-to-yo-24px.pam",
+   "sha256": "fbade05e784110de741d9bd59d8f95e2884c68059c610d17599ed5b20657c085",
+   "engine": "pillow",
+   "notes": "Pillow 13.0.0, FreeType 2.14.3, basic layout (kern table pairs, glyphs at whole pixels, advances rounded); white on black coverage; FreeType autohints it (the font has no instructions, and Pillow can't turn hinting off): compare within a tolerance"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "Ångström façade",
+   "px": 20,
+   "origin": [
+    3,
+    21
+   ],
+   "width": 159,
+   "height": 28,
+   "pam": "expected/fonts/ngstr-m-fa-ade-20px.pam",
+   "sha256": "ea7ec3e8b49b7d51d68550cabee9428a224f76f21c7b2025529a1099afc326a4",
+   "engine": "pillow",
+   "notes": "Pillow 13.0.0, FreeType 2.14.3, basic layout (kern table pairs, glyphs at whole pixels, advances rounded); white on black coverage; FreeType autohints it (the font has no instructions, and Pillow can't turn hinting off): compare within a tolerance"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 48,
+   "origin": [
+    2,
+    46
+   ],
+   "width": 31,
+   "height": 59,
+   "pam": "expected/fonts/g-48px.pam",
+   "sha256": "9e1fb2cb9ee085c536029ddbe94c50e32d7e0ea53a061e8a13a2ecf79cffd800",
+   "engine": "pillow",
+   "notes": "Pillow 13.0.0, FreeType 2.14.3, basic layout (kern table pairs, glyphs at whole pixels, advances rounded); white on black coverage; FreeType autohints it (the font has no instructions, and Pillow can't turn hinting off): compare within a tolerance"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 64,
+   "origin": [
+    2,
+    60
+   ],
+   "width": 40,
+   "height": 76,
+   "pam": "expected/fonts/glyph-64px.pam",
+   "sha256": "aed5402a8193fc1946340711f6cc4fbd216a6f738aae26a4850f94ebd0127d03",
+   "engine": "pillow",
+   "notes": "Pillow 13.0.0, FreeType 2.14.3, basic layout (kern table pairs, glyphs at whole pixels, advances rounded); white on black coverage; FreeType autohints it (the font has no instructions, and Pillow can't turn hinting off): compare within a tolerance"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "The quick brown fox",
+   "px": 11,
+   "origin": [
+    2,
+    12
+   ],
+   "width": 108,
+   "height": 17,
+   "pam": "expected/fonts/the-quick-brown-fox-11px.pam",
+   "sha256": "e547294ee1cc99987e413ae747e7a7cff1f1eb6c5f6894bbf293e0589c89ea81",
+   "engine": "pillow",
+   "notes": "Pillow 13.0.0, FreeType 2.14.3, basic layout (kern table pairs, glyphs at whole pixels, advances rounded); white on black coverage; FreeType autohints it (the font has no instructions, and Pillow can't turn hinting off): compare within a tolerance"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 12,
+   "dx": 0.0,
+   "left": 0,
+   "top": 9,
+   "advance": 8.00390625,
+   "width": 8,
+   "height": 9,
+   "pam": "expected/fonts/unhinted/A-12px-dx00.pam",
+   "sha256": "d7a36e755c6096f44f92298c2bd6bece074f757a397b0d4a2b002f2a0e5691f8",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 12,
+   "dx": 0.25,
+   "left": 0,
+   "top": 9,
+   "advance": 8.00390625,
+   "width": 9,
+   "height": 9,
+   "pam": "expected/fonts/unhinted/A-12px-dx25.pam",
+   "sha256": "b5292be4727068244e0e3ca1702c2d03591c6c5e102b7baa9b85266e610090a6",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 12,
+   "dx": 0.5,
+   "left": 0,
+   "top": 9,
+   "advance": 8.00390625,
+   "width": 9,
+   "height": 9,
+   "pam": "expected/fonts/unhinted/A-12px-dx50.pam",
+   "sha256": "bcfbb7fe1f85fe80f615b8764c200ab7e7855e154af369cf722b0a2db7111610",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 12,
+   "dx": 0.75,
+   "left": 0,
+   "top": 9,
+   "advance": 8.00390625,
+   "width": 9,
+   "height": 9,
+   "pam": "expected/fonts/unhinted/A-12px-dx75.pam",
+   "sha256": "c34bceaac7524109d027dbfadaf53c1d56300c800e4db2e1c0ccfc905998b1c6",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 24,
+   "dx": 0.0,
+   "left": 0,
+   "top": 17,
+   "advance": 16.0078125,
+   "width": 16,
+   "height": 17,
+   "pam": "expected/fonts/unhinted/A-24px-dx00.pam",
+   "sha256": "046be969d6eb0283be63a20792c7ba578b35f3d7b7e94b3870b6a7fda8684685",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 24,
+   "dx": 0.25,
+   "left": 0,
+   "top": 17,
+   "advance": 16.0078125,
+   "width": 17,
+   "height": 17,
+   "pam": "expected/fonts/unhinted/A-24px-dx25.pam",
+   "sha256": "d744ad9aa88ca062abda6aa4472179945e20fa1accad146e7a223c013ec80e0f",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 24,
+   "dx": 0.5,
+   "left": 0,
+   "top": 17,
+   "advance": 16.0078125,
+   "width": 17,
+   "height": 17,
+   "pam": "expected/fonts/unhinted/A-24px-dx50.pam",
+   "sha256": "4b2a70975c63a35f3c65fcbf1fdb2f1d57c94cc191d65c9318115bda0e8bff83",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 24,
+   "dx": 0.75,
+   "left": 0,
+   "top": 17,
+   "advance": 16.0078125,
+   "width": 17,
+   "height": 17,
+   "pam": "expected/fonts/unhinted/A-24px-dx75.pam",
+   "sha256": "ee65b0ffb029dfa7ec260d1165770f5669d5df52e65ea7197c18b9611041fce9",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 48,
+   "dx": 0.0,
+   "left": 0,
+   "top": 34,
+   "advance": 32.015625,
+   "width": 32,
+   "height": 34,
+   "pam": "expected/fonts/unhinted/A-48px-dx00.pam",
+   "sha256": "016fb98d2a489ab3e76c9b10a28aeeb2bc111922dd477291c5ad1c17339e164c",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 48,
+   "dx": 0.25,
+   "left": 0,
+   "top": 34,
+   "advance": 32.015625,
+   "width": 33,
+   "height": 34,
+   "pam": "expected/fonts/unhinted/A-48px-dx25.pam",
+   "sha256": "2e361206e7413710c034a103fe49420df0cc934903e88e5dbc0dfd274e18af59",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 48,
+   "dx": 0.5,
+   "left": 0,
+   "top": 34,
+   "advance": 32.015625,
+   "width": 33,
+   "height": 34,
+   "pam": "expected/fonts/unhinted/A-48px-dx50.pam",
+   "sha256": "229ca5a6cba3202c583b29ceaa66a8a17fe4251b66cfc2615ad818efe82374e4",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "A",
+   "px": 48,
+   "dx": 0.75,
+   "left": 0,
+   "top": 34,
+   "advance": 32.015625,
+   "width": 33,
+   "height": 34,
+   "pam": "expected/fonts/unhinted/A-48px-dx75.pam",
+   "sha256": "71d67d8cf6122da7ca84f65af51b6b11df02607269aa6a1b2390bc3860f23d28",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 12,
+   "dx": 0.0,
+   "left": 0,
+   "top": 7,
+   "advance": 6.673828125,
+   "width": 6,
+   "height": 10,
+   "pam": "expected/fonts/unhinted/g-12px-dx00.pam",
+   "sha256": "c5c4c78361d9715f3c71732d060687504eae598330288a9c09981f84fb43807c",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 12,
+   "dx": 0.25,
+   "left": 0,
+   "top": 7,
+   "advance": 6.673828125,
+   "width": 7,
+   "height": 10,
+   "pam": "expected/fonts/unhinted/g-12px-dx25.pam",
+   "sha256": "45f5371cbedb88aff74b67be51d459af6d9589956b701b46560a620cc30d6114",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 12,
+   "dx": 0.5,
+   "left": 1,
+   "top": 7,
+   "advance": 6.673828125,
+   "width": 6,
+   "height": 10,
+   "pam": "expected/fonts/unhinted/g-12px-dx50.pam",
+   "sha256": "5755daedf2f736f2c572df99296646aea148fb71e2e7c4be19d981b7dcee1872",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 12,
+   "dx": 0.75,
+   "left": 1,
+   "top": 7,
+   "advance": 6.673828125,
+   "width": 6,
+   "height": 10,
+   "pam": "expected/fonts/unhinted/g-12px-dx75.pam",
+   "sha256": "43e01096ff0f0576c334e001917e918cdd3bd83607fa3cc50b7c6711a9ca3260",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 24,
+   "dx": 0.0,
+   "left": 1,
+   "top": 13,
+   "advance": 13.34765625,
+   "width": 11,
+   "height": 18,
+   "pam": "expected/fonts/unhinted/g-24px-dx00.pam",
+   "sha256": "3c4b10392388c46ebffae57d60bd8126da867e4f53cb94f4f9d660ba696fcc1a",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 24,
+   "dx": 0.25,
+   "left": 1,
+   "top": 13,
+   "advance": 13.34765625,
+   "width": 12,
+   "height": 18,
+   "pam": "expected/fonts/unhinted/g-24px-dx25.pam",
+   "sha256": "5bb6dff0ed3796cc63f930bbe9bcc6e9e3f097ae1c70195018fce364ca43f0b2",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 24,
+   "dx": 0.5,
+   "left": 1,
+   "top": 13,
+   "advance": 13.34765625,
+   "width": 12,
+   "height": 18,
+   "pam": "expected/fonts/unhinted/g-24px-dx50.pam",
+   "sha256": "04ff987c3f8d920bcd0af29381d3c5529c4ea5e8a4fa90aa5eda361e9956f779",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 24,
+   "dx": 0.75,
+   "left": 1,
+   "top": 13,
+   "advance": 13.34765625,
+   "width": 12,
+   "height": 18,
+   "pam": "expected/fonts/unhinted/g-24px-dx75.pam",
+   "sha256": "bde3f39d6ae4195e80fc9a24833c75670f282a3cb458d2711dc76f2785e7afae",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 48,
+   "dx": 0.0,
+   "left": 2,
+   "top": 26,
+   "advance": 26.6953125,
+   "width": 22,
+   "height": 36,
+   "pam": "expected/fonts/unhinted/g-48px-dx00.pam",
+   "sha256": "749e6c9a5ffeba8f0fd42fc2a5572b832e0f10b8ff4b1620adda78f754714834",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 48,
+   "dx": 0.25,
+   "left": 2,
+   "top": 26,
+   "advance": 26.6953125,
+   "width": 22,
+   "height": 36,
+   "pam": "expected/fonts/unhinted/g-48px-dx25.pam",
+   "sha256": "6edf0b550884c859a67b86d6123f8cc0af2ef6af7b8d28c28b42aaebfb9f8980",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 48,
+   "dx": 0.5,
+   "left": 2,
+   "top": 26,
+   "advance": 26.6953125,
+   "width": 23,
+   "height": 36,
+   "pam": "expected/fonts/unhinted/g-48px-dx50.pam",
+   "sha256": "514d9539894b7db08a8d80d7a4d5686395bad23191e8de057a6079e1d3b6b62b",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "g",
+   "px": 48,
+   "dx": 0.75,
+   "left": 2,
+   "top": 26,
+   "advance": 26.6953125,
+   "width": 23,
+   "height": 36,
+   "pam": "expected/fonts/unhinted/g-48px-dx75.pam",
+   "sha256": "31f960871afbdb24afa285277f36c754e5fff7a69332b7db48d77657133ece83",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 12,
+   "dx": 0.0,
+   "left": 0,
+   "top": 9,
+   "advance": 12.181640625,
+   "width": 12,
+   "height": 11,
+   "pam": "expected/fonts/unhinted/at-12px-dx00.pam",
+   "sha256": "00e28b303a24cc1a042feead029b52b33a65028a9d252a86b79b9f19098989d0",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 12,
+   "dx": 0.25,
+   "left": 1,
+   "top": 9,
+   "advance": 12.181640625,
+   "width": 11,
+   "height": 11,
+   "pam": "expected/fonts/unhinted/at-12px-dx25.pam",
+   "sha256": "8a232ba3410452fb779a601909fb098a9fba393d1fa1754b1dae0af25197d55a",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 12,
+   "dx": 0.5,
+   "left": 1,
+   "top": 9,
+   "advance": 12.181640625,
+   "width": 11,
+   "height": 11,
+   "pam": "expected/fonts/unhinted/at-12px-dx50.pam",
+   "sha256": "1de5a644426f729a95e9e21c23e47e6d241ddfcee8ec17d61071647951bdde05",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 12,
+   "dx": 0.75,
+   "left": 1,
+   "top": 9,
+   "advance": 12.181640625,
+   "width": 11,
+   "height": 11,
+   "pam": "expected/fonts/unhinted/at-12px-dx75.pam",
+   "sha256": "fc12632e7e4d77bafd505c74dd428ef91ef0830af050cc41dcc901ea9122fca7",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 24,
+   "dx": 0.0,
+   "left": 1,
+   "top": 18,
+   "advance": 24.36328125,
+   "width": 22,
+   "height": 22,
+   "pam": "expected/fonts/unhinted/at-24px-dx00.pam",
+   "sha256": "51688a30a6b93aa60002c54a12b2148d8e5f47e1f942f3e0c5a713a172b21d3d",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 24,
+   "dx": 0.25,
+   "left": 2,
+   "top": 18,
+   "advance": 24.36328125,
+   "width": 21,
+   "height": 22,
+   "pam": "expected/fonts/unhinted/at-24px-dx25.pam",
+   "sha256": "fcd3f15771054674ab47910fb226cedd68cb1e0406d8906f9f03cb5050acf3c6",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 24,
+   "dx": 0.5,
+   "left": 2,
+   "top": 18,
+   "advance": 24.36328125,
+   "width": 21,
+   "height": 22,
+   "pam": "expected/fonts/unhinted/at-24px-dx50.pam",
+   "sha256": "3e1ab5841ce1c3d4155cae18d82df7237b1454ce3ed57ef7b6480c4d5e7f181d",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 24,
+   "dx": 0.75,
+   "left": 2,
+   "top": 18,
+   "advance": 24.36328125,
+   "width": 22,
+   "height": 22,
+   "pam": "expected/fonts/unhinted/at-24px-dx75.pam",
+   "sha256": "55e80fda98992270bc9a0619d6d9fdcb6bf43885dcdb77589d29f398c8fb24a7",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 48,
+   "dx": 0.0,
+   "left": 3,
+   "top": 35,
+   "advance": 48.7265625,
+   "width": 42,
+   "height": 42,
+   "pam": "expected/fonts/unhinted/at-48px-dx00.pam",
+   "sha256": "27bf7317f2fb6952ce01e6edf91671a0335b19bbe383df4cb580cb53d10b7fef",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 48,
+   "dx": 0.25,
+   "left": 4,
+   "top": 35,
+   "advance": 48.7265625,
+   "width": 41,
+   "height": 42,
+   "pam": "expected/fonts/unhinted/at-48px-dx25.pam",
+   "sha256": "f26d232a4deb955c3062443fd3230222fd1455ac6f856648ec72e4833d4d1367",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 48,
+   "dx": 0.5,
+   "left": 4,
+   "top": 35,
+   "advance": 48.7265625,
+   "width": 42,
+   "height": 42,
+   "pam": "expected/fonts/unhinted/at-48px-dx50.pam",
+   "sha256": "2dc65f03b844bf33ee227540521a0cfc457688270a21abc0934e43902f76d0db",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "@",
+   "px": 48,
+   "dx": 0.75,
+   "left": 4,
+   "top": 35,
+   "advance": 48.7265625,
+   "width": 42,
+   "height": 42,
+   "pam": "expected/fonts/unhinted/at-48px-dx75.pam",
+   "sha256": "5c56ba0beeb10103e13f4168e2fbd5596726f591bf0a16e8e81ec53dedec9a30",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 12,
+   "dx": 0.0,
+   "left": 0,
+   "top": 9,
+   "advance": 6.673828125,
+   "width": 7,
+   "height": 10,
+   "pam": "expected/fonts/unhinted/eacute-12px-dx00.pam",
+   "sha256": "2fb4c691d898cd8e1e34e5a3ece18a09e82d42cccf4dc97bd233d9cee4da90e6",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 12,
+   "dx": 0.25,
+   "left": 0,
+   "top": 9,
+   "advance": 6.673828125,
+   "width": 7,
+   "height": 10,
+   "pam": "expected/fonts/unhinted/eacute-12px-dx25.pam",
+   "sha256": "df16c13b4d10fb18857ba626817807a9443c8ac8d1c203e6700fcf52b62510e6",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 12,
+   "dx": 0.5,
+   "left": 1,
+   "top": 9,
+   "advance": 6.673828125,
+   "width": 6,
+   "height": 10,
+   "pam": "expected/fonts/unhinted/eacute-12px-dx50.pam",
+   "sha256": "0051c19501f857b80fa9ebd20c75fd8b025125e5c8ac1eef64045d1bfa3aa3c9",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 12,
+   "dx": 0.75,
+   "left": 1,
+   "top": 9,
+   "advance": 6.673828125,
+   "width": 6,
+   "height": 10,
+   "pam": "expected/fonts/unhinted/eacute-12px-dx75.pam",
+   "sha256": "9b02a373549f58abb400a2cf3187b35b75d19a1d310139cc9aafd3b30cf04a3b",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 24,
+   "dx": 0.0,
+   "left": 1,
+   "top": 18,
+   "advance": 13.34765625,
+   "width": 12,
+   "height": 19,
+   "pam": "expected/fonts/unhinted/eacute-24px-dx00.pam",
+   "sha256": "783ee71f5e7f86c7785e286b8084e208c53099dae5c9926b42bb8e045ad8621b",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 24,
+   "dx": 0.25,
+   "left": 1,
+   "top": 18,
+   "advance": 13.34765625,
+   "width": 12,
+   "height": 19,
+   "pam": "expected/fonts/unhinted/eacute-24px-dx25.pam",
+   "sha256": "73145d5f61fb1d34df347285e38ee1adf0826942efa5deb64fdb82abb15b9763",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 24,
+   "dx": 0.5,
+   "left": 1,
+   "top": 18,
+   "advance": 13.34765625,
+   "width": 12,
+   "height": 19,
+   "pam": "expected/fonts/unhinted/eacute-24px-dx50.pam",
+   "sha256": "a998677a52f4877bfd07397c1fdf27b20ca250e01faccd1d094634518c0fbb1b",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 24,
+   "dx": 0.75,
+   "left": 1,
+   "top": 18,
+   "advance": 13.34765625,
+   "width": 13,
+   "height": 19,
+   "pam": "expected/fonts/unhinted/eacute-24px-dx75.pam",
+   "sha256": "1c05b33cc60bedbf9dff48d935eaf7b9888287b9206e89ddd966c907587ee05c",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 48,
+   "dx": 0.0,
+   "left": 2,
+   "top": 36,
+   "advance": 26.6953125,
+   "width": 23,
+   "height": 37,
+   "pam": "expected/fonts/unhinted/eacute-48px-dx00.pam",
+   "sha256": "c5857d0fdb46327540a0900d88eb7f6a92a4e114b48438d4c6f205091edcd25f",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 48,
+   "dx": 0.25,
+   "left": 2,
+   "top": 36,
+   "advance": 26.6953125,
+   "width": 23,
+   "height": 37,
+   "pam": "expected/fonts/unhinted/eacute-48px-dx25.pam",
+   "sha256": "1358e9ccfa718ddccf89409c5fdce7b880c22669e1faf0b25804628b2c0652ab",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 48,
+   "dx": 0.5,
+   "left": 2,
+   "top": 36,
+   "advance": 26.6953125,
+   "width": 24,
+   "height": 37,
+   "pam": "expected/fonts/unhinted/eacute-48px-dx50.pam",
+   "sha256": "696eca4c52928ef901cb2bc21dcebe5d0aba32b6d75072e0b6b39119e270d791",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "é",
+   "px": 48,
+   "dx": 0.75,
+   "left": 2,
+   "top": 36,
+   "advance": 26.6953125,
+   "width": 24,
+   "height": 37,
+   "pam": "expected/fonts/unhinted/eacute-48px-dx75.pam",
+   "sha256": "885adab06a67886333a9ce2478797eb0c2e917d833b795195f583db47f94d818",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; one glyph, its outline moved right by dx pixels; the bitmap's top left corner is (left, -top) from the pen on the baseline (y down)"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "AVATAR To Yo",
+   "px": 24,
+   "origin": [
+    2,
+    24
+   ],
+   "width": 172,
+   "height": 32,
+   "pam": "expected/fonts/unhinted/avatar-to-yo-24px.pam",
+   "sha256": "30dc4bc53d2a76e8311b50c3d6352e2af1283c984090439a2b882237aa1bad3f",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; each glyph at its fractional pen position (unhinted advances and the kern table's pairs, from the origin on the baseline), coverage added and clamped where glyphs overlap"
+  },
+  {
+   "font": "fonts/MylaTestSans.ttf",
+   "text": "Hello, World!",
+   "px": 16,
+   "origin": [
+    2,
+    17
+   ],
+   "width": 97,
+   "height": 23,
+   "pam": "expected/fonts/unhinted/hello--world-16px.pam",
+   "sha256": "df68cf6f95410443b34f406a0222b553f59c8dc9b7219ca3ecf69ce4492052de",
+   "engine": "freetype-unhinted",
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; each glyph at its fractional pen position (unhinted advances and the kern table's pairs, from the origin on the baseline), coverage added and clamped where glyphs overlap"
+  }
+ ]
+}
