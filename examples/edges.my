@@ -1,0 +1,71 @@
+// Edge detection with std.imgproc (MYLA-941): a generated scene, a disc
+// and a bar on a soft ramp, is blurred and its Canny edges drawn as text;
+// Otsu's threshold and the connected components find its two shapes, and
+// an area-averaged thumbnail is drawn in shades.
+
+import std.image as image
+from std.image import Image, Image8, Layout
+import std.imgproc as imgproc
+
+// The scene's brightness at (x, y).
+#test(10, 9)[220u8]
+#test(0, 0)[20u8]
+#test(30, 4)[160u8]
+fun scene_at(x: int, y: int) -> uint8 {
+    let dx = x - 10
+    let dy = y - 9
+    if dx * dx + dy * dy <= 36 {
+        return 220u8
+    }
+    if x >= 24 && x < 36 && y >= 3 && y < 8 {
+        return 160u8
+    }
+    return (20 + x / 2) as uint8
+}
+
+// A sample as a character of a ramp from dark to light.
+#test(0u8)[' ']
+#test(255u8)['@']
+#test(128u8)['+']
+fun shade(v: uint8) -> char {
+    let ramp = " .:-=+*#%@".chars()
+    return ramp[(v as int) * ramp.len() / 256]
+}
+
+// Row `y` of a gray image as text: an edge (or any sample past 0) as `#`.
+#test(Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 255u8, 0u8] }, 0)[".#."]
+fun row_text(img: Image8, y: int) -> str {
+    var sb = StringBuilder()
+    for x in 0..img.width {
+        sb.append(if img[(x, y, 0)] > 0u8 { "#" } else { "." })
+    }
+    return sb.build()
+}
+
+fun main() {
+    var img: Image8 = image.new(40, 17, Layout.Gray, 0u8)
+    for y in 0..img.height {
+        for x in 0..img.width {
+            img[(x, y, 0)] = scene_at(x, y)
+        }
+    }
+    let edges = img |> imgproc.gaussian_blur(1.0f32) |> imgproc.canny(30.0f32, 90.0f32)
+    for y in 0..edges.height {
+        print(row_text(edges, y))
+    }
+    let t = imgproc.otsu(img)
+    let shapes = img |> imgproc.threshold(t) |> imgproc.components()
+    print(f"threshold {t}: {shapes.count} shapes")
+    for l in 1..shapes.count + 1 {
+        let r = shapes.stats[l]
+        print(f"  {r.area} pixels in {r.bbox.w}x{r.bbox.h} at ({r.bbox.x}, {r.bbox.y}), centre {r.centroid:.1}")
+    }
+    let small = imgproc.resize(img, 20, 4, imgproc.Filter.Area)
+    for y in 0..small.height {
+        var sb = StringBuilder()
+        for x in 0..small.width {
+            sb.append_char(shade(small[(x, y, 0)]))
+        }
+        print(f"|{sb.build()}|")
+    }
+}
