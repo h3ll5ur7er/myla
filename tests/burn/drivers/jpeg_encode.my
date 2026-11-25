@@ -1,0 +1,65 @@
+// std.jpeg's encoder under tests/burn/test_jpeg_encode.py (MYLA-937): each
+// line of stdin is `<input>\t<output>\t<quality>\t<subsampling>`, the input
+// a PNM or PAM image (std.pnm), the subsampling `444`, `422` or `420`. The
+// image is encoded into the output file, which std.jpeg's decoder then
+// reads back. Each line's answer:
+//
+//     ok <bytes written> <width> <height> <layout> <sha256 of the decoded samples>
+//     err <what>
+
+import std.jpeg as jpeg
+from std.jpeg import Subsampling
+import std.pnm as pnm
+import std.image as image
+import std.digest as digest
+import std.encoding as encoding
+import std.fs as fs
+import std.num as num
+from std.io import stdin, println
+
+#test("444")[Some(Subsampling.S444)]
+#test("422")[Some(Subsampling.S422)]
+#test("420")[Some(Subsampling.S420)]
+#test("411")[None]
+fun subsampling_of(s: str) -> Option<Subsampling> {
+    return match s {
+        "444" => Some(Subsampling.S444)
+        "422" => Some(Subsampling.S422)
+        "420" => Some(Subsampling.S420)
+        _ => None
+    }
+}
+
+fun one(input: str, out: str, quality: str, sub: str) -> str {
+    let Ok(data) = fs.read_bytes(input) else { return f"err cannot read {input}" }
+    let Ok(img) = pnm.decode(data, image.MAX_PIXELS) else { return f"err {input} isn't a PNM image" }
+    let Some(q) = num.parse_int(quality) else { return f"err quality {quality}" }
+    let Some(s) = subsampling_of(sub) else { return f"err subsampling {sub}" }
+    let b = jpeg.encode(img, q as int, s)
+    if let Err(e) = fs.write_bytes(out, b) {
+        return f"err cannot write {out}: {e}"
+    }
+    return match jpeg.decode(b, image.MAX_PIXELS) {
+        Ok(d) => f"ok {b.len()} {d.width} {d.height} {d.layout} {encoding.hex_encode(digest.sha256(d.data))}"
+        Err(e) => f"err decoding our own file: {e}"
+    }
+}
+
+fun main() {
+    var r = stdin()
+    while true {
+        let line = match r.read_line() {
+            Ok(Some(l)) => l
+            _ => ""
+        }
+        if line.len() == 0 {
+            break
+        }
+        let parts = line.split("\t")
+        if parts.len() != 4 {
+            println(f"err a request of {parts.len()} fields")
+        } else {
+            println(one(parts[0], parts[1], parts[2], parts[3]))
+        }
+    }
+}

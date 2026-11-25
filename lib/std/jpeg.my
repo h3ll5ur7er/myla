@@ -1854,6 +1854,613 @@ pub fun apply_orientation<S: Sample>(img: Image<S>, o: int) -> Image<S> {
 }
 
 // ---------------------------------------------------------------------------
+// Encoding (MYLA-937)
+// ---------------------------------------------------------------------------
+
+// How `encode` samples a colour image's chroma (Cb and Cr): at every pixel
+// (4:4:4), every other column (4:2:2) or every other column of every other
+// row (4:2:0). The luma (Y) is always kept at every pixel.
+#derive(Eq)
+pub enum Subsampling {
+    S444
+    S422
+    S420
+}
+
+// libjpeg's RGB to YCbCr (jccolor.c), 16 bits of fraction: FIX(x) =
+// round(x * 65536).
+const FIX_0_29900: int = 19595
+const FIX_0_58700: int = 38470
+const FIX_0_11400: int = 7471
+const FIX_0_16874: int = 11059
+const FIX_0_33126: int = 21709
+const FIX_0_41869: int = 27439
+const FIX_0_08131: int = 5329
+const FIX_0_50000: int = 32768
+// Cb's and Cr's offset of 128 and their rounding, a half less a little, so
+// 255 can't round up to 256.
+const CBCR_ROUND: int = 8421375
+
+// An RGB sample as YCbCr, as libjpeg's `rgb_ycc_convert` (and Pillow) gives
+// it.
+#test(0, 0, 0)[(0, 128, 128)]
+#test(255, 255, 255)[(255, 128, 128)]
+#test(255, 0, 0)[(76, 85, 255)]
+#test(0, 0, 255)[(29, 255, 107)]
+#test(12, 200, 99)[(132, 109, 42)]
+fun rgb_to_ycc(r: int, g: int, b: int) -> (int, int, int) {
+    let y = (FIX_0_29900 * r + FIX_0_58700 * g + FIX_0_11400 * b + ONE_HALF) >> SCALEBITS
+    let cb = (FIX_0_50000 * b - FIX_0_16874 * r - FIX_0_33126 * g + CBCR_ROUND) >> SCALEBITS
+    let cr = (FIX_0_50000 * r - FIX_0_41869 * g - FIX_0_08131 * b + CBCR_ROUND) >> SCALEBITS
+    return (y, cb, cr)
+}
+
+// libjpeg-turbo's quantisation (jcdctmgr.c): a coefficient of the islow DCT,
+// which is 8 times too large, divided by 8 * `q` and rounded to nearest (a
+// half away from zero), by a multiplication: `compute_reciprocal`'s
+// reciprocal `fq`, correction `c` and shift `r`, so the quotient of `x >= 0`
+// is ((x + c) * fq) >> r.
+#test(1)[(32768, 4, 18)]
+#test(2)[(32768, 8, 19)]
+#test(3)[(43691, 12, 20)]
+#test(5)[(52429, 20, 21)]
+#test(255)[(32897, 1020, 26)]
+fun reciprocal(q: int) -> (int, int, int) {
+    let d = q * 8
+    var b = 0
+    while (2 << b) <= d {
+        b += 1
+    }
+    var r = 16 + b
+    let one = 1i64 << (r as int64)
+    var fq = one / (d as int64)
+    let fr = one % (d as int64)
+    var c = d / 2
+    if fr == 0i64 {
+        fq >>= 1i64
+        r -= 1
+    } else if fr <= (d / 2) as int64 {
+        c += 1
+    } else {
+        fq += 1i64
+    }
+    return (fq as int, c, r)
+}
+
+// `x` quantised by `q` as libjpeg-turbo does it (`reciprocal`).
+#test(0, 16)[0]
+#test(64, 16)[1]
+#test(63, 16)[0]
+#test(-64, 16)[-1]
+#test(-63, 16)[0]
+#test(1000, 3)[42]
+#test(-8192, 1)[-1024]
+fun quantize(x: int, q: int) -> int {
+    let (fq, c, r) = reciprocal(q)
+    if x < 0 {
+        return -(((-x + c) * fq) >> r)
+    }
+    return ((x + c) * fq) >> r
+}
+
+// The Huffman code of each symbol of a DHT table (`counts` of each length,
+// `symbols` in code order), as libjpeg's `jpeg_make_c_derived_tbl` assigns
+// them: (code << 8) | length, 0 for a symbol not in the table.
+#test([1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [5, 0, 7], 8)[[514, 0, 0, 0, 0, 1, 0, 770]]
+fun huffman_codes(counts: [int], symbols: [int], size: int) -> [int] {
+    var t = list_m.filled(size, 0)
+    var code = 0
+    var k = 0
+    for len in 1..17 {
+        for _ in 0..counts[len - 1] {
+            t[symbols[k]] = (code << 8) | len
+            code += 1
+            k += 1
+        }
+        code <<= 1
+    }
+    return t
+}
+
+// A component's tables in the encoder: the quantisation's (`reciprocal`) by
+// zigzag position and the Huffman codes (`huffman_codes`) of DC and AC.
+struct EncTable {
+    fq: [int],
+    cq: [int],
+    rq: [int],
+    dc: [int],
+    ac: [int],
+}
+
+// The tables for the quantisation table `q` (row by row) and the standard
+// luminance or chrominance Huffman tables.
+fun enc_table(q: [int], luma: bool) -> EncTable {
+    let nat = natural_order()
+    var fq: [int] = []
+    var cq: [int] = []
+    var rq: [int] = []
+    for k in 0..64 {
+        let (f, c, r) = reciprocal(q[nat[k]])
+        fq.push(f)
+        cq.push(c)
+        rq.push(r)
+    }
+    let (dcn, dcs) = std_huffman(luma, false)
+    let (acn, acs) = std_huffman(luma, true)
+    return EncTable { fq: fq, cq: cq, rq: rq, dc: huffman_codes(dcn, dcs, 16), ac: huffman_codes(acn, acs, 256) }
+}
+
+// The entropy coder: the bytes so far, and the bits not yet a byte (the low
+// `n` of `acc`, fewer than 32 between blocks).
+struct Enc {
+    out: [uint8],
+    acc: uint64,
+    n: int,
+    ws: [int],          // the DCT's 64 values
+    zz: [int],          // the quantised coefficients in zigzag order
+    nbits: [int],       // the bits of each magnitude 0 to 2047
+    nat: [int],         // natural_order()
+    last_dc: [int],     // each component's DC, for the next block's difference
+}
+
+fun new_enc(out: [uint8]) -> Enc {
+    var nbits = list_m.filled(2048, 0)
+    for i in 1..2048 {
+        nbits[i] = nbits[i >> 1] + 1
+    }
+    return Enc { out: out, acc: 0, n: 0, ws: list_m.filled(64, 0), zz: list_m.filled(64, 0), nbits: nbits, nat: natural_order(), last_dc: [0, 0, 0] }
+}
+
+impl Enc {
+    // The 8x8 samples at `off` in `s` (rows `stride` apart) as a block of
+    // component `c`: the islow forward DCT (jfdctint.c), quantised by `t`
+    // as libjpeg-turbo does, then Huffman coded (jchuff.c).
+    fun block(var self, t: EncTable, c: int, s: [int], off: int, stride: int) {
+        var ws = self.ws
+        self.ws = []
+        // pass 1: the rows, scaled up by 2^PASS1_BITS (2)
+        for y in 0..8 {
+            let o = off + y * stride
+            let w = y * 8
+            let d0 = s[o] - 128
+            let d1 = s[o + 1] - 128
+            let d2 = s[o + 2] - 128
+            let d3 = s[o + 3] - 128
+            let d4 = s[o + 4] - 128
+            let d5 = s[o + 5] - 128
+            let d6 = s[o + 6] - 128
+            let d7 = s[o + 7] - 128
+            let tmp0 = d0 + d7
+            let tmp7 = d0 - d7
+            let tmp1 = d1 + d6
+            let tmp6 = d1 - d6
+            let tmp2 = d2 + d5
+            let tmp5 = d2 - d5
+            let tmp3 = d3 + d4
+            let tmp4 = d3 - d4
+            let tmp10 = tmp0 + tmp3
+            let tmp13 = tmp0 - tmp3
+            let tmp11 = tmp1 + tmp2
+            let tmp12 = tmp1 - tmp2
+            ws[w] = (tmp10 + tmp11) << 2
+            ws[w + 4] = (tmp10 - tmp11) << 2
+            let z1 = (tmp12 + tmp13) * FX_0_541196100
+            ws[w + 2] = (z1 + tmp13 * FX_0_765366865 + 1024) >> 11
+            ws[w + 6] = (z1 - tmp12 * FX_1_847759065 + 1024) >> 11
+            let z5 = (tmp4 + tmp6 + tmp5 + tmp7) * FX_1_175875602
+            let o1 = -(tmp4 + tmp7) * FX_0_899976223
+            let o2 = -(tmp5 + tmp6) * FX_2_562915447
+            let o3 = z5 - (tmp4 + tmp6) * FX_1_961570560
+            let o4 = z5 - (tmp5 + tmp7) * FX_0_390180644
+            ws[w + 7] = (tmp4 * FX_0_298631336 + o1 + o3 + 1024) >> 11
+            ws[w + 5] = (tmp5 * FX_2_053119869 + o2 + o4 + 1024) >> 11
+            ws[w + 3] = (tmp6 * FX_3_072711026 + o2 + o3 + 1024) >> 11
+            ws[w + 1] = (tmp7 * FX_1_501321110 + o1 + o4 + 1024) >> 11
+        }
+        // pass 2: the columns, the PASS1_BITS taken off again (the result is
+        // 8 times the true DCT)
+        for x in 0..8 {
+            let tmp0 = ws[x] + ws[56 + x]
+            let tmp7 = ws[x] - ws[56 + x]
+            let tmp1 = ws[8 + x] + ws[48 + x]
+            let tmp6 = ws[8 + x] - ws[48 + x]
+            let tmp2 = ws[16 + x] + ws[40 + x]
+            let tmp5 = ws[16 + x] - ws[40 + x]
+            let tmp3 = ws[24 + x] + ws[32 + x]
+            let tmp4 = ws[24 + x] - ws[32 + x]
+            let tmp10 = tmp0 + tmp3
+            let tmp13 = tmp0 - tmp3
+            let tmp11 = tmp1 + tmp2
+            let tmp12 = tmp1 - tmp2
+            ws[x] = (tmp10 + tmp11 + 2) >> 2
+            ws[32 + x] = (tmp10 - tmp11 + 2) >> 2
+            let z1 = (tmp12 + tmp13) * FX_0_541196100
+            ws[16 + x] = (z1 + tmp13 * FX_0_765366865 + 16384) >> 15
+            ws[48 + x] = (z1 - tmp12 * FX_1_847759065 + 16384) >> 15
+            let z5 = (tmp4 + tmp6 + tmp5 + tmp7) * FX_1_175875602
+            let o1 = -(tmp4 + tmp7) * FX_0_899976223
+            let o2 = -(tmp5 + tmp6) * FX_2_562915447
+            let o3 = z5 - (tmp4 + tmp6) * FX_1_961570560
+            let o4 = z5 - (tmp5 + tmp7) * FX_0_390180644
+            ws[56 + x] = (tmp4 * FX_0_298631336 + o1 + o3 + 16384) >> 15
+            ws[40 + x] = (tmp5 * FX_2_053119869 + o2 + o4 + 16384) >> 15
+            ws[24 + x] = (tmp6 * FX_3_072711026 + o2 + o3 + 16384) >> 15
+            ws[8 + x] = (tmp7 * FX_1_501321110 + o1 + o4 + 16384) >> 15
+        }
+        // quantised, in zigzag order
+        var zz = self.zz
+        self.zz = []
+        let nat = self.nat
+        let fq = t.fq
+        let cq = t.cq
+        let rq = t.rq
+        for k in 0..64 {
+            let v = ws[nat[k]]
+            zz[k] = if v < 0 { -(((cq[k] - v) * fq[k]) >> rq[k]) } else { ((v + cq[k]) * fq[k]) >> rq[k] }
+        }
+        self.ws = ws
+        self.code(t, c, zz)
+        self.zz = zz
+    }
+
+    // A block of component `c` past the image's edge in a partial MCU, as
+    // libjpeg makes it: the AC coefficients zero and the DC the previous
+    // block's, so its difference is 0.
+    fun dummy(var self, t: EncTable, c: int) {
+        var zz = self.zz
+        self.zz = []
+        zz[0] = self.last_dc[c]
+        for k in 1..64 {
+            zz[k] = 0
+        }
+        self.code(t, c, zz)
+        self.zz = zz
+    }
+
+    // The quantised coefficients `zz` (zigzag order) of a block of component
+    // `c` Huffman coded with `t`'s tables, as libjpeg's `encode_one_block`:
+    // the DC's difference from the component's last, then the AC
+    // coefficients as runs of zeros (ZRL for 16) and an EOB after the last
+    // that isn't zero. The bits go into `acc`, whole bytes out when it holds
+    // 32 or more, each 0xFF followed by a stuffed 0x00.
+    fun code(var self, t: EncTable, c: int, zz: [int]) {
+        var out = self.out
+        self.out = []
+        var acc = self.acc
+        var n = self.n
+        let nbits = self.nbits
+        let ac = t.ac
+        // the DC: its magnitude's category, then the bits (one less if negative)
+        let diff = zz[0] - self.last_dc[c]
+        self.last_dc[c] = zz[0]
+        var mag = if diff < 0 { -diff } else { diff }
+        var nb = if mag < 2048 { nbits[mag] } else { 11 }
+        var hc = t.dc[nb]
+        var len = (hc & 255) + nb
+        var bits = ((hc >> 8) << nb) | ((if diff < 0 { diff - 1 } else { diff }) & ((1 << nb) - 1))
+        acc = (acc << (len as uint64)) | (bits as uint64)
+        n += len
+        if n >= 32 {
+            for _ in 0..4 {
+                n -= 8
+                let b = ((acc >> (n as uint64)) & 255u64) as uint8
+                out.push(b)
+                if b == 0xFFu8 {
+                    out.push(0u8)
+                }
+            }
+        }
+        var run = 0
+        for k in 1..64 {
+            let v = zz[k]
+            if v == 0 {
+                run += 1
+                continue
+            }
+            while run > 15 {
+                // ZRL, sixteen zeros
+                hc = ac[0xF0]
+                len = hc & 255
+                acc = (acc << (len as uint64)) | ((hc >> 8) as uint64)
+                n += len
+                if n >= 32 {
+                    for _ in 0..4 {
+                        n -= 8
+                        let b = ((acc >> (n as uint64)) & 255u64) as uint8
+                        out.push(b)
+                        if b == 0xFFu8 {
+                            out.push(0u8)
+                        }
+                    }
+                }
+                run -= 16
+            }
+            mag = if v < 0 { -v } else { v }
+            nb = if mag < 2048 { nbits[mag] } else { 11 }
+            hc = ac[(run << 4) + nb]
+            len = (hc & 255) + nb
+            bits = ((hc >> 8) << nb) | ((if v < 0 { v - 1 } else { v }) & ((1 << nb) - 1))
+            acc = (acc << (len as uint64)) | (bits as uint64)
+            n += len
+            if n >= 32 {
+                for _ in 0..4 {
+                    n -= 8
+                    let b = ((acc >> (n as uint64)) & 255u64) as uint8
+                    out.push(b)
+                    if b == 0xFFu8 {
+                        out.push(0u8)
+                    }
+                }
+            }
+            run = 0
+        }
+        if run > 0 {
+            // EOB
+            hc = ac[0]
+            len = hc & 255
+            acc = (acc << (len as uint64)) | ((hc >> 8) as uint64)
+            n += len
+            if n >= 32 {
+                for _ in 0..4 {
+                    n -= 8
+                    let b = ((acc >> (n as uint64)) & 255u64) as uint8
+                    out.push(b)
+                    if b == 0xFFu8 {
+                        out.push(0u8)
+                    }
+                }
+            }
+        }
+        self.acc = acc
+        self.n = n
+        self.out = out
+    }
+
+    // The bytes, the last one filled up with 1 bits (T.81, F.1.2.3).
+    fun finish(var self) -> [uint8] {
+        var out = self.out
+        self.out = []
+        var n = self.n
+        var acc = self.acc
+        let pad = (8 - n % 8) % 8
+        acc = (acc << (pad as uint64)) | ((1u64 << (pad as uint64)) - 1u64)
+        n += pad
+        while n > 0 {
+            n -= 8
+            let b = ((acc >> (n as uint64)) & 255u64) as uint8
+            out.push(b)
+            if b == 0xFFu8 {
+                out.push(0u8)
+            }
+        }
+        self.n = 0
+        self.acc = 0
+        return out
+    }
+}
+
+// The forward DCT's constants (jfdctint.c): FIX(x) = round(x * 8192), as
+// int (the sums fit in 32 bits for 8-bit samples).
+const FX_0_298631336: int = 2446
+const FX_0_390180644: int = 3196
+const FX_0_541196100: int = 4433
+const FX_0_765366865: int = 6270
+const FX_0_899976223: int = 7373
+const FX_1_175875602: int = 9633
+const FX_1_501321110: int = 12299
+const FX_1_847759065: int = 15137
+const FX_1_961570560: int = 16069
+const FX_2_053119869: int = 16819
+const FX_2_562915447: int = 20995
+const FX_3_072711026: int = 25172
+
+// The 64 samples of an 8x8 block (row by row) through the forward DCT and
+// quantised by `q` (row by row): the coefficients in zigzag order.
+#test(list_m.filled(64, 128), list_m.filled(64, 1))[list_m.filled(64, 0)]
+#test(list_m.filled(64, 0), list_m.filled(64, 1))[[-1024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
+fun fdct_block(samples: [int], q: [int]) -> [int] {
+    var e = new_enc([])
+    let t = enc_table(q, true)
+    e.block(t, 0, samples, 0, 8)
+    return e.zz
+}
+
+// The headers before the entropy-coded data, as libjpeg writes them: SOI, a
+// JFIF APP0 (version 1.01, no unit, 1:1), a DQT for each table, SOF0, a DHT
+// for each Huffman table, SOS.
+fun enc_header(w: int, h: int, nc: int, hs: [int], vs: [int], q0: [int], q1: [int]) -> [uint8] {
+    var o: [uint8] = [0xFFu8, 0xD8u8, 0xFFu8, 0xE0u8, 0u8, 16u8, 0x4Au8, 0x46u8, 0x49u8, 0x46u8, 0u8, 1u8, 1u8, 0u8, 0u8, 1u8, 0u8, 1u8, 0u8, 0u8]
+    let nat = natural_order()
+    for t in 0..(if nc == 1 { 1 } else { 2 }) {
+        let q = if t == 0 { q0 } else { q1 }
+        o.push(0xFFu8)
+        o.push(0xDBu8)
+        o.push(0u8)
+        o.push(67u8)
+        o.push(t as uint8)
+        for k in 0..64 {
+            o.push(q[nat[k]] as uint8)
+        }
+    }
+    let sof = [0xFF, 0xC0, 0, 8 + 3 * nc, 8, h >> 8, h & 255, w >> 8, w & 255, nc]
+    for v in sof {
+        o.push(v as uint8)
+    }
+    for c in 0..nc {
+        o.push((c + 1) as uint8)
+        o.push(((hs[c] << 4) | vs[c]) as uint8)
+        o.push((if c == 0 { 0 } else { 1 }) as uint8)
+    }
+    for t in 0..(if nc == 1 { 1 } else { 2 }) {
+        for ac in [false, true] {
+            let (counts, symbols) = std_huffman(t == 0, ac)
+            let len = 19 + symbols.len()
+            o.push(0xFFu8)
+            o.push(0xC4u8)
+            o.push((len >> 8) as uint8)
+            o.push((len & 255) as uint8)
+            o.push(((if ac { 16 } else { 0 }) + t) as uint8)
+            for v in counts {
+                o.push(v as uint8)
+            }
+            for v in symbols {
+                o.push(v as uint8)
+            }
+        }
+    }
+    let sos = [0xFF, 0xDA, 0, 6 + 2 * nc, nc]
+    for v in sos {
+        o.push(v as uint8)
+    }
+    for c in 0..nc {
+        o.push((c + 1) as uint8)
+        o.push((if c == 0 { 0 } else { 0x11 }) as uint8)
+    }
+    o.push(0u8)
+    o.push(63u8)
+    o.push(0u8)
+    return o
+}
+
+// `img` as a baseline JFIF JPEG at `quality` (1 to 100, clamped: IJG's
+// scaling of Annex K's tables) with the chroma sampled as `subsampling`
+// says. Gray and gray + alpha images are one component (gray), RGB and RGBA
+// images YCbCr; alpha is dropped. It is what libjpeg (Pillow, `optimize`
+// off, not progressive) writes with the same settings, byte for byte but
+// its JFIF density: the islow DCT, libjpeg's colour conversion, its
+// downsampling (each chroma sample the mean of its 2 or 4 pixels, rounded
+// alternately up and down), its rounding and the standard Huffman tables.
+// An image JPEG can't hold (no pixels, a side over 65,535) or whose `data`
+// doesn't fit its size gives no bytes.
+pub fun encode(img: Image8, quality: int = 85, subsampling: Subsampling = Subsampling.S420) -> [uint8] {
+    let w = img.width
+    let h = img.height
+    let ch = img.layout.channels()
+    if w < 1 || h < 1 || w > 65535 || h > 65535 || (img.data.len() as int64) != (w as int64) * (h as int64) * (ch as int64) {
+        return []
+    }
+    let color = img.layout.is_color()
+    let nc = if color { 3 } else { 1 }
+    let hmax = if color && subsampling != Subsampling.S444 { 2 } else { 1 }
+    let vmax = if color && subsampling == Subsampling.S420 { 2 } else { 1 }
+    let q0 = scaled_quant(luma_quant(), quality)
+    let q1 = scaled_quant(chroma_quant(), quality)
+    let t0 = enc_table(q0, true)
+    let t1 = enc_table(q1, false)
+    var e = new_enc(enc_header(w, h, nc, [hmax, 1, 1], [vmax, 1, 1], q0, q1))
+    let data = img.data
+    // MCUs across and down, the luma's blocks across and down, and the
+    // full-resolution strip of an MCU row: `fw` by `fh` samples of each
+    // component, the image's last column and row repeated past its edges
+    let mx = (w + 8 * hmax - 1) / (8 * hmax)
+    let my = (h + 8 * vmax - 1) / (8 * vmax)
+    let wb = (w + 7) / 8
+    let hb = (h + 7) / 8
+    let fw = mx * hmax * 8
+    let fh = vmax * 8
+    var f0 = list_m.filled(fw * fh, 0)
+    var f1 = if color { list_m.filled(fw * fh, 0) } else { [] }
+    var f2 = if color { list_m.filled(fw * fh, 0) } else { [] }
+    // the chroma's strips when subsampled: `cw` by 8
+    let sub = color && hmax > 1
+    let cw = mx * 8
+    var s1 = if sub { list_m.filled(cw * 8, 0) } else { [] }
+    var s2 = if sub { list_m.filled(cw * 8, 0) } else { [] }
+    // the chroma's rows made from the image's (the rest repeat the last)
+    let crows = (h + vmax - 1) / vmax
+    for iy in 0..my {
+        // the colour conversion
+        for r in 0..fh {
+            let sy = if iy * fh + r < h { iy * fh + r } else { h - 1 }
+            let src = sy * w * ch
+            let o = r * fw
+            if color {
+                for x in 0..w {
+                    let p = src + x * ch
+                    let rr = data[p] as int
+                    let gg = data[p + 1] as int
+                    let bb = data[p + 2] as int
+                    f0[o + x] = (FIX_0_29900 * rr + FIX_0_58700 * gg + FIX_0_11400 * bb + ONE_HALF) >> SCALEBITS
+                    f1[o + x] = (FIX_0_50000 * bb - FIX_0_16874 * rr - FIX_0_33126 * gg + CBCR_ROUND) >> SCALEBITS
+                    f2[o + x] = (FIX_0_50000 * rr - FIX_0_41869 * gg - FIX_0_08131 * bb + CBCR_ROUND) >> SCALEBITS
+                }
+                let y = f0[o + w - 1]
+                let cb = f1[o + w - 1]
+                let cr = f2[o + w - 1]
+                for x in w..fw {
+                    f0[o + x] = y
+                    f1[o + x] = cb
+                    f2[o + x] = cr
+                }
+            } else {
+                for x in 0..w {
+                    f0[o + x] = data[src + x * ch] as int
+                }
+                let y = f0[o + w - 1]
+                for x in w..fw {
+                    f0[o + x] = y
+                }
+            }
+        }
+        // the chroma downsampled as libjpeg's h2v1 and h2v2 do: the mean
+        // with a bias of 0, 1, 0, 1 (in halves) or 1, 2, 1, 2 (in quarters)
+        // across, so the roundings even out
+        if sub {
+            for j in 0..8 {
+                let o = j * cw
+                if vmax == 1 {
+                    let a = j * fw
+                    for i in 0..cw {
+                        s1[o + i] = (f1[a + 2 * i] + f1[a + 2 * i + 1] + (i & 1)) >> 1
+                        s2[o + i] = (f2[a + 2 * i] + f2[a + 2 * i + 1] + (i & 1)) >> 1
+                    }
+                } else if iy * 8 + j < crows {
+                    let a = 2 * j * fw
+                    let b = a + fw
+                    for i in 0..cw {
+                        let bias = 1 + (i & 1)
+                        s1[o + i] = (f1[a + 2 * i] + f1[a + 2 * i + 1] + f1[b + 2 * i] + f1[b + 2 * i + 1] + bias) >> 2
+                        s2[o + i] = (f2[a + 2 * i] + f2[a + 2 * i + 1] + f2[b + 2 * i] + f2[b + 2 * i + 1] + bias) >> 2
+                    }
+                } else {
+                    // below the image: the last row made from it, repeated
+                    let a = (crows - 1 - iy * 8) * cw
+                    for i in 0..cw {
+                        s1[o + i] = s1[a + i]
+                        s2[o + i] = s2[a + i]
+                    }
+                }
+            }
+        }
+        // the MCUs: the luma's blocks (a partial MCU's past the image are
+        // dummies), then Cb's and Cr's
+        for m in 0..mx {
+            for by in 0..vmax {
+                for bx in 0..hmax {
+                    let col = m * hmax + bx
+                    if col < wb && iy * vmax + by < hb {
+                        e.block(t0, 0, f0, by * 8 * fw + col * 8, fw)
+                    } else {
+                        e.dummy(t0, 0)
+                    }
+                }
+            }
+            if sub {
+                e.block(t1, 1, s1, m * 8, cw)
+                e.block(t1, 2, s2, m * 8, cw)
+            } else if color {
+                e.block(t1, 1, f1, m * 8, fw)
+                e.block(t1, 2, f2, m * 8, fw)
+            }
+        }
+    }
+    var out = e.finish()
+    out.push(0xFFu8)
+    out.push(0xD9u8)
+    return out
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
