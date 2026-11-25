@@ -2,18 +2,38 @@
 id: MYLA-945
 title: "Image and font test corpus, the fuzz harness and the benchmarks"
 type: chore
-status: in-progress
+status: review
 priority: medium
 labels: [stdlib, images, tests]
 ---
 Step 1 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]: what every codec lane plugs its files into.
 
-- **Owns:** `tests/burn/data/images/`, `tests/burn/test_images.py`, `benchmarks/images_std.my`
+- **Owns:** `tests/burn/data/images/`, `tests/burn/test_images.py`, `benchmarks/images_std.my`, and with them `tests/burn/_images.py` (the helpers), `tests/burn/_images_vendor.py` (`--vendor`), `tests/burn/drivers/` (the drivers' common module, the harness's own driver; the codec lanes add theirs), `benchmarks/images_pillow.py`, the suite's part of [[Development/Testing]]
 - **Needs:** [[MYLA-930]] (the fixture decision)
 
-- [ ] The corpus with a `LICENSES.md` naming each file's source and licence: PngSuite; a few JPEG (baseline, progressive, every sampling factor, restart markers, CMYK), GIF (animated, interlaced, transparent) and TIFF files; one small OFL font subset
-- [ ] `--vendor`: Pillow writes the expected pixels as PAM files (or their SHA-256 where large), as test_toml's `--vendor` makes its JSON; the tests themselves need no third-party package, and skip only the round trips through Pillow when it is missing
-- [ ] The harness: a driver per module, built once, natively and `--checked`; the smallest files also interpreted; `MYLA_TEST_TARGET` runs it on aarch64 and wasm32 (`scripts/test-target.py`)
-- [ ] Fuzzing: every truncation up to 512 bytes and 10,000 seeded mutations per decoder; the pass condition "`Ok` or `Err`"; the seed printed on a failure
-- [ ] The benchmark program and Pillow's numbers for the same work beside it, filled in as the modules land
-- [ ] [[Development/Testing]] names the suite
+- [x] The corpus with a `LICENSES.md` naming each file's source and licence: PngSuite; a few JPEG (baseline, progressive, every sampling factor, restart markers, CMYK), GIF (animated, interlaced, transparent) and TIFF files; one small OFL font subset
+- [x] `--vendor`: Pillow writes the expected pixels as PAM files (or their SHA-256 where large), as test_toml's `--vendor` makes its JSON; the tests themselves need no third-party package, and skip only the round trips through Pillow when it is missing
+- [x] The harness: a driver per module, built once, natively and `--checked`; the smallest files also interpreted; `MYLA_TEST_TARGET` runs it on aarch64 and wasm32 (`scripts/test-target.py`) — run on wasm32 here; aarch64 not (no qemu-aarch64 on this machine); `tests.burn.test_images` isn't in `_targets.SUITES` yet (a shared file: the integrator's line)
+- [x] Fuzzing: every truncation up to 512 bytes and 10,000 seeded mutations per decoder; the pass condition "`Ok` or `Err`"; the seed printed on a failure
+- [x] The benchmark program and Pillow's numbers for the same work beside it, filled in as the modules land (Pillow's numbers recorded; the Myla lines are the lanes')
+- [x] [[Development/Testing]] names the suite
+
+## What there is
+
+- **The corpus** (`tests/burn/data/images/`, 1.73 MB, 346 image files and a font in two files): PngSuite 2017-07-19 (176 files, 14 broken), downloaded from schaik.com and checked against its SHA-256; `png/gen/` (every filter on odd widths at 2, 8 and 16 bits, Adam7 at 16 bits, a short tRNS, IDAT in 1-byte chunks, a 512x384 photo, an unknown ancillary chunk, and 10 broken files: bad CRC, cut, no IEND, huge, zero width, unknown critical chunk, bad filter byte, bad zlib, short data, palette index out of range); 42 JPEG (4:4:4, 4:2:2, 4:2:0 at three qualities on a 61x47 photo, 4:4:0 and 4:1:1 by ImageMagick, gray, progressive, optimised tables, restart markers baseline and progressive, Adobe CMYK, EXIF orientations 3, 6, 8, 1x1, one MCU, 256x192, 512x384, and 11 broken or unsupported: no SOI, SOF9, SOF3, 12-bit, huge, zero width, bad DHT, cut at four places); 17 GIF (static, interlaced, 2 colours, transparent, 1x1, an animation for each disposal 0 to 3, local palettes, 7 broken); 41 TIFF (none, LZW, Deflate, old Deflate, PackBits; strips and tiles; planar 2; both byte orders; 1, 4, 8, 16 bits and float32 with predictors 2 and 3; gray, RGB, RGBA, palette 4 and 8, bilevel both ways; 3 pages; 12 broken or unsupported: byte order, BigTIFF, IFD past the end and looped, JPEG, CCITT, CMYK, huge, cut); 19 BMP (1, 4, 8, 16 (555, 565), 24, 32 (BI_RGB, bitfields V4 and V5) bits, RLE8, RLE4, top-down, 7 broken); 23 PNM (P1 to P6, ASCII and binary, MAXVAL 15 and 1000, 16 bits, PAM in all four layouts and 16 bits, 8 broken); 9 QOI (4 by Pillow, 5 broken).
+- **Expected pixels**: 266 PAM files for the 272 `ok` entries and 2 for TIFF pages (the others, 4 medium images and 2 float32 TIFFs, by hash), `manifest.json` with each file's verdict (`ok`, `err`, `any`), size, layout, bits, frames, SHA-256 and notes. JPEG and GIF: Pillow's decode (GIF's frames composited as RGBA). PNG: `_images.png_decode` (zlib alone; it keeps 16 bits and tRNS), checked equal to Pillow's decode of every file Pillow reads. TIFF, BMP, PNM: the pictures our own writers wrote, each checked against Pillow's decode.
+- **Font**: `fonts/MylaTestSans.ttf` (15.6 KB: Liberation Sans 2.1.5 subset to 176 glyphs, ASCII and Western European letters, 49 composite glyphs, `kern` format 0 with 104 pairs, cmap 4, no hinting, renamed as the OFL asks), `MylaTestSans.ttc` (Regular and Bold), `OFL.txt`, `info.json` (metrics, advances, kerning sample); renderings: 7 by Pillow (autohinted: Pillow can't turn hinting off), 48 single glyphs (A, g, @, é at 12, 24, 48 px, offsets 0, 1/4, 1/2, 3/4 px) and 2 kerned strings by FreeType unhinted through freetype-py.
+- **Harness** (`tests/burn/_images.py`): manifest, PAM read and write, `compare` (exact, `max_abs`, `min_psnr`, 16 to 8 bits rounded, lossless layout changes), `Driver`, `build_driver` (plain or `--checked`, MYLA_TEST_TARGET's target), `interpreter_argv`, `check_corpus`, `truncations`, `mutate`, `fuzz` (failure: seed, file, mutation, the case kept in `build/fuzz-failures/`, the command to run it). `tests/burn/drivers/image_driver.my`: the protocol (`serve8`, `serve16`, `serve_f32`, `serve8_frames`, `serve16_frames`); a codec's driver is the `main` alone.
+- **Tests** (`tests/burn/test_images.py`): `Corpus` (Python alone, Pillow round trip optional), `Harness`, `SelftestPamDecoder` (the harness's own driver through every codec test) and a class per row of `CODECS` (pnm, bmp, qoi, png, png16, jpeg, gif, tiff), skipped until `lib/std/<m>.my` and `tests/burn/drivers/<driver>.my` exist.
+
+## Evidence
+
+- `python3 -m unittest tests.burn.test_images` (2026-11-24/25, this worktree): 20 tests in about 6 s, OK, 8 codec classes skipped ("lib/std/png.my doesn't exist yet" …). `python3 -S -m unittest tests.burn.test_images.Corpus` (no site-packages: no Pillow, no numpy): 8 tests OK, the Pillow round trip skipped.
+- `MYLA_TEST_TARGET=wasm32-wasi python3 -m unittest tests.burn.test_images.SelftestPamDecoder tests.burn.test_images.Harness`: 12 tests in 9.2 s, OK (3 skipped: interpreter and host-only runs). aarch64 and Windows not run: no qemu-aarch64 or Wine here.
+- The harness fails when it should (seen first as failures while writing it): a driver with a planted out-of-range index is caught at "fuzz case 7 (MYLA_FUZZ_SEED=945) … truncated to 7 bytes: runtime error: list index 7 out of bounds", the case kept; an image whose samples don't fill it prints `bad 2x2 gray with 1 samples` and fails a fuzz run; an `err` entry that decodes, a pixel off by 3 (`1 of 3072 samples differ, by at most 3`), a shape mismatch are reported.
+- Fuzz throughput, the harness's own driver, natively: 10,392 cases (10,000 mutations of 221 files and every truncation of the 6 smallest) in 1.62 s plain, 2.01 s `--checked` (2,932 ok, 7,460 err).
+- `--vendor` is deterministic: runs with and without fontTools and freetype-py (which then keeps the committed font and renderings) give byte-identical files (sha256 of all 678 files).
+- `build/myla test tests/burn/drivers/image_driver.my`: 6/6; `build/myla test benchmarks/images_std.my`: 13/13 (its picture's pixels against images_pillow.py's formula).
+- Pillow 13.0.0 (libjpeg-turbo 3.2.0, zlib-ng, FreeType 2.14.3) on the 12-MP picture (4000x3000 RGB), the fastest of 5, on the shared 4-core machine: PNG encode level 6 3076 ms (14.7 MB), PNG decode 196 ms, JPEG encode q85 4:2:0 44 ms (3.3 MB), JPEG decode 77 ms, resize to 1155x866 bilinear 50 ms, box 31 ms, Lanczos 125 ms, Gaussian blur sigma 2 at 1 MP 28 ms, 3x3 edges on 1 MP gray 11 ms (Pillow has no Canny), an 804-character paragraph at 16 px wrapped 25 ms. Making the picture in Myla natively: 484 ms.
+- Found on the way: Pillow 13 doesn't check IDAT's CRC (PngSuite's `xcsn0g01` reads); it reads a big-endian float32 TIFF with predictor 3 byte-swapped (libtiff through ImageMagick reads our file right); it keeps 8 bits of 16-bit colour (PNG, TIFF: the high byte; PPM: rounded) and a gray or RGB `tRNS` aside, so the expected pixels of those come from the source or `png_decode`; FreeType autohints a font without instructions under Pillow's default load flags.
+- No language or toolchain bug hit. `match` arms can't `return` (`Err(e) => return …` is a parse error; `if let`/let-else instead), noted for the lanes.

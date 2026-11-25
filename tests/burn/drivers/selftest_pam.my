@@ -1,0 +1,104 @@
+// The harness's own driver (MYLA-945): a reader of 8-bit PAM files (P7),
+// one image or several one after the other, through image_driver's
+// protocol. tests/burn/test_images.py runs it over the corpus's expected
+// PAM files and fuzzes it, so the harness is tested before any codec exists.
+// A codec's driver is the `main` alone (std.pnm's reads PAM properly).
+
+import std.image as image
+from std.image import Image8, ImageError
+import std.num as num
+import image_driver as driver
+
+struct Header {
+    width: int,
+    height: int,
+    depth: int,
+    maxval: int,
+    // where the samples start
+    end: int,
+}
+
+// The header of the PAM image at `pos`.
+fun header(b: [uint8], pos: int) -> Result<Header, ImageError> {
+    if pos + 3 > b.len() {
+        return Err(ImageError.Truncated)
+    }
+    if b[pos] != 'P' || b[pos + 1] != '7' || b[pos + 2] != '\n' {
+        return Err(ImageError.BadSignature)
+    }
+    var h = Header { width: -1, height: -1, depth: -1, maxval: -1, end: 0 }
+    var i = pos + 3
+    while true {
+        var j = i
+        while j < b.len() && b[j] != '\n' {
+            j += 1
+        }
+        if j >= b.len() {
+            return Err(ImageError.Truncated)
+        }
+        var sb = StringBuilder()
+        for k in i..j {
+            if b[k] < 32u8 || b[k] > 126u8 {
+                return Err(ImageError.Corrupt(f"a header byte {b[k]} at {k}"))
+            }
+            sb.append_char(b[k] as char)
+        }
+        let line = sb.build()
+        i = j + 1
+        if line == "ENDHDR" {
+            h.end = i
+            break
+        }
+        let words = line.split(" ")
+        if words.len() != 2 {
+            continue
+        }
+        let n = match num.parse_int(words[1]) {
+            Some(v) => if v >= 0i64 && v <= 1000000i64 { v as int } else { -1 }
+            None => -1
+        }
+        if words[0] == "WIDTH" { h.width = n }
+        if words[0] == "HEIGHT" { h.height = n }
+        if words[0] == "DEPTH" { h.depth = n }
+        if words[0] == "MAXVAL" { h.maxval = n }
+    }
+    if h.width < 1 || h.height < 1 || h.depth < 1 || h.depth > 4 || h.maxval < 1 {
+        return Err(ImageError.Corrupt("a bad header"))
+    }
+    if h.maxval != 255 {
+        return Err(ImageError.Unsupported(f"MAXVAL {h.maxval}"))
+    }
+    return Ok(h)
+}
+
+// Every image of `b`, which must all have the first's size and depth.
+fun decode(b: [uint8], max_pixels: int64) -> Result<[Image8], ImageError> {
+    var frames: [Image8] = []
+    var pos = 0
+    var total: int64 = 0
+    while pos < b.len() {
+        let h = header(b, pos)?
+        let Some(layout) = image.layout_of(h.depth) else {
+            return Err(ImageError.Corrupt("depth"))
+        }
+        total += (h.width as int64) * (h.height as int64)
+        image.check_size(h.width, h.height, h.depth, max_pixels)?
+        if total > max_pixels {
+            return Err(ImageError.TooLarge(total))
+        }
+        let n = h.width * h.height * h.depth
+        if (h.end as int64) + (n as int64) > (b.len() as int64) {
+            return Err(ImageError.Truncated)
+        }
+        frames.push(image.from_data(h.width, h.height, layout, b[h.end:h.end + n])?)
+        pos = h.end + n
+    }
+    if frames.len() == 0 {
+        return Err(ImageError.Truncated)
+    }
+    return Ok(frames)
+}
+
+fun main() {
+    driver.serve8_frames(decode)
+}
