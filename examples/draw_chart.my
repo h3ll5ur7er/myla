@@ -1,0 +1,69 @@
+// A small chart drawn with std.draw (MYLA-942): bars filled through the
+// coverage rasteriser, a stroked line with round joins, axes as aliased
+// lines and a title in the built-in bitmap font, then printed in the
+// terminal, one character a pixel, darker pixels as denser characters.
+
+import std.draw as draw
+import std.image as image
+from std.draw import Canvas, Paint, Join, Cap
+from std.image import Color
+from std.vector32 import Vec2, vec2
+
+// The character for a pixel's lightness (0 black to 255 white).
+#test(0)['@']
+#test(255)[' ']
+#test(128)['=']
+fun shade(lightness: int) -> char {
+    let ramp = "@%#*+=-:. "
+    let k = (255 - lightness) * 9 / 255
+    return ramp.chars()[9 - k]
+}
+
+// The canvas as text: a line a row, a character a pixel.
+#test(draw.blank(3, 2, image.rgb(255u8, 255u8, 255u8)))[["   ", "   "]]
+fun to_text(c: Canvas) -> [str] {
+    var lines: [str] = []
+    for y in 0..c.image.height {
+        var sb = StringBuilder()
+        for x in 0..c.image.width {
+            let i = (y * c.image.width + x) * 4
+            // the luma of BT.601, as std.image's gray
+            let l = (299 * (c.image.data[i] as int) + 587 * (c.image.data[i + 1] as int) + 114 * (c.image.data[i + 2] as int)) / 1000
+            sb.append_char(shade(l))
+        }
+        lines.push(sb.build())
+    }
+    return lines
+}
+
+// The top left corners of the points of `values` on a chart `height` high
+// whose x axis is at `base`, `step` apart from `x0`.
+#test([0.0f32, 1.0f32], 10.0f32, 20.0f32, 2.0f32, 4.0f32)[[vec2(2.0, 20.0), vec2(6.0, 10.0)]]
+fun points(values: [float32], height: float32, base: float32, x0: float32, step: float32) -> [Vec2] {
+    var out: [Vec2] = []
+    for i in 0..values.len() {
+        out.push(vec2(x0 + step * (i as float32), base - values[i] * height))
+    }
+    return out
+}
+
+fun main() {
+    let ink = image.rgb(0u8, 0u8, 0u8)
+    var c = draw.blank(48, 26, image.rgb(255u8, 255u8, 255u8))
+    c.text_bitmap("SALES", 9, 0, ink)
+    // the axes
+    c.line_aliased(3, 11, 3, 24, ink)
+    c.line_aliased(3, 24, 46, 24, ink)
+    // bars of 0 to 1, with a soft grey fill
+    let sales = [0.3f32, 0.55f32, 0.4f32, 0.8f32, 0.65f32, 1.0f32]
+    for i in 0..sales.len() {
+        let h = sales[i] * 12.0f32
+        c.fill(draw.rect(5.5f32 + 7.0f32 * (i as float32), 24.0f32 - h, 4.5f32, h), Paint.Solid(image.rgb(150u8, 150u8, 150u8)))
+    }
+    // the trend through the bars' tops
+    let trend = draw.polyline(points(sales, 12.0f32, 23.0f32, 7.75f32, 7.0f32))
+    c.stroke(trend, draw.stroke_style(1.5f32).with_join(Join.Round).with_cap(Cap.Round), Paint.Solid(ink))
+    for line in to_text(c) {
+        print(line)
+    }
+}
