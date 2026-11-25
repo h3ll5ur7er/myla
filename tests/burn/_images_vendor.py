@@ -1531,9 +1531,11 @@ def make_unhinted(c: Corpus, ttf: str, python: str) -> None:
         c.renders.append({"font": rel_font, "text": t["text"], "px": t["px"], "origin": t["origin"],
                           "width": t["width"], "height": t["height"], "pam": rel, "sha256": p.sha256(),
                           "engine": "freetype-unhinted",
-                          "notes": note + "; each glyph at its fractional pen position (unhinted advances and the "
-                                          "kern table's pairs, from the origin on the baseline), coverage added and "
-                                          "clamped where glyphs overlap"})
+                          "notes": note + "; each glyph at its fractional pen position (unhinted advances, from "
+                                          "the origin on the baseline), coverage added and clamped where glyphs "
+                                          "overlap; not kerned: FreeType's get_kerning gave 0 for the kern table's "
+                                          "pairs here (MYLA-943 found the strings match unkerned pens, to 2 "
+                                          "levels, and not kerned ones)"})
 
 
 def _write_ofl(copyright_text: str, out: str) -> None:
