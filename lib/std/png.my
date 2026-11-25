@@ -1,0 +1,1427 @@
+// std.png: PNG images read and written (MYLA-935, D311).
+//
+// Decoding reads every colour type (gray, RGB, palette, gray and alpha,
+// RGBA) at every bit depth PNG allows (1, 2, 4, 8, 16), `tRNS` as an alpha
+// channel, Adam7 interlacing and the five filters. The CRC-32 of every chunk
+// is checked, and the image data (every IDAT chunk's, one after the other)
+// is inflated by std.compress with its limit set from the size the header
+// claims, so a small file can't make the decoder allocate much more than
+// the image. A palette image is `Rgb`, or `Rgba` with a `tRNS`; gray or RGB
+// with a `tRNS` colour key is `GrayAlpha` or `Rgba` (alpha 0 where the
+// pixel is the key). Gray of fewer than 8 bits is scaled to 8 as libpng
+// does (`v * 255 / (2^d - 1)`). `decode` rounds 16 bits to 8 as libpng and
+// std.image do (`(v * 255 + 32767) / 65535`); `decode16` widens 8 to 16 by
+// 257.
+//
+// An unknown ancillary chunk is skipped; an unknown critical one is
+// `Unsupported`. A missing IEND is forgiven when the image data is whole.
+// A palette index past the palette is black (as libpng gives it).
+//
+// Encoding filters each row by the filter whose output has the smallest sum
+// of absolute values (libpng's heuristic) or by one filter, compresses
+// through std.compress's `zlib_compress(level)`, and writes the smallest
+// colour type that loses nothing: gray if every pixel is gray, no alpha if
+// every pixel is opaque. `encode_indexed` writes a palette image (`PLTE` and
+// `tRNS`) at the smallest bit depth its indices fit.
+//
+// The hot loops (unfiltering, filtering) index `[uint8]` lists directly:
+// unfiltering works in place in the inflated data, moving each row over the
+// filter bytes before it, so an 8-bit image's samples are the inflated list
+// itself.
+
+import std.image as image
+from std.image import Image, Image8, Image16, ImageError, ImageInfo, Layout, Sample, Indexed, Color
+import std.compress as compress
+from std.compress import CompressError
+import std.checksum as checksum
+import std.bytes as bytes_m
+import std.list as list_m // `filled`, `extend`, `truncate`
+import std.option as option_m // `unwrap_or`, `expect` in the tests
+import std.encoding as encoding // `hex_decode`, in the tests
+
+// How the encoder filters a row: one of PNG's five filters for every row,
+// or `Adaptive`, each row by the filter whose output has the smallest sum
+// of absolute values (each byte read as a signed one), as libpng chooses.
+#derive(Eq)
+pub enum Filter {
+    NoFilter
+    Sub
+    Up
+    Average
+    Paeth
+    Adaptive
+}
+
+// A `pHYs` chunk: the pixels per unit along x and y; the unit is the metre
+// if `meter`, else unknown (the chunk then gives only the aspect ratio).
+#derive(Eq)
+pub struct Phys {
+    x: int64,
+    y: int64,
+    meter: bool,
+}
+
+// A text chunk: `tEXt` and `zTXt` (Latin-1, here as UTF-8) or `iTXt`
+// (UTF-8, with a language tag and a translated keyword). `compressed` says
+// whether it was stored compressed (`zTXt`, or a compressed `iTXt`).
+#derive(Eq)
+pub struct TextChunk {
+    keyword: str,
+    text: str,
+    language: str,
+    translated: str,
+    compressed: bool,
+}
+
+// What a PNG tells beside its pixels. `gamma` is `gAMA`'s value, the gamma
+// times 100000 (45455 for 1 / 2.2); `srgb` is `sRGB`'s rendering intent (0
+// to 3); `icc_name` and `icc_profile` are `iCCP`'s name and its profile,
+// decompressed but not applied (empty without one); `phys` is `pHYs`; `text`
+// holds the text chunks in file order. Nothing of it changes the pixels.
+#derive(Eq)
+pub struct PngMeta {
+    gamma: Option<int64>,
+    srgb: Option<int>,
+    icc_name: str,
+    icc_profile: [uint8],
+    phys: Option<Phys>,
+    text: [TextChunk],
+}
+
+// The most bytes an `iCCP` profile or a compressed text inflates to.
+const META_LIMIT: int = 0x1000000
+
+// --- Decoding -------------------------------------------------------------------------
+
+// A PNG's header and image data, as the chunks gave them.
+struct Png {
+    width: int,
+    height: int,
+    depth: int,
+    ctype: int,
+    interlaced: bool,
+    // Colour type 3: the palette as 256 RGBA entries (1024 bytes), past
+    // its end black and opaque; `alpha` if a `tRNS` gave alphas.
+    palette: [uint8],
+    alpha: bool,
+    // Colour types 0 and 2 with a `tRNS`: the transparent colour's samples.
+    key: [int],
+    idat: [uint8],
+    meta: PngMeta,
+}
+
+impl Png {
+    // The samples a pixel has as stored: 1 to 4.
+    fun channels(self) -> int {
+        return stored_channels(self.ctype)
+    }
+
+    // The bits of a stored pixel.
+    fun pixel_bits(self) -> int {
+        return self.channels() * self.depth
+    }
+
+    // The bytes a complete pixel takes, at least 1: what the filters look
+    // back by.
+    fun bpp(self) -> int {
+        let b = self.pixel_bits() / 8
+        return if b < 1 { 1 } else { b }
+    }
+
+    // The layout the decoder gives.
+    fun layout(self) -> Layout {
+        return out_layout(self.ctype, self.alpha || self.key.len() > 0)
+    }
+}
+
+// The samples a pixel of colour type `ctype` has as stored (0 for a type
+// PNG doesn't have).
+#test(0)[1]
+#test(2)[3]
+#test(3)[1]
+#test(4)[2]
+#test(6)[4]
+#test(5)[0]
+fun stored_channels(ctype: int) -> int {
+    return match ctype {
+        0 => 1
+        2 => 3
+        3 => 1
+        4 => 2
+        6 => 4
+        _ => 0
+    }
+}
+
+// The decoded layout of colour type `ctype`, `transparent` if a `tRNS`
+// adds alpha.
+#test(0, false)[Layout.Gray]
+#test(0, true)[Layout.GrayAlpha]
+#test(2, true)[Layout.Rgba]
+#test(3, false)[Layout.Rgb]
+#test(3, true)[Layout.Rgba]
+#test(4, false)[Layout.GrayAlpha]
+#test(6, false)[Layout.Rgba]
+fun out_layout(ctype: int, transparent: bool) -> Layout {
+    if ctype == 0 {
+        return if transparent { Layout.GrayAlpha } else { Layout.Gray }
+    }
+    if ctype == 2 || ctype == 3 {
+        return if transparent { Layout.Rgba } else { Layout.Rgb }
+    }
+    if ctype == 4 {
+        return Layout.GrayAlpha
+    }
+    return Layout.Rgba
+}
+
+// Whether colour type `ctype` may have samples of `depth` bits.
+#test(0, 1)[true]
+#test(0, 16)[true]
+#test(2, 4)[false]
+#test(3, 16)[false]
+#test(3, 8)[true]
+#test(6, 8)[true]
+#test(4, 2)[false]
+#test(1, 8)[false]
+fun valid_depth(ctype: int, depth: int) -> bool {
+    if ctype == 0 {
+        return depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16
+    }
+    if ctype == 3 {
+        return depth == 1 || depth == 2 || depth == 4 || depth == 8
+    }
+    if ctype == 2 || ctype == 4 || ctype == 6 {
+        return depth == 8 || depth == 16
+    }
+    return false
+}
+
+// The big-endian 32-bit number at `at` (the caller has checked the bytes
+// are there).
+#test([1u8, 2u8, 3u8, 4u8, 255u8], 1)[0x020304FFi64]
+fun be32(b: [uint8], at: int) -> int64 {
+    return ((b[at] as int64) << 24) | ((b[at + 1] as int64) << 16) | ((b[at + 2] as int64) << 8) | (b[at + 3] as int64)
+}
+
+// Whether `b` starts as a PNG does: Some(true) for the whole signature,
+// Some(false) for a prefix of it (the input ends inside), None otherwise.
+#test([137u8, 80u8, 78u8, 71u8, 13u8, 10u8, 26u8, 10u8, 0u8])[Some(true)]
+#test([137u8, 80u8, 78u8])[Some(false)]
+#test([137u8, 80u8, 78u8, 71u8, 13u8, 13u8, 26u8, 10u8])[None]
+#test([])[Some(false)]
+fun signature(b: [uint8]) -> Option<bool> {
+    let sig = [137u8, 80u8, 78u8, 71u8, 13u8, 10u8, 26u8, 10u8]
+    var i = 0
+    while i < 8 && i < b.len() {
+        if b[i] != sig[i] {
+            return None
+        }
+        i += 1
+    }
+    return Some(b.len() >= 8)
+}
+
+// Whether the chunk type at `at` is four ASCII letters.
+#test([73u8, 72u8, 68u8, 82u8], 0)[true]
+#test([73u8, 72u8, 68u8, 0u8], 0)[false]
+fun chunk_name_ok(b: [uint8], at: int) -> bool {
+    for i in 0..4 {
+        let c = b[at + i] | 0x20u8
+        if c < 'a' || c > 'z' {
+            return false
+        }
+    }
+    return true
+}
+
+// The chunks of `b` read: the header checked, the palette and `tRNS`
+// applied, every IDAT's bytes put together, the metadata kept if `meta`.
+// With `header_only`, it stops at the first IDAT (for `info`).
+fun parse(b: [uint8], max_pixels: int64, meta: bool, header_only: bool) -> Result<Png, ImageError> {
+    let Some(whole) = signature(b) else { return Err(ImageError.BadSignature) }
+    if !whole {
+        return Err(ImageError.Truncated)
+    }
+    var p = Png {
+        width: 0, height: 0, depth: 0, ctype: 0, interlaced: false, palette: [], alpha: false, key: [],
+        idat: [], meta: no_meta(),
+    }
+    let n = b.len()
+    var pos = 8
+    var seen_ihdr = false
+    var seen_idat = false
+    var ended = false
+    var plte: [uint8] = []
+    var trns: [uint8] = []
+    var has_trns = false
+    while pos < n {
+        if pos + 12 > n {
+            return Err(ImageError.Truncated)
+        }
+        let len64 = be32(b, pos)
+        if len64 > 0x7FFFFFFFi64 {
+            return Err(ImageError.Corrupt(f"chunk length {len64} at {pos}"))
+        }
+        let len = len64 as int
+        if (pos as int64) + 12i64 + len64 > (n as int64) {
+            return Err(ImageError.Truncated)
+        }
+        if !chunk_name_ok(b, pos + 4) {
+            return Err(ImageError.Corrupt(f"chunk type that isn't four letters at {pos + 4}"))
+        }
+        let kind = bytes_m.to_str(b[pos + 4:pos + 8])
+        let body = b[pos + 8:pos + 8 + len]
+        let crc = checksum.crc32_update_bytes(checksum.crc32_update_bytes(0u32, b[pos + 4:pos + 8]), body)
+        if (crc as int64) != be32(b, pos + 8 + len) {
+            return Err(ImageError.Checksum)
+        }
+        let at = pos
+        pos += 12 + len
+        if !seen_ihdr && kind != "IHDR" {
+            return Err(ImageError.Corrupt(f"the first chunk is {kind}, not IHDR"))
+        }
+        if kind == "IHDR" {
+            if seen_ihdr {
+                return Err(ImageError.Corrupt(f"a second IHDR at {at}"))
+            }
+            seen_ihdr = true
+            p = read_ihdr(p, body, max_pixels)?
+        } else if kind == "IDAT" {
+            if header_only {
+                break
+            }
+            seen_idat = true
+            if p.idat.len() == 0 {
+                p.idat = body
+            } else {
+                p.idat.extend(body)
+            }
+        } else if kind == "IEND" {
+            ended = true
+            break
+        } else if kind == "PLTE" {
+            if p.ctype == 3 && (len == 0 || len % 3 != 0 || len > 768) {
+                return Err(ImageError.Corrupt(f"a PLTE of {len} bytes"))
+            }
+            if !seen_idat {
+                plte = body
+            }
+        } else if kind == "tRNS" {
+            if !seen_idat {
+                trns = body
+                has_trns = true
+            }
+        } else if (b[at + 4] & 0x20u8) == 0u8 {
+            return Err(ImageError.Unsupported(f"the critical chunk {kind}"))
+        } else if meta {
+            p.meta = read_meta(p.meta, kind, body)
+        }
+    }
+    if !seen_ihdr {
+        return Err(ImageError.Truncated)
+    }
+    if p.ctype == 3 {
+        if plte.len() == 0 {
+            return Err(ImageError.Corrupt("a palette image without PLTE"))
+        }
+        p.palette = palette_table(plte, trns)
+        // libpng ignores a tRNS longer than the palette
+        p.alpha = has_trns && trns.len() > 0 && trns.len() <= plte.len() / 3
+    } else if has_trns && p.ctype == 0 && trns.len() == 2 {
+        p.key = [((trns[0] as int) << 8) | (trns[1] as int)]
+    } else if has_trns && p.ctype == 2 && trns.len() == 6 {
+        p.key = [((trns[0] as int) << 8) | (trns[1] as int), ((trns[2] as int) << 8) | (trns[3] as int),
+            ((trns[4] as int) << 8) | (trns[5] as int)]
+    }
+    if !header_only && !seen_idat {
+        return Err(if ended { ImageError.Corrupt("no IDAT") } else { ImageError.Truncated })
+    }
+    return Ok(p)
+}
+
+// `p` with the IHDR `body` read and checked: more than `max_pixels`
+// pixels is `TooLarge` (a negative `max_pixels` allows any size).
+fun read_ihdr(p0: Png, body: [uint8], max_pixels: int64) -> Result<Png, ImageError> {
+    if body.len() != 13 {
+        return Err(ImageError.Corrupt(f"an IHDR of {body.len()} bytes"))
+    }
+    let w = be32(body, 0)
+    let h = be32(body, 4)
+    if w == 0i64 || h == 0i64 || w > 0x7FFFFFFFi64 || h > 0x7FFFFFFFi64 {
+        return Err(ImageError.Corrupt(f"size {w}x{h}"))
+    }
+    let depth = body[8] as int
+    let ctype = body[9] as int
+    if stored_channels(ctype) == 0 {
+        return Err(ImageError.Corrupt(f"colour type {ctype}"))
+    }
+    if !valid_depth(ctype, depth) {
+        return Err(ImageError.Corrupt(f"bit depth {depth} for colour type {ctype}"))
+    }
+    if body[10] != 0u8 {
+        return Err(ImageError.Corrupt(f"compression method {body[10]}"))
+    }
+    if body[11] != 0u8 {
+        return Err(ImageError.Corrupt(f"filter method {body[11]}"))
+    }
+    if body[12] > 1u8 {
+        return Err(ImageError.Corrupt(f"interlace method {body[12]}"))
+    }
+    if max_pixels >= 0i64 {
+        image.check_size(w as int, h as int, 1, max_pixels)?
+    }
+    var p = p0
+    p.width = w as int
+    p.height = h as int
+    p.depth = depth
+    p.ctype = ctype
+    p.interlaced = body[12] == 1u8
+    return Ok(p)
+}
+
+// The palette `plte` (RGB triples) with the alphas of `trns` as 256 RGBA
+// entries: past the palette black, past `trns` opaque (a `tRNS` longer than
+// the palette is ignored, as libpng does).
+fun palette_table(plte: [uint8], trns: [uint8]) -> [uint8] {
+    let colors = plte.len() / 3
+    let use_trns = trns.len() <= colors
+    var out = list_m.filled(1024, 0u8)
+    for i in 0..256 {
+        if i < colors {
+            out[4 * i] = plte[3 * i]
+            out[4 * i + 1] = plte[3 * i + 1]
+            out[4 * i + 2] = plte[3 * i + 2]
+        }
+        out[4 * i + 3] = if use_trns && i < trns.len() { trns[i] } else { 255u8 }
+    }
+    return out
+}
+
+#test
+fun palettes() {
+    let t = palette_table([1u8, 2u8, 3u8, 4u8, 5u8, 6u8], [9u8])
+    assert(t.len() == 1024 && t[:12] == [1u8, 2u8, 3u8, 9u8, 4u8, 5u8, 6u8, 255u8, 0u8, 0u8, 0u8, 255u8], "two colours")
+    assert(palette_table([1u8, 2u8, 3u8], [9u8, 9u8])[3] == 255u8, "a tRNS longer than the palette")
+}
+
+// No metadata.
+fun no_meta() -> PngMeta {
+    return PngMeta { gamma: None, srgb: None, icc_name: "", icc_profile: [], phys: None, text: [] }
+}
+
+// The text of `b` read as Latin-1, as UTF-8.
+#test([104u8, 233u8])["hé"]
+#test([])[""]
+fun latin1(b: [uint8]) -> str {
+    var out: [uint8] = []
+    for c in b {
+        if c < 128u8 {
+            out.push(c)
+        } else {
+            out.push(0xC0u8 | (c >> 6))
+            out.push(0x80u8 | (c & 0x3Fu8))
+        }
+    }
+    return bytes_m.to_str(out)
+}
+
+// Where the first zero byte is in `b` from `start`, if there is one.
+#test([1u8, 0u8, 2u8, 0u8], 2)[Some(3)]
+#test([1u8], 0)[None]
+fun zero_at(b: [uint8], start: int) -> Option<int> {
+    var i = start
+    while i < b.len() {
+        if b[i] == 0u8 {
+            return Some(i)
+        }
+        i += 1
+    }
+    return None
+}
+
+// `b` inflated as a zlib stream, at most META_LIMIT bytes; None if it
+// isn't one.
+fun inflate_meta(b: [uint8]) -> Option<[uint8]> {
+    return match compress.zlib_decompress(b, META_LIMIT) {
+        Ok(out) => Some(out)
+        Err(_) => None
+    }
+}
+
+// `m` with the ancillary chunk `kind` of `body` added, if it is one std.png
+// keeps and well formed (a broken one is left out, as libpng does).
+fun read_meta(m0: PngMeta, kind: str, body: [uint8]) -> PngMeta {
+    var m = m0
+    let n = body.len()
+    if kind == "gAMA" && n == 4 && m.gamma == None {
+        m.gamma = Some(be32(body, 0))
+    } else if kind == "sRGB" && n == 1 && m.srgb == None && body[0] <= 3u8 {
+        m.srgb = Some(body[0] as int)
+    } else if kind == "pHYs" && n == 9 && m.phys == None && body[8] <= 1u8 {
+        m.phys = Some(Phys { x: be32(body, 0), y: be32(body, 4), meter: body[8] == 1u8 })
+    } else if kind == "iCCP" && m.icc_profile.len() == 0 {
+        if let Some(z) = zero_at(body, 0) {
+            if z >= 1 && z + 1 < n && body[z + 1] == 0u8 {
+                if let Some(profile) = inflate_meta(body[z + 2:]) {
+                    m.icc_name = latin1(body[:z])
+                    m.icc_profile = profile
+                }
+            }
+        }
+    } else if kind == "tEXt" || kind == "zTXt" || kind == "iTXt" {
+        if let Some(t) = text_chunk(kind, body) {
+            m.text.push(t)
+        }
+    }
+    return m
+}
+
+// The text chunk `kind` of `body`, if it is well formed.
+fun text_chunk(kind: str, body: [uint8]) -> Option<TextChunk> {
+    let Some(z) = zero_at(body, 0) else { return None }
+    if z < 1 || z > 79 {
+        return None
+    }
+    let keyword = latin1(body[:z])
+    if kind == "tEXt" {
+        return Some(TextChunk { keyword: keyword, text: latin1(body[z + 1:]), language: "", translated: "", compressed: false })
+    }
+    if kind == "zTXt" {
+        if z + 1 >= body.len() || body[z + 1] != 0u8 {
+            return None
+        }
+        let Some(t) = inflate_meta(body[z + 2:]) else { return None }
+        return Some(TextChunk { keyword: keyword, text: latin1(t), language: "", translated: "", compressed: true })
+    }
+    // iTXt: the flag, the method, the language, the translated keyword, the text
+    if z + 2 >= body.len() || body[z + 1] > 1u8 || body[z + 2] != 0u8 {
+        return None
+    }
+    let compressed = body[z + 1] == 1u8
+    let Some(l) = zero_at(body, z + 3) else { return None }
+    let Some(t) = zero_at(body, l + 1) else { return None }
+    let language = body[z + 3:l]
+    let translated = body[l + 1:t]
+    var text = body[t + 1:]
+    if compressed {
+        let Some(u) = inflate_meta(text) else { return None }
+        text = u
+    }
+    if !bytes_m.is_utf8(language) || !bytes_m.is_utf8(translated) || !bytes_m.is_utf8(text) {
+        return None
+    }
+    return Some(TextChunk {
+        keyword: keyword, text: bytes_m.to_str(text), language: bytes_m.to_str(language),
+        translated: bytes_m.to_str(translated), compressed: compressed,
+    })
+}
+
+// One pass of the image: its pixels' first position and steps, and its
+// size. A plain image is one pass of steps 1.
+struct Pass {
+    x0: int,
+    y0: int,
+    dx: int,
+    dy: int,
+    w: int,
+    h: int,
+}
+
+// The passes of a `w` by `h` image that have pixels: Adam7's seven if
+// `interlaced`, else one.
+fun passes(w: int, h: int, interlaced: bool) -> [Pass] {
+    if !interlaced {
+        return [Pass { x0: 0, y0: 0, dx: 1, dy: 1, w: w, h: h }]
+    }
+    let x0 = [0, 4, 0, 2, 0, 1, 0]
+    let y0 = [0, 0, 4, 0, 2, 0, 1]
+    let dx = [8, 8, 4, 4, 2, 2, 1]
+    let dy = [8, 8, 8, 4, 4, 2, 2]
+    var out: [Pass] = []
+    for i in 0..7 {
+        let pw = (w - x0[i] + dx[i] - 1) / dx[i]
+        let ph = (h - y0[i] + dy[i] - 1) / dy[i]
+        if pw > 0 && ph > 0 {
+            out.push(Pass { x0: x0[i], y0: y0[i], dx: dx[i], dy: dy[i], w: pw, h: ph })
+        }
+    }
+    return out
+}
+
+#test
+fun adam7_passes_of_a_small_image() {
+    let ps = passes(3, 2, true)
+    var sizes: [(int, int)] = []
+    for q in ps {
+        sizes.push((q.w, q.h))
+    }
+    // pass 1 (0, 0); pass 4 (2, 0); pass 6 (1, 0); pass 7 the row y = 1
+    assert(sizes == [(1, 1), (1, 1), (1, 1), (3, 1)], "the passes")
+    assert(passes(1, 1, true).len() == 1, "one pixel, one pass")
+}
+
+// The bytes a row of `w` pixels of `bits` takes.
+#test(3, 1)[1i64]
+#test(9, 1)[2i64]
+#test(5, 24)[15i64]
+#test(0x7FFFFFFF, 64)[17179869176i64]
+fun row_bytes(w: int, bits: int) -> int64 {
+    return ((w as int64) * (bits as int64) + 7i64) / 8i64
+}
+
+// The error of the image data's zlib stream.
+#test(CompressError.Truncated)[ImageError.Truncated]
+#test(CompressError.ChecksumMismatch)[ImageError.Checksum]
+#test(CompressError.TooLarge)[ImageError.Corrupt("more image data than the header gives room for")]
+fun zlib_error(e: CompressError) -> ImageError {
+    return match e {
+        Truncated => ImageError.Truncated
+        ChecksumMismatch => ImageError.Checksum
+        TooLarge => ImageError.Corrupt("more image data than the header gives room for")
+        _ => ImageError.Corrupt(f"image data: {e}")
+    }
+}
+
+// The image data of `p` inflated and unfiltered: each pass's rows one after
+// the other, without their filter bytes. It works in place: each row is
+// unfiltered into the place where the compacted rows go, which lies before
+// its own filtered bytes (by the filter bytes read so far), so nothing is
+// overwritten before it is read.
+fun image_rows(p: Png, ps: [Pass]) -> Result<[uint8], ImageError> {
+    let bits = p.pixel_bits()
+    var total = 0i64
+    for q in ps {
+        total += (q.h as int64) * (1i64 + row_bytes(q.w, bits))
+    }
+    if total > 0x7FFFFFFFi64 {
+        return Err(ImageError.TooLarge((p.width as int64) * (p.height as int64)))
+    }
+    let want = total as int
+    var raw: [uint8] = []
+    match compress.zlib_decompress(p.idat, want) {
+        Ok(r) => {
+            raw = r
+        }
+        Err(e) => {
+            return Err(zlib_error(e))
+        }
+    }
+    if raw.len() < want {
+        return Err(ImageError.Corrupt(f"the image data is {want - raw.len()} bytes short"))
+    }
+    let bpp = p.bpp()
+    var s = 0 // the next filter byte
+    var d = 0 // where the next unfiltered row goes
+    for q in ps {
+        let rb = row_bytes(q.w, bits) as int
+        for y in 0..q.h {
+            var kind = raw[s] as int
+            s += 1
+            let up = d - rb
+            if y == 0 {
+                // nothing above: Up is no filter, Paeth is Sub, Average its
+                // own case (-3, which no filter byte is)
+                if kind == 2 {
+                    kind = 0
+                } else if kind == 4 {
+                    kind = 1
+                } else if kind == 3 {
+                    kind = -3
+                }
+            }
+            if kind == 0 {
+                for i in 0..rb {
+                    raw[d + i] = raw[s + i]
+                }
+            } else if kind == 1 {
+                for i in 0..bpp {
+                    raw[d + i] = raw[s + i]
+                }
+                for i in bpp..rb {
+                    raw[d + i] = raw[s + i].wrapping_add(raw[d + i - bpp])
+                }
+            } else if kind == 2 {
+                for i in 0..rb {
+                    raw[d + i] = raw[s + i].wrapping_add(raw[up + i])
+                }
+            } else if kind == 3 {
+                for i in 0..bpp {
+                    raw[d + i] = raw[s + i].wrapping_add(raw[up + i] >> 1)
+                }
+                for i in bpp..rb {
+                    let avg = ((raw[d + i - bpp] as int) + (raw[up + i] as int)) >> 1
+                    raw[d + i] = raw[s + i].wrapping_add(avg as uint8)
+                }
+            } else if kind == 4 {
+                for i in 0..bpp {
+                    raw[d + i] = raw[s + i].wrapping_add(raw[up + i])
+                }
+                for i in bpp..rb {
+                    // paeth(a, b, c) by hand: the call costs a sixth of this loop
+                    let a = raw[d + i - bpp] as int
+                    let b = raw[up + i] as int
+                    let c = raw[up + i - bpp] as int
+                    let pa0 = b - c
+                    let pb0 = a - c
+                    let pc0 = pa0 + pb0
+                    let pa = (pa0 ^ (pa0 >> 31)) - (pa0 >> 31)
+                    let pb = (pb0 ^ (pb0 >> 31)) - (pb0 >> 31)
+                    let pc = (pc0 ^ (pc0 >> 31)) - (pc0 >> 31)
+                    let not_a = ((pb - pa) | (pc - pa)) >> 31
+                    let bc = b ^ ((b ^ c) & ((pc - pb) >> 31))
+                    raw[d + i] = raw[s + i].wrapping_add((a ^ ((a ^ bc) & not_a)) as uint8)
+                }
+            } else if kind == -3 {
+                for i in 0..bpp {
+                    raw[d + i] = raw[s + i]
+                }
+                for i in bpp..rb {
+                    raw[d + i] = raw[s + i].wrapping_add(raw[d + i - bpp] >> 1)
+                }
+            } else {
+                return Err(ImageError.Corrupt(f"filter type {kind} at row {y}"))
+            }
+            s += rb
+            d += rb
+        }
+    }
+    raw.truncate(d)
+    return Ok(raw)
+}
+
+// The sample of `depth` bits (1, 2 or 4) number `x` of the row at `r`.
+#test([0b10110100u8], 0, 1, 1)[0]
+#test([0b10110100u8], 0, 2, 1)[1]
+#test([0b10110100u8], 0, 3, 2)[0]
+#test([0b10110100u8], 0, 1, 4)[4]
+fun sub_sample(rows: [uint8], r: int, x: int, depth: int) -> int {
+    let bit = x * depth
+    let shift = 8 - depth - (bit & 7)
+    return ((rows[r + (bit >> 3)] as int) >> shift) & ((1 << depth) - 1)
+}
+
+// The 16-bit sample at `i` rounded to 8 bits: `(v * 255 + 32767) / 65535`
+// in multiplications (the same for every v).
+#test([255u8, 255u8], 0)[255u8]
+#test([0u8, 128u8], 0)[0u8]
+#test([0u8, 129u8], 0)[1u8]
+#test([127u8, 255u8], 0)[127u8]
+#test([128u8, 127u8], 0)[128u8]
+#test([128u8, 128u8], 0)[128u8]
+fun round16(rows: [uint8], i: int) -> uint8 {
+    let v = ((rows[i] as uint32) << 8) | (rows[i + 1] as uint32)
+    return ((v * 65281u32 + 8388608u32) >> 24) as uint8
+}
+
+// The pixels of one pass as 8-bit samples of the decoded layout: `pw` by
+// `ph` pixels whose unfiltered rows start at `off` in `rows`. 16 bits are
+// rounded to 8, fewer than 8 scaled.
+fun expand8(rows: [uint8], off: int, pw: int, ph: int, p: Png) -> [uint8] {
+    let rb = row_bytes(pw, p.pixel_bits()) as int
+    let depth = p.depth
+    let ch = p.channels()
+    let keyed = p.key.len() > 0
+    if p.ctype == 3 {
+        let pal = p.palette
+        let alpha = p.alpha
+        var out: [uint8] = []
+        for y in 0..ph {
+            let r = off + y * rb
+            for x in 0..pw {
+                let k = if depth == 8 { (rows[r + x] as int) << 2 } else { sub_sample(rows, r, x, depth) << 2 }
+                out.push(pal[k])
+                out.push(pal[k + 1])
+                out.push(pal[k + 2])
+                if alpha {
+                    out.push(pal[k + 3])
+                }
+            }
+        }
+        return out
+    }
+    let n = pw * ph * ch
+    if depth == 8 && !keyed {
+        if off == 0 && rows.len() == n {
+            return rows
+        }
+        return rows[off:off + n]
+    }
+    var out: [uint8] = []
+    if depth == 16 && !keyed {
+        for i in 0..n {
+            out.push(round16(rows, off + 2 * i))
+        }
+        return out
+    }
+    let key = p.key
+    if depth == 16 {
+        // gray or RGB with a key: compare the 16-bit samples
+        var i = off
+        for _ in 0..pw * ph {
+            var same = true
+            for c in 0..ch {
+                let v = ((rows[i] as int) << 8) | (rows[i + 1] as int)
+                if v != key[c] {
+                    same = false
+                }
+                out.push(round16(rows, i))
+                i += 2
+            }
+            out.push(if same { 0u8 } else { 255u8 })
+        }
+        return out
+    }
+    if depth == 8 {
+        var i = off
+        for _ in 0..pw * ph {
+            var same = true
+            for c in 0..ch {
+                let v = rows[i]
+                if (v as int) != key[c] {
+                    same = false
+                }
+                out.push(v)
+                i += 1
+            }
+            out.push(if same { 0u8 } else { 255u8 })
+        }
+        return out
+    }
+    // gray of 1, 2 or 4 bits
+    let scale = 255 / ((1 << depth) - 1)
+    let k0 = if keyed { key[0] } else { -1 }
+    for y in 0..ph {
+        let r = off + y * rb
+        for x in 0..pw {
+            let v = sub_sample(rows, r, x, depth)
+            out.push((v * scale) as uint8)
+            if keyed {
+                out.push(if v == k0 { 0u8 } else { 255u8 })
+            }
+        }
+    }
+    return out
+}
+
+// The pixels of one pass of a 16-bit image as 16-bit samples of the
+// decoded layout.
+fun expand16(rows: [uint8], off: int, pw: int, ph: int, p: Png) -> [uint16] {
+    let ch = p.channels()
+    let key = p.key
+    let keyed = key.len() > 0
+    var out: [uint16] = []
+    var i = off
+    for _ in 0..pw * ph {
+        var same = true
+        for c in 0..ch {
+            let v = ((rows[i] as int) << 8) | (rows[i + 1] as int)
+            if keyed && v != key[c] {
+                same = false
+            }
+            out.push(v as uint16)
+            i += 2
+        }
+        if keyed {
+            out.push(if same { 0u16 } else { 65535u16 })
+        }
+    }
+    return out
+}
+
+// 8-bit samples widened to 16 by 257.
+#test([0u8, 1u8, 255u8])[[0u16, 257u16, 65535u16]]
+fun widen(b: [uint8]) -> [uint16] {
+    var out: [uint16] = []
+    for v in b {
+        out.push((v as uint16) * 257u16)
+    }
+    return out
+}
+
+// The image of `p`, each pass's pixels made samples by `expand` and put in
+// their places.
+fun pixels<S: Sample>(p: Png, expand: ([uint8], int, int, int) -> [S]) -> Result<Image<S>, ImageError> {
+    let layout = p.layout()
+    let ch = layout.channels()
+    image.check_size(p.width, p.height, ch, image.MAX_SAMPLES)?
+    let ps = passes(p.width, p.height, p.interlaced)
+    let rows = image_rows(p, ps)?
+    let w = p.width
+    if !p.interlaced {
+        return Ok(Image { width: w, height: p.height, layout: layout, data: expand(rows, 0, w, p.height) })
+    }
+    var data = list_m.filled(w * p.height * ch, S.from_unorm8(0u8))
+    let bits = p.pixel_bits()
+    var off = 0
+    for q in ps {
+        let part = expand(rows, off, q.w, q.h)
+        off += q.h * (row_bytes(q.w, bits) as int)
+        var k = 0
+        for y in 0..q.h {
+            var o = ((q.y0 + y * q.dy) * w + q.x0) * ch
+            let step = q.dx * ch
+            for _ in 0..q.w {
+                for c in 0..ch {
+                    data[o + c] = part[k]
+                    k += 1
+                }
+                o += step
+            }
+        }
+    }
+    return Ok(Image { width: w, height: p.height, layout: layout, data: data })
+}
+
+// The image of `p` at 8 bits.
+fun pixels8(p: Png) -> Result<Image8, ImageError> {
+    return pixels<uint8>(p, (r: [uint8], off: int, w: int, h: int) => expand8(r, off, w, h, p))
+}
+
+// The image of `p` at 16 bits.
+fun pixels16(p: Png) -> Result<Image16, ImageError> {
+    if p.depth == 16 {
+        return pixels<uint16>(p, (r: [uint8], off: int, w: int, h: int) => expand16(r, off, w, h, p))
+    }
+    return pixels<uint16>(p, (r: [uint8], off: int, w: int, h: int) => widen(expand8(r, off, w, h, p)))
+}
+
+// The size, the decoded layout and the bit depth as stored of the PNG `b`,
+// from the chunks before its image data (whose CRCs are checked).
+#test(unhex("89504e470d0a1a0a0000000d49484452000000030000000204030000006f5a7b2900000009504c5445ff000000ff000000ff2d4acd8a0000000274524e5380004d1055730000000e4944415478da636054605064000000cd00437a58dbad0000000049454e44ae426082"))[Ok(ImageInfo { width: 3, height: 2, layout: Layout.Rgba, bit_depth: 4, frames: 1, format: "png" })]
+#test(unhex("89504e470d0a1a0a0000000d49484452"))[Err(ImageError.Truncated)]
+#test(unhex("89504e470d0a1a0a0000000d494844520000ffff0000ffff0806000000b605d9500000000049454e44ae426082"))[Ok(ImageInfo { width: 65535, height: 65535, layout: Layout.Rgba, bit_depth: 8, frames: 1, format: "png" })] // too large to decode, not to describe
+#test(unhex("89504e470d0a1a0b"))[Err(ImageError.BadSignature)]
+pub fun info(b: [uint8]) -> Result<ImageInfo, ImageError> {
+    let p = parse(b, -1i64, false, true)?
+    return Ok(ImageInfo { width: p.width, height: p.height, layout: p.layout(), bit_depth: p.depth, frames: 1, format: "png" })
+}
+
+// The image of the PNG `b`, with 8-bit samples (16 bits rounded): `Gray`,
+// `GrayAlpha`, `Rgb` or `Rgba`. More than `max_pixels` pixels is `TooLarge`,
+// found before anything is allocated.
+#test(unhex("89504e470d0a1a0a0000000d49484452000000030000000204030000006f5a7b2900000009504c5445ff000000ff000000ff2d4acd8a0000000274524e5380004d1055730000000e4944415478da636054605064000000cd00437a58dbad0000000049454e44ae426082"), image.MAX_PIXELS)[Ok(Image { width: 3, height: 2, layout: Layout.Rgba, data: [255u8, 0u8, 0u8, 128u8, 0u8, 255u8, 0u8, 0u8, 0u8, 0u8, 255u8, 255u8, 0u8, 0u8, 255u8, 255u8, 0u8, 255u8, 0u8, 0u8, 255u8, 0u8, 0u8, 128u8] })] // 4-bit palette, tRNS
+#test(unhex("89504e470d0a1a0a0000000d49484452000000030000000204030000006f5a7b2900000009504c5445ff000000ff000000ff2d4acd8a0000000274524e5380004d1055730000000e4944415478da636054605064000000cd00437a58dbad0000000049454e44ae426082"), 5i64)[Err(ImageError.TooLarge(6i64))]
+#test(unhex("89504e470d0a1a0a0000000d4948445200000002000000021002000000ad4446300000000674524e530000000000006ea60791000000124944415478da63f80f060c10006134800100a7fc0af94048cfc80000000049454e44ae426082"), image.MAX_PIXELS)[Ok(Image { width: 2, height: 2, layout: Layout.Rgba, data: [255u8, 255u8, 255u8, 255u8, 0u8, 0u8, 0u8, 0u8, 255u8, 0u8, 0u8, 255u8, 128u8, 128u8, 128u8, 255u8] })] // 16-bit RGB with a black key
+#test(unhex("89504e470d0a1a0a0000000d49484452000000030000000204030000006f5a7b2900000009504c5445ff000000ff000000ff2d4acd8a0000000274524e5380004d1055720000000e4944415478da636054605064000000cd00437a58dbad0000000049454e44ae426082"), image.MAX_PIXELS)[Err(ImageError.Checksum)] // tRNS's CRC
+#test(unhex("89504e470d0a1a0a0000000d494844520000ffff0000ffff0806000000b605d9500000000049454e44ae426082"), image.MAX_PIXELS)[Err(ImageError.TooLarge(4294836225i64))]
+#test(unhex("89504e470d0a1a0a0000000d49484452000000010000000108000000003a7e9b550000000049454e44ae426082"), image.MAX_PIXELS)[Err(ImageError.Corrupt("no IDAT"))]
+#test(unhex("89504e470d0a1a0a0000000d4948445200000001000000020800000000bceae9fb0000000c4944415478da631660550000006a0039db4385e70000000049454e44ae426082"), image.MAX_PIXELS)[Err(ImageError.Corrupt("filter type 5 at row 1"))] // Average on the first row, then 5
+pub fun decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError> {
+    let p = parse(b, max_pixels, false, false)?
+    return pixels8(p)
+}
+
+// The image of the PNG `b` with 16-bit samples (8 bits and fewer widened
+// by 257 after scaling to 8).
+#test(unhex("89504e470d0a1a0a0000000d4948445200000002000000021002000000ad4446300000000674524e530000000000006ea60791000000124944415478da63f80f060c10006134800100a7fc0af94048cfc80000000049454e44ae426082"), image.MAX_PIXELS)[Ok(Image { width: 2, height: 2, layout: Layout.Rgba, data: [65535u16, 65535u16, 65535u16, 65535u16, 0u16, 0u16, 0u16, 0u16, 65535u16, 0u16, 0u16, 65535u16, 32896u16, 32896u16, 32896u16, 65535u16] })]
+#test(unhex("89504e470d0a1a0a0000000d4948445200000001000000010100000000376ef9240000000a4944415478da6368000000820081da45083b0000000049454e44ae426082"), image.MAX_PIXELS)[Ok(Image { width: 1, height: 1, layout: Layout.Gray, data: [65535u16] })] // 1-bit gray
+pub fun decode16(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image16, ImageError> {
+    let p = parse(b, max_pixels, false, false)?
+    return pixels16(p)
+}
+
+// The image of the PNG `b`, as `decode` gives it, and its metadata.
+pub fun decode_with_meta(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<(Image8, PngMeta), ImageError> {
+    let p = parse(b, max_pixels, true, false)?
+    let img = pixels8(p)?
+    return Ok((img, p.meta))
+}
+
+// --- Encoding -------------------------------------------------------------------------
+
+// Why an image can't be encoded: a size of 0 (PNG has none) or samples
+// that don't fill it. None if it can.
+fun encode_problem(width: int, height: int, channels: int, samples: int) -> Option<str> {
+    if width < 1 || height < 1 {
+        return Some(f"a {width}x{height} image: PNG needs at least one pixel")
+    }
+    if (width as int64) * (height as int64) * (channels as int64) != (samples as int64) {
+        return Some(f"a {width}x{height} image of {channels} channels with {samples} samples")
+    }
+    return None
+}
+
+// The smallest layout `img` fits without loss (gray if every pixel is gray,
+// no alpha if every pixel is opaque), and its samples in it.
+fun reduced<S: Sample + Eq>(img: Image<S>) -> (Layout, [S]) {
+    let ch = img.layout.channels()
+    let d = img.data
+    let full = S.max_value()
+    var opaque = img.layout.has_alpha()
+    var gray = img.layout.is_color()
+    var i = 0
+    while i < d.len() && (opaque || gray) {
+        if opaque && d[i + ch - 1] != full {
+            opaque = false
+        }
+        if gray && (d[i] != d[i + 1] || d[i] != d[i + 2]) {
+            gray = false
+        }
+        i += ch
+    }
+    if !opaque && !gray {
+        return (img.layout, d)
+    }
+    let alpha = img.layout.has_alpha() && !opaque
+    let layout = if gray {
+        if alpha { Layout.GrayAlpha } else { Layout.Gray }
+    } else {
+        if alpha { Layout.Rgba } else { Layout.Rgb }
+    }
+    let keep = if gray || !img.layout.is_color() { 1 } else { 3 }
+    var out: [S] = []
+    var j = 0
+    while j < d.len() {
+        for c in 0..keep {
+            out.push(d[j + c])
+        }
+        if alpha {
+            out.push(d[j + ch - 1])
+        }
+        j += ch
+    }
+    return (layout, out)
+}
+
+#test
+fun reduced_layouts() {
+    let rgba = Image { width: 2, height: 1, layout: Layout.Rgba, data: [1u8, 1u8, 1u8, 255u8, 7u8, 7u8, 7u8, 255u8] }
+    let (l, d) = reduced<uint8>(rgba)
+    assert(l == Layout.Gray && d == [1u8, 7u8], "opaque gray RGBA is gray")
+    let ga = Image { width: 2, height: 1, layout: Layout.Rgba, data: [1u8, 1u8, 1u8, 0u8, 7u8, 7u8, 7u8, 255u8] }
+    let (l2, d2) = reduced<uint8>(ga)
+    assert(l2 == Layout.GrayAlpha && d2 == [1u8, 0u8, 7u8, 255u8], "gray RGBA is gray and alpha")
+    let rgb = Image { width: 1, height: 1, layout: Layout.Rgba, data: [1u16, 2u16, 3u16, 65535u16] }
+    let (l3, d3) = reduced<uint16>(rgb)
+    assert(l3 == Layout.Rgb && d3 == [1u16, 2u16, 3u16], "opaque RGBA is RGB")
+    let keep = Image { width: 1, height: 1, layout: Layout.Rgb, data: [1u8, 2u8, 3u8] }
+    assert(reduced<uint8>(keep).0 == Layout.Rgb, "colour RGB stays")
+}
+
+// PNG's colour type of `layout`.
+#test(Layout.Gray)[0]
+#test(Layout.Rgb)[2]
+#test(Layout.GrayAlpha)[4]
+#test(Layout.Rgba)[6]
+fun color_type(layout: Layout) -> int {
+    return match layout {
+        Gray => 0
+        Rgb => 2
+        GrayAlpha => 4
+        Rgba => 6
+    }
+}
+
+// The filter type of a fixed filter (Adaptive is decided per row).
+#test(Filter.Paeth)[4]
+#test(Filter.NoFilter)[0]
+fun filter_code(f: Filter) -> int {
+    return match f {
+        NoFilter => 0
+        Sub => 1
+        Up => 2
+        Average => 3
+        Paeth => 4
+        Adaptive => -1
+    }
+}
+
+// The absolute value of each byte read as a signed one: libpng's cost.
+fun cost_table() -> [int] {
+    var t: [int] = []
+    for v in 0..256 {
+        t.push(if v < 128 { v } else { 256 - v })
+    }
+    return t
+}
+
+// PNG's Paeth predictor of the left byte `a`, the one above `b` and the
+// one above left `c`: whichever is nearest to a + b - c, `a` first, then
+// `b`. Without branches, which a photo's rows would mispredict: `x >> 31`
+// is 0 or -1, the mask of a negative x.
+#test(10, 20, 30)[10] // p = 0: |p - a| is the smallest
+#test(10, 20, 5)[20]
+#test(3, 3, 3)[3]
+#test(0, 255, 255)[0]
+#test(255, 0, 128)[128] // p = 127: c is nearest
+fun paeth(a: int, b: int, c: int) -> int {
+    let pa0 = b - c
+    let pb0 = a - c
+    let pc0 = pa0 + pb0
+    let pa = (pa0 ^ (pa0 >> 31)) - (pa0 >> 31)
+    let pb = (pb0 ^ (pb0 >> 31)) - (pb0 >> 31)
+    let pc = (pc0 ^ (pc0 >> 31)) - (pc0 >> 31)
+    let not_a = ((pb - pa) | (pc - pa)) >> 31 // -1 if pa > pb or pa > pc
+    let not_b = (pc - pb) >> 31 // -1 if pb > pc
+    let bc = b ^ ((b ^ c) & not_b)
+    return a ^ ((a ^ bc) & not_a)
+}
+
+#test
+fun paeth_is_the_spec_s() {
+    var a = 0
+    while a < 256 {
+        var b = 0
+        while b < 256 {
+            var c = 0
+            while c < 256 {
+                let p = a + b - c
+                let pa = if p > a { p - a } else { a - p }
+                let pb = if p > b { p - b } else { b - p }
+                let pc = if p > c { p - c } else { c - p }
+                let want = if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c }
+                assert(paeth(a, b, c) == want, f"paeth({a}, {b}, {c})")
+                c += 15
+            }
+            b += 15
+        }
+        a += 15
+    }
+}
+
+// The filter type libpng's heuristic picks for the row at `r` of `raw`,
+// the row above it at `up` in `above` (a row of zeros for the first): the
+// smallest sum of absolute values.
+fun best_filter(raw: [uint8], r: int, above: [uint8], up: int, rb: int, bpp: int, cost: [int]) -> int {
+    var s0 = 0
+    var s1 = 0
+    var s2 = 0
+    var s3 = 0
+    var s4 = 0
+    for i in 0..bpp {
+        // nothing to the left: Sub is no filter, Paeth is Up
+        let x = raw[r + i] as int
+        let b = above[up + i] as int
+        s0 += cost[x]
+        s1 += cost[x]
+        s2 += cost[(x - b) & 255]
+        s3 += cost[(x - (b >> 1)) & 255]
+        s4 += cost[(x - b) & 255]
+    }
+    for i in bpp..rb {
+        let x = raw[r + i] as int
+        let a = raw[r + i - bpp] as int
+        let b = above[up + i] as int
+        let c = above[up + i - bpp] as int
+        s0 += cost[x]
+        s1 += cost[(x - a) & 255]
+        s2 += cost[(x - b) & 255]
+        s3 += cost[(x - ((a + b) >> 1)) & 255]
+        s4 += cost[(x - paeth(a, b, c)) & 255]
+    }
+    var best = 0
+    var min = s0
+    if s1 < min {
+        best = 1
+        min = s1
+    }
+    if s2 < min {
+        best = 2
+        min = s2
+    }
+    if s3 < min {
+        best = 3
+        min = s3
+    }
+    if s4 < min {
+        best = 4
+    }
+    return best
+}
+
+// The rows of `raw` (`h` rows of `rb` bytes, `bpp` bytes a pixel) filtered
+// by `f`, each after its filter byte.
+fun filter_rows(raw: [uint8], rb: int, h: int, bpp: int, f: Filter) -> [uint8] {
+    let cost = cost_table()
+    let zero = list_m.filled(rb, 0u8)
+    let fixed = filter_code(f)
+    var out: [uint8] = []
+    for y in 0..h {
+        let r = y * rb
+        // the row above, a row of zeros for the first
+        let above = if y == 0 { zero } else { raw }
+        let up = if y == 0 { 0 } else { r - rb }
+        let kind = if fixed >= 0 { fixed } else { best_filter(raw, r, above, up, rb, bpp, cost) }
+        out.push(kind as uint8)
+        if kind == 0 {
+            for i in 0..rb {
+                out.push(raw[r + i])
+            }
+        } else if kind == 1 {
+            for i in 0..bpp {
+                out.push(raw[r + i])
+            }
+            for i in bpp..rb {
+                out.push(raw[r + i].wrapping_sub(raw[r + i - bpp]))
+            }
+        } else if kind == 2 {
+            for i in 0..rb {
+                out.push(raw[r + i].wrapping_sub(above[up + i]))
+            }
+        } else if kind == 3 {
+            for i in 0..bpp {
+                out.push(raw[r + i].wrapping_sub(above[up + i] >> 1))
+            }
+            for i in bpp..rb {
+                let avg = ((raw[r + i - bpp] as int) + (above[up + i] as int)) >> 1
+                out.push(raw[r + i].wrapping_sub(avg as uint8))
+            }
+        } else {
+            for i in 0..bpp {
+                out.push(raw[r + i].wrapping_sub(above[up + i]))
+            }
+            for i in bpp..rb {
+                let pred = paeth(raw[r + i - bpp] as int, above[up + i] as int, above[up + i - bpp] as int)
+                out.push(raw[r + i].wrapping_sub(pred as uint8))
+            }
+        }
+    }
+    return out
+}
+
+// A chunk: its length, its type, `data`, and the CRC of the type and data.
+fun put_chunk(out: [uint8], kind: str, data: [uint8]) -> [uint8] {
+    var w = bytes_m.writer()
+    w.put_u32_be(data.len() as uint32)
+    w.put_str(kind)
+    w.put_bytes(data)
+    w.put_u32_be(checksum.crc32_update_bytes(checksum.crc32(kind), data))
+    var o = out
+    o.extend(w.finish())
+    return o
+}
+
+// The bytes of a PNG file: the IHDR of a `w` by `h` image of `depth` bits
+// and colour type `ctype`, a `PLTE` and `tRNS` if given (not empty), the
+// rows `raw` (`rb` bytes each, `bpp` a pixel) filtered by `f` and
+// compressed at `level`, in IDAT chunks of up to 64 KiB.
+fun assemble(w: int, h: int, depth: int, ctype: int, plte: [uint8], trns: [uint8], raw: [uint8], rb: int, bpp: int,
+             f: Filter, level: int) -> [uint8] {
+    var out = [137u8, 80u8, 78u8, 71u8, 13u8, 10u8, 26u8, 10u8]
+    var ihdr = bytes_m.writer()
+    ihdr.put_u32_be(w as uint32)
+    ihdr.put_u32_be(h as uint32)
+    ihdr.put_u8(depth as uint8)
+    ihdr.put_u8(ctype as uint8)
+    ihdr.put_zeros(3)
+    out = put_chunk(out, "IHDR", ihdr.finish())
+    if plte.len() > 0 {
+        out = put_chunk(out, "PLTE", plte)
+    }
+    if trns.len() > 0 {
+        out = put_chunk(out, "tRNS", trns)
+    }
+    let z = compress.zlib_compress(filter_rows(raw, rb, h, bpp, f), level)
+    let piece = 65536
+    var i = 0
+    while i < z.len() {
+        let e = if i + piece < z.len() { i + piece } else { z.len() }
+        out = put_chunk(out, "IDAT", z[i:e])
+        i = e
+    }
+    return put_chunk(out, "IEND", [])
+}
+
+// The PNG of `img`, compressed at `level` (0 to 9, as zlib's) with rows
+// filtered by `filter`, in the smallest colour type that loses nothing:
+// gray if every pixel is gray, without alpha if every pixel is opaque. An
+// image of no pixels, or whose samples don't fill it, is a failure.
+#test(Image { width: 1, height: 1, layout: Layout.Rgba, data: [9u8, 9u8, 9u8, 255u8] }, 6, Filter.NoFilter)[unhex("89504e470d0a1a0a0000000d49484452000000010000000108000000003a7e9b550000000a49444154789c63e00400000b000ac32bee920000000049454e44ae426082")] // opaque gray: colour type 0
+pub fun encode(img: Image8, level: int = 6, filter: Filter = Filter.Adaptive) -> [uint8] {
+    if let Some(why) = encode_problem(img.width, img.height, img.layout.channels(), img.data.len()) {
+        panic(f"png.encode: {why}")
+    }
+    let (layout, data) = reduced<uint8>(img)
+    let ch = layout.channels()
+    return assemble(img.width, img.height, 8, color_type(layout), [], [], data, img.width * ch, ch, filter, level)
+}
+
+// The PNG of `img` with 16-bit samples, as `encode` writes it.
+#test(Image { width: 1, height: 1, layout: Layout.Rgb, data: [1u16, 258u16, 65535u16] }, 6, Filter.NoFilter)[unhex("89504e470d0a1a0a0000000d4948445200000001000000011002000000c0e78f9d0000000f49444154789c6360606464faff1f000313020383c42a210000000049454e44ae426082")]
+pub fun encode16(img: Image16, level: int = 6, filter: Filter = Filter.Adaptive) -> [uint8] {
+    if let Some(why) = encode_problem(img.width, img.height, img.layout.channels(), img.data.len()) {
+        panic(f"png.encode16: {why}")
+    }
+    let (layout, data) = reduced<uint16>(img)
+    let ch = layout.channels()
+    var raw: [uint8] = []
+    for v in data {
+        raw.push((v >> 8) as uint8)
+        raw.push((v & 255u16) as uint8)
+    }
+    return assemble(img.width, img.height, 16, color_type(layout), [], [], raw, img.width * ch * 2, ch * 2, filter,
+        level)
+}
+
+// The bit depth a palette of `colors` entries needs: 1, 2, 4 or 8.
+#test(1)[1]
+#test(2)[1]
+#test(3)[2]
+#test(16)[4]
+#test(17)[8]
+fun index_depth(colors: int) -> int {
+    if colors <= 2 {
+        return 1
+    }
+    if colors <= 4 {
+        return 2
+    }
+    if colors <= 16 {
+        return 4
+    }
+    return 8
+}
+
+// The palette image `ix` as a PNG, its palette in `PLTE` and its alphas
+// in `tRNS` (up to the last that isn't opaque), its indices at the
+// smallest bit depth that holds them and unfiltered (as libpng advises for
+// palettes), compressed at `level`. An index past the palette is
+// transparent black, as `ix.to_image()` gives it. A palette of more than
+// 256 colours, an image of no pixels or indices that don't fill it is a
+// failure.
+#test(Indexed { width: 3, height: 1, palette: [image.rgb(255u8, 0u8, 0u8), image.rgba(0u8, 0u8, 255u8, 128u8)], indices: [0u8, 1u8, 0u8] }, 6)[unhex("89504e470d0a1a0a0000000d4948445200000003000000010103000000212e86f700000006504c5445ff00000000ff6ca1fd8e0000000274524e53ff80080fb36a0000000a49444154789c63700000004200412937f4ef0000000049454e44ae426082")]
+pub fun encode_indexed(ix: Indexed, level: int = 6) -> [uint8] {
+    if let Some(why) = encode_problem(ix.width, ix.height, 1, ix.indices.len()) {
+        panic(f"png.encode_indexed: {why}")
+    }
+    if ix.palette.len() > 256 {
+        panic(f"png.encode_indexed: a palette of {ix.palette.len()} colours (PNG holds 256)")
+    }
+    var colors = ix.palette.len()
+    for i in ix.indices {
+        if (i as int) >= colors {
+            colors = (i as int) + 1
+        }
+    }
+    if colors == 0 {
+        colors = 1
+    }
+    var plte: [uint8] = []
+    var alphas: [uint8] = []
+    var last = 0 // the alphas tRNS needs
+    for i in 0..colors {
+        let c = if i < ix.palette.len() { ix.palette[i] } else { image.rgba(0u8, 0u8, 0u8, 0u8) }
+        plte.push(c.r)
+        plte.push(c.g)
+        plte.push(c.b)
+        alphas.push(c.a)
+        if c.a != 255u8 {
+            last = i + 1
+        }
+    }
+    let depth = index_depth(colors)
+    let w = ix.width
+    let rb = row_bytes(w, depth) as int
+    var raw = list_m.filled(rb * ix.height, 0u8)
+    for y in 0..ix.height {
+        for x in 0..w {
+            let v = ix.indices[y * w + x]
+            let bit = x * depth
+            let at = y * rb + (bit >> 3)
+            raw[at] = raw[at] | (v << ((8 - depth - (bit & 7)) as uint8))
+        }
+    }
+    return assemble(w, ix.height, depth, 3, plte, alphas[:last], raw, rb, 1, Filter.NoFilter, level)
+}
+
+// --- Tests ----------------------------------------------------------------------------
+
+// The bytes of a hex string, in the tests.
+fun unhex(s: str) -> [uint8] {
+    return encoding.hex_decode(s).expect("hex")
+}
+
+// Every filter, and the adaptive choice, decodes back to the same image,
+// for every layout and for 16 bits.
+#test
+fun round_trips() -> Result<(), ImageError> {
+    var data: [uint8] = []
+    for i in 0..(7 * 5 * 4) {
+        data.push(((i * 37 + (i / 9) * 11) & 255) as uint8)
+    }
+    let rgba = Image { width: 7, height: 5, layout: Layout.Rgba, data: data }
+    for f in [Filter.NoFilter, Filter.Sub, Filter.Up, Filter.Average, Filter.Paeth, Filter.Adaptive] {
+        let back = decode(encode(rgba, 6, f), image.MAX_PIXELS)?
+        assert(back == rgba, f"filter {filter_code(f)}")
+    }
+    for layout in [Layout.Gray, Layout.GrayAlpha, Layout.Rgb] {
+        let img = rgba.convert(layout)
+        assert(decode(encode(img, 1, Filter.Adaptive), image.MAX_PIXELS)? == img, f"{layout}")
+    }
+    let wide = rgba.to_u16()
+    var w16 = wide
+    w16.data[3] = 1234u16
+    assert(decode16(encode16(w16, 6, Filter.Adaptive), image.MAX_PIXELS)? == w16, "16 bits")
+    assert(decode(encode16(w16, 6, Filter.Paeth), image.MAX_PIXELS)? == w16.to_u8(), "16 bits rounded to 8")
+    return Ok(())
+}
+
+// A palette image of each bit depth decodes to what `to_image` gives.
+#test
+fun indexed_round_trips() -> Result<(), ImageError> {
+    for colors in [2, 3, 16, 17, 256] {
+        var pal: [Color] = []
+        for i in 0..colors {
+            pal.push(image.rgba((i * 7) as uint8, (255 - i) as uint8, (i * 3) as uint8, if i == 1 { 0u8 } else { 255u8 }))
+        }
+        var ix: [uint8] = []
+        for i in 0..(5 * 3) {
+            ix.push(((i * 5) % colors) as uint8)
+        }
+        let img = Indexed { width: 5, height: 3, palette: pal, indices: ix }
+        let b = encode_indexed(img, 6)
+        assert(decode(b, image.MAX_PIXELS)? == img.to_image(), f"{colors} colours")
+        assert(info(b)?.bit_depth == index_depth(colors), f"depth of {colors} colours")
+    }
+    // an index past the palette is transparent black
+    let past = Indexed { width: 2, height: 1, palette: [image.rgb(1u8, 2u8, 3u8)], indices: [0u8, 2u8] }
+    assert(decode(encode_indexed(past, 6), image.MAX_PIXELS)? == past.to_image(), "past the palette")
+    return Ok(())
+}
+
+// Interlaced images: Adam7's passes put back, at every depth.
+#test
+fun interlaced() -> Result<(), ImageError> {
+    // Python: a 5x3 2-bit gray image, Adam7, filters none (zlib level 9)
+    let b = unhex("89504e470d0a1a0a0000000d494844520000000500000003020000000143eab213000000154944415478da6360008206860e8602860b0c390e00104702f5b2b6abbe0000000049454e44ae426082")
+    let img = decode(b, image.MAX_PIXELS)?
+    assert(img.layout == Layout.Gray && img.width == 5 && img.height == 3, "the size")
+    assert(img.data == [0u8, 85u8, 170u8, 255u8, 0u8, 85u8, 170u8, 255u8, 0u8, 85u8, 170u8, 255u8, 0u8, 85u8, 170u8], "the ramp")
+    return Ok(())
+}
+
+// What decode_with_meta keeps.
+#test
+fun metadata() -> Result<(), ImageError> {
+    // Python: 1x1 gray with gAMA 45455, sRGB 0, pHYs 2835x2835 per metre,
+    // tEXt Title=Hé (Latin-1), zTXt Comment=zipped, iTXt Author (de) = "Jörg"
+    let b = unhex("89504e470d0a1a0a0000000d49484452000000010000000108000000003a7e9b550000000467414d410000b18f0bfc6105000000017352474200aece1ce9000000097048597300000b1300000b1301009a9c1800000008744558745469746c650048e912b7245d000000177a545874436f6d6d656e740000789cabca2c28484d0100092d028d8a9010190000001669545874417574686f720000006465004e616d65004ac3b67267a75a93340000000a4944415478da6360000000020001e527defc0000000049454e44ae426082")
+    let (img, m) = decode_with_meta(b, image.MAX_PIXELS)?
+    assert(img.data == [0u8], "the pixel")
+    assert(m.gamma == Some(45455i64) && m.srgb == Some(0), "gAMA and sRGB")
+    assert(m.phys == Some(Phys { x: 2835i64, y: 2835i64, meter: true }), "pHYs")
+    assert(m.text.len() == 3, f"{m.text.len()} text chunks")
+    assert(m.text[0].keyword == "Title" && m.text[0].text == "Hé" && !m.text[0].compressed, "tEXt")
+    assert(m.text[1].keyword == "Comment" && m.text[1].text == "zipped" && m.text[1].compressed, "zTXt")
+    assert(m.text[2].keyword == "Author" && m.text[2].text == "Jörg" && m.text[2].language == "de", "iTXt")
+    assert(m.text[2].translated == "Name", "iTXt's translated keyword")
+    let (_, none) = decode_with_meta(encode(img, 6, Filter.Adaptive), image.MAX_PIXELS)?
+    assert(none == no_meta(), "no chunks, no metadata")
+    return Ok(())
+}
+
+// Broken files are errors.
+#test
+fun broken() {
+    let good = encode(Image { width: 2, height: 2, layout: Layout.Rgb, data: [1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8] }, 6, Filter.Sub)
+    for n in 0..good.len() - 12 {
+        // every cut before IEND
+        assert(decode(good[:n], image.MAX_PIXELS) != decode(good, image.MAX_PIXELS), f"cut to {n}")
+    }
+    var bad = good
+    bad[16] = 9u8 // the width's low byte: the CRC is wrong
+    assert(decode(bad, image.MAX_PIXELS) == Err(ImageError.Checksum), "IHDR's CRC")
+    assert(decode(good[:20], image.MAX_PIXELS) == Err(ImageError.Truncated), "cut in IHDR")
+    assert(decode([1u8, 2u8], image.MAX_PIXELS) == Err(ImageError.BadSignature), "not a PNG")
+}

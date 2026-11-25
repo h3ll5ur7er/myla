@@ -1,0 +1,9 @@
+// std.png's `decode` (8 bits, 16 rounded) under the image corpus's harness
+// (tests/burn/test_images.py, MYLA-935).
+
+import std.png as png
+import image_driver as driver
+
+fun main() {
+    driver.serve8((b: [uint8], max: int64) => png.decode(b, max))
+}

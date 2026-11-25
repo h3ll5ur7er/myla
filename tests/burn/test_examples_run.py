@@ -98,6 +98,9 @@ EXPECTED = {
                        "BMP, 32 bits: 634 bytes, read back: the same\nBMP, 24 bits: 438 bytes, read back: the same\n"
                        "QOI: 274 bytes, read back: the same\nbmp: 16x8 rgba, 8 bits a sample\n"
                        "P2\n4 2\n255\n194 178 162 146\n76 61 45 29\nQOI cut short: 20 bytes, read back: truncated input\n"),
+    "png_badge.my": ("drawn: 48x20 rgba, pixels 64c3d222\nPNG: 441 bytes, 48x20 rgba, 8 bits\n"
+                      "decoded back the same: true\npalette PNG: 13 colours, 279 bytes, 48x20 rgba, 4 bits\n"
+                      "the same pixels: true\nerror: checksum mismatch\n"),
     "draw_chart.my": (
         '                                                \n'
         '          @@@@  @@@  @     @@@@@  @@@@          \n'
