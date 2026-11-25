@@ -2,7 +2,7 @@
 id: MYLA-944
 title: "std.imgproc, tier B: contours, Hough, features, homographies, optical flow"
 type: feature
-status: todo
+status: in-progress
 priority: low
 labels: [stdlib, images, vision]
 ---
