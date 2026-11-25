@@ -1,0 +1,293 @@
+// std.font's driver for tests/burn/test_font.py (MYLA-943).
+//
+// Without arguments it speaks the image drivers' protocol (tests/burn/_images.py)
+// for the fuzz runs: each line of stdin a font file, and for each a line
+// `ok <faces> <glyphs> font 8 1 <checksum>` after every face was parsed and
+// every glyph outlined and rendered at 12 px and a text laid out, or
+// `err <message>` when the file isn't a font std.font reads.
+//
+// With `--commands` each line of stdin is a command and gets a line back:
+//   metrics <font> <face>        family|style|upem|ascender|descender|line gap|glyphs
+//   glyphs <font>                for each glyph `advance,lsb,xmin,ymin,xmax,ymax` (the
+//                                outline's box, `-` without one), `;` between
+//   cmap <font> <cp,cp,…>        the glyphs, `,` between
+//   kern <font> <a.b,a.b,…>      the kerning of glyph pairs, `,` between
+//   outline <font> <glyph>       the outline's segments: `M x y`, `L x y`, `Q cx cy x y`, `Z`
+//   glyph <font> <cp> <px> <dx>  `x y w h <hex>`: render_glyph's mask
+//   text <font> <px> <x0> <y0> <w> <h> <exact|cached> <hex utf-8>
+//                                the text laid out unkerned from the pen (x0, y0) on the first
+//                                baseline, each glyph's coverage added and clamped
+//                                into a w by h image: `<hex>` (exact: each glyph at its
+//                                exact fraction; cached: a GlyphCache's masks)
+//   layout <font> <px> <max width> <left|center|right> <line height> <hex utf-8>
+//                                `width height lines` then `glyph:x:y` per glyph
+import std.font as font
+from std.font import Font, Align, TextLayout
+import std.draw as draw
+from std.draw import Mask, Seg
+import std.encoding as encoding
+import std.bytes as bytes
+import std.fs as fs
+import std.num as num
+import std.process as process
+from std.io import stdin, println, Reader
+
+struct Lines { r: Reader }
+
+impl Lines {
+    fun next(var self) -> Option<str> {
+        let line = match self.r.read_line() {
+            Ok(Some(l)) => l
+            _ => ""
+        }
+        if line.len() == 0 {
+            return None
+        }
+        return Some(line)
+    }
+}
+
+#test("a\nb\tc")["a b c"]
+fun one_line(s: str) -> str {
+    return s.replace("\n", " ").replace("\t", " ")
+}
+
+// Everything std.font does with a font, folded into a checksum.
+fun exercise(b: [uint8]) -> Result<str, font.FontError> {
+    let faces = font.face_count(b)
+    var sum: uint32 = 0
+    var glyphs = 0
+    for face in 0..(if faces < 1 { 1 } else { faces }) {
+        let f = font.parse(b, face)?
+        glyphs += f.glyph_count
+        for g in 0..f.glyph_count {
+            sum = sum.wrapping_mul(31u32).wrapping_add((f.advance(g) + f.lsb(g) + f.kerning(g, g + 1)) as uint32)
+            if let Some(p) = f.outline(g) {
+                sum = sum.wrapping_add(p.segs.len() as uint32)
+            }
+            let m = font.render_glyph(f, g, 12.0, 0.25)
+            for v in m.image.data {
+                sum = sum.wrapping_add(v as uint32)
+            }
+        }
+        let opts = font.layout_options().with_max_width(60.0).with_align(Align.Center)
+        let l = font.layout(f, "Hello, World! AVATAR\tTo Yo é\nñ 😀", 12.0, opts)
+        var cache = font.glyph_cache(f)
+        for m in cache.masks(l, 0.5, 0.25) {
+            sum = sum.wrapping_add((m.x + m.y + m.image.width) as uint32)
+        }
+        sum = sum.wrapping_add(l.lines as uint32)
+    }
+    return Ok(f"{faces} {glyphs} font 8 1 {sum:08x}")
+}
+
+fun serve() {
+    var lines = Lines { r: stdin() }
+    while let Some(path) = lines.next() {
+        match fs.read_bytes(path) {
+            Ok(data) => {
+                match exercise(data) {
+                    Ok(line) => println("ok " + line)
+                    Err(e) => println("err " + one_line(f"{e}"))
+                }
+            }
+            Err(e) => println(f"bad cannot read {path}: {e}")
+        }
+    }
+}
+
+fun int_of(s: str) -> int {
+    return match num.parse_int(s) {
+        Some(n) => n as int
+        None => 0
+    }
+}
+
+fun float_of(s: str) -> float32 {
+    return match num.parse_float(s) {
+        Some(v) => v as float32
+        None => 0.0
+    }
+}
+
+fun text_of(hex: str) -> str {
+    return match encoding.hex_decode(hex) {
+        Ok(b) => bytes.to_str(b)
+        Err(_) => ""
+    }
+}
+
+struct Fonts { cache: [str: [uint8]] }
+
+impl Fonts {
+    fun load(var self, path: str, face: int) -> Result<Font, str> {
+        if !self.cache.contains(path) {
+            let r = fs.read_bytes(path)
+            if let Err(e) = r {
+                return Err(f"cannot read {path}: {e}")
+            }
+            if let Ok(b) = r {
+                self.cache[path] = b
+            }
+        }
+        return match font.parse(self.cache[path], face) {
+            Ok(f) => Ok(f)
+            Err(e) => Err(f"{e}")
+        }
+    }
+}
+
+fun hex_of(data: [uint8]) -> str {
+    return if data.len() == 0 { "-" } else { encoding.hex_encode(data) }
+}
+
+fun glyphs_line(f: Font) -> str {
+    var parts: [str] = []
+    for g in 0..f.glyph_count {
+        var box = "-"
+        if let Some(p) = f.outline(g) {
+            if let Some((lo, hi)) = p.bounds() {
+                box = f"{lo.x as int},{lo.y as int},{hi.x as int},{hi.y as int}"
+            }
+        }
+        parts.push(f"{f.advance(g)},{f.lsb(g)},{box}")
+    }
+    return parts.join(";")
+}
+
+// Glyph `g`'s outline: `M x y`, `L x y`, `Q cx cy x y` and `Z`, `-` for none.
+fun outline_line(f: Font, g: int) -> str {
+    let Some(p) = f.outline(g) else {
+        return "-"
+    }
+    var parts: [str] = []
+    for s in p.segs {
+        parts.push(match s {
+            Move(q) => f"M {q.x} {q.y}"
+            Line(q) => f"L {q.x} {q.y}"
+            Quad(c, q) => f"Q {c.x} {c.y} {q.x} {q.y}"
+            Cubic(a, c, q) => f"C {a.x} {a.y} {c.x} {c.y} {q.x} {q.y}"
+            Close => "Z"
+        })
+    }
+    return parts.join(" ")
+}
+
+// The masks added into a w by h image, clamped.
+fun composite(ms: [Mask], w: int, h: int) -> [uint8] {
+    var out: [int] = []
+    for i in 0..w * h {
+        out.push(0)
+    }
+    for m in ms {
+        for y in 0..m.image.height {
+            for x in 0..m.image.width {
+                let px = m.x + x
+                let py = m.y + y
+                if px >= 0 && px < w && py >= 0 && py < h {
+                    out[py * w + px] += m.image.data[y * m.image.width + x] as int
+                }
+            }
+        }
+    }
+    var b: [uint8] = []
+    for v in out {
+        b.push((if v > 255 { 255 } else { v }) as uint8)
+    }
+    return b
+}
+
+fun text_masks(f: Font, l: TextLayout, x0: float32, y0: float32, how: str) -> [Mask] {
+    if how == "cached" {
+        var cache = font.glyph_cache(f)
+        // the layout's top left corner is the ascender above the first baseline
+        return cache.masks(l, x0, y0 - (f.ascender as float32) * f.scale(l.px))
+    }
+    var ms: [Mask] = []
+    let top = y0 - (f.ascender as float32) * f.scale(l.px)
+    for p in l.glyphs {
+        let pen = (x0 + p.x) as float64
+        let ix = pen.floor()
+        let m = font.render_glyph(f, p.glyph, l.px, (pen - ix) as float32)
+        let iy = ((top + p.y) as float64 + 0.5).floor() as int
+        ms.push(Mask { image: m.image, x: m.x + (ix as int), y: m.y + iy })
+    }
+    return ms
+}
+
+struct Commands { fonts: Fonts }
+
+impl Commands {
+    fun run(var self, line: str) -> str {
+        let w = line.split(" ")
+        if w.len() < 2 {
+            return "bad command"
+        }
+        let face = if w[0] == "metrics" && w.len() > 2 { int_of(w[2]) } else { 0 }
+        let r = self.fonts.load(w[1], face)
+        if let Err(e) = r {
+            return "err " + one_line(e)
+        }
+        let Ok(f) = r else {
+            return "bad"
+        }
+        if w[0] == "metrics" {
+            return f"{f.family}|{f.style}|{f.units_per_em}|{f.ascender}|{f.descender}|{f.line_gap}|{f.glyph_count}"
+        }
+        if w[0] == "glyphs" {
+            return glyphs_line(f)
+        }
+        if w[0] == "cmap" && w.len() > 2 {
+            var gs: [str] = []
+            for cp in w[2].split(",") {
+                gs.push(f"{f.glyph(int_of(cp) as char)}")
+            }
+            return gs.join(",")
+        }
+        if w[0] == "kern" && w.len() > 2 {
+            var ks: [str] = []
+            for pair in w[2].split(",") {
+                let ab = pair.split(".")
+                ks.push(f"{f.kerning(int_of(ab[0]), int_of(ab[1]))}")
+            }
+            return ks.join(",")
+        }
+        if w[0] == "outline" && w.len() > 2 {
+            return outline_line(f, int_of(w[2]))
+        }
+        if w[0] == "glyph" && w.len() > 4 {
+            let m = font.render_glyph(f, f.glyph(int_of(w[2]) as char), float_of(w[3]), float_of(w[4]))
+            return f"{m.x} {m.y} {m.image.width} {m.image.height} {hex_of(m.image.data)}"
+        }
+        if w[0] == "text" && w.len() > 8 {
+            let px = float_of(w[2])
+            let l = font.layout(f, text_of(w[8]), px, font.layout_options().with_kerning(false))
+            let ms = text_masks(f, l, float_of(w[3]), float_of(w[4]), w[7])
+            return hex_of(composite(ms, int_of(w[5]), int_of(w[6])))
+        }
+        if w[0] == "layout" && w.len() > 6 {
+            let align = if w[4] == "center" { Align.Center } else if w[4] == "right" { Align.Right } else { Align.Left }
+            let opts = font.layout_options().with_max_width(float_of(w[3])).with_align(align).with_line_height(float_of(w[5]))
+            let l = font.layout(f, text_of(w[6]), float_of(w[2]), opts)
+            var parts = [f"{l.width} {l.height} {l.lines}"]
+            for p in l.glyphs {
+                parts.push(f"{p.glyph}:{p.x}:{p.y}")
+            }
+            return parts.join(" ")
+        }
+        return "bad command " + w[0]
+    }
+}
+
+fun main() {
+    let argv = process.args()
+    if argv.len() > 1 && argv[1] == "--commands" {
+        var c = Commands { fonts: Fonts { cache: [:] } }
+        var lines = Lines { r: stdin() }
+        while let Some(line) = lines.next() {
+            println(c.run(line))
+        }
+        return
+    }
+    serve()
+}

@@ -318,6 +318,16 @@ Import: `import std.fmt as fmt`.
 - Internal: `parse_spec(s: str) -> Result<Spec, str>`, `spec_need(sp: Spec, class: int32) -> str`, `fmt_int(v: int64, bits: int32, signed: bool, spec: str) -> str`, `fmt_float(x: float64, text: str, spec: str) -> str`, `fmt_text(text: str, spec: str) -> str`
 - Prose: `docs/Language/Standard-library/Fmt.md`
 
+## std.font: TrueType fonts, glyph masks, text layout
+TrueType `.ttf` and `.ttc` parsing, glyph outlines and masks, a simple layout (MYLA-943). `import std.font as font`; masks are std.draw's `Mask`, outlines its `Path`.
+- `fun parse(b: [uint8], index: int = 0) -> Result<Font, FontError>` (index: a collection's face), `face_count(b) -> int`. `struct Font { family: str, style: str, units_per_em: int, ascender: int, descender: int, line_gap: int, glyph_count: int, … }` (font units, y up; descender negative; OS/2's typo metrics when USE_TYPO_METRICS). `enum FontError { Truncated, BadSignature, MissingTable(str), Unsupported(str), Corrupt(str), NoFace(int) }` (`message()`, `Format`); CFF (`OTTO`) is `Unsupported`.
+- `f.glyph(c: char) -> int` (0 is .notdef; cmap formats 4 and 12), `f.advance(g) -> int`, `f.lsb(g) -> int`, `f.kerning(a, b) -> int` (kern format 0; font units), `f.outline(g) -> Option<draw.Path>` (font units, y up, quadratic curves; `None` for a space or a broken glyph), `f.scale(px: float32) -> float32`. `const MAX_DEPTH: int = 8` (composite nesting).
+- `fun render_glyph(f, g, px: float32, dx: float32 = 0.0) -> Mask`: unhinted exact-area coverage, the outline moved right by `dx`, `(m.x, m.y)` from the pen on the baseline, y down (a capital's `m.y` is negative); curves cut as FreeType's smooth renderer cuts them (matches it within a few levels).
+- `fun layout(f, text, px: float32, opts: LayoutOptions = layout_options()) -> TextLayout`, `measure(f, text, px) -> (float32, float32)`. `struct LayoutOptions { max_width: float32 (0: no wrapping), align: Align, line_height: float32 (× the font's), tab: int (spaces), kerning: bool }`, `layout_options()` (0, Left, 1.0, 4, true), copies by `.with_max_width(w)`, `.with_align(a)`, `.with_line_height(k)`, `.with_tab(n)`, `.with_kerning(b)`; `enum Align { Left, Center, Right }`. `struct TextLayout { glyphs: [Placed], width, height, lines: int, px }`, `struct Placed { glyph: int, x: float32, y: float32 }` (pen on the baseline from the top left; spaces, tabs and breaks not listed).
+- `fun glyph_cache(f) -> GlyphCache`; `var self`: `.masks(l: TextLayout, x, y) -> [Mask]` (top left at `(x, y)`; pens at quarter pixels), `.mask(g, px, x, y) -> Mask` (pen at `(x, y)`); `.count() -> int`. On `Canvas` (added by std.font): `c.fill_masks(ms, paint)`, `c.fill_text(f, text, x, y, px, paint)`.
+- Gotchas: glyphs are read lazily, so `parse` is cheap and a broken glyph is only an empty outline or mask. Breaks only at spaces and tabs; a long word overflows. No GPOS, GSUB, CFF, hinting or shaping.
+- Prose: `docs/Language/Standard-library/Font.md`
+
 ## std.fs: files, directories, metadata, temporary files
 Import: `import std.fs as fs`. `IoError`, `from_errno` and `io_error_name` are re-exported from std.ioerror, so `fs.IoError` and `from std.fs import IoError` work.
 - Whole files:

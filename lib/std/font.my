@@ -1,0 +1,1906 @@
+// std.font: TrueType fonts (D311, MYLA-943). Parsing of `.ttf` files and
+// `.ttc` collections, glyph outlines as std.draw paths, glyph masks
+// rasterised unhinted at a quarter of a pixel, and a simple text layout:
+// characters to glyphs through `cmap`, advances, `kern` pairs, lines broken
+// at spaces within a width and at `\n`, left, centred or right aligned.
+//
+// A font is untrusted input. `parse` checks the tables it keeps (their
+// places in the file and the lengths of their arrays); the glyphs are read
+// when they are asked for, and every offset is checked then, so a broken
+// glyph is no outline (`None`) rather than a failure. Composite glyphs nest
+// at most `MAX_DEPTH` deep.
+//
+// Units: a font's metrics, advances and outlines are in font units
+// (`units_per_em` to the em), with y up from the baseline. Masks and
+// layouts are in pixels, y down, `px` pixels to the em (`f.scale(px)`
+// pixels a unit).
+
+import std.draw as draw
+from std.draw import Path, Seg, Mask, Paint, Canvas, FillRule
+import std.image as image
+from std.image import Image, Layout, Rect
+from std.vector32 import Vec2, vec2
+import std.float as fl // floor, round, trunc, sqrt, is_finite, to_bits
+import std.list as list_m // filled
+import std.map as map_m // get
+import std.option as option_m // unwrap_or, expect in the tests
+
+// How deep composite glyphs may nest (a component of a component …).
+pub const MAX_DEPTH: int = 8
+
+// The components and points one glyph may expand to, so that a composite
+// that repeats its parts at every level stays small.
+const MAX_COMPONENTS: int = 4096
+const MAX_POINTS: int = 262144
+
+// Why a font couldn't be read (D168: a bare enum with `message()`).
+#derive(Eq)
+pub enum FontError {
+    // The file ends inside a header, a table directory or a table.
+    Truncated
+    // Not a TrueType font or collection.
+    BadSignature
+    // A table the font needs isn't there, by its tag.
+    MissingTable(str)
+    // A valid feature this module doesn't read, by name.
+    Unsupported(str)
+    // What is wrong with the font.
+    Corrupt(str)
+    // A face index past the faces of the file (one for a `.ttf`).
+    NoFace(int)
+}
+
+impl FontError {
+    #test(FontError.Truncated)["truncated font"]
+    #test(FontError.MissingTable("glyf"))["missing table 'glyf'"]
+    #test(FontError.Unsupported("CFF outlines"))["unsupported: CFF outlines"]
+    #test(FontError.NoFace(3))["no face 3 in the file"]
+    fun message(self) -> str {
+        return match self {
+            Truncated => "truncated font"
+            BadSignature => "not a TrueType font"
+            MissingTable(t) => f"missing table '{t}'"
+            Unsupported(what) => f"unsupported: {what}"
+            Corrupt(what) => f"corrupt font: {what}"
+            NoFace(i) => f"no face {i} in the file"
+        }
+    }
+}
+
+impl Format for FontError {
+    // The message; the spec is ignored.
+    #test(FontError.BadSignature, "")["not a TrueType font"]
+    fun format(self, spec: str) -> str {
+        return self.message()
+    }
+}
+
+// A parsed face. The first seven fields are its names and metrics (font
+// units); the others say where its tables are in `data` (the whole file).
+pub struct Font {
+    family: str,
+    style: str,
+    units_per_em: int,
+    // the typographic ascender (positive), descender (negative) and line
+    // gap: hhea's, or OS/2's typo metrics when its USE_TYPO_METRICS bit is set
+    ascender: int,
+    descender: int,
+    line_gap: int,
+    glyph_count: int,
+    data: [uint8],
+    loca: int,
+    long_loca: bool,
+    glyf: int,
+    glyf_end: int,
+    hmtx: int,
+    hmtx_end: int,
+    hmetrics: int,
+    // the cmap subtable used (format 4 or 12), and the cmap table's end
+    cmap: int,
+    cmap_end: int,
+    cmap_format: int,
+    // the first pair of the kern table's format 0 subtable, and their number
+    kern: int,
+    kern_pairs: int,
+}
+
+// --- reading big-endian numbers ------------------------------------------------
+
+// The callers check that the bytes are there.
+#test([1u8, 2u8], 0)[258]
+fun u16at(b: [uint8], o: int) -> int {
+    return ((b[o] as int) << 8) | (b[o + 1] as int)
+}
+
+#test([255u8, 254u8], 0)[-2]
+#test([127u8, 255u8], 0)[32767]
+fun i16at(b: [uint8], o: int) -> int {
+    let v = ((b[o] as int) << 8) | (b[o + 1] as int)
+    return if v >= 32768 { v - 65536 } else { v }
+}
+
+#test([255u8, 255u8, 255u8, 254u8], 0)[4294967294i64]
+fun u32at(b: [uint8], o: int) -> int64 {
+    return ((b[o] as int64) << 24) | ((b[o + 1] as int64) << 16) | ((b[o + 2] as int64) << 8) | (b[o + 3] as int64)
+}
+
+// A 2.14 fixed-point number.
+#test([64u8, 0u8], 0)[1.0]
+#test([224u8, 0u8], 0)[-0.5]
+fun f2dot14(b: [uint8], o: int) -> float64 {
+    return (i16at(b, o) as float64) / 16384.0
+}
+
+// Whether the four bytes at `o` are `tag`.
+#test([99u8, 109u8, 97u8, 112u8], 0, "cmap")[true]
+#test([99u8, 109u8, 97u8, 112u8], 0, "glyf")[false]
+fun tag_at(b: [uint8], o: int, tag: str) -> bool {
+    return b[o] == tag[0] && b[o + 1] == tag[1] && b[o + 2] == tag[2] && b[o + 3] == tag[3]
+}
+
+// --- parsing -------------------------------------------------------------------
+
+// A face's table directory: `count` records from `dir + 12` in `b`.
+struct Tables {
+    b: [uint8],
+    dir: int,
+    count: int,
+}
+
+impl Tables {
+    // The table `tag` as its offset and length, `(-1, 0)` when absent;
+    // checked to lie within the file.
+    fun find(self, tag: str) -> Result<(int, int), FontError> {
+        for i in 0..self.count {
+            let r = self.dir + 12 + 16 * i
+            if tag_at(self.b, r, tag) {
+                let off = u32at(self.b, r + 8)
+                let len = u32at(self.b, r + 12)
+                if off + len > (self.b.len() as int64) {
+                    return Err(FontError.Truncated)
+                }
+                return Ok((off as int, len as int))
+            }
+        }
+        return Ok((-1, 0))
+    }
+
+    // The table `tag`, which must be there and hold at least `min` bytes.
+    fun need(self, tag: str, min: int) -> Result<(int, int), FontError> {
+        let (off, len) = self.find(tag)?
+        if off < 0 {
+            return Err(FontError.MissingTable(tag))
+        }
+        if len < min {
+            return Err(FontError.Corrupt(f"table '{tag}' of {len} bytes is too short"))
+        }
+        return Ok((off, len))
+    }
+}
+
+// The face `index` of a TrueType font (`.ttf`, index 0) or collection
+// (`.ttc`). The tables `head`, `hhea`, `hmtx`, `maxp`, `cmap` (a Unicode
+// subtable of format 4 or 12), `loca` and `glyf` are needed; `kern`
+// (format 0), `name` and `OS/2` are read when there.
+#test([], 0)[Err(FontError.Truncated)]
+#test([0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8], 0)[Err(FontError.MissingTable("head"))]
+#test([79u8, 84u8, 84u8, 79u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8], 0)[Err(FontError.Unsupported("CFF outlines (OpenType 'OTTO')"))]
+#test([1u8, 2u8, 3u8, 4u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8], 0)[Err(FontError.BadSignature)]
+#test([0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8], 1)[Err(FontError.NoFace(1))]
+pub fun parse(b: [uint8], index: int = 0) -> Result<Font, FontError> {
+    if b.len() < 12 {
+        return Err(FontError.Truncated)
+    }
+    var start = 0
+    if tag_at(b, 0, "ttcf") {
+        let faces = u32at(b, 8)
+        if index < 0 || (index as int64) >= faces {
+            return Err(FontError.NoFace(index))
+        }
+        let rec = 12 + 4 * index
+        if rec + 4 > b.len() {
+            return Err(FontError.Truncated)
+        }
+        let off = u32at(b, rec)
+        if off + 12 > (b.len() as int64) {
+            return Err(FontError.Truncated)
+        }
+        start = off as int
+    } else if index != 0 {
+        if tag_at(b, 0, "OTTO") || u32at(b, 0) == 0x00010000i64 || tag_at(b, 0, "true") {
+            return Err(FontError.NoFace(index))
+        }
+    }
+    let version = u32at(b, start)
+    if tag_at(b, start, "OTTO") {
+        return Err(FontError.Unsupported("CFF outlines (OpenType 'OTTO')"))
+    }
+    if version != 0x00010000i64 && !tag_at(b, start, "true") {
+        return Err(FontError.BadSignature)
+    }
+    let count = u16at(b, start + 4)
+    if start + 12 + 16 * count > b.len() {
+        return Err(FontError.Truncated)
+    }
+    let t = Tables { b: b, dir: start, count: count }
+
+    let (head, _) = t.need("head", 54)?
+    let upem = u16at(b, head + 18)
+    if upem < 16 || upem > 16384 {
+        return Err(FontError.Corrupt(f"units per em {upem} (16 to 16384)"))
+    }
+    let loca_format = i16at(b, head + 50)
+    if loca_format != 0 && loca_format != 1 {
+        return Err(FontError.Corrupt(f"loca format {loca_format}"))
+    }
+    let (maxp, _) = t.need("maxp", 6)?
+    let glyphs = u16at(b, maxp + 4)
+    let (hhea, _) = t.need("hhea", 36)?
+    var ascender = i16at(b, hhea + 4)
+    var descender = i16at(b, hhea + 6)
+    var line_gap = i16at(b, hhea + 8)
+    let hmetrics = u16at(b, hhea + 34)
+    if hmetrics == 0 || hmetrics > glyphs {
+        return Err(FontError.Corrupt(f"{hmetrics} horizontal metrics for {glyphs} glyphs"))
+    }
+    let (hmtx, hmtx_len) = t.need("hmtx", 4 * hmetrics)?
+    let (os2, os2_len) = t.find("OS/2")?
+    if os2 >= 0 && os2_len >= 74 && (u16at(b, os2 + 62) & 0x80) != 0 {
+        ascender = i16at(b, os2 + 68)
+        descender = i16at(b, os2 + 70)
+        line_gap = i16at(b, os2 + 72)
+    }
+
+    let (glyf, glyf_len) = t.find("glyf")?
+    if glyf < 0 {
+        let (cff, _) = t.find("CFF ")?
+        if cff >= 0 {
+            return Err(FontError.Unsupported("CFF outlines"))
+        }
+        return Err(FontError.MissingTable("glyf"))
+    }
+    let (loca, _) = t.need("loca", (glyphs + 1) * (if loca_format == 1 { 4 } else { 2 }))?
+
+    let (cmap_off, cmap_len) = t.need("cmap", 4)?
+    let (sub, format) = pick_cmap(b, cmap_off, cmap_off + cmap_len)?
+
+    let (kern_off, kern_len) = t.find("kern")?
+    let (kern, pairs) = if kern_off >= 0 { kern_table(b, kern_off, kern_off + kern_len) } else { (0, 0) }
+
+    let (name, name_len) = t.find("name")?
+    let family = if name >= 0 { name_string(b, name, name + name_len, 1) } else { "" }
+    let style = if name >= 0 { name_string(b, name, name + name_len, 2) } else { "" }
+
+    return Ok(Font { family: family, style: style, units_per_em: upem, ascender: ascender, descender: descender,
+        line_gap: line_gap, glyph_count: glyphs, data: b, loca: loca, long_loca: loca_format == 1, glyf: glyf,
+        glyf_end: glyf + glyf_len, hmtx: hmtx, hmtx_end: hmtx + hmtx_len, hmetrics: hmetrics, cmap: sub,
+        cmap_end: cmap_off + cmap_len, cmap_format: format, kern: kern, kern_pairs: pairs })
+}
+
+// The number of faces in a font file: a collection's count, 1 for a font,
+// 0 for neither.
+#test([116u8, 116u8, 99u8, 102u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8])[2]
+#test([0u8, 1u8, 0u8, 0u8])[1]
+#test([1u8, 2u8])[0]
+pub fun face_count(b: [uint8]) -> int {
+    if b.len() < 4 {
+        return 0
+    }
+    if tag_at(b, 0, "ttcf") {
+        if b.len() < 12 {
+            return 0
+        }
+        let n = u32at(b, 8)
+        return if n > 65535i64 { 65535 } else { n as int }
+    }
+    if u32at(b, 0) == 0x00010000i64 || tag_at(b, 0, "true") || tag_at(b, 0, "OTTO") {
+        return 1
+    }
+    return 0
+}
+
+// The cmap subtable to use and its format: a Unicode one of format 12 or 4,
+// (3, 10) first, then (0, *) of format 12, (3, 1), (0, *) of format 4, and
+// a symbol font's (3, 0). Each is checked to fit in the table.
+fun pick_cmap(b: [uint8], cmap: int, end: int) -> Result<(int, int), FontError> {
+    let n = u16at(b, cmap + 2)
+    if cmap + 4 + 8 * n > end {
+        return Err(FontError.Corrupt("cmap's encoding records run past the table"))
+    }
+    var best = -1
+    var best_rank = 0
+    var best_format = 0
+    for i in 0..n {
+        let r = cmap + 4 + 8 * i
+        let platform = u16at(b, r)
+        let encoding = u16at(b, r + 2)
+        let off = u32at(b, r + 4)
+        if (cmap as int64) + off + 4 > (end as int64) {
+            continue
+        }
+        let sub = cmap + (off as int)
+        let format = u16at(b, sub)
+        if !cmap_fits(b, sub, end, format) {
+            continue
+        }
+        var rank = 0
+        if format == 12 && platform == 3 && encoding == 10 {
+            rank = 6
+        } else if format == 12 && platform == 0 {
+            rank = 5
+        } else if format == 4 && platform == 3 && encoding == 1 {
+            rank = 4
+        } else if format == 4 && platform == 0 {
+            rank = 3
+        } else if format == 12 && platform == 3 && encoding == 1 {
+            rank = 2
+        } else if format == 4 && platform == 3 && encoding == 0 {
+            rank = 1
+        }
+        if rank > best_rank {
+            best = sub
+            best_rank = rank
+            best_format = format
+        }
+    }
+    if best < 0 {
+        return Err(FontError.Unsupported("no Unicode cmap subtable of format 4 or 12"))
+    }
+    return Ok((best, best_format))
+}
+
+// Whether a cmap subtable of format 4 or 12 at `sub` holds its arrays
+// before `end`.
+fun cmap_fits(b: [uint8], sub: int, end: int, format: int) -> bool {
+    if format == 4 {
+        if sub + 14 > end {
+            return false
+        }
+        let segs = u16at(b, sub + 6) / 2
+        return sub + 16 + 8 * segs <= end
+    }
+    if format == 12 {
+        if sub + 16 > end {
+            return false
+        }
+        let groups = u32at(b, sub + 12)
+        return (sub as int64) + 16 + 12 * groups <= (end as int64)
+    }
+    return false
+}
+
+// The first pair of the kern table's first horizontal format 0 subtable,
+// and how many pairs fit in the table; `(0, 0)` without one.
+fun kern_table(b: [uint8], kern: int, end: int) -> (int, int) {
+    if kern + 4 > end || u16at(b, kern) != 0 {
+        return (0, 0)
+    }
+    let n = u16at(b, kern + 2)
+    var sub = kern + 4
+    for i in 0..n {
+        if sub + 14 > end {
+            return (0, 0)
+        }
+        let len = u16at(b, sub + 2)
+        let coverage = u16at(b, sub + 4)
+        // format 0, horizontal, not minimum values, not cross-stream
+        if (coverage >> 8) == 0 && (coverage & 7) == 1 {
+            let pairs = u16at(b, sub + 6)
+            let room = (end - (sub + 14)) / 6
+            return (sub + 14, if pairs < room { pairs } else { room })
+        }
+        if len < 6 {
+            return (0, 0)
+        }
+        sub += len
+    }
+    return (0, 0)
+}
+
+// The Mac OS Roman characters 128 to 255.
+const MAC_ROMAN: str = "ÄÅÇÉÑÖÜáàâäãåçéèêëíìîïñóòôöõúùûü†°¢£§•¶ß®©™´¨≠ÆØ∞±≤≥¥µ∂∑∏π∫ªºΩæø¿¡¬√ƒ≈∆«»…\u{A0}ÀÃÕŒœ–—“”‘’÷◊ÿŸ⁄€‹›ﬁﬂ‡·‚„‰ÂÊÁËÈÍÎÏÌÓÔ\u{F8FF}ÒÚÛÙıˆ˜¯˘˙˚¸˝˛ˇ"
+
+// The name `id` (1 the family, 2 the subfamily) from the name table: a
+// Windows Unicode record in English first, then any Windows Unicode one,
+// a Unicode platform one, and a Mac Roman one; "" without one.
+fun name_string(b: [uint8], name: int, end: int, id: int) -> str {
+    if name + 6 > end {
+        return ""
+    }
+    var count = u16at(b, name + 2)
+    let strings = name + u16at(b, name + 4)
+    if name + 6 + 12 * count > end {
+        count = (end - name - 6) / 12
+    }
+    var best = -1
+    var best_rank = 0
+    for i in 0..count {
+        let r = name + 6 + 12 * i
+        if u16at(b, r + 6) != id {
+            continue
+        }
+        let platform = u16at(b, r)
+        let encoding = u16at(b, r + 2)
+        let language = u16at(b, r + 4)
+        var rank = 0
+        if platform == 3 && (encoding == 1 || encoding == 10) {
+            rank = if language == 0x409 { 4 } else { 3 }
+        } else if platform == 0 {
+            rank = 2
+        } else if platform == 1 && encoding == 0 {
+            rank = 1
+        }
+        let at = strings + u16at(b, r + 10)
+        if rank > best_rank && at + u16at(b, r + 8) <= end {
+            best = r
+            best_rank = rank
+        }
+    }
+    if best < 0 {
+        return ""
+    }
+    let at = strings + u16at(b, best + 10)
+    let len = u16at(b, best + 8)
+    var sb = StringBuilder()
+    if best_rank == 1 {
+        let mac = MAC_ROMAN.chars()
+        for i in at..at + len {
+            let v = b[i]
+            if v < 128u8 {
+                sb.append_char(v as char)
+            } else {
+                sb.append_char(mac[(v as int) - 128])
+            }
+        }
+        return sb.build()
+    }
+    var i = at
+    while i + 1 < at + len {
+        var u = u16at(b, i)
+        i += 2
+        if u >= 0xD800 && u < 0xDC00 && i + 1 < at + len {
+            let lo = u16at(b, i)
+            if lo >= 0xDC00 && lo < 0xE000 {
+                u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00)
+                i += 2
+            }
+        }
+        if u >= 0xD800 && u < 0xE000 {
+            u = 0xFFFD
+        }
+        sb.append_char(u as char)
+    }
+    return sb.build()
+}
+
+// --- metrics and the character map ---------------------------------------------
+
+impl Font {
+    // Pixels a font unit at `px` pixels to the em.
+    #test(tiny(), 20.0f32)[0.02f32]
+    fun scale(self, px: float32) -> float32 {
+        return px / (self.units_per_em as float32)
+    }
+
+    // The glyph of `c`, 0 (.notdef) for a character the font doesn't have.
+    #test(tiny(), 'A')[2]
+    #test(tiny(), 'C')[5] // through the glyph array
+    #test(tiny(), 'Z')[0]
+    #test(tiny(), '\u{1F600}')[0] // past format 4
+    fun glyph(self, c: char) -> int {
+        let cp = c as int
+        let b = self.data
+        var g = 0
+        if self.cmap_format == 4 {
+            if cp > 0xFFFF {
+                return 0
+            }
+            let sub = self.cmap
+            let segs = u16at(b, sub + 6) / 2
+            let ends = sub + 14
+            // the first segment whose end is at or past cp
+            var lo = 0
+            var hi = segs
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if u16at(b, ends + 2 * mid) < cp {
+                    lo = mid + 1
+                } else {
+                    hi = mid
+                }
+            }
+            if lo >= segs {
+                return 0
+            }
+            let first = u16at(b, ends + 2 + 2 * segs + 2 * lo)
+            if cp < first {
+                return 0
+            }
+            let delta = u16at(b, ends + 2 + 4 * segs + 2 * lo)
+            let ro_at = ends + 2 + 6 * segs + 2 * lo
+            let ro = u16at(b, ro_at)
+            if ro == 0 {
+                g = (cp + delta) & 0xFFFF
+            } else {
+                let at = ro_at + ro + 2 * (cp - first)
+                if at + 2 > self.cmap_end {
+                    return 0
+                }
+                g = u16at(b, at)
+                if g != 0 {
+                    g = (g + delta) & 0xFFFF
+                }
+            }
+        } else {
+            let sub = self.cmap
+            let n = u32at(b, sub + 12) as int
+            let c64 = cp as int64
+            var lo = 0
+            var hi = n
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if u32at(b, sub + 16 + 12 * mid + 4) < c64 {
+                    lo = mid + 1
+                } else {
+                    hi = mid
+                }
+            }
+            if lo >= n {
+                return 0
+            }
+            let at = sub + 16 + 12 * lo
+            let first = u32at(b, at)
+            if c64 < first {
+                return 0
+            }
+            let v = u32at(b, at + 8) + (c64 - first)
+            if v >= (self.glyph_count as int64) {
+                return 0
+            }
+            g = v as int
+        }
+        return if g < self.glyph_count { g } else { 0 }
+    }
+
+    // The advance width of glyph `g` (font units); 0 past the glyphs.
+    #test(tiny(), 0)[600]
+    #test(tiny(), 5)[1000] // past the metrics: the last advance
+    #test(tiny(), 6)[0]
+    fun advance(self, g: int) -> int {
+        if g < 0 || g >= self.glyph_count {
+            return 0
+        }
+        let i = if g < self.hmetrics { g } else { self.hmetrics - 1 }
+        return u16at(self.data, self.hmtx + 4 * i)
+    }
+
+    // The left side bearing of glyph `g` (font units); 0 past the glyphs
+    // or the table.
+    #test(tiny(), 0)[100]
+    #test(tiny(), 5)[7] // from the trailing bearings
+    fun lsb(self, g: int) -> int {
+        if g < 0 || g >= self.glyph_count {
+            return 0
+        }
+        if g < self.hmetrics {
+            return i16at(self.data, self.hmtx + 4 * g + 2)
+        }
+        let at = self.hmtx + 4 * self.hmetrics + 2 * (g - self.hmetrics)
+        return if at + 2 <= self.hmtx_end { i16at(self.data, at) } else { 0 }
+    }
+
+    // The kerning between the glyphs `a` and `b`, to add to `a`'s advance
+    // (font units): the kern table's pair, 0 without one.
+    #test(tiny(), 2, 3)[-50]
+    #test(tiny(), 3, 2)[20]
+    #test(tiny(), 3, 3)[0]
+    fun kerning(self, a: int, b: int) -> int {
+        if self.kern_pairs == 0 || a < 0 || b < 0 {
+            return 0
+        }
+        let key = ((a as int64) << 16) | (b as int64)
+        var lo = 0
+        var hi = self.kern_pairs
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            let at = self.kern + 6 * mid
+            let k = ((u16at(self.data, at) as int64) << 16) | (u16at(self.data, at + 2) as int64)
+            if k == key {
+                return i16at(self.data, at + 4)
+            }
+            if k < key {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return 0
+    }
+
+    // The bytes of glyph `g` in `glyf`, as `(start, end)`: `(0, 0)` for an
+    // empty glyph, None for one past the glyphs or out of the table.
+    fun glyph_range(self, g: int) -> Option<(int, int)> {
+        if g < 0 || g >= self.glyph_count {
+            return None
+        }
+        let b = self.data
+        var a: int64 = 0
+        var z: int64 = 0
+        if self.long_loca {
+            a = u32at(b, self.loca + 4 * g)
+            z = u32at(b, self.loca + 4 * g + 4)
+        } else {
+            a = (u16at(b, self.loca + 2 * g) as int64) * 2
+            z = (u16at(b, self.loca + 2 * g + 2) as int64) * 2
+        }
+        if z < a || (self.glyf as int64) + z > (self.glyf_end as int64) {
+            return None
+        }
+        if z == a {
+            return Some((0, 0))
+        }
+        return Some((self.glyf + (a as int), self.glyf + (z as int)))
+    }
+
+    // The outline of glyph `g` in font units, y up: quadratic curves and
+    // lines, a closed subpath a contour. None for a glyph without contours
+    // (a space), past the glyphs, or broken.
+    fun outline(self, g: int) -> Option<Path> {
+        let o = self.points(g)?
+        let p = o.path()
+        return if p.is_empty() { None } else { Some(p) }
+    }
+
+    // The points of glyph `g`, composites resolved; None as for `outline`.
+    fun points(self, g: int) -> Option<Outline> {
+        var l = Loader { font: self, out: Outline { xs: [], ys: [], on: [], ends: [] }, components: 0 }
+        if !l.load(g, 0) {
+            return None
+        }
+        return Some(l.out)
+    }
+}
+
+// --- glyph outlines ------------------------------------------------------------
+
+// A glyph's points, contour after contour: `ends[k]` is the index past
+// contour k's last point.
+struct Outline {
+    xs: [float64],
+    ys: [float64],
+    on: [bool],
+    ends: [int],
+}
+
+struct Loader {
+    font: Font,
+    out: Outline,
+    components: int,
+}
+
+impl Loader {
+    // Adds glyph `g`'s points (in its own coordinates) at `depth`; false
+    // for a broken glyph.
+    fun load(var self, g: int, depth: int) -> bool {
+        let Some((at, end)) = self.font.glyph_range(g) else {
+            return false
+        }
+        if at == end {
+            return true
+        }
+        let b = self.font.data
+        if at + 10 > end {
+            return false
+        }
+        let contours = i16at(b, at)
+        if contours >= 0 {
+            return self.simple(at, end, contours)
+        }
+        if depth >= MAX_DEPTH {
+            return false
+        }
+        return self.composite(at + 10, end, depth)
+    }
+
+    fun simple(var self, at: int, end: int, contours: int) -> bool {
+        let b = self.font.data
+        var p = at + 10
+        if p + 2 * contours + 2 > end {
+            return false
+        }
+        let base = self.out.xs.len()
+        var last = -1
+        for i in 0..contours {
+            let e = u16at(b, p + 2 * i)
+            if e < last {
+                return false
+            }
+            last = e
+        }
+        let n = last + 1
+        if base + n > MAX_POINTS {
+            return false
+        }
+        p += 2 * contours
+        p += 2 + u16at(b, p)
+        // flags
+        var flags: [uint8] = list_m.filled(n, 0u8)
+        var i = 0
+        while i < n {
+            if p >= end {
+                return false
+            }
+            let f = b[p]
+            p += 1
+            flags[i] = f
+            i += 1
+            if (f & 8u8) != 0u8 {
+                if p >= end {
+                    return false
+                }
+                var r = b[p] as int
+                p += 1
+                while r > 0 && i < n {
+                    flags[i] = f
+                    i += 1
+                    r -= 1
+                }
+            }
+        }
+        // x, then y
+        var xs: [float64] = list_m.filled(n, 0.0)
+        var v = 0
+        for k in 0..n {
+            let f = flags[k]
+            if (f & 2u8) != 0u8 {
+                if p >= end {
+                    return false
+                }
+                let d = b[p] as int
+                p += 1
+                v += if (f & 16u8) != 0u8 { d } else { -d }
+            } else if (f & 16u8) == 0u8 {
+                if p + 2 > end {
+                    return false
+                }
+                v += i16at(b, p)
+                p += 2
+            }
+            xs[k] = v as float64
+        }
+        v = 0
+        for k in 0..n {
+            let f = flags[k]
+            if (f & 4u8) != 0u8 {
+                if p >= end {
+                    return false
+                }
+                let d = b[p] as int
+                p += 1
+                v += if (f & 32u8) != 0u8 { d } else { -d }
+            } else if (f & 32u8) == 0u8 {
+                if p + 2 > end {
+                    return false
+                }
+                v += i16at(b, p)
+                p += 2
+            }
+            self.out.xs.push(xs[k])
+            self.out.ys.push(v as float64)
+            self.out.on.push((f & 1u8) != 0u8)
+        }
+        let ends_at = at + 10
+        for c in 0..contours {
+            self.out.ends.push(base + u16at(b, ends_at + 2 * c) + 1)
+        }
+        return true
+    }
+
+    // The components from `p`: each glyph loaded, then moved by its
+    // transform and offset (or by matching a point of it with one of the
+    // glyph so far).
+    fun composite(var self, p0: int, end: int, depth: int) -> bool {
+        let b = self.font.data
+        let base = self.out.xs.len()
+        var p = p0
+        var more = true
+        while more {
+            self.components += 1
+            if self.components > MAX_COMPONENTS || p + 4 > end {
+                return false
+            }
+            let flags = u16at(b, p)
+            let g = u16at(b, p + 2)
+            p += 4
+            var e1 = 0
+            var e2 = 0
+            if (flags & 1) != 0 {
+                if p + 4 > end {
+                    return false
+                }
+                e1 = if (flags & 2) != 0 { i16at(b, p) } else { u16at(b, p) }
+                e2 = if (flags & 2) != 0 { i16at(b, p + 2) } else { u16at(b, p + 2) }
+                p += 4
+            } else {
+                if p + 2 > end {
+                    return false
+                }
+                e1 = b[p] as int
+                e2 = b[p + 1] as int
+                if (flags & 2) != 0 {
+                    e1 = if e1 >= 128 { e1 - 256 } else { e1 }
+                    e2 = if e2 >= 128 { e2 - 256 } else { e2 }
+                }
+                p += 2
+            }
+            var xx = 1.0
+            var yx = 0.0
+            var xy = 0.0
+            var yy = 1.0
+            if (flags & 8) != 0 {
+                if p + 2 > end {
+                    return false
+                }
+                xx = f2dot14(b, p)
+                yy = xx
+                p += 2
+            } else if (flags & 0x40) != 0 {
+                if p + 4 > end {
+                    return false
+                }
+                xx = f2dot14(b, p)
+                yy = f2dot14(b, p + 2)
+                p += 4
+            } else if (flags & 0x80) != 0 {
+                if p + 8 > end {
+                    return false
+                }
+                xx = f2dot14(b, p)
+                yx = f2dot14(b, p + 2)
+                xy = f2dot14(b, p + 4)
+                yy = f2dot14(b, p + 6)
+                p += 8
+            }
+            more = (flags & 0x20) != 0
+            let first = self.out.xs.len()
+            if !self.load(g, depth + 1) {
+                return false
+            }
+            let last = self.out.xs.len()
+            var ox = 0.0
+            var oy = 0.0
+            for k in first..last {
+                let x = self.out.xs[k]
+                let y = self.out.ys[k]
+                self.out.xs[k] = xx * x + xy * y
+                self.out.ys[k] = yx * x + yy * y
+            }
+            if (flags & 2) != 0 {
+                ox = e1 as float64
+                oy = e2 as float64
+                if (flags & 0x800) != 0 && (flags & 0x1000) == 0 {
+                    ox = ox * (xx * xx + yx * yx).sqrt()
+                    oy = oy * (xy * xy + yy * yy).sqrt()
+                }
+            } else {
+                // point matching: the component's point e2 onto the glyph's point e1
+                let pa = base + e1
+                let pb = first + e2
+                if pa >= first || pb >= last {
+                    return false
+                }
+                ox = self.out.xs[pa] - self.out.xs[pb]
+                oy = self.out.ys[pa] - self.out.ys[pb]
+            }
+            if ox != 0.0 || oy != 0.0 {
+                for k in first..last {
+                    self.out.xs[k] = self.out.xs[k] + ox
+                    self.out.ys[k] = self.out.ys[k] + oy
+                }
+            }
+        }
+        return true
+    }
+}
+
+impl Outline {
+    // The contours as a path in font units, y up: lines and quadratic
+    // curves. Two off-curve points in a row have an on-curve point half way
+    // between them.
+    fun path(self) -> Path {
+        var pen = Pen { segs: [], flat: false, start: vec2(0.0, 0.0), sx: 0.0, sy: 0.0, cx: 0.0, cy: 0.0 }
+        pen.walk(self, 1.0, 0.0)
+        return pen.done()
+    }
+
+    // The contours at `s` pixels a unit, moved right by `dx` pixels, y
+    // down, as lines: the points on FreeType's grid of 1/64 pixel and each
+    // curve cut as FreeType's smooth renderer cuts it (`Pen.quad`).
+    fun pixel_path(self, s: float64, dx: float64) -> Path {
+        var pen = Pen { segs: [], flat: true, start: vec2(0.0, 0.0), sx: 0.0, sy: 0.0, cx: 0.0, cy: 0.0 }
+        pen.walk(self, s * 64.0, (dx * 64.0).round())
+        return pen.done()
+    }
+}
+
+// Turns contours into a path's segments. A flat pen works in FreeType's
+// units, y up: points in 1/64 pixel, curves cut in 1/256 pixel, and gives
+// pixels, y down; the other gives the points as they are.
+struct Pen {
+    segs: [Seg],
+    flat: bool,
+    start: Vec2,
+    // the contour's first point and the current point, in the pen's units
+    sx: float64,
+    sy: float64,
+    cx: float64,
+    cy: float64,
+}
+
+impl Pen {
+    // Each contour of `o`, each point `(x, y)` at `(x * k + tx, y * k)`,
+    // rounded to whole units when the pen is flat (FreeType's 26.6 fixed
+    // point).
+    fun walk(var self, o: Outline, k: float64, tx: float64) {
+        var begin = 0
+        for end in o.ends {
+            let n = end - begin
+            if n <= 0 {
+                begin = end
+                continue
+            }
+            var xs: [float64] = []
+            var ys: [float64] = []
+            for i in begin..end {
+                var x = o.xs[i] * k + tx
+                var y = o.ys[i] * k
+                if self.flat {
+                    x = x.round()
+                    y = y.round()
+                }
+                xs.push(x)
+                ys.push(y)
+            }
+            // where the contour starts: an on-curve point, or half way
+            // between two off-curve ones
+            var k0 = 0
+            var count = n
+            var x0 = xs[0]
+            var y0 = ys[0]
+            if o.on[begin] {
+                k0 = 1
+                count = n - 1
+            } else if o.on[end - 1] {
+                x0 = xs[n - 1]
+                y0 = ys[n - 1]
+                count = n - 1
+            } else {
+                x0 = self.middle(xs[0], xs[n - 1])
+                y0 = self.middle(ys[0], ys[n - 1])
+            }
+            self.move(x0, y0)
+            var have = false
+            var qx = 0.0
+            var qy = 0.0
+            for j in k0..k0 + count {
+                let x = xs[j]
+                let y = ys[j]
+                if o.on[begin + j] {
+                    if have {
+                        self.quad(qx, qy, x, y)
+                        have = false
+                    } else {
+                        self.line(x, y)
+                    }
+                } else {
+                    if have {
+                        self.quad(qx, qy, self.middle(qx, x), self.middle(qy, y))
+                    }
+                    qx = x
+                    qy = y
+                    have = true
+                }
+            }
+            if have {
+                self.quad(qx, qy, x0, y0)
+            }
+            self.segs.push(Seg.Close)
+            begin = end
+        }
+    }
+
+    // Half way from `a` to `b`: in whole units when flat, truncated as
+    // FreeType's integer division does it.
+    fun middle(self, a: float64, b: float64) -> float64 {
+        let m = (a + b) * 0.5
+        return if self.flat { m.trunc() } else { m }
+    }
+
+    fun point(self, x: float64, y: float64) -> Vec2 {
+        if self.flat {
+            return vec2((x / 64.0) as float32, (-y / 64.0) as float32)
+        }
+        return vec2(x as float32, y as float32)
+    }
+
+    fun move(var self, x: float64, y: float64) {
+        let p = self.point(x, y)
+        self.segs.push(Seg.Move(p))
+        self.start = p
+        self.sx = x
+        self.sy = y
+        self.cx = x
+        self.cy = y
+    }
+
+    fun line(var self, x: float64, y: float64) {
+        self.segs.push(Seg.Line(self.point(x, y)))
+        self.cx = x
+        self.cy = y
+    }
+
+    // A quadratic curve from the current point. A flat pen cuts it as
+    // FreeType's `gray_render_conic` does: in 1/256 pixel, into 2^k lines of
+    // equal parameter steps, the fewest for which each piece's second
+    // difference is within a quarter pixel (its chord within 1/16 pixel of
+    // it), each point rounded down.
+    fun quad(var self, x1: float64, y1: float64, x2: float64, y2: float64) {
+        if !self.flat {
+            self.segs.push(Seg.Quad(self.point(x1, y1), self.point(x2, y2)))
+            self.cx = x2
+            self.cy = y2
+            return
+        }
+        let p0x = self.cx * 4.0
+        let p0y = self.cy * 4.0
+        let bx = x1 * 4.0 - p0x
+        let by = y1 * 4.0 - p0y
+        let ax = x2 * 4.0 - x1 * 4.0 - bx
+        let ay = y2 * 4.0 - y1 * 4.0 - by
+        var d = ax.abs().max(ay.abs())
+        if d > 64.0 && d.is_finite() {
+            var shift = 0
+            while true {
+                d = (d * 0.25).floor()
+                shift += 1
+                if d <= 64.0 || shift >= 16 {
+                    break
+                }
+            }
+            let n = 1 << shift
+            let h = 1.0 / (n as float64)
+            for i in 1..n {
+                let t = (i as float64) * h
+                let px = (p0x + 2.0 * bx * t + ax * t * t).floor()
+                let py = (p0y + 2.0 * by * t + ay * t * t).floor()
+                self.segs.push(Seg.Line(vec2((px / 256.0) as float32, (-py / 256.0) as float32)))
+            }
+        }
+        self.line(x2, y2)
+    }
+
+    fun done(self) -> Path {
+        return Path { segs: self.segs, start: self.start, current: self.start, open: self.segs.len() > 0 }
+    }
+}
+
+// --- rendering -----------------------------------------------------------------
+
+// Glyph `g` at `px` pixels to the em, its outline moved right by `dx`
+// pixels (a pen position's fraction), as a coverage mask placed from the
+// pen on the baseline: the mask's top left pixel is `(m.x, m.y)` from it,
+// y down. Unhinted: each pixel gets the exact area of it the outline
+// covers, its curves cut into lines as FreeType's smooth renderer cuts
+// them (`Pen.quad`), so the masks match FreeType's within a few levels. An
+// empty mask (0 by 0) for a glyph without an outline or a size that isn't
+// positive.
+pub fun render_glyph(f: Font, g: int, px: float32, dx: float32 = 0.0) -> Mask {
+    let empty = Mask { image: Image { width: 0, height: 0, layout: Layout.Gray, data: [] }, x: 0, y: 0 }
+    if !(px > 0.0f32) || !px.is_finite() || !dx.is_finite() {
+        return empty
+    }
+    let Some(o) = f.points(g) else {
+        return empty
+    }
+    let s = (px as float64) / (f.units_per_em as float64)
+    let p = o.pixel_path(s, dx as float64)
+    if p.is_empty() {
+        return empty
+    }
+    // a broken font's glyph may reach far: keep its mask within reason
+    let reach = 32.0 * (px as float64) + 256.0
+    let lim = if reach > 8192.0 { 8192 } else { reach as int }
+    return draw.rasterize_clipped(p, Rect { x: -lim, y: -lim, w: 2 * lim, h: 2 * lim }, FillRule.NonZero)
+}
+
+// --- layout --------------------------------------------------------------------
+
+// How a layout's lines line up within its width.
+#derive(Eq)
+pub enum Align {
+    Left
+    Center
+    Right
+}
+
+// A layout's options: `max_width` in pixels (0 for no wrapping), the
+// alignment, the line height as a factor of the font's (ascender minus
+// descender plus line gap), a tab's width in spaces, and whether the
+// `kern` table's pairs apply.
+#derive(Eq)
+pub struct LayoutOptions {
+    max_width: float32,
+    align: Align,
+    line_height: float32,
+    tab: int,
+    kerning: bool,
+}
+
+// No wrapping, left aligned, the font's line height, tabs of 4 spaces,
+// kerned.
+#test()[LayoutOptions { max_width: 0.0f32, align: Align.Left, line_height: 1.0f32, tab: 4, kerning: true }]
+pub fun layout_options() -> LayoutOptions {
+    return LayoutOptions { max_width: 0.0, align: Align.Left, line_height: 1.0, tab: 4, kerning: true }
+}
+
+impl LayoutOptions {
+    // A copy wrapping at `w` pixels.
+    #test(layout_options(), 80.0f32)[LayoutOptions { max_width: 80.0f32, align: Align.Left, line_height: 1.0f32, tab: 4, kerning: true }]
+    fun with_max_width(self, w: float32) -> LayoutOptions {
+        var o = self
+        o.max_width = w
+        return o
+    }
+
+    // A copy aligned by `a`.
+    #test(layout_options(), Align.Right)[LayoutOptions { max_width: 0.0f32, align: Align.Right, line_height: 1.0f32, tab: 4, kerning: true }]
+    fun with_align(self, a: Align) -> LayoutOptions {
+        var o = self
+        o.align = a
+        return o
+    }
+
+    // A copy with lines `k` times the font's line height apart.
+    #test(layout_options(), 1.5f32)[LayoutOptions { max_width: 0.0f32, align: Align.Left, line_height: 1.5f32, tab: 4, kerning: true }]
+    fun with_line_height(self, k: float32) -> LayoutOptions {
+        var o = self
+        o.line_height = k
+        return o
+    }
+
+    // A copy with tabs `n` spaces wide.
+    #test(layout_options(), 8)[LayoutOptions { max_width: 0.0f32, align: Align.Left, line_height: 1.0f32, tab: 8, kerning: true }]
+    fun with_tab(self, n: int) -> LayoutOptions {
+        var o = self
+        o.tab = n
+        return o
+    }
+
+    // A copy kerned or not.
+    #test(layout_options(), false)[LayoutOptions { max_width: 0.0f32, align: Align.Left, line_height: 1.0f32, tab: 4, kerning: false }]
+    fun with_kerning(self, on: bool) -> LayoutOptions {
+        var o = self
+        o.kerning = on
+        return o
+    }
+}
+
+// A glyph placed: its pen position on its line's baseline, in pixels from
+// the layout's top left corner.
+#derive(Eq)
+pub struct Placed {
+    glyph: int,
+    x: float32,
+    y: float32,
+}
+
+// Text laid out: its glyphs (not the spaces, tabs and line breaks), the
+// widest line's advance, the height from the first line's ascender to the
+// last line's descender, the number of lines, and the size.
+#derive(Eq)
+pub struct TextLayout {
+    glyphs: [Placed],
+    width: float32,
+    height: float32,
+    lines: int,
+    px: float32,
+}
+
+struct Layouter {
+    f: Font,
+    s: float64,
+    max_w: float64,
+    tab_w: float64,
+    kerning: bool,
+    space: int,
+    // the glyphs so far, x from their line's start, and each line's first
+    // glyph and width
+    gs: [int],
+    xs: [float64],
+    starts: [int],
+    widths: [float64],
+    // the current line
+    pen: float64,
+    prev: int,
+    line_end: float64,
+    has_word: bool,
+}
+
+impl Layouter {
+    // The kerning of a pair in pixels.
+    fun kern(self, a: int, b: int) -> float64 {
+        return if self.kerning { (self.f.kerning(a, b) as float64) * self.s } else { 0.0 }
+    }
+
+    fun finish_line(var self) {
+        self.starts.push(self.gs.len())
+        self.widths.push(self.line_end)
+        self.pen = 0.0
+        self.prev = -1
+        self.line_end = 0.0
+        self.has_word = false
+    }
+
+    // A run of spaces and tabs.
+    fun space_run(var self, cs: [char], i0: int, i1: int) {
+        for i in i0..i1 {
+            if cs[i] == '\t' {
+                if self.tab_w > 0.0 {
+                    self.pen = ((self.pen / self.tab_w).floor() + 1.0) * self.tab_w
+                }
+                self.prev = -1
+            } else {
+                let g = self.space
+                if self.prev >= 0 {
+                    self.pen += self.kern(self.prev, g)
+                }
+                self.pen += (self.f.advance(g) as float64) * self.s
+                self.prev = g
+            }
+        }
+    }
+
+    // A word's glyphs, from the current pen; a new line first if it would
+    // pass the width.
+    fun word(var self, gs: [int]) {
+        if gs.len() == 0 {
+            return
+        }
+        var end = self.place(gs, self.pen, self.prev)
+        if self.max_w > 0.0 && self.has_word && end.0 > self.max_w {
+            self.finish_line()
+            end = self.place(gs, 0.0, -1)
+        }
+        for i in 0..gs.len() {
+            self.gs.push(gs[i])
+            self.xs.push(end.1[i])
+        }
+        self.pen = end.0
+        self.line_end = end.0
+        self.prev = gs[^1]
+        self.has_word = true
+    }
+
+    // The pen positions of `gs` from `pen` after the glyph `prev` (-1 for
+    // none), and the pen after them.
+    fun place(self, gs: [int], pen0: float64, prev0: int) -> (float64, [float64]) {
+        var xs: [float64] = []
+        var pen = pen0
+        var prev = prev0
+        for g in gs {
+            if prev >= 0 {
+                pen += self.kern(prev, g)
+            }
+            xs.push(pen)
+            pen += (self.f.advance(g) as float64) * self.s
+            prev = g
+        }
+        return (pen, xs)
+    }
+}
+
+// Whether `c` separates words.
+fun is_space(c: char) -> bool {
+    return c == ' ' || c == '\t'
+}
+
+// `text` laid out at `px` pixels to the em: each character's glyph (from
+// `cmap`) at its pen position, advanced by the glyphs' advances and kerned
+// by the `kern` table's pairs. A line ends at `\n` and, with a
+// `max_width`, before a word that would pass it (a word longer than the
+// width overflows its line). Spaces at a break are dropped. Lines are
+// `line_height` times the font's line height apart, aligned within
+// `max_width` (or the widest line without one). Characters below U+0020
+// other than `\t` and `\n` are left out.
+#test(tiny(), "AB A", 10.0f32, layout_options())[TextLayout { glyphs: [Placed { glyph: 2, x: 0.0f32, y: 8.0f32 }, Placed { glyph: 3, x: 9.5f32, y: 8.0f32 }, Placed { glyph: 2, x: 22.0f32, y: 8.0f32 }], width: 32.0f32, height: 10.0f32, lines: 1, px: 10.0f32 }] // kerned: A B is -50 units
+#test(tiny(), "AB A", 10.0f32, layout_options().with_max_width(25.0f32))[TextLayout { glyphs: [Placed { glyph: 2, x: 0.0f32, y: 8.0f32 }, Placed { glyph: 3, x: 9.5f32, y: 8.0f32 }, Placed { glyph: 2, x: 0.0f32, y: 19.0f32 }], width: 19.5f32, height: 21.0f32, lines: 2, px: 10.0f32 }] // wrapped
+pub fun layout(f: Font, text: str, px: float32, opts: LayoutOptions = layout_options()) -> TextLayout {
+    let s = (px as float64) / (f.units_per_em as float64)
+    let space = f.glyph(' ')
+    var l = Layouter { f: f, s: s, max_w: opts.max_width as float64,
+        tab_w: (opts.tab as float64) * (f.advance(space) as float64) * s, kerning: opts.kerning, space: space, gs: [], xs: [],
+        starts: [], widths: [], pen: 0.0, prev: -1, line_end: 0.0, has_word: false }
+    let cs = text.chars()
+    let n = cs.len()
+    var i = 0
+    while i < n {
+        if cs[i] == '\n' {
+            l.finish_line()
+            i += 1
+            continue
+        }
+        var j = i
+        while j < n && is_space(cs[j]) {
+            j += 1
+        }
+        l.space_run(cs, i, j)
+        var word: [int] = []
+        while j < n && cs[j] != '\n' && !is_space(cs[j]) {
+            if (cs[j] as int) >= 0x20 {
+                word.push(f.glyph(cs[j]))
+            }
+            j += 1
+        }
+        l.word(word)
+        i = j
+    }
+    if n > 0 {
+        l.finish_line()
+    }
+    return finish_layout(f, l, s, px, opts)
+}
+
+fun finish_layout(f: Font, l: Layouter, s: float64, px: float32, opts: LayoutOptions) -> TextLayout {
+    let lines = l.widths.len()
+    var widest = 0.0
+    for w in l.widths {
+        widest = widest.max(w)
+    }
+    let box_w = if opts.max_width > 0.0f32 { opts.max_width as float64 } else { widest }
+    let asc = (f.ascender as float64) * s
+    let desc = (f.descender as float64) * s
+    let line_px = ((f.ascender - f.descender + f.line_gap) as float64) * s * (opts.line_height as float64)
+    var out: [Placed] = []
+    var at = 0
+    for k in 0..lines {
+        let off = match opts.align {
+            Left => 0.0
+            Center => (box_w - l.widths[k]) * 0.5
+            Right => box_w - l.widths[k]
+        }
+        let y = asc + (k as float64) * line_px
+        // a line's glyphs are those before the next line's first
+        let stop = l.starts[k]
+        for i in at..stop {
+            out.push(Placed { glyph: l.gs[i], x: (l.xs[i] + off) as float32, y: y as float32 })
+        }
+        at = stop
+    }
+    let height = if lines == 0 { 0.0 } else { asc - desc + ((lines - 1) as float64) * line_px }
+    return TextLayout { glyphs: out, width: widest as float32, height: height as float32, lines: lines, px: px }
+}
+
+// The size `layout` gives `text` with the default options: `(width,
+// height)` in pixels.
+#test(tiny(), "AB A", 10.0f32)[(32.0f32, 10.0f32)]
+#test(tiny(), "A\nA", 10.0f32)[(10.0f32, 21.0f32)]
+pub fun measure(f: Font, text: str, px: float32) -> (float32, float32) {
+    let l = layout(f, text, px, layout_options())
+    return (l.width, l.height)
+}
+
+// --- the glyph cache -----------------------------------------------------------
+
+// Glyph masks rasterised once per glyph, size and quarter-pixel offset.
+pub struct GlyphCache {
+    font: Font,
+    cache: [(int, uint32, int): Mask],
+}
+
+// An empty cache for `f`.
+pub fun glyph_cache(f: Font) -> GlyphCache {
+    return GlyphCache { font: f, cache: [:] }
+}
+
+impl GlyphCache {
+    // The mask of glyph `g` at `px` with its pen at `(x, y)` (pixels, the
+    // baseline): the pen's x rounded to a quarter pixel, its y to a pixel.
+    fun mask(var self, g: int, px: float32, x: float32, y: float32) -> Mask {
+        let fx = (x as float64).floor()
+        var ix = fx as int
+        var q = (((x as float64) - fx) * 4.0 + 0.5).floor() as int
+        if q >= 4 {
+            q = 0
+            ix += 1
+        }
+        let iy = ((y as float64) + 0.5).floor() as int
+        let key = (g, px.to_bits(), q)
+        let m = match self.cache.get(key) {
+            Some(m) => m
+            None => {
+                let r = render_glyph(self.font, g, px, (q as float32) * 0.25f32)
+                self.cache[key] = r
+                r
+            }
+        }
+        return Mask { image: m.image, x: m.x + ix, y: m.y + iy }
+    }
+
+    // The masks of a layout's glyphs with its top left corner at `(x, y)`,
+    // ready for `c.fill_mask(m, paint)`; glyphs without an outline left out.
+    fun masks(var self, l: TextLayout, x: float32, y: float32) -> [Mask] {
+        var out: [Mask] = []
+        for p in l.glyphs {
+            let m = self.mask(p.glyph, l.px, x + p.x, y + p.y)
+            if m.image.width > 0 {
+                out.push(m)
+            }
+        }
+        return out
+    }
+
+    // How many masks the cache holds.
+    fun count(self) -> int {
+        return self.cache.len()
+    }
+}
+
+impl Canvas {
+    // Draws coverage masks (a glyph cache's) with `paint`.
+    fun fill_masks(var self, ms: [Mask], paint: Paint) {
+        for m in ms {
+            self.fill_mask(m, paint)
+        }
+    }
+
+    // Lays out `text` at `px` and draws it with its top left corner at
+    // `(x, y)`, each glyph rasterised for this call: a glyph cache's
+    // `masks` and `fill_masks` reuse them.
+    fun fill_text(var self, f: Font, text: str, x: float32, y: float32, px: float32, paint: Paint) {
+        var cache = glyph_cache(f)
+        let l = layout(f, text, px, layout_options())
+        for m in cache.masks(l, x, y) {
+            self.fill_mask(m, paint)
+        }
+    }
+}
+
+// --- a small font for the tests ------------------------------------------------
+
+struct Bytes {
+    b: [uint8],
+}
+
+impl Bytes {
+    fun u8(var self, v: int) {
+        self.b.push((v & 255) as uint8)
+    }
+
+    fun u16(var self, v: int) {
+        self.u8(v >> 8)
+        self.u8(v)
+    }
+
+    fun u32(var self, v: int) {
+        self.u16(v >> 16)
+        self.u16(v & 0xFFFF)
+    }
+
+    fun tag(var self, t: str) {
+        for i in 0..4 {
+            self.b.push(t[i])
+        }
+    }
+
+    fun add(var self, o: [uint8]) {
+        for v in o {
+            self.b.push(v)
+        }
+    }
+
+    // Zeros to a multiple of `n` bytes.
+    fun pad(var self, n: int) {
+        while self.b.len() % n != 0 {
+            self.b.push(0u8)
+        }
+    }
+}
+
+fun bytes_of() -> Bytes {
+    return Bytes { b: [] }
+}
+
+// The glyphs of the test font (1000 units to the em): 0 a rectangle, 1 a
+// space, 2 'A' a curve over a base line, 3 'B' a composite of 2 and of 0
+// scaled by a half, 4 'O' four off-curve points, 5 'C' a composite of 2
+// and of 0 placed by matching points.
+fun tiny_glyphs() -> [[uint8]] {
+    var rect = bytes_of()
+    for v in [1, 100, 0, 500, 700, 3, 0] {
+        rect.u16(v)
+    }
+    // on curve, repeated 3 more times
+    rect.u8(9)
+    rect.u8(3)
+    for v in [100, 0, 400, 0, 0, 700, 0, -700] {
+        rect.u16(v)
+    }
+    var a = bytes_of()
+    for v in [1, 0, 0, 1000, 1000, 2, 0] {
+        a.u16(v)
+    }
+    a.add([0x31u8, 0x00u8, 0x01u8])
+    for v in [500, 500, 1000, -1000] {
+        a.u16(v)
+    }
+    var b = bytes_of()
+    for v in [-1, 0, 0, 1000, 1000, 0x23, 2, 0, 0, 0x0A, 0] {
+        b.u16(v)
+    }
+    b.u8(25)
+    b.u8(10)
+    b.u16(0x2000)
+    var o = bytes_of()
+    for v in [1, 0, 0, 100, 100, 3, 0] {
+        o.u16(v)
+    }
+    // x: +50 +50 -50 -50 (short); y: 0, +50, +50, -50
+    o.add([0x32u8, 0x36u8, 0x26u8, 0x06u8, 50u8, 50u8, 50u8, 50u8, 50u8, 50u8, 50u8])
+    var c = bytes_of()
+    for v in [-1, 0, 0, 1400, 1000, 0x23, 2, 0, 0, 0x00, 0] {
+        c.u16(v)
+    }
+    c.u8(2)
+    c.u8(0)
+    return [rect.b, [], a.b, b.b, o.b, c.b]
+}
+
+// A sfnt of the test font whose tables are at `base` in its file: loca long
+// or short, a format 12 cmap beside the format 4 one, OS/2's typo metrics
+// in use, the names in Mac Roman only.
+fun tiny_sfnt(long_loca: bool, cmap12: bool, typo: bool, mac: bool, base: int) -> [uint8] {
+    let glyphs = tiny_glyphs()
+    var glyf = bytes_of()
+    var loca = bytes_of()
+    for g in glyphs {
+        if long_loca {
+            loca.u32(glyf.b.len())
+        } else {
+            loca.u16(glyf.b.len() / 2)
+        }
+        glyf.add(g)
+        glyf.pad(2)
+    }
+    if long_loca {
+        loca.u32(glyf.b.len())
+    } else {
+        loca.u16(glyf.b.len() / 2)
+    }
+    var head = bytes_of()
+    head.u32(0x00010000)
+    head.u32(0)
+    head.u32(0)
+    head.u32(0x5F0F3CF5)
+    head.u16(0)
+    head.u16(1000)
+    for i in 0..15 {
+        head.u16(0)
+    }
+    head.u16(if long_loca { 1 } else { 0 })
+    head.u16(0)
+    var hhea = bytes_of()
+    hhea.u32(0x00010000)
+    for v in [800, -200, 100, 1100, 0, 0, 1000, 1, 0, 0, 0, 0, 0, 0, 0, 5] {
+        hhea.u16(v)
+    }
+    var maxp = bytes_of()
+    maxp.u32(0x00005000)
+    maxp.u16(6)
+    var hmtx = bytes_of()
+    for v in [600, 100, 250, 0, 1000, 0, 1000, 0, 1000, 0, 7] {
+        hmtx.u16(v)
+    }
+    // cmap: ' ' by delta, 'A' to 'C' through the glyph array, 'O' by delta
+    var sub4 = bytes_of()
+    for v in [4, 54, 0, 8, 8, 2, 0, 32, 67, 79, 0xFFFF, 0, 32, 65, 79, 0xFFFF, (1 - 32) & 0xFFFF, 0, (4 - 79) & 0xFFFF, 1, 0, 6, 0, 0, 2, 3, 5] {
+        sub4.u16(v)
+    }
+    var cmap = bytes_of()
+    cmap.u16(0)
+    cmap.u16(if cmap12 { 2 } else { 1 })
+    let records = 4 + 8 * (if cmap12 { 2 } else { 1 })
+    cmap.u16(3)
+    cmap.u16(1)
+    cmap.u32(records)
+    if cmap12 {
+        cmap.u16(3)
+        cmap.u16(10)
+        cmap.u32(records + sub4.b.len())
+    }
+    cmap.add(sub4.b)
+    if cmap12 {
+        // U+0041 to U+0043 as 2 to 4, U+1F600 as 4
+        for v in [12, 0] {
+            cmap.u16(v)
+        }
+        cmap.u32(40)
+        cmap.u32(0)
+        cmap.u32(2)
+        for v in [0x41, 0x43, 2, 0x1F600, 0x1F600, 4] {
+            cmap.u32(v)
+        }
+    }
+    var kern = bytes_of()
+    for v in [0, 1, 0, 26, 1, 2, 12, 1, 0, 2, 3, -50, 3, 2, 20] {
+        kern.u16(v)
+    }
+    var name = bytes_of()
+    let family = if mac { "Tiny Mac" } else { "Tiny Sans" }
+    let style = "Regular"
+    name.u16(0)
+    name.u16(2)
+    name.u16(6 + 24)
+    var strings = bytes_of()
+    for (id, s) in [(1, family), (2, style)] {
+        let at = strings.b.len()
+        if mac {
+            for i in 0..s.len() {
+                strings.b.push(s[i])
+            }
+            if id == 1 {
+                strings.u8(0x8E)
+            }
+        } else {
+            for c in s {
+                strings.u16(c as int)
+            }
+        }
+        name.u16(if mac { 1 } else { 3 })
+        name.u16(if mac { 0 } else { 1 })
+        name.u16(if mac { 0 } else { 0x409 })
+        name.u16(id)
+        name.u16(strings.b.len() - at)
+        name.u16(at)
+    }
+    name.add(strings.b)
+    var os2 = bytes_of()
+    for i in 0..31 {
+        os2.u16(0)
+    }
+    os2.u16(if typo { 0x80 } else { 0 })
+    for v in [0, 0, 900, -300, 0, 1000, 300] {
+        os2.u16(v)
+    }
+    var tables: [(str, [uint8])] = [("OS/2", os2.b), ("cmap", cmap.b), ("glyf", glyf.b), ("head", head.b),
+        ("hhea", hhea.b), ("hmtx", hmtx.b), ("kern", kern.b), ("loca", loca.b), ("maxp", maxp.b),
+        ("name", name.b)]
+    var out = bytes_of()
+    out.u32(0x00010000)
+    out.u16(tables.len())
+    out.u16(128)
+    out.u16(3)
+    out.u16(32)
+    var at = base + 12 + 16 * tables.len()
+    for (tag, t) in tables {
+        out.tag(tag)
+        out.u32(0)
+        out.u32(at)
+        out.u32(t.len())
+        at += t.len()
+        while at % 4 != 0 {
+            at += 1
+        }
+    }
+    for (_, t) in tables {
+        out.add(t)
+        out.pad(4)
+    }
+    return out.b
+}
+
+fun tiny_bytes() -> [uint8] {
+    return tiny_sfnt(false, false, false, false, 0)
+}
+
+fun tiny() -> Font {
+    return parse(tiny_bytes(), 0).expect("the test font")
+}
+
+// A collection of two faces: the test font, and the one with a format 12
+// cmap, long loca, typo metrics and Mac names.
+fun tiny_ttc() -> [uint8] {
+    let first = tiny_sfnt(false, false, false, false, 20)
+    var out = bytes_of()
+    out.tag("ttcf")
+    out.u32(0x00010000)
+    out.u32(2)
+    out.u32(20)
+    out.u32(20 + first.len())
+    out.add(first)
+    out.add(tiny_sfnt(true, true, true, true, 20 + first.len()))
+    return out.b
+}
+
+fun tiny12() -> Font {
+    return parse(tiny_ttc(), 1).expect("the collection's second face")
+}
+
+#test
+fun names_and_metrics() {
+    let f = tiny()
+    assert(f.family == "Tiny Sans" && f.style == "Regular")
+    assert(f.units_per_em == 1000 && f.glyph_count == 6)
+    assert(f.ascender == 800 && f.descender == -200 && f.line_gap == 100)
+    // the second face: Mac Roman names, OS/2's typo metrics, long loca
+    let g = tiny12()
+    assert(g.family == "Tiny Mac\u{E9}" && g.style == "Regular")
+    assert(g.ascender == 900 && g.descender == -300 && g.line_gap == 0)
+    assert(g.long_loca && !f.long_loca)
+    assert(face_count(tiny_ttc()) == 2 && face_count(tiny_bytes()) == 1)
+    assert(parse(tiny_ttc(), 2).err() == Some(FontError.NoFace(2)))
+    let first = parse(tiny_ttc(), 0).expect("first face")
+    assert(first.family == "Tiny Sans" && first.advance(2) == 1000)
+}
+
+#test
+fun character_maps() {
+    let f = tiny()
+    assert(f.glyph(' ') == 1 && f.glyph('A') == 2 && f.glyph('B') == 3 && f.glyph('C') == 5)
+    assert(f.glyph('O') == 4 && f.glyph('Z') == 0 && f.glyph('@') == 0 && f.glyph('\u{1F600}') == 0)
+    // format 12, chosen over format 4: the whole of Unicode
+    let g = tiny12()
+    assert(g.cmap_format == 12)
+    assert(g.glyph('A') == 2 && g.glyph('C') == 4 && g.glyph('\u{1F600}') == 4 && g.glyph(' ') == 0)
+    assert(g.glyph('D') == 0 && g.glyph('\u{1F601}') == 0)
+}
+
+#test
+fun metrics_and_kerning() {
+    let f = tiny()
+    assert(f.advance(0) == 600 && f.advance(1) == 250 && f.advance(4) == 1000)
+    // past numberOfHMetrics: the last advance, the trailing bearing
+    assert(f.advance(5) == 1000 && f.lsb(5) == 7 && f.lsb(0) == 100)
+    assert(f.advance(6) == 0 && f.advance(-1) == 0 && f.lsb(6) == 0)
+    assert(f.kerning(2, 3) == -50 && f.kerning(3, 2) == 20 && f.kerning(2, 2) == 0 && f.kerning(-1, 2) == 0)
+    assert(f.scale(20.0) == 0.02f32)
+}
+
+#test
+fun outlines() {
+    let f = tiny()
+    let a = f.outline(2).expect("A")
+    assert(a.segs == [Seg.Move(vec2(0.0, 0.0)), Seg.Quad(vec2(500.0, 1000.0), vec2(1000.0, 0.0)), Seg.Close])
+    // four off-curve points: on-curve points half way, the start between the last and the first
+    let o = f.outline(4).expect("O")
+    assert(o.segs == [Seg.Move(vec2(25.0, 25.0)), Seg.Quad(vec2(50.0, 0.0), vec2(75.0, 25.0)),
+        Seg.Quad(vec2(100.0, 50.0), vec2(75.0, 75.0)), Seg.Quad(vec2(50.0, 100.0), vec2(25.0, 75.0)),
+        Seg.Quad(vec2(0.0, 50.0), vec2(25.0, 25.0)), Seg.Close])
+    // a composite: glyph 2, and glyph 0 scaled by a half and moved by (25, 10)
+    let b = f.outline(3).expect("B")
+    assert(b.segs[3] == Seg.Move(vec2(75.0, 10.0)) && b.segs[4] == Seg.Line(vec2(75.0, 360.0)))
+    assert(b.segs[6] == Seg.Line(vec2(275.0, 10.0)) && b.segs.len() == 8)
+    // point matching: glyph 0's point 0 onto glyph 2's point 2
+    let c = f.outline(5).expect("C")
+    assert(c.segs[3] == Seg.Move(vec2(1000.0, 0.0)) && c.segs[5] == Seg.Line(vec2(1400.0, 700.0)))
+    assert(f.outline(1).is_none() && f.outline(6).is_none() && f.outline(-1).is_none())
+}
+
+#test
+fun rendered_glyphs() {
+    let f = tiny()
+    // the rectangle, 1 to 5 pixels right of the pen and 7 up
+    let m = render_glyph(f, 0, 10.0, 0.0)
+    assert(m.x == 1 && m.y == -7 && m.image.width == 4 && m.image.height == 7)
+    for v in m.image.data {
+        assert(v == 255u8)
+    }
+    // half a pixel to the right: half columns at both ends
+    let h = render_glyph(f, 0, 10.0, 0.5)
+    assert(h.x == 1 && h.image.width == 5)
+    assert(h.image.data[0:5] == [128u8, 255u8, 255u8, 255u8, 128u8])
+    // the curve of 'A' covers two thirds of its triangle: 2/3 × 50 pixels, within its flattening
+    let a = render_glyph(f, 2, 10.0, 0.0)
+    var total = 0
+    for v in a.image.data {
+        total += v as int
+    }
+    let area = (total as float64) / 255.0
+    assert(area > 33.0 && area < 33.6)
+    assert(render_glyph(f, 1, 10.0, 0.0).image.width == 0)
+    assert(render_glyph(f, 2, 0.0, 0.0).image.width == 0)
+    assert(render_glyph(f, 2, -3.0, 0.0).image.width == 0)
+}
+
+// Every prefix of the test font, and every byte of it inverted, parses or
+// fails, and what parses outlines and renders every glyph.
+#test
+fun broken_fonts() {
+    let b = tiny_bytes()
+    for n in 0..b.len() {
+        if let Ok(f) = parse(b[:n], 0) {
+            for g in 0..f.glyph_count {
+                let m = render_glyph(f, g, 4.0, 0.25)
+                assert(m.image.data.len() == m.image.width * m.image.height)
+            }
+        }
+    }
+    var flipped = 0
+    for i in 0..b.len() {
+        var c = b
+        c[i] = c[i] ^ 0xFFu8
+        if let Ok(f) = parse(c, 0) {
+            flipped += 1
+            for g in 0..f.glyph_count {
+                let m = render_glyph(f, g, 4.0, 0.25)
+                assert(m.image.data.len() == m.image.width * m.image.height)
+            }
+            let l = layout(f, "AB C\tO\n A", 4.0, layout_options().with_max_width(5.0))
+            assert(l.lines >= 2)
+        }
+    }
+    assert(flipped > 0)
+}
+
+#test
+fun layouts() {
+    let f = tiny()
+    let opts = layout_options()
+    // centred within the width: 19.5 and 10 pixels wide lines in 25
+    let c = layout(f, "AB A", 10.0, opts.with_max_width(25.0).with_align(Align.Center))
+    assert(c.glyphs == [Placed { glyph: 2, x: 2.75, y: 8.0 }, Placed { glyph: 3, x: 12.25, y: 8.0 },
+        Placed { glyph: 2, x: 7.5, y: 19.0 }])
+    let r = layout(f, "AB A", 10.0, opts.with_max_width(25.0).with_align(Align.Right))
+    assert(r.glyphs[0].x == 5.5 && r.glyphs[2].x == 15.0)
+    // a tab goes to the next stop, 4 spaces (10 pixels) apart; no kerning across it
+    let t = layout(f, "A\tB", 10.0, opts)
+    assert(t.glyphs[1] == Placed { glyph: 3, x: 20.0, y: 8.0 } && t.width == 30.0f32)
+    // line breaks: a trailing one makes an empty line; nothing makes no line
+    let n = layout(f, "A\n", 10.0, opts.with_line_height(2.0))
+    assert(n.lines == 2 && n.height == 32.0f32 && n.width == 10.0f32)
+    assert(layout(f, "", 10.0, opts) == TextLayout { glyphs: [], width: 0.0, height: 0.0, lines: 0, px: 10.0 })
+    // spaces at a break are dropped, those that start a paragraph kept
+    let s = layout(f, "  A   A", 10.0, opts.with_max_width(16.0))
+    assert(s.glyphs == [Placed { glyph: 2, x: 5.0, y: 8.0 }, Placed { glyph: 2, x: 0.0, y: 19.0 }])
+    assert(s.width == 15.0f32)
+    // a word longer than the width stays whole
+    let w = layout(f, "AAA", 10.0, opts.with_max_width(5.0))
+    assert(w.lines == 1 && w.width == 30.0f32)
+    // without kerning
+    let k = layout(f, "AB", 10.0, opts.with_kerning(false))
+    assert(k.glyphs[1].x == 10.0f32)
+    // control characters are left out, missing ones are .notdef
+    let z = layout(f, "A\rZ", 10.0, opts)
+    assert(z.glyphs == [Placed { glyph: 2, x: 0.0, y: 8.0 }, Placed { glyph: 0, x: 10.0, y: 8.0 }])
+}
+
+#test
+fun glyph_caches() {
+    let f = tiny()
+    var cache = glyph_cache(f)
+    let l = layout(f, "AA A", 10.0, layout_options())
+    let ms = cache.masks(l, 0.3, 0.0)
+    // three placements of one glyph at one quarter offset (0.3 and 10.3 and 22.8 round to .25, .25 and .75)
+    assert(ms.len() == 3 && cache.count() == 2)
+    // the curve's top is half way to its control point: 5 pixels above the baseline at 8
+    assert(ms[1].x == ms[0].x + 10 && ms[0].y == 3 && ms[2].x == ms[0].x + 22)
+    assert(ms[0].image == render_glyph(f, 2, 10.0, 0.25).image)
+    assert(ms[2].image == render_glyph(f, 2, 10.0, 0.75).image)
+    // a pen 0.9 past a pixel is the next pixel's
+    let m = cache.mask(2, 10.0, 3.9, 5.6)
+    assert(m.x == render_glyph(f, 2, 10.0, 0.0).x + 4 && m.y == -5 + 6 && cache.count() == 3)
+}
+
+#test
+fun drawn_text() {
+    let f = tiny()
+    let white = image.rgb(255u8, 255u8, 255u8)
+    var c = draw.blank(40, 12, white)
+    c.fill_text(f, "A", 1.0, 0.0, 10.0, Paint.Solid(image.rgb(0u8, 0u8, 0u8)))
+    // inside the curve near its base, and outside the glyph
+    assert(c.image.color_at(6, 7) == image.rgb(0u8, 0u8, 0u8))
+    assert(c.image.color_at(30, 5) == white && c.image.color_at(1, 0) == white)
+    var d = draw.blank(40, 12, white)
+    var cache = glyph_cache(f)
+    d.fill_masks(cache.masks(layout(f, "A", 10.0, layout_options()), 1.0, 0.0), Paint.Solid(image.rgb(0u8, 0u8, 0u8)))
+    assert(d.image == c.image)
+}

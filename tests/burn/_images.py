@@ -44,7 +44,7 @@ and advances (font units), and `MylaTestSans.ttc` (Regular and Bold).
 `freetype-unhinted` (FreeType without hinting: single glyphs moved right by
 `dx` of 0, 1/4, 1/2 and 3/4 pixel, the bitmap's top left at (`left`, -`top`)
 from the pen; and strings with each glyph at its fractional pen position from
-`origin` on the baseline, kerned), which std.font's rasteriser should match
+`origin` on the baseline, not kerned), which std.font's rasteriser should match
 within a level or two, and `pillow` (Pillow's text, autohinted, at whole
 pixels), to compare within a tolerance.
 

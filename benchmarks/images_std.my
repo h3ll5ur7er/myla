@@ -27,6 +27,8 @@
 //     find edges 1 MP gray (3x3)               11 ms   MYLA-941: imgproc.canny(gray, 50.0f32, 150.0f32)
 //                                                       (Pillow has no Canny: a 3x3 kernel is no match)
 //     text: 804 characters at 16 px, wrapped   25 ms   MYLA-943: font.layout + glyph_cache masks + fill_mask
+//                                                       (2026-11-25: 5.5 ms with a new cache, 3.8 ms with
+//                                                       one kept, of which 2.9 ms make the canvas)
 //
 // Until then this times what exists: making the picture (std.image).
 
@@ -36,6 +38,10 @@ import std.image as image
 from std.image import Image8
 import std.num as num
 import std.process as process
+import std.font as font
+import std.draw as draw
+from std.draw import Paint
+import std.fs as fs
 
 // The pixel (x, y) of the `w` by `h` picture, as r << 16 | g << 8 | b: the
 // formula of images_pillow.py's `photo`.
@@ -137,7 +143,44 @@ fun main() {
     //     show(bench.run_n("jpeg decode", 3, () => jpeg.decode(jpeg_bytes)))
     // MYLA-941: resize to 1155x866 (bilinear, area, lanczos), then at
     //     1024x1024: gaussian_blur(2.0f32), and gray |> canny(50.0f32, 150.0f32)
-    // MYLA-943: the paragraph of images_pillow.py at 16 px with
-    //     tests/burn/data/images/fonts/MylaTestSans.ttf, wrapped at 780 px:
-    //     layout, the glyph cache's masks, filled on an 800x400 canvas
+    text_bench()
+}
+
+// MYLA-943: the paragraph of images_pillow.py at 16 px with
+// tests/burn/data/images/fonts/MylaTestSans.ttf, wrapped at 780 px: layout,
+// the glyph cache's masks, filled on an 800x400 canvas; with a new cache
+// each time (every glyph rasterised) and with one kept (none). Run from the
+// repository's root, which has the font.
+fun text_bench() {
+    let path = "tests/burn/data/images/fonts/MylaTestSans.ttf"
+    let Ok(b) = fs.read_bytes(path) else {
+        print(f"text: {path} not found (run from the repository's root)")
+        return
+    }
+    let Ok(f) = font.parse(b, 0) else {
+        print(f"text: {path} isn't a font")
+        return
+    }
+    let one = "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. Sphinx of black quartz, judge my vow! How vexingly quick daft zebras jump. \u{C5}ngstr\u{F6}m's fa\u{E7}ade: na\u{EF}ve caf\u{E9}, d\u{E9}j\u{E0} vu. "
+    let text = one + one + one + one
+    let opts = font.layout_options().with_max_width(780.0)
+    let paint = Paint.Solid(image.rgb(255u8, 255u8, 255u8))
+    let black = image.rgb(0u8, 0u8, 0u8)
+    show(bench.run_n(f"text: {text.chars().len()} characters at 16 px, layout", 20, () => font.layout(f, text, 16.0, opts).lines))
+    show(bench.run_n("text: layout, masks, fill (a new cache)", 10, () => {
+        var c = draw.blank(800, 400, black)
+        var cache = font.glyph_cache(f)
+        c.fill_masks(cache.masks(font.layout(f, text, 16.0, opts), 4.0, 4.0), paint)
+        return c.image.data[0]
+    }))
+    var warm = font.glyph_cache(f)
+    let glyphs = warm.masks(font.layout(f, text, 16.0, opts), 4.0, 4.0).len()
+    print(f"text: {glyphs} glyphs drawn, {warm.count()} masks in the cache")
+    show(bench.run_n("text: layout, masks, fill (the cache kept)", 10, () => {
+        var c = draw.blank(800, 400, black)
+        var cache = warm
+        c.fill_masks(cache.masks(font.layout(f, text, 16.0, opts), 4.0, 4.0), paint)
+        return c.image.data[0]
+    }))
+    show(bench.run_n("text: the 800x400 canvas alone", 10, () => draw.blank(800, 400, black).image.data[0]))
 }
