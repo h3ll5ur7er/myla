@@ -1,0 +1,119 @@
+// std.png's encoders under tests/burn/test_png.py (MYLA-935): each line of
+// stdin is `<input>\t<output>\t<mode>`; the input PNG is decoded, encoded
+// again into the output file, and that is decoded and compared with the
+// first decode. The modes: `8` (`decode`, `encode`), `16` (`decode16`,
+// `encode16`), `indexed` (`decode`, `image.quantize` to 256 colours without
+// dithering, `encode_indexed`; compared with the palette image's pixels).
+// The adaptive filter at level 6, or `--filter N` (0 to 4) and
+// `--level N`. Each line's answer:
+//
+//     ok <bytes written> <layout written>
+//     err <the decoder's error>
+//     differs <what>
+
+import std.png as png
+from std.png import Filter
+import std.image as image
+from std.image import Image, Sample
+import std.fs as fs
+import std.num as num
+import std.process as process
+from std.io import stdin, println
+
+// The value after `flag` in `argv`, or `default`.
+#test(["p", "--level", "9"], "--level", 6)[9]
+#test(["p"], "--level", 6)[6]
+fun arg_of(argv: [str], flag: str, default: int) -> int {
+    var i = 1
+    while i + 1 < argv.len() {
+        if argv[i] == flag {
+            return match num.parse_int(argv[i + 1]) {
+                Some(n) => n as int
+                None => default
+            }
+        }
+        i += 1
+    }
+    return default
+}
+
+#test(0)[Filter.NoFilter]
+#test(4)[Filter.Paeth]
+#test(-1)[Filter.Adaptive]
+fun filter_of(n: int) -> Filter {
+    return match n {
+        0 => Filter.NoFilter
+        1 => Filter.Sub
+        2 => Filter.Up
+        3 => Filter.Average
+        4 => Filter.Paeth
+        _ => Filter.Adaptive
+    }
+}
+
+// The layout the file `b` holds, as its colour type says.
+fun written_layout(b: [uint8]) -> str {
+    return match png.info(b) {
+        Ok(i) => f"{i.layout}/{i.bit_depth}"
+        Err(e) => f"unreadable: {e}"
+    }
+}
+
+// `b` written to `out` and its answer: `ok` if `same`.
+fun answer(b: [uint8], out: str, same: bool) -> str {
+    if let Err(e) = fs.write_bytes(out, b) {
+        return f"differs: cannot write {out}: {e}"
+    }
+    if !same {
+        return "differs: decoded again, the pixels aren't the same"
+    }
+    return f"ok {b.len()} {written_layout(b)}"
+}
+
+fun one(input: str, out: str, mode: str, level: int, f: Filter) -> str {
+    let Ok(data) = fs.read_bytes(input) else { return f"differs: cannot read {input}" }
+    if mode == "16" {
+        return match png.decode16(data, image.MAX_PIXELS) {
+            Ok(img) => {
+                let b = png.encode16(img, level, f)
+                answer(b, out, png.decode16(b, image.MAX_PIXELS) == Ok(img))
+            }
+            Err(e) => f"err {e}"
+        }
+    }
+    return match png.decode(data, image.MAX_PIXELS) {
+        Ok(img) => {
+            if mode == "indexed" {
+                let ix = image.quantize(img, 256, false)
+                let b = png.encode_indexed(ix, level)
+                answer(b, out, png.decode(b, image.MAX_PIXELS) == Ok(ix.to_image()))
+            } else {
+                let b = png.encode(img, level, f)
+                answer(b, out, png.decode(b, image.MAX_PIXELS) == Ok(img))
+            }
+        }
+        Err(e) => f"err {e}"
+    }
+}
+
+fun main() {
+    let argv = process.args()
+    let level = arg_of(argv, "--level", 6)
+    let f = filter_of(arg_of(argv, "--filter", -1))
+    var r = stdin()
+    while true {
+        let line = match r.read_line() {
+            Ok(Some(l)) => l
+            _ => ""
+        }
+        if line.len() == 0 {
+            break
+        }
+        let parts = line.split("\t")
+        if parts.len() != 3 {
+            println(f"differs: a request of {parts.len()} fields")
+        } else {
+            println(one(parts[0], parts[1], parts[2], level, f))
+        }
+    }
+}

@@ -76,6 +76,9 @@ EXPECTED = {
     "lzw_and_packbits.my": ("GIF LZW: 256 bytes in 72, 74 as sub-blocks\ndecoded: true\nTIFF LZW: 110 bytes\n"
                             "at most 100 bytes: output longer than max_output\nPackBits: 201 bytes\n"
                             "one byte short: compressed data ends too early\n"),
+    "png_badge.my": ("drawn: 48x20 rgba, pixels 64c3d222\nPNG: 441 bytes, 48x20 rgba, 8 bits\n"
+                      "decoded back the same: true\npalette PNG: 13 colours, 279 bytes, 48x20 rgba, 4 bits\n"
+                      "the same pixels: true\nerror: checksum mismatch\n"),
     "draw_chart.my": (
         '                                                \n'
         '          @@@@  @@@  @     @@@@@  @@@@          \n'

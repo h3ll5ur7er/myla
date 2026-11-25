@@ -16,7 +16,10 @@
 // 2026-11-24, the fastest of 5 runs:
 //
 //     png encode (level 6), 12 MP            3076 ms   MYLA-935: png.encode(img)
+//                                                       std.png 5190 ms (std.compress's deflate 4.7 s),
+//                                                       13.66 MB to Pillow's 14.7 MB
 //     png decode, 12 MP                       196 ms   MYLA-935: png.decode(b)
+//                                                       std.png 402 ms (std.compress's inflate 255 ms)
 //     jpeg encode (q85, 4:2:0), 12 MP          44 ms   MYLA-937: jpeg.encode(img, 85)
 //     jpeg decode, 12 MP                       77 ms   MYLA-936: jpeg.decode(b)
 //     resize 12 MP to 1155x866, bilinear       50 ms   MYLA-941: imgproc.resize(img, 1155, 866, Filter.Bilinear)
@@ -36,6 +39,7 @@ import std.image as image
 from std.image import Image8
 import std.num as num
 import std.process as process
+import std.png as png
 
 // The pixel (x, y) of the `w` by `h` picture, as r << 16 | g << 8 | b: the
 // formula of images_pillow.py's `photo`.
@@ -129,9 +133,10 @@ fun main() {
     let img = photo(w, h)
     print(f"{w}x{h} RGB, {img.data.len()} samples")
     show(bench.run_n(f"make the {w}x{h} picture", 3, () => photo(w, h)))
-    // MYLA-935: let png_bytes = png.encode(img)
-    //     show(bench.run_n("png encode (level 6)", 3, () => png.encode(img)))
-    //     show(bench.run_n("png decode", 3, () => png.decode(png_bytes)))
+    let png_bytes = png.encode(img)
+    print(f"png: {png_bytes.len()} bytes")
+    show(bench.run_n("png encode (level 6)", 3, () => png.encode(img)))
+    show(bench.run_n("png decode", 3, () => png.decode(png_bytes)))
     // MYLA-936, MYLA-937: let jpeg_bytes = jpeg.encode(img, 85)
     //     show(bench.run_n("jpeg encode (q85, 4:2:0)", 3, () => jpeg.encode(img, 85)))
     //     show(bench.run_n("jpeg decode", 3, () => jpeg.decode(jpeg_bytes)))
