@@ -92,6 +92,7 @@ class Codec:
 # module and its driver exist.
 CODECS: list[Codec] = [
     Codec("pnm", "pnm", "pnm"),
+    Codec("pnm16", "pnm", "pnm", notes="(decode16)"),
     Codec("bmp", "bmp", "bmp"),
     Codec("qoi", "qoi", "qoi"),
     Codec("png", "png", "png"),

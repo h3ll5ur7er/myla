@@ -94,6 +94,10 @@ EXPECTED = {
         '==--==--==--==--==--\n'
         'info: 20x8, 4 frames\n'
     ),
+    "image_files.my": ("PAM: 578 bytes, read back: the same\nPPM: 396 bytes, read back: the same\n"
+                       "BMP, 32 bits: 634 bytes, read back: the same\nBMP, 24 bits: 438 bytes, read back: the same\n"
+                       "QOI: 274 bytes, read back: the same\nbmp: 16x8 rgba, 8 bits a sample\n"
+                       "P2\n4 2\n255\n194 178 162 146\n76 61 45 29\nQOI cut short: 20 bytes, read back: truncated input\n"),
     "draw_chart.my": (
         '                                                \n'
         '          @@@@  @@@  @     @@@@@  @@@@          \n'

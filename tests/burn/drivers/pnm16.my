@@ -1,0 +1,7 @@
+// std.pnm's `decode16` through image_driver's protocol (MYLA-934).
+import std.pnm as pnm
+import image_driver as driver
+
+fun main() {
+    driver.serve16((b: [uint8], max: int64) => pnm.decode16(b, max))
+}
