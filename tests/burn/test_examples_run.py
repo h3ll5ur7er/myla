@@ -241,6 +241,10 @@ EXPECTED = {
         "qoi    5425 bytes (lossless), read as qoi: the same\n"
         "holiday/IMG_0042.JPG: jpeg\nscan.tiff: tiff\nicon.dib: bmp\nframe.pam: pnm\nnotes.txt: no image format\n"
         "<html>: not an image of this format\nno/such/picture.png: NotFound\n",
+    "jpeg_encode.my": "the picture: 64x48 rgb, 9216 bytes of samples\n"
+        "quality  50, 4:2:0:   967 bytes, PSNR 26.7 dB\nquality  75, 4:2:0:  1108 bytes, PSNR 28.4 dB\n"
+        "quality  90, 4:2:0:  1391 bytes, PSNR 29.8 dB\nquality  90, 4:2:2:  1481 bytes, PSNR 32.5 dB\n"
+        "quality  90, 4:4:4:  1728 bytes, PSNR 38.0 dB\ngray at quality 75: 663 bytes, read back as gray\n",
 }
 
 def run_file(path: str) -> str:
