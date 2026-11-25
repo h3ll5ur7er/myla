@@ -2373,76 +2373,121 @@ pub fun encode(img: Image8, quality: int = 85, subsampling: Subsampling = Subsam
     let hb = (h + 7) / 8
     let fw = mx * hmax * 8
     let fh = vmax * 8
-    var f0 = list_m.filled(fw * fh, 0)
-    var f1 = if color { list_m.filled(fw * fh, 0) } else { [] }
-    var f2 = if color { list_m.filled(fw * fh, 0) } else { [] }
     // the chroma's strips when subsampled: `cw` by 8
     let sub = color && hmax > 1
     let cw = mx * 8
+    var f0 = list_m.filled(fw * fh, 0)
+    var f1 = if color && !sub { list_m.filled(fw * fh, 0) } else { [] }
+    var f2 = if color && !sub { list_m.filled(fw * fh, 0) } else { [] }
     var s1 = if sub { list_m.filled(cw * 8, 0) } else { [] }
     var s2 = if sub { list_m.filled(cw * 8, 0) } else { [] }
     // the chroma's rows made from the image's (the rest repeat the last)
     let crows = (h + vmax - 1) / vmax
     for iy in 0..my {
-        // the colour conversion
-        for r in 0..fh {
-            let sy = if iy * fh + r < h { iy * fh + r } else { h - 1 }
-            let src = sy * w * ch
-            let o = r * fw
-            if color {
-                for x in 0..w {
-                    let p = src + x * ch
-                    let rr = data[p] as int
-                    let gg = data[p + 1] as int
-                    let bb = data[p + 2] as int
-                    f0[o + x] = (FIX_0_29900 * rr + FIX_0_58700 * gg + FIX_0_11400 * bb + ONE_HALF) >> SCALEBITS
-                    f1[o + x] = (FIX_0_50000 * bb - FIX_0_16874 * rr - FIX_0_33126 * gg + CBCR_ROUND) >> SCALEBITS
-                    f2[o + x] = (FIX_0_50000 * rr - FIX_0_41869 * gg - FIX_0_08131 * bb + CBCR_ROUND) >> SCALEBITS
-                }
-                let y = f0[o + w - 1]
-                let cb = f1[o + w - 1]
-                let cr = f2[o + w - 1]
-                for x in w..fw {
-                    f0[o + x] = y
-                    f1[o + x] = cb
-                    f2[o + x] = cr
-                }
-            } else {
-                for x in 0..w {
-                    f0[o + x] = data[src + x * ch] as int
-                }
-                let y = f0[o + w - 1]
-                for x in w..fw {
-                    f0[o + x] = y
-                }
-            }
-        }
-        // the chroma downsampled as libjpeg's h2v1 and h2v2 do: the mean
-        // with a bias of 0, 1, 0, 1 (in halves) or 1, 2, 1, 2 (in quarters)
-        // across, so the roundings even out
         if sub {
+            // the colour conversion and the chroma's downsampling at once, a
+            // chroma row at a time: each Cb and Cr sample the mean of its 2
+            // or 4 pixels' as libjpeg's h2v1 and h2v2 make it, with a bias
+            // of 0, 1, 0, 1 (in halves) or 1, 2, 1, 2 (in quarters) across
+            // so the roundings even out; the luma of those pixels beside
             for j in 0..8 {
                 let o = j * cw
-                if vmax == 1 {
-                    let a = j * fw
-                    for i in 0..cw {
-                        s1[o + i] = (f1[a + 2 * i] + f1[a + 2 * i + 1] + (i & 1)) >> 1
-                        s2[o + i] = (f2[a + 2 * i] + f2[a + 2 * i + 1] + (i & 1)) >> 1
+                let ra = j * vmax
+                let ya = if iy * fh + ra < h { iy * fh + ra } else { h - 1 }
+                let yb = if iy * fh + ra + 1 < h { iy * fh + ra + 1 } else { h - 1 }
+                let sa = ya * w * ch
+                let sb = yb * w * ch
+                let la = ra * fw
+                let lb = la + fw
+                if vmax == 2 && iy * 8 + j >= crows {
+                    // below the image: the luma of its last row, and the
+                    // last chroma row made from it repeated
+                    for x in 0..fw {
+                        let p = sa + (if x < w { x } else { w - 1 }) * ch
+                        let v = (FIX_0_29900 * (data[p] as int) + FIX_0_58700 * (data[p + 1] as int) + FIX_0_11400 * (data[p + 2] as int) + ONE_HALF) >> SCALEBITS
+                        f0[la + x] = v
+                        f0[lb + x] = v
                     }
-                } else if iy * 8 + j < crows {
-                    let a = 2 * j * fw
-                    let b = a + fw
-                    for i in 0..cw {
-                        let bias = 1 + (i & 1)
-                        s1[o + i] = (f1[a + 2 * i] + f1[a + 2 * i + 1] + f1[b + 2 * i] + f1[b + 2 * i + 1] + bias) >> 2
-                        s2[o + i] = (f2[a + 2 * i] + f2[a + 2 * i + 1] + f2[b + 2 * i] + f2[b + 2 * i + 1] + bias) >> 2
-                    }
-                } else {
-                    // below the image: the last row made from it, repeated
                     let a = (crows - 1 - iy * 8) * cw
                     for i in 0..cw {
                         s1[o + i] = s1[a + i]
                         s2[o + i] = s2[a + i]
+                    }
+                    continue
+                }
+                for i in 0..cw {
+                    let x0 = 2 * i
+                    let p0 = (if x0 < w { x0 } else { w - 1 }) * ch
+                    let p1 = (if x0 + 1 < w { x0 + 1 } else { w - 1 }) * ch
+                    var q = sa + p0
+                    var rr = data[q] as int
+                    var gg = data[q + 1] as int
+                    var bb = data[q + 2] as int
+                    f0[la + x0] = (FIX_0_29900 * rr + FIX_0_58700 * gg + FIX_0_11400 * bb + ONE_HALF) >> SCALEBITS
+                    var cb = (FIX_0_50000 * bb - FIX_0_16874 * rr - FIX_0_33126 * gg + CBCR_ROUND) >> SCALEBITS
+                    var cr = (FIX_0_50000 * rr - FIX_0_41869 * gg - FIX_0_08131 * bb + CBCR_ROUND) >> SCALEBITS
+                    q = sa + p1
+                    rr = data[q] as int
+                    gg = data[q + 1] as int
+                    bb = data[q + 2] as int
+                    f0[la + x0 + 1] = (FIX_0_29900 * rr + FIX_0_58700 * gg + FIX_0_11400 * bb + ONE_HALF) >> SCALEBITS
+                    cb += (FIX_0_50000 * bb - FIX_0_16874 * rr - FIX_0_33126 * gg + CBCR_ROUND) >> SCALEBITS
+                    cr += (FIX_0_50000 * rr - FIX_0_41869 * gg - FIX_0_08131 * bb + CBCR_ROUND) >> SCALEBITS
+                    if vmax == 1 {
+                        s1[o + i] = (cb + (i & 1)) >> 1
+                        s2[o + i] = (cr + (i & 1)) >> 1
+                        continue
+                    }
+                    q = sb + p0
+                    rr = data[q] as int
+                    gg = data[q + 1] as int
+                    bb = data[q + 2] as int
+                    f0[lb + x0] = (FIX_0_29900 * rr + FIX_0_58700 * gg + FIX_0_11400 * bb + ONE_HALF) >> SCALEBITS
+                    cb += (FIX_0_50000 * bb - FIX_0_16874 * rr - FIX_0_33126 * gg + CBCR_ROUND) >> SCALEBITS
+                    cr += (FIX_0_50000 * rr - FIX_0_41869 * gg - FIX_0_08131 * bb + CBCR_ROUND) >> SCALEBITS
+                    q = sb + p1
+                    rr = data[q] as int
+                    gg = data[q + 1] as int
+                    bb = data[q + 2] as int
+                    f0[lb + x0 + 1] = (FIX_0_29900 * rr + FIX_0_58700 * gg + FIX_0_11400 * bb + ONE_HALF) >> SCALEBITS
+                    cb += (FIX_0_50000 * bb - FIX_0_16874 * rr - FIX_0_33126 * gg + CBCR_ROUND) >> SCALEBITS
+                    cr += (FIX_0_50000 * rr - FIX_0_41869 * gg - FIX_0_08131 * bb + CBCR_ROUND) >> SCALEBITS
+                    let bias = 1 + (i & 1)
+                    s1[o + i] = (cb + bias) >> 2
+                    s2[o + i] = (cr + bias) >> 2
+                }
+            }
+        } else {
+            // the colour conversion, a row at a time
+            for r in 0..fh {
+                let sy = if iy * fh + r < h { iy * fh + r } else { h - 1 }
+                let src = sy * w * ch
+                let o = r * fw
+                if color {
+                    for x in 0..w {
+                        let p = src + x * ch
+                        let rr = data[p] as int
+                        let gg = data[p + 1] as int
+                        let bb = data[p + 2] as int
+                        f0[o + x] = (FIX_0_29900 * rr + FIX_0_58700 * gg + FIX_0_11400 * bb + ONE_HALF) >> SCALEBITS
+                        f1[o + x] = (FIX_0_50000 * bb - FIX_0_16874 * rr - FIX_0_33126 * gg + CBCR_ROUND) >> SCALEBITS
+                        f2[o + x] = (FIX_0_50000 * rr - FIX_0_41869 * gg - FIX_0_08131 * bb + CBCR_ROUND) >> SCALEBITS
+                    }
+                    let y = f0[o + w - 1]
+                    let cb = f1[o + w - 1]
+                    let cr = f2[o + w - 1]
+                    for x in w..fw {
+                        f0[o + x] = y
+                        f1[o + x] = cb
+                        f2[o + x] = cr
+                    }
+                } else {
+                    for x in 0..w {
+                        f0[o + x] = data[src + x * ch] as int
+                    }
+                    let y = f0[o + w - 1]
+                    for x in w..fw {
+                        f0[o + x] = y
                     }
                 }
             }
