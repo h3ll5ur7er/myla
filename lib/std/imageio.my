@@ -1,0 +1,613 @@
+// std.imageio: images read and written in any format the standard library
+// knows (MYLA-940), the module most programs import. A file's format is
+// found by its contents (`sniff`, the magic bytes), never by its name, when
+// it is read; by its name's extension (`format_of`) when it is written.
+//
+// PNG, JPEG, GIF, TIFF, BMP, the Netpbm formats (PBM, PGM, PPM, PAM) and
+// QOI, through std.png, std.jpeg, std.gif, std.tiff, std.bmp, std.pnm and
+// std.qoi: a GIF's first frame as it is shown, a TIFF's first page. `load`
+// turns a JPEG as its EXIF orientation says, as viewers do; `decode` gives
+// the pixels as stored. Errors are std.image's `ImageError`, a file's
+// `ImageError.Io`.
+//
+// A program that needs one format only imports its codec, and checks and
+// builds faster for it.
+
+import std.image as image
+from std.image import Image, Image8, Image16, ImageInfo, ImageError, Layout
+import std.png as png
+import std.jpeg as jpeg
+import std.gif as gif
+import std.tiff as tiff
+import std.bmp as bmp
+import std.pnm as pnm
+from std.pnm import Kind
+import std.qoi as qoi
+import std.fs as fs
+import std.str as str_m // `to_lower`
+import std.list as list_m // `filled`
+import std.option as option_m // `expect` in the tests
+import std.encoding as encoding_m // `hex_decode`, in the tests
+
+// The file formats.
+#derive(Eq, Hash)
+pub enum Format {
+    Png
+    Jpeg
+    Gif
+    Tiff
+    Bmp
+    Pnm
+    Qoi
+}
+
+impl Format {
+    // The format's name, as its codec's `ImageInfo.format` gives it.
+    #test(Format.Jpeg)["jpeg"]
+    #test(Format.Pnm)["pnm"]
+    fun name(self) -> str {
+        return match self {
+            Png => "png"
+            Jpeg => "jpeg"
+            Gif => "gif"
+            Tiff => "tiff"
+            Bmp => "bmp"
+            Pnm => "pnm"
+            Qoi => "qoi"
+        }
+    }
+
+    // The usual extension of its files, without the dot.
+    #test(Format.Jpeg)["jpg"]
+    #test(Format.Tiff)["tif"]
+    #test(Format.Qoi)["qoi"]
+    fun extension(self) -> str {
+        return match self {
+            Png => "png"
+            Jpeg => "jpg"
+            Gif => "gif"
+            Tiff => "tif"
+            Bmp => "bmp"
+            Pnm => "pnm"
+            Qoi => "qoi"
+        }
+    }
+
+    // Whether `encode` keeps every sample of any image: false for JPEG,
+    // and for GIF, which keeps 256 colours (and alpha only as full or none).
+    // BMP and QOI give a gray image back as RGB, BMP drops an alpha that is
+    // all opaque, and 16 bits are written at 8 by all but PNG, TIFF and PNM.
+    #test(Format.Png)[true]
+    #test(Format.Gif)[false]
+    #test(Format.Jpeg)[false]
+    fun lossless(self) -> bool {
+        return match self {
+            Jpeg | Gif => false
+            Png | Tiff | Bmp | Pnm | Qoi => true
+        }
+    }
+}
+
+impl Format for Format {
+    // The name; the spec is ignored.
+    #test(Format.Gif, "")["gif"]
+    fun format(self, spec: str) -> str {
+        return self.name()
+    }
+}
+
+// Every format, in the order of the enum.
+#test()[[Format.Png, Format.Jpeg, Format.Gif, Format.Tiff, Format.Bmp, Format.Pnm, Format.Qoi]]
+pub fun formats() -> [Format] {
+    return [Format.Png, Format.Jpeg, Format.Gif, Format.Tiff, Format.Bmp, Format.Pnm, Format.Qoi]
+}
+
+// Whether `b` starts with the bytes of `p`.
+#test([71u8, 73u8, 70u8, 56u8], "GIF")[true]
+#test([71u8, 73u8], "GIF")[false]
+fun has_prefix(b: [uint8], p: str) -> bool {
+    if b.len() < p.len() {
+        return false
+    }
+    for i in 0..p.len() {
+        if b[i] != p[i] {
+            return false
+        }
+    }
+    return true
+}
+
+// The format of the file `b` by its first bytes (its magic number): PNG's
+// signature, FF D8 FF for JPEG, `GIF87a` or `GIF89a`, `II*\0` or `MM\0*`
+// for TIFF (and BigTIFF's `II+\0` and `MM\0+`, which std.tiff names as
+// unsupported), `BM` for BMP, `P1` to `P7` and a whitespace byte for the
+// Netpbm formats, `qoif`; None for anything else.
+#test([0x89u8, 0x50u8, 0x4Eu8, 0x47u8, 0x0Du8, 0x0Au8, 0x1Au8, 0x0Au8, 0u8])[Some(Format.Png)]
+#test([0x89u8, 0x50u8, 0x4Eu8, 0x47u8, 0x0Du8, 0x0Au8, 0x1Au8])[None] // the signature cut short
+#test([0xFFu8, 0xD8u8, 0xFFu8, 0xE0u8])[Some(Format.Jpeg)]
+#test([0xFFu8, 0xD8u8, 0x00u8])[None]
+#test([71u8, 73u8, 70u8, 56u8, 57u8, 97u8])[Some(Format.Gif)] // GIF89a
+#test([71u8, 73u8, 70u8, 56u8, 55u8, 97u8])[Some(Format.Gif)] // GIF87a
+#test([71u8, 73u8, 70u8, 56u8, 56u8, 97u8])[None] // GIF88a
+#test([73u8, 73u8, 42u8, 0u8, 8u8])[Some(Format.Tiff)]
+#test([77u8, 77u8, 0u8, 42u8])[Some(Format.Tiff)]
+#test([73u8, 73u8, 43u8, 0u8])[Some(Format.Tiff)] // BigTIFF
+#test([73u8, 73u8, 0u8, 42u8])[None] // little endian, a big-endian 42
+#test([66u8, 77u8, 0u8])[Some(Format.Bmp)]
+#test([80u8, 54u8, 10u8, 49u8])[Some(Format.Pnm)] // P6
+#test([80u8, 49u8, 32u8])[Some(Format.Pnm)] // P1
+#test([80u8, 55u8, 10u8])[Some(Format.Pnm)] // P7, PAM
+#test([80u8, 56u8, 10u8])[None] // P8
+#test([80u8, 54u8, 120u8])[None] // P6x
+#test([80u8, 54u8])[None]
+#test([113u8, 111u8, 105u8, 102u8, 0u8])[Some(Format.Qoi)]
+#test([])[None]
+pub fun sniff(b: [uint8]) -> Option<Format> {
+    if b.len() >= 8 && b[0] == 0x89 && has_prefix(b[1:8], "PNG\r\n\u{1A}\n") {
+        return Some(Format.Png)
+    }
+    if b.len() >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF {
+        return Some(Format.Jpeg)
+    }
+    if has_prefix(b, "GIF87a") || has_prefix(b, "GIF89a") {
+        return Some(Format.Gif)
+    }
+    if has_prefix(b, "II*\0") || has_prefix(b, "MM\0*") || has_prefix(b, "II+\0") || has_prefix(b, "MM\0+") {
+        return Some(Format.Tiff)
+    }
+    if has_prefix(b, "BM") {
+        return Some(Format.Bmp)
+    }
+    if b.len() >= 3 && b[0] == 'P' && b[1] >= '1' && b[1] <= '7' && (b[2] == 32u8 || (b[2] >= 9u8 && b[2] <= 13u8)) {
+        return Some(Format.Pnm)
+    }
+    if has_prefix(b, "qoif") {
+        return Some(Format.Qoi)
+    }
+    return None
+}
+
+// The extension of the file name at the end of `path`, without the dot and
+// in lower case: what follows the name's last `.`, unless that is the
+// name's first byte (a hidden file); "" for none. `/` and `\` end a
+// directory's name.
+#test("photos/IMG_01.JPG")["jpg"]
+#test("a.tar.gz")["gz"]
+#test("dir.d/file")[""]
+#test("dir.d\\file")[""]
+#test(".png")[""]
+#test("x/.png")[""]
+#test("a.")[""]
+#test("")[""]
+fun extension_of(path: str) -> str {
+    var i = path.len() - 1
+    while i >= 0 {
+        let c = path[i]
+        if c == '/' || c == '\\' {
+            return ""
+        }
+        if c == '.' {
+            if i == 0 || path[i - 1] == '/' || path[i - 1] == '\\' {
+                return ""
+            }
+            return path[i + 1:].to_lower()
+        }
+        i -= 1
+    }
+    return ""
+}
+
+// The format of the file `path` names, by its extension, in any case:
+// `.png`; `.jpg`, `.jpeg`, `.jpe`, `.jfif`; `.gif`; `.tif`, `.tiff`; `.bmp`,
+// `.dib`; `.pbm`, `.pgm`, `.ppm`, `.pnm`, `.pam`; `.qoi`. None for another
+// extension or none.
+#test("out/edges.png")[Some(Format.Png)]
+#test("IMG_0001.JPG")[Some(Format.Jpeg)]
+#test("a.jpeg")[Some(Format.Jpeg)]
+#test("a.jpe")[Some(Format.Jpeg)]
+#test("a.JFIF")[Some(Format.Jpeg)]
+#test("a.gif")[Some(Format.Gif)]
+#test("scan.TIFF")[Some(Format.Tiff)]
+#test("scan.tif")[Some(Format.Tiff)]
+#test("a.bmp")[Some(Format.Bmp)]
+#test("a.dib")[Some(Format.Bmp)]
+#test("a.pbm")[Some(Format.Pnm)]
+#test("a.pgm")[Some(Format.Pnm)]
+#test("a.ppm")[Some(Format.Pnm)]
+#test("a.pnm")[Some(Format.Pnm)]
+#test("a.Pam")[Some(Format.Pnm)]
+#test("a.qoi")[Some(Format.Qoi)]
+#test("a.webp")[None]
+#test("png")[None]
+#test("a.png/b")[None]
+pub fun format_of(path: str) -> Option<Format> {
+    return match extension_of(path) {
+        "png" => Some(Format.Png)
+        "jpg" | "jpeg" | "jpe" | "jfif" => Some(Format.Jpeg)
+        "gif" => Some(Format.Gif)
+        "tif" | "tiff" => Some(Format.Tiff)
+        "bmp" | "dib" => Some(Format.Bmp)
+        "pbm" | "pgm" | "ppm" | "pnm" | "pam" => Some(Format.Pnm)
+        "qoi" => Some(Format.Qoi)
+        _ => None
+    }
+}
+
+// The Netpbm kind a file name's extension asks for: `.pbm`, `.pgm`,
+// `.ppm` and `.pam`; None for `.pnm` (the image's own kind) and the rest.
+#test("a.PGM")[Some(Kind.Pgm)]
+#test("a.pam")[Some(Kind.Pam)]
+#test("a.pnm")[None]
+fun pnm_kind_of(path: str) -> Option<Kind> {
+    return match extension_of(path) {
+        "pbm" => Some(Kind.Pbm)
+        "pgm" => Some(Kind.Pgm)
+        "ppm" => Some(Kind.Ppm)
+        "pam" => Some(Kind.Pam)
+        _ => None
+    }
+}
+
+// The format of `b` by its contents, or `BadSignature`.
+fun format_or_err(b: [uint8]) -> Result<Format, ImageError> {
+    return match sniff(b) {
+        Some(f) => Ok(f)
+        None => Err(ImageError.BadSignature)
+    }
+}
+
+// What the file `b` says of its image without decoding it (its format
+// found by `sniff`), as its codec's `info` gives it: the size, the layout
+// `decode` gives, the bits of a sample as stored, the frames (a GIF's) or
+// pages (a TIFF's), and `format`, `Format.name()`. `BadSignature` if no
+// format matches.
+#test([0x71u8, 0x6Fu8, 0x69u8, 0x66u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8, 3u8, 4u8, 0u8])[Ok(ImageInfo { width: 2, height: 3, layout: Layout.Rgba, bit_depth: 8, frames: 1, format: "qoi" })]
+#test([80u8, 53u8, 10u8, 49u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 7u8])[Ok(ImageInfo { width: 1, height: 1, layout: Layout.Gray, bit_depth: 8, frames: 1, format: "pnm" })]
+#test([1u8, 2u8, 3u8])[Err(ImageError.BadSignature)]
+#test([])[Err(ImageError.BadSignature)]
+pub fun info(b: [uint8]) -> Result<ImageInfo, ImageError> {
+    return match format_or_err(b)? {
+        Png => png.info(b)
+        Jpeg => jpeg.info(b)
+        Gif => gif.info(b)
+        Tiff => tiff.info(b)
+        Bmp => bmp.info(b)
+        Pnm => pnm.info(b)
+        Qoi => qoi.info(b)
+    }
+}
+
+// The image of the file `b`, its format found by `sniff`, with 8-bit
+// samples, as its codec's `decode` gives it: a GIF's first frame as it is
+// shown (`Rgba`), a TIFF's first page, a JPEG's pixels as stored (not
+// turned: `load` turns them), 16 bits rounded to 8. `BadSignature` if no
+// format matches; more than `max_pixels` pixels is `TooLarge`.
+#test([80u8, 53u8, 10u8, 50u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 7u8, 200u8], 268435456i64)[Ok(Image { width: 2, height: 1, layout: Layout.Gray, data: [7u8, 200u8] })]
+#test([80u8, 53u8, 10u8, 50u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 7u8, 200u8], 1i64)[Err(ImageError.TooLarge(2i64))]
+#test([0x89u8, 0x50u8, 0x4Eu8, 0x47u8, 0x0Du8, 0x0Au8, 0x1Au8, 0x0Au8], 268435456i64)[Err(ImageError.Truncated)]
+#test([60u8, 104u8, 116u8, 109u8, 108u8, 62u8], 268435456i64)[Err(ImageError.BadSignature)]
+pub fun decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError> {
+    return match format_or_err(b)? {
+        Png => png.decode(b, max_pixels)
+        Jpeg => jpeg.decode(b, max_pixels)
+        Gif => gif.decode(b, max_pixels)
+        Tiff => tiff.decode(b, 0, max_pixels)
+        Bmp => bmp.decode(b, max_pixels)
+        Pnm => pnm.decode(b, max_pixels)
+        Qoi => qoi.decode(b, max_pixels)
+    }
+}
+
+// `img` at 16 bits, each sample widened by 257 (255 to 65535), in integers.
+#test(Image { width: 2, height: 1, layout: Layout.Gray, data: [1u8, 255u8] })[Image { width: 2, height: 1, layout: Layout.Gray, data: [257u16, 65535u16] }]
+fun widened(img: Image8) -> Image16 {
+    let d = img.data
+    var out = list_m.filled(d.len(), 0u16)
+    for i in 0..d.len() {
+        out[i] = (d[i] as uint16) * 257u16
+    }
+    return Image { width: img.width, height: img.height, layout: img.layout, data: out }
+}
+
+// The image of the file `b` with 16-bit samples: PNG, TIFF and PNM as
+// their `decode16` give them (fewer bits widened), the other formats, which
+// hold 8 bits at most, decoded and widened by 257.
+#test([80u8, 53u8, 10u8, 50u8, 32u8, 49u8, 10u8, 54u8, 53u8, 53u8, 51u8, 53u8, 10u8, 1u8, 2u8, 255u8, 255u8], 268435456i64)[Ok(Image { width: 2, height: 1, layout: Layout.Gray, data: [258u16, 65535u16] })]
+#test([0x71u8, 0x6Fu8, 0x69u8, 0x66u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 3u8, 0u8, 0xFEu8, 1u8, 2u8, 255u8], 268435456i64)[Ok(Image { width: 1, height: 1, layout: Layout.Rgb, data: [257u16, 514u16, 65535u16] })]
+#test([0u8], 268435456i64)[Err(ImageError.BadSignature)]
+pub fun decode16(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image16, ImageError> {
+    return match format_or_err(b)? {
+        Png => png.decode16(b, max_pixels)
+        Tiff => tiff.decode16(b, 0, max_pixels)
+        Pnm => pnm.decode16(b, max_pixels)
+        Jpeg | Gif | Bmp | Qoi => Ok(widened(decode(b, max_pixels)?))
+    }
+}
+
+// The bytes of the file at `path`, a file error as `ImageError.Io`.
+fun read_file(path: str) -> Result<[uint8], ImageError> {
+    return match fs.read_bytes(path) {
+        Ok(b) => Ok(b)
+        Err(e) => Err(ImageError.Io(e))
+    }
+}
+
+// The image in the file at `path`, read by its contents whatever its name
+// says (`decode`), and shown upright: a JPEG turned as its EXIF orientation
+// says (`jpeg.apply_orientation`), as viewers and Pillow's
+// `ImageOps.exif_transpose` do. A file that can't be read is
+// `ImageError.Io`.
+pub fun load(path: str, max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError> {
+    let b = read_file(path)?
+    let img = decode(b, max_pixels)?
+    if sniff(b) == Some(Format.Jpeg) {
+        return Ok(jpeg.apply_orientation(img, jpeg.orientation(b)))
+    }
+    return Ok(img)
+}
+
+// `load` with 16-bit samples (`decode16`).
+pub fun load16(path: str, max_pixels: int64 = image.MAX_PIXELS) -> Result<Image16, ImageError> {
+    let b = read_file(path)?
+    let img = decode16(b, max_pixels)?
+    if sniff(b) == Some(Format.Jpeg) {
+        return Ok(jpeg.apply_orientation(img, jpeg.orientation(b)))
+    }
+    return Ok(img)
+}
+
+// Whether `encode` can write JPEG yet: std.jpeg's encoder is MYLA-937's.
+const JPEG_ENCODER: bool = false
+
+// `img` as a JPEG file at `quality`. A private helper to be replaced by
+// `jpeg.encode(img, quality)` once MYLA-937 has written it.
+fun encode_jpeg(img: Image8, quality: int) -> [uint8] {
+    panic("JPEG encoding needs MYLA-937")
+}
+
+// `img` as a file of the format `f`, written as its codec's `encode`
+// writes it by default: PNG at zlib level 6 with adaptive filters, JPEG at
+// `quality` (1 to 100; the other formats ignore it), GIF dithered to 256
+// colours if it has more, TIFF with LZW, BMP 24 or 32 bits, Netpbm the
+// image's own kind (PGM, PPM or PAM), QOI.
+#test(Image { width: 2, height: 1, layout: Layout.Gray, data: [7u8, 200u8] }, Format.Pnm, 90)[[80u8, 53u8, 10u8, 50u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 7u8, 200u8]]
+#test(Image { width: 1, height: 1, layout: Layout.Rgb, data: [1u8, 2u8, 3u8] }, Format.Qoi, 90)[[113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 3u8, 0u8, 162u8, 121u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8]] // a luma difference from black
+pub fun encode(img: Image8, f: Format, quality: int = 90) -> [uint8] {
+    return match f {
+        Png => png.encode(img)
+        Jpeg => encode_jpeg(img, quality)
+        Gif => gif.encode(img)
+        Tiff => tiff.encode(img)
+        Bmp => bmp.encode(img)
+        Pnm => pnm.encode(img)
+        Qoi => qoi.encode(img)
+    }
+}
+
+// `img` with 16-bit samples as a file of `f`: PNG, TIFF and PNM at 16 bits
+// (`encode16`), the others, which hold 8 bits at most, rounded to 8 first
+// (`img.to_u8()`) and written by `encode`.
+#test(Image { width: 2, height: 1, layout: Layout.Gray, data: [258u16, 65535u16] }, Format.Pnm, 90)[[80u8, 53u8, 10u8, 50u8, 32u8, 49u8, 10u8, 54u8, 53u8, 53u8, 51u8, 53u8, 10u8, 1u8, 2u8, 255u8, 255u8]]
+#test(Image { width: 1, height: 1, layout: Layout.Rgb, data: [257u16, 514u16, 65535u16] }, Format.Qoi, 90)[[113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 3u8, 0u8, 162u8, 117u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8]] // rounded to (1, 2, 255), a luma difference
+pub fun encode16(img: Image16, f: Format, quality: int = 90) -> [uint8] {
+    return match f {
+        Png => png.encode16(img)
+        Tiff => tiff.encode16(img)
+        Pnm => pnm.encode16(img)
+        Jpeg | Gif | Bmp | Qoi => encode(img.to_u8(), f, quality)
+    }
+}
+
+// The format to write `path` in, by its extension: `Unsupported` for an
+// extension no format has (or none), and for JPEG while it can't be
+// written.
+#test("a/b.PNG")[Ok(Format.Png)]
+#test("a/b.webp")[Err(ImageError.Unsupported("extension .webp"))]
+#test("a/b")[Err(ImageError.Unsupported("a file name without an extension"))]
+fun format_to_write(path: str) -> Result<Format, ImageError> {
+    let Some(f) = format_of(path) else {
+        let ext = extension_of(path)
+        if ext.len() == 0 {
+            return Err(ImageError.Unsupported("a file name without an extension"))
+        }
+        return Err(ImageError.Unsupported(f"extension .{ext}"))
+    }
+    if f == Format.Jpeg && !JPEG_ENCODER {
+        return Err(ImageError.Unsupported("JPEG encoding (MYLA-937)"))
+    }
+    return Ok(f)
+}
+
+// `b` written to the file at `path`, a file error as `ImageError.Io`.
+fun write_file(path: str, b: [uint8]) -> Result<(), ImageError> {
+    return match fs.write_bytes(path, b) {
+        Ok(()) => Ok(())
+        Err(e) => Err(ImageError.Io(e))
+    }
+}
+
+// `img` written to the file at `path` (created or replaced) in the format
+// its extension names (`format_of`), as `encode` writes it, JPEG at
+// `quality`. `.pbm`, `.pgm`, `.ppm` and `.pam` write that Netpbm kind
+// (`pnm.encode_as`: PGM and PPM convert to gray or RGB, dropping alpha, PBM
+// to black and white), `.pnm` the image's own. An extension no format has
+// is `Unsupported("extension .webp")`; a file that can't be written
+// `ImageError.Io`.
+pub fun save(path: str, img: Image8, quality: int = 90) -> Result<(), ImageError> {
+    let f = format_to_write(path)?
+    if let Some(kind) = pnm_kind_of(path) {
+        return write_file(path, pnm.encode_as(img, kind, false))
+    }
+    return write_file(path, encode(img, f, quality))
+}
+
+// `save` with 16-bit samples (`encode16`): PNG, TIFF and the Netpbm
+// formats at 16 bits, the others rounded to 8.
+pub fun save16(path: str, img: Image16, quality: int = 90) -> Result<(), ImageError> {
+    let f = format_to_write(path)?
+    if let Some(kind) = pnm_kind_of(path) {
+        return write_file(path, pnm.encode16_as(img, kind, false))
+    }
+    return write_file(path, encode16(img, f, quality))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+// A small RGBA picture of `w` by `h`: gradients and a hole of alpha.
+fun picture(w: int, h: int) -> Image8 {
+    var img: Image8 = image.new(w, h, Layout.Rgba, 0u8)
+    for y in 0..h {
+        for x in 0..w {
+            let a = if x == 1 && y == 1 { 0u8 } else if x == 2 { 128u8 } else { 255u8 }
+            img.set_color(x, y, image.rgba((x * 40) as uint8, (y * 50) as uint8, ((x + y) * 20) as uint8, a))
+        }
+    }
+    return img
+}
+
+// What a format keeps of `img` (`lossless` ones): BMP and QOI give gray
+// back as RGB.
+fun kept(img: Image8, f: Format) -> Image8 {
+    if (f == Format.Bmp || f == Format.Qoi) && !img.layout.is_color() {
+        return img.convert(if img.layout.has_alpha() { Layout.Rgba } else { Layout.Rgb })
+    }
+    return img
+}
+
+#test
+fun every_lossless_format_round_trips_in_memory() {
+    for layout in [Layout.Gray, Layout.GrayAlpha, Layout.Rgb, Layout.Rgba] {
+        let img = picture(5, 4).convert(layout)
+        for f in formats() {
+            if !f.lossless() {
+                continue
+            }
+            let b = encode(img, f)
+            assert(sniff(b) == Some(f), f"{f} sniffed")
+            let i = info(b).expect(f"{f} info")
+            assert(i.format == f.name() && i.width == 5 && i.height == 4, f"{f} info")
+            let back = decode(b).expect(f"{f} decoded")
+            assert(back == kept(img, f), f"{f} of {layout}")
+        }
+    }
+}
+
+#test
+fun gif_keeps_few_colours_and_jpeg_isnt_written_yet() {
+    // GIF is exact up to 256 colours with alpha full or none
+    var img: Image8 = image.new(4, 3, Layout.Rgba, 255u8)
+    img.set_color(1, 1, image.rgba(0u8, 0u8, 0u8, 0u8))
+    img.set_color(2, 1, image.rgba(200u8, 10u8, 30u8, 255u8))
+    let back = decode(encode(img, Format.Gif)).expect("gif")
+    assert(back.color_at(2, 1) == image.rgba(200u8, 10u8, 30u8, 255u8) && back.color_at(1, 1).a == 0u8)
+    assert(back.color_at(0, 0) == image.rgba(255u8, 255u8, 255u8, 255u8))
+    assert(save("never-written.jpg", img) == Err(ImageError.Unsupported("JPEG encoding (MYLA-937)")))
+}
+
+#test
+fun sixteen_bits_round_trip_where_the_format_holds_them() {
+    var img: Image16 = image.new(3, 2, Layout.Rgb, 0u16)
+    for i in 0..img.data.len() {
+        img.data[i] = (i * 3001 + 7) as uint16
+    }
+    for f in [Format.Png, Format.Tiff, Format.Pnm] {
+        assert(decode16(encode16(img, f)).expect(f"{f}") == img, f"{f} at 16 bits")
+    }
+    // QOI holds 8 bits: rounded, then widened again
+    let q = decode16(encode16(img, Format.Qoi)).expect("qoi")
+    assert(q == widened(img.to_u8()), "qoi at 8 bits")
+    // a 16-bit file decoded at 8 rounds as std.image does
+    assert(decode(encode16(img, Format.Png)).expect("png") == img.to_u8())
+}
+
+#test
+fun save_and_load_by_the_extension_and_the_contents() -> Result<(), ImageError> {
+    let dir = match fs.make_temp_dir() {
+        Ok(d) => d
+        Err(e) => {
+            return Err(ImageError.Io(e))
+        }
+    }
+    defer {
+        let gone = fs.remove_dir_all(dir)
+    }
+    let img = picture(4, 3)
+    for f in formats() {
+        if !f.lossless() {
+            continue
+        }
+        let path = dir + "/a." + f.extension().to_upper()
+        save(path, img)?
+        assert(load(path)? == kept(img, f), f"{f} saved and loaded")
+        let raw = fs.read_bytes(path).expect("written")
+        assert(raw == encode(img, f), f"{f}: save writes encode's bytes")
+    }
+    // a PNG named .bmp is read as the PNG it is
+    let liar = dir + "/png.bmp"
+    if let Err(e) = fs.write_bytes(liar, encode(img, Format.Png)) {
+        return Err(ImageError.Io(e))
+    }
+    assert(load(liar)? == img, "read by the contents")
+    // the Netpbm kinds by their extensions, at 8 and 16 bits
+    save(dir + "/g.pgm", img)?
+    assert(load(dir + "/g.pgm")? == img.convert(Layout.Gray), "pgm is gray")
+    save(dir + "/c.ppm", img)?
+    assert(info(fs.read_bytes(dir + "/c.ppm").expect("ppm"))?.layout == Layout.Rgb, "ppm is rgb")
+    save16(dir + "/w.png", img.to_u16())?
+    assert(load16(dir + "/w.png")? == img.to_u16(), "16 bits")
+    assert(info(fs.read_bytes(dir + "/w.png").expect("png"))?.bit_depth == 16, "16 bits written")
+    // errors
+    assert(save(dir + "/a.webp", img) == Err(ImageError.Unsupported("extension .webp")))
+    assert(save(dir + "/no/such/dir/a.png", img) == Err(ImageError.Io(fs.IoError.NotFound)))
+    assert(load(dir + "/missing.png") == Err(ImageError.Io(fs.IoError.NotFound)))
+    if let Err(e) = fs.write_bytes(dir + "/text.png", [104u8, 105u8]) {
+        return Err(ImageError.Io(e))
+    }
+    assert(load(dir + "/text.png") == Err(ImageError.BadSignature), "not an image")
+    return Ok(())
+}
+
+// An image whose pixels are all different, to see a turn.
+fun numbered(w: int, h: int) -> Image8 {
+    var img: Image8 = image.new(w, h, Layout.Gray, 0u8)
+    for i in 0..img.data.len() {
+        img.data[i] = i as uint8
+    }
+    return img
+}
+
+#test
+fun load_turns_a_jpeg_by_its_exif_orientation() -> Result<(), ImageError> {
+    // a 16x8 JPEG whose EXIF orientation is 6 (a quarter turn clockwise):
+    // loaded 8x16
+    let dir = match fs.make_temp_dir() {
+        Ok(d) => d
+        Err(e) => {
+            return Err(ImageError.Io(e))
+        }
+    }
+    defer {
+        let gone = fs.remove_dir_all(dir)
+    }
+    let path = dir + "/turned.jpg"
+    if let Err(e) = fs.write_bytes(path, exif6_jpeg()) {
+        return Err(ImageError.Io(e))
+    }
+    let b = fs.read_bytes(path).expect("read")
+    let stored = decode(b)?
+    assert(stored.width == 16 && stored.height == 8, "as stored")
+    let shown = load(path)?
+    assert(shown.width == 8 && shown.height == 16, "turned")
+    assert(shown == stored.rotate90(), "a quarter clockwise")
+    assert(load16(path)? == widened(stored).rotate90(), "16 bits turned too")
+    return Ok(())
+}
+
+// A 16x8 gray JPEG (Pillow 13, quality 90, optimized) with an EXIF
+// orientation of 6.
+fun exif6_jpeg() -> [uint8] {
+    let hex = "ffd8ffe000104a46494600010100000100010000ffe100224578696600004d4d002a00000008000101120003000000010006000000000000ffdb0043000302020302020303030304030304050805050404050a070706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffc0000b080008001001011100ffc4001500010100000000000000000000000000000809ffc4002710000003070109000000000000000000000611120001020305131415040708161722313451ffda0008010100003f003270da1bf57b3e352b0355ba5fbab140cf4fd4f9768bb5d5f0aedac8c7911cdb6b4c49520949791993fc37ffd9"
+    return encoding_m.hex_decode(hex).expect("hex")
+}
