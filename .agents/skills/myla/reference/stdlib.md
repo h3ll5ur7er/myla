@@ -355,6 +355,14 @@ Import: `import std.fs as fs`. `IoError`, `from_errno` and `io_error_name` are r
   - Ignored `Result`s must be bound (`let r = fs.remove_dir_all(d)`).
 - Prose: `docs/Language/Standard-library/Fs.md`
 
+## std.gif: GIF images and animations
+GIF87a/GIF89a read and written (MYLA-938): palettes, transparency, interlacing, delays, disposal, the NETSCAPE2.0 loop count; LZW from std.compress. `import std.gif as gif`, `from std.gif import Animation, Frame, Disposal` (struct literals need the import).
+- `enum Disposal { Unspecified, Keep, Background, Previous }` (`Eq`, `Format`, `d.code()` 0 to 3; `disposal_of(n)`, 4 to 7 `Unspecified`). `struct Frame { image: Image8, x: int, y: int, delay_ms: int, disposal: Disposal }` (the frame's own rectangle). `struct Animation { width, height, loops: int (0 forever, -1 no loop extension), background: Color, frames: [Frame] }`; `background` is the canvas at first and what `Background` clears to (decoded as Pillow: the first frame's transparent colour with alpha 0, else the global background colour, opaque).
+- `decode(b, max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError>` (the first frame as shown, the whole canvas, `Rgba`), `decode_all(b, max_pixels = …) -> Result<Animation, ImageError>` (every frame its own rectangle, `Rgba`; the transparent index alpha 0, keeping its colour), `info(b) -> Result<ImageInfo, ImageError>` (frames counted). The canvas grows to hold the first frame; `max_pixels` counts each frame's rectangle plus a canvas per frame, all frames together.
+- `composite(a: Animation) -> [Image8]`: each frame as shown (Pillow's frames exactly over the corpus): alpha 0 leaves the canvas, other pixels replace it, clipped; then the frame's disposal.
+- `encode(img: Image8, dither: bool = true) -> [uint8]`, `encode_all(a: Animation, dither: bool = true) -> [uint8]`: alpha below 128 transparent; at most 256 colours exact (255 with transparency), more through `image.quantize`; frames after the first written as the changed rectangle (`Keep`, or `Background` where pixels turn transparent), so decoded frames differ from `a.frames` but `composite` is the same; delays rounded to 10 ms. No frames, or past 65535 pixels a side, is a failure.
+- Prose: `docs/Language/Standard-library/Gif.md`
+
 ## std.glob: glob patterns and directory walks
 Import: `import std.glob as glob`. Syntax: `*`, `?`, `[a-z]`, `[!…]`, `\`, and `**` as a whole component. A leading `.` must be matched literally.
 - `pub struct Pattern` (opaque). `pub fun compile(pattern: str) -> Pattern`, then `p.matches(path: str) -> bool`. Or in one step: `pub fun matches(pattern: str, p: str) -> bool`.

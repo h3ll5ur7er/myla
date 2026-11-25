@@ -76,6 +76,24 @@ EXPECTED = {
     "lzw_and_packbits.my": ("GIF LZW: 256 bytes in 72, 74 as sub-blocks\ndecoded: true\nTIFF LZW: 110 bytes\n"
                             "at most 100 bytes: output longer than max_output\nPackBits: 201 bytes\n"
                             "one byte short: compressed data ends too early\n"),
+    "gif_animation.my": (
+        '187 bytes, 4 frames of 20x8\n'
+        'loops 0 (0: forever)\n'
+        'frame at (0, 0), 20x8, 120 ms, Keep\n'
+        'frame at (1, 3), 5x3, 120 ms, Keep\n'
+        'frame at (3, 3), 5x3, 120 ms, Keep\n'
+        'frame at (5, 3), 5x3, 120 ms, Keep\n'
+        'shown as made: true\n'
+        '....................\n'
+        '....................\n'
+        '....................\n'
+        '.......@@@..........\n'
+        '.......@@@..........\n'
+        '.......@@@..........\n'
+        '==--==--==--==--==--\n'
+        '==--==--==--==--==--\n'
+        'info: 20x8, 4 frames\n'
+    ),
     "draw_chart.my": (
         '                                                \n'
         '          @@@@  @@@  @     @@@@@  @@@@          \n'
@@ -103,6 +121,7 @@ EXPECTED = {
         '   @ .----  .----  .----  .----  .----  .----   \n'
         '   @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ \n'
         '                                                \n'
+    ),
     "edges.my": (
         "........................................\n"
         "........................................\n"
