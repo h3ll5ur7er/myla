@@ -28,6 +28,7 @@ import std.str as str_m // `to_lower`
 import std.list as list_m // `filled`
 import std.option as option_m // `expect` in the tests
 import std.encoding as encoding_m // `hex_decode`, in the tests
+import std.test as test // `temp_dir`, in the tests
 
 // The file formats.
 #derive(Eq, Hash)
@@ -85,14 +86,6 @@ impl Format {
             Jpeg | Gif => false
             Png | Tiff | Bmp | Pnm | Qoi => true
         }
-    }
-}
-
-impl Format for Format {
-    // The name; the spec is ignored.
-    #test(Format.Gif, "")["gif"]
-    fun format(self, spec: str) -> str {
-        return self.name()
     }
 }
 
@@ -501,11 +494,11 @@ fun every_lossless_format_round_trips_in_memory() {
                 continue
             }
             let b = encode(img, f)
-            assert(sniff(b) == Some(f), f"{f} sniffed")
-            let i = info(b).expect(f"{f} info")
-            assert(i.format == f.name() && i.width == 5 && i.height == 4, f"{f} info")
-            let back = decode(b).expect(f"{f} decoded")
-            assert(back == kept(img, f), f"{f} of {layout}")
+            assert(sniff(b) == Some(f), f"{f.name()} sniffed")
+            let i = info(b).expect(f"{f.name()} info")
+            assert(i.format == f.name() && i.width == 5 && i.height == 4, f"{f.name()} info")
+            let back = decode(b).expect(f"{f.name()} decoded")
+            assert(back == kept(img, f), f"{f.name()} of {layout}")
         }
     }
 }
@@ -541,15 +534,7 @@ fun jpeg_is_saved_once_std_jpeg_encodes() -> Result<(), ImageError> {
     // Until MYLA-937's `jpeg.encode` is wired into `encode_jpeg`, saving a
     // JPEG is `Unsupported` and writes nothing; after, it round trips
     // closely (a smooth gradient at quality 95).
-    let dir = match fs.make_temp_dir() {
-        Ok(d) => d
-        Err(e) => {
-            return Err(ImageError.Io(e))
-        }
-    }
-    defer {
-        let gone = fs.remove_dir_all(dir)
-    }
+    let dir = test.temp_dir()
     var img: Image8 = image.new(16, 16, Layout.Rgb, 0u8)
     for y in 0..16 {
         for x in 0..16 {
@@ -578,7 +563,7 @@ fun sixteen_bits_round_trip_where_the_format_holds_them() {
         img.data[i] = (i * 3001 + 7) as uint16
     }
     for f in [Format.Png, Format.Tiff, Format.Pnm] {
-        assert(decode16(encode16(img, f)).expect(f"{f}") == img, f"{f} at 16 bits")
+        assert(decode16(encode16(img, f)).expect(f"{f.name()}") == img, f"{f.name()} at 16 bits")
     }
     // QOI holds 8 bits: rounded, then widened again
     let q = decode16(encode16(img, Format.Qoi)).expect("qoi")
@@ -589,15 +574,7 @@ fun sixteen_bits_round_trip_where_the_format_holds_them() {
 
 #test
 fun save_and_load_by_the_extension_and_the_contents() -> Result<(), ImageError> {
-    let dir = match fs.make_temp_dir() {
-        Ok(d) => d
-        Err(e) => {
-            return Err(ImageError.Io(e))
-        }
-    }
-    defer {
-        let gone = fs.remove_dir_all(dir)
-    }
+    let dir = test.temp_dir()
     let img = picture(4, 3)
     for f in formats() {
         if !f.lossless() {
@@ -605,9 +582,9 @@ fun save_and_load_by_the_extension_and_the_contents() -> Result<(), ImageError> 
         }
         let path = dir + "/a." + f.extension().to_upper()
         save(path, img)?
-        assert(load(path)? == kept(img, f), f"{f} saved and loaded")
+        assert(load(path)? == kept(img, f), f"{f.name()} saved and loaded")
         let raw = fs.read_bytes(path).expect("written")
-        assert(raw == encode(img, f), f"{f}: save writes encode's bytes")
+        assert(raw == encode(img, f), f"{f.name()}: save writes encode's bytes")
     }
     // a PNG named .bmp is read as the PNG it is
     let liar = dir + "/png.bmp"
@@ -634,29 +611,12 @@ fun save_and_load_by_the_extension_and_the_contents() -> Result<(), ImageError> 
     return Ok(())
 }
 
-// An image whose pixels are all different, to see a turn.
-fun numbered(w: int, h: int) -> Image8 {
-    var img: Image8 = image.new(w, h, Layout.Gray, 0u8)
-    for i in 0..img.data.len() {
-        img.data[i] = i as uint8
-    }
-    return img
-}
-
 #test
 fun load_turns_a_jpeg_by_its_exif_orientation() -> Result<(), ImageError> {
     // a 16x8 JPEG whose EXIF orientation is 6 (a quarter turn clockwise):
-    // loaded 8x16
-    let dir = match fs.make_temp_dir() {
-        Ok(d) => d
-        Err(e) => {
-            return Err(ImageError.Io(e))
-        }
-    }
-    defer {
-        let gone = fs.remove_dir_all(dir)
-    }
-    let path = dir + "/turned.jpg"
+    // loaded 8x16, and the same file named .png is still turned
+    let dir = test.temp_dir()
+    let path = dir + "/turned.png"
     if let Err(e) = fs.write_bytes(path, exif6_jpeg()) {
         return Err(ImageError.Io(e))
     }

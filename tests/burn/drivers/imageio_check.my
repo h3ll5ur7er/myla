@@ -1,0 +1,256 @@
+// std.imageio (MYLA-940) against the codecs under it, for
+// tests/burn/test_imageio.py. It reads requests from stdin, a line each,
+// fields separated by tabs, until an empty line or the end, and prints a
+// line for each:
+//
+//     same <path> <format>   `imageio.decode` and `imageio.info` of the file
+//                            against the codec's own `decode` (a TIFF's first
+//                            page) and `info`: `ok <w> <h> <layout> <sha256>`
+//                            or `err <message>` when they agree, `differ
+//                            <what>` when they don't
+//     sniff <path>           `imageio.sniff` of the file: the format's name or
+//                            `none`
+//     format_of <name>       `imageio.format_of`: the name or `none`
+//     load <path>            `imageio.load`: `ok <w> <h> <layout> <sha256>`
+//                            or `err <message>`; `differ` if it isn't the
+//                            decoded image turned by `jpeg.apply_orientation`
+//     roundtrip <path> <dir> the file decoded, then saved in `dir` as every
+//                            format and loaded back: `ok <formats>` if each
+//                            lossless one gave the same image (BMP and QOI
+//                            make gray RGB), GIF the same size, and JPEG the
+//                            same size or `Unsupported` (`jpeg=no` or
+//                            `jpeg=yes` at the end), `differ <what>` if not
+//     roundtrip16 <path> <dir> the file by `decode16`, saved as PNG, TIFF and
+//                            PNM by `save16` and loaded back by `load16`
+//
+// `sha256` is the hex SHA-256 of the samples, a byte each, as image_driver
+// prints it.
+
+import std.image as image
+from std.image import Image, Image8, Image16, ImageError, Layout
+import std.imageio as imageio
+from std.imageio import Format
+import std.png as png
+import std.jpeg as jpeg
+import std.gif as gif
+import std.tiff as tiff
+import std.bmp as bmp
+import std.pnm as pnm
+import std.qoi as qoi
+import std.digest as digest
+import std.encoding as encoding
+import std.fs as fs
+from std.io import stdin, println, Reader
+
+// The codec's own `decode` of `b`, `fmt` its name in the manifest.
+fun codec_decode(b: [uint8], fmt: str) -> Result<Image8, ImageError> {
+    return match fmt {
+        "png" => png.decode(b, image.MAX_PIXELS)
+        "jpeg" => jpeg.decode(b, image.MAX_PIXELS)
+        "gif" => gif.decode(b, image.MAX_PIXELS)
+        "tiff" => tiff.decode(b, 0, image.MAX_PIXELS)
+        "bmp" => bmp.decode(b, image.MAX_PIXELS)
+        "pnm" => pnm.decode(b, image.MAX_PIXELS)
+        "qoi" => qoi.decode(b, image.MAX_PIXELS)
+        _ => Err(ImageError.Unsupported(f"no codec {fmt}"))
+    }
+}
+
+// The codec's own `info` of `b`.
+fun codec_info(b: [uint8], fmt: str) -> Result<image.ImageInfo, ImageError> {
+    return match fmt {
+        "png" => png.info(b)
+        "jpeg" => jpeg.info(b)
+        "gif" => gif.info(b)
+        "tiff" => tiff.info(b)
+        "bmp" => bmp.info(b)
+        "pnm" => pnm.info(b)
+        "qoi" => qoi.info(b)
+        _ => Err(ImageError.Unsupported(f"no codec {fmt}"))
+    }
+}
+
+// `s` on one line.
+fun one_line(s: str) -> str {
+    return s.replace("\n", " ").replace("\t", " ")
+}
+
+fun described(img: Image8) -> str {
+    let sha = encoding.hex_encode(digest.sha256(img.data))
+    return f"{img.width} {img.height} {img.layout} {sha}"
+}
+
+fun same(path: str, fmt: str) -> str {
+    let Ok(b) = fs.read_bytes(path) else {
+        return f"differ cannot read {path}"
+    }
+    let ours = imageio.decode(b)
+    let theirs = codec_decode(b, fmt)
+    if ours != theirs {
+        return "differ decode"
+    }
+    if imageio.info(b) != codec_info(b, fmt) {
+        return "differ info"
+    }
+    return match ours {
+        Ok(img) => "ok " + described(img)
+        Err(e) => "err " + one_line(f"{e}")
+    }
+}
+
+fun sniffed(path: str) -> str {
+    let Ok(b) = fs.read_bytes(path) else {
+        return f"differ cannot read {path}"
+    }
+    return match imageio.sniff(b) {
+        Some(f) => f.name()
+        None => "none"
+    }
+}
+
+fun format_of(name: str) -> str {
+    return match imageio.format_of(name) {
+        Some(f) => f.name()
+        None => "none"
+    }
+}
+
+fun loaded(path: str) -> str {
+    let img = match imageio.load(path) {
+        Ok(i) => i
+        Err(e) => {
+            return "err " + one_line(f"{e}")
+        }
+    }
+    let Ok(b) = fs.read_bytes(path) else {
+        return f"differ cannot read {path}"
+    }
+    let Ok(stored) = imageio.decode(b) else {
+        return "differ load is Ok, decode isn't"
+    }
+    if img != jpeg.apply_orientation(stored, jpeg.orientation(b)) {
+        return "differ load isn't decode turned by apply_orientation"
+    }
+    return "ok " + described(img)
+}
+
+// What a lossless format gives back of `img`: BMP and QOI make gray RGB.
+fun kept(img: Image8, f: Format) -> Image8 {
+    if (f == Format.Bmp || f == Format.Qoi) && !img.layout.is_color() {
+        return img.convert(if img.layout.has_alpha() { Layout.Rgba } else { Layout.Rgb })
+    }
+    return img
+}
+
+fun roundtrip(path: str, dir: str) -> str {
+    let Ok(b) = fs.read_bytes(path) else {
+        return f"differ cannot read {path}"
+    }
+    let img = match imageio.decode(b) {
+        Ok(i) => i
+        Err(e) => {
+            return "err " + one_line(f"{e}")
+        }
+    }
+    var done = ""
+    var jpeg_written = "no"
+    for f in imageio.formats() {
+        let out = dir + "/rt." + f.extension()
+        let saved = imageio.save(out, img)
+        if f == Format.Jpeg && saved == Err(ImageError.Unsupported("jpeg encoding")) {
+            if fs.exists(out) {
+                return "differ an unsupported JPEG was written"
+            }
+            continue
+        }
+        if let Err(e) = saved {
+            return one_line(f"differ {f.name()}: save: {e}")
+        }
+        let back = match imageio.load(out) {
+            Ok(i) => i
+            Err(e) => {
+                return one_line(f"differ {f.name()}: load: {e}")
+            }
+        }
+        if f.lossless() {
+            if back != kept(img, f) {
+                return f"differ {f.name()}: not the same image"
+            }
+        } else if back.width != img.width || back.height != img.height {
+            return f"differ {f.name()}: {back.width}x{back.height}"
+        }
+        if f == Format.Jpeg {
+            jpeg_written = "yes"
+        }
+        done = done + f.name() + ","
+    }
+    return f"ok {done} jpeg={jpeg_written}"
+}
+
+fun roundtrip16(path: str, dir: str) -> str {
+    let Ok(b) = fs.read_bytes(path) else {
+        return f"differ cannot read {path}"
+    }
+    let img = match imageio.decode16(b) {
+        Ok(i) => i
+        Err(e) => {
+            return "err " + one_line(f"{e}")
+        }
+    }
+    for f in [Format.Png, Format.Tiff, Format.Pnm] {
+        let out = dir + "/rt16." + f.extension()
+        if let Err(e) = imageio.save16(out, img) {
+            return one_line(f"differ {f.name()}: save16: {e}")
+        }
+        match imageio.load16(out) {
+            Ok(back) => {
+                if back != img {
+                    return f"differ {f.name()}: not the same image"
+                }
+            }
+            Err(e) => {
+                return one_line(f"differ {f.name()}: load16: {e}")
+            }
+        }
+    }
+    return "ok"
+}
+
+fun answer(line: str) -> str {
+    let p = line.split("\t")
+    let arg = if p.len() >= 3 { p[2] } else { "" }
+    if p.len() < 2 {
+        return f"differ a malformed request: {line}"
+    }
+    return match p[0] {
+        "same" => same(p[1], arg)
+        "sniff" => sniffed(p[1])
+        "format_of" => format_of(p[1])
+        "load" => loaded(p[1])
+        "roundtrip" => roundtrip(p[1], arg)
+        "roundtrip16" => roundtrip16(p[1], arg)
+        _ => f"differ an unknown request: {p[0]}"
+    }
+}
+
+struct Lines { r: Reader }
+
+impl Lines {
+    fun next(var self) -> Option<str> {
+        let line = match self.r.read_line() {
+            Ok(Some(l)) => l
+            _ => ""
+        }
+        if line.len() == 0 {
+            return None
+        }
+        return Some(line)
+    }
+}
+
+fun main() {
+    var lines = Lines { r: stdin() }
+    while let Some(line) = lines.next() {
+        println(answer(line))
+    }
+}
