@@ -2,7 +2,7 @@
 id: MYLA-939
 title: "std.tiff: baseline TIFF, several pages, float samples"
 type: feature
-status: todo
+status: in-progress
 priority: low
 labels: [stdlib, images, tiff]
 ---

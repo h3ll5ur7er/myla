@@ -2,7 +2,7 @@
 id: MYLA-943
 title: "std.font: TrueType parsing, glyph rendering and simple text layout"
 type: feature
-status: todo
+status: in-progress
 priority: medium
 labels: [stdlib, fonts, graphics]
 ---

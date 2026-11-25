@@ -2,7 +2,7 @@
 id: MYLA-934
 title: "std.pnm, std.bmp and std.qoi"
 type: feature
-status: todo
+status: in-progress
 priority: medium
 labels: [stdlib, images]
 ---
