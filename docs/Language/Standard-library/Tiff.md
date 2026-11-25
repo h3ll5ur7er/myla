@@ -110,7 +110,7 @@ Pillow 13 reads every file `encode` and `encode16` write to the same pixels, but
 
 ## Speed
 
-Natively on x86-64, the best of three runs on a 4096×4096 RGB picture (50 MB of samples: smooth gradients and a little noise), in memory, on a machine shared with other work (2026-11-25, `0605be9`):
+Natively on x86-64, the best of three runs on a 4096×4096 RGB picture (50 MB of samples: smooth gradients and a little noise), in memory, on a machine shared with other work (2026-11-25, `d784466`):
 
 | Compression | File | `encode` | `decode` | Pillow 13's save and load (libtiff, no predictor) |
 | --- | --- | --- | --- | --- |
@@ -119,7 +119,7 @@ Natively on x86-64, the best of three runs on a 4096×4096 RGB picture (50 MB of
 | Deflate, predictor | 14.3 MB | 3678 ms, 14 MB/s | 578 ms, 87 MB/s | 1367 and 327 ms (27.0 MB) |
 | PackBits | 50.7 MB | 463 ms, 109 MB/s | 207 ms, 243 MB/s | 173 and 38 ms |
 
-The compression is std.compress's (its own speed is on [[Language/Standard-library/Compress]]): Deflate's encoder at level 6 dominates its row. An uncompressed file whose strips lie one after the other is taken in one slice of the file; even so, copying a list natively costs about 2 ns a byte, a slice as much as a loop of `push`es, which is most of the 111 ms. An 8-bit gray or RGB(A) page is the stored samples as they are; other pages go through a table a channel from each stored value to the sample (a page of fewer pixels than a sample has values converts each sample on its own, which keeps the interpreter fast on small 16-bit images).
+The compression is std.compress's (its own speed is on [[Language/Standard-library/Compress]]): Deflate's encoder at level 6 dominates its row. An uncompressed file whose strips lie one after the other is taken in one slice of the file; even so, copying a list natively costs about 2 ns a byte, a slice as much as a loop of `push`es ([[MYLA-951]]), which is most of the 111 ms. An 8-bit gray or RGB(A) page is the stored samples as they are; other pages go through a table a channel from each stored value to the sample (a page of fewer pixels than a sample has values converts each sample on its own, which keeps the interpreter fast on small 16-bit images).
 
 ## Tests
 
