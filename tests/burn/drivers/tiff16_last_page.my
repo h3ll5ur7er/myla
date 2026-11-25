@@ -1,0 +1,18 @@
+// std.tiff's `decode16` (MYLA-939) through image_driver's protocol: the
+// last page `pages` finds, at 16 bits (page 0 where `pages` fails).
+
+import std.tiff as tiff
+from std.image import Image16, ImageError
+import image_driver as driver
+
+fun last_page(b: [uint8], max: int64) -> Result<Image16, ImageError> {
+    var last = 0
+    if let Ok(ps) = tiff.pages(b) {
+        last = ps.len() - 1
+    }
+    return tiff.decode16(b, last, max)
+}
+
+fun main() {
+    driver.serve16(last_page)
+}

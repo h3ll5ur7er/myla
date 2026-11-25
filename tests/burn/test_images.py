@@ -100,7 +100,21 @@ CODECS: list[Codec] = [
     Codec("jpeg", "jpeg", "jpeg"),
     Codec("gif", "gif", "gif", notes="(decode_all + composite: every frame as shown)"),
     Codec("tiff", "tiff", "tiff"),
+    Codec("tiff16_last_page", "tiff", "tiff", entries=lambda: _tiff_last_pages(),
+          notes="(decode16 of the last page pages() finds)"),
+    Codec("tiff_f32", "tiff", "tiff", accepts=lambda e: e.get("bits") == 32 or e["expect"] != "ok"),
 ]
+
+
+def _tiff_last_pages() -> list[dict]:
+    """The TIFF entries, a file of several pages expected as its last."""
+    out = []
+    for e in im.entries("tiff"):
+        if e.get("pages"):
+            e = {**e, **e["pages"][-1], "frames": 1}
+            del e["pages"]
+        out.append(e)
+    return out
 
 
 def _missing(codec: Codec) -> str | None:

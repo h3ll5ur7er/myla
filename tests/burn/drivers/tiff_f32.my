@@ -1,0 +1,9 @@
+// std.tiff's `decode_f32` (MYLA-939) through image_driver's protocol:
+// page 0 with float32 samples.
+
+import std.tiff as tiff
+import image_driver as driver
+
+fun main() {
+    driver.serve_f32((b: [uint8], max: int64) => tiff.decode_f32(b, 0, max))
+}
