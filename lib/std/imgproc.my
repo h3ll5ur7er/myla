@@ -21,14 +21,14 @@
 
 import std.image as image
 from std.image import Image, Image8, ImageF, Layout, Color, Rect, Sample, ImageError
-from std.vector32 import Vec2, Vec3
+from std.vector32 import Vec2
 import std.vector32 as v32
 from std.matrix32 import Mat3
 import std.matrix32 as m32
 import std.unionfind as unionfind
 import std.float as fl
 import std.list as list_m
-import std.option as option_m
+import std.option as option_m // `expect` in the test functions
 import std.math as math
 
 // How a filter or a warp sees the pixels past the edge (OpenCV's set):
@@ -288,6 +288,9 @@ fun color_samples(c: Color, layout: Layout) -> [float64] {
 fun border_at(i: int, n: int, b: Border) -> int {
     if i >= 0 && i < n {
         return i
+    }
+    if n <= 0 {
+        return -1
     }
     return match b {
         Constant(_) => -1
@@ -1827,6 +1830,21 @@ fun warp_core<S: Sample>(img: Image<S>, inv: [float64], perspective: bool, ow: i
             }
             let x0 = ifloor(sx) - half + 1
             let y0 = ifloor(sy) - half + 1
+            if n == 2 && x0 >= 0 && y0 >= 0 && x0 + 1 < w && y0 + 1 < h {
+                // bilinear inside the image: the four pixels directly
+                let fx = sx - (x0 as float64)
+                let fy = sy - (y0 as float64)
+                let s00 = (y0 * w + x0) * c
+                let s10 = s00 + c
+                let s01 = s00 + w * c
+                let s11 = s01 + c
+                for k in 0..c {
+                    let top = src[s00 + k] + (src[s10 + k] - src[s00 + k]) * fx
+                    let bottom = src[s01 + k] + (src[s11 + k] - src[s01 + k]) * fx
+                    out[o + k] = top + (bottom - top) * fy
+                }
+                continue
+            }
             var sumx = 0.0
             var sumy = 0.0
             for t in 0..n {
@@ -2183,7 +2201,7 @@ pub fun convolve_sep<S: Sample>(img: Image<S>, kx: [float32], ky: [float32], bor
 // The mean of each (2r + 1) by (2r + 1) square, by running sums: the same
 // work for any `r`.
 pub fun box_blur<S: Sample>(img: Image<S>, r: int, border: Border = Border.Reflect101) -> Image<S> {
-    if r <= 0 {
+    if r <= 0 || img.width == 0 || img.height == 0 {
         return img
     }
     let w = img.width
@@ -2333,7 +2351,7 @@ pub fun gaussian_blur<S: Sample>(img: Image<S>, sigma: float32, border: Border =
 // Pillow's `MedianFilter(2r + 1)` and OpenCV's `medianBlur`.
 #test(Image { width: 3, height: 3, layout: Layout.Gray, data: [1u8, 2u8, 3u8, 4u8, 200u8, 6u8, 7u8, 8u8, 9u8] }, 1, Border.Replicate)[Image { width: 3, height: 3, layout: Layout.Gray, data: [2u8, 3u8, 3u8, 4u8, 6u8, 6u8, 7u8, 8u8, 9u8] }]
 pub fun median(img: Image8, r: int, border: Border = Border.Replicate) -> Image8 {
-    if r <= 0 {
+    if r <= 0 || img.width == 0 || img.height == 0 {
         return img
     }
     let w = img.width
@@ -2775,6 +2793,9 @@ pub fun canny(img: Image8, low: float32, high: float32) -> Image8 {
     let g = gray(img)
     let w = g.width
     let h = g.height
+    if w == 0 || h == 0 {
+        return g
+    }
     // the gray padded by one pixel, replicated
     let pw = w + 2
     var p = list_m.filled(pw * (h + 2), 0)
@@ -3178,7 +3199,7 @@ pub fun components(img: Image8, connectivity: int = 8) -> Components {
                 if n > 0 {
                     l = n
                     if west > 0 && west != n {
-                        let joined = uf.union(n, west)
+                        let _ = uf.union(n, west)
                     }
                 } else if west > 0 {
                     l = west
@@ -3193,7 +3214,7 @@ pub fun components(img: Image8, connectivity: int = 8) -> Components {
                 if ne > 0 {
                     l = ne
                     if left > 0 && left != ne {
-                        let joined = uf.union(ne, left)
+                        let _ = uf.union(ne, left)
                     }
                 } else {
                     l = left
@@ -3518,4 +3539,18 @@ fun quality() {
         Ok(_) => assert(false)
         Err(e) => assert(e == ImageError.Mismatch("ssim needs 11x11 at least, not 4x4"))
     }
+}
+
+// Images without pixels go through every kind of function.
+#test
+fun empty_images() {
+    let e: Image8 = image.new(0, 3, Layout.Rgb, 0u8)
+    assert(gray(e).data.len() == 0 && to_rgb(e).width == 0)
+    assert(median(e, 2).height == 3 && canny(e, 1.0f32, 2.0f32).width == 0)
+    assert(gaussian_blur(e, 1.0f32).data.len() == 0 && box_blur(e, 1).data.len() == 0)
+    assert(sobel(e, 1, 0).data.len() == 0 && erode(e, rect(3, 3)).data.len() == 0)
+    assert(components(e).count == 0 && distance_transform(e).data.len() == 0)
+    assert(pad(e, 1, 1, 1, 1, Border.Wrap).width == 2)
+    assert(warp_affine(e, m32.translation2d(v32.vec2(1.0f32, 0.0f32)), 2, 2, Filter.Bilinear, Border.Wrap).data == list_m.filled(12, 0u8))
+    assert(resize(e, 2, 2).data.len() == 12 && rotate(e, 30.0f32).width == 0)
 }

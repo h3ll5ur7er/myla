@@ -89,5 +89,6 @@ The conventions (D164): operations on built-in types are methods (`s.split(",")`
 | `std.uuid` | [[Language/Standard-library/Uuid]] | UUIDs of RFC 9562, version 4 (random) and 7 (a time), parsing and the canonical text |
 | `std.compress` | [[Language/Standard-library/Compress]] | DEFLATE and the gzip and zlib formats: `inflate`, `gunzip`, `zlib_decompress` and `Read` streams over any stream; `deflate`, `gzip`, `zlib_compress` at levels 0 to 9 and `Write` streams |
 | `std.archive` | [[Language/Standard-library/Archive]] | tar archives read and written (ustar, pax, GNU long names), zip archives read (stored, deflate), safe entry names |
+| `std.imgproc` | [[Language/Standard-library/Imgproc]] | Image processing over `Image<S>`: colour and point operations, Pillow-exact `resize`, warps, separable filters, Huang's median, Sobel and Canny, morphology, Harris and Shi-Tomasi corners, template matching, connected components, the distance transform, MSE, PSNR and SSIM |
 | `std.args` | [[Language/Standard-library/Args]] | Command-line arguments: a declarative spec of flags, options, positionals and subcommands, parsing, the generated help |
 | `std.rt` | [[Language/Standard-library/Rt]] | The runtime in Myla; not for programs |
