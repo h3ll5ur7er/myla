@@ -49,7 +49,7 @@ fun main() {
 | Function | Result |
 | --- | --- |
 | `info(b: [uint8]) -> Result<ImageInfo, ImageError>` | The size and layout from the frame header, without decoding: `Gray` for one component, `Rgb` for three or four; `bit_depth` 8, `frames` 1, `format` `"jpeg"` |
-| `decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError>` | The pixels as stored, `Gray` or `Rgb` (CMYK and YCCK converted, [below](#colour)); an image of more than `max_pixels` pixels is `TooLarge` before anything is allocated |
+| `decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError>` | The pixels as stored, `Gray` or `Rgb` (CMYK and YCCK converted, [below](#cmyk-and-ycck)); an image of more than `max_pixels` pixels is `TooLarge` before anything is allocated |
 | `decode_with_meta(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<(Image8, JpegMeta), ImageError>` | `decode`, and what the file says beside the pixels |
 | `orientation(b: [uint8]) -> int` | EXIF's orientation, 1 to 8, from the markers before the first scan (nothing decoded); 1 if there is none or it is broken |
 | `apply_orientation<S: Sample>(img: Image<S>, o: int) -> Image<S>` | `img` turned as orientation `o` says, so it shows upright, as Pillow's `ImageOps.exif_transpose`: 2 mirrored (`flip_h`), 3 half a turn, 4 flipped (`flip_v`), 5 `transpose`, 6 a quarter clockwise (`rotate90`), 7 transverse, 8 a quarter counter-clockwise (`rotate270`); 1 and anything else unchanged |
@@ -90,31 +90,33 @@ The decoder is libjpeg's, step by step, so a JPEG decodes to the same pixels eve
 - **upsampling** is jdsample.c's "fancy" one: the triangle filter across for 2x1 (`h2v1`), down for 1x2 (`h1v2`) and both for 2x2 (`h2v2`), each output sample 3/4 of the nearer input sample and 1/4 of the further, with libjpeg's rounding (alternately 1 and 2, or 8 and 7 in sixteenths) and the edges repeated; a component 2 samples wide or less is repeated instead, as libjpeg does, and so are the other ratios (4:1:1's 4x1);
 - **colour** is jdcolor.c's fixed point: YCbCr to RGB by its four tables at 16 bits of fraction, the result clamped. A JFIF file is YCbCr; without JFIF, Adobe's transform says (0 RGB, 1 YCbCr), and without either, components named `R`, `G`, `B` are RGB.
 
-<a id="colour"></a>Four components are CMYK (Adobe's transform 0, or no APP14) or YCCK (transform 2), stored inverted as Adobe writes them; YCCK becomes CMYK by libjpeg's conversion, and CMYK becomes RGB as Pillow's CMYK image converts: each of R, G and B is `round(C' * K' / 255)` of the stored (inverted) samples, which is `(255 - C) * (255 - K) / 255` of the uninverted ones.
-
 The corpus of [[MYLA-945]] (`tests/burn/data/images/jpeg/`) holds every sampling factor, progressive files with spectral selection, successive approximation and restart markers, optimised tables, Adobe CMYK and EXIF orientations: each decodes to Pillow's pixels exactly, natively and `--checked`, under qemu-aarch64 and on wasm32 under Node; so do 12-megapixel baseline (4:2:0, 4:4:4) and progressive photos ([below](#speed)). Not covered by the corpus: YCCK, and a progressive file whose scans leave a coefficient not fully known, where libjpeg smooths the blocks (`do_block_smoothing`) and this decoder doesn't.
+
+### CMYK and YCCK
+
+Four components are CMYK (Adobe's transform 0, or no APP14) or YCCK (transform 2, or any other, as libjpeg assumes), stored inverted as Adobe writes them; YCCK becomes CMYK by libjpeg's conversion, and CMYK becomes RGB as Pillow's CMYK image converts: each of R, G and B is `round(C' * K' / 255)` of the stored (inverted) samples, which is `(255 - C) * (255 - K) / 255` of the uninverted ones.
 
 ## Errors
 
-`ImageError` ([[Language/Standard-library/Image#errors]]): `Truncated` (the data ends before the first scan, or inside a segment), `BadSignature` (no SOI), `Unsupported(name)`, `Corrupt(what)` (a bad length, table, frame or scan header, a Huffman code that isn't one, a component or table the scan names that isn't there), `TooLarge(pixels)`. Input is untrusted: every offset and index is checked, so a broken file is an `Err` or an image, never a runtime error (the fuzz runs check it, [below](#tests)).
+`ImageError` ([[Language/Standard-library/Image#Errors]]): `Truncated` (the data ends before the first scan, or inside a segment), `BadSignature` (no SOI), `Unsupported(name)`, `Corrupt(what)` (a bad length, table, frame or scan header, a Huffman code that isn't one, a component or table the scan names that isn't there), `TooLarge(pixels)`. Input is untrusted: every offset and index is checked, so a broken file is an `Err` or an image, never a runtime error (the fuzz runs check it, [below](#tests)).
 
 ## How it works
 
 `Decoder.run` walks the markers from SOI and decodes each scan as it meets it. The frame header allocates every component's plane, padded to whole MCUs (and, for a progressive file, its coefficients). A sequential scan turns each block into samples at once: Huffman decoding with a table of 9 bits ahead (a code of up to 9 bits in one look, longer ones by length, as F.2.2.3), the coefficients dequantised as they are read, then `Idct.block` into the plane (a block whose AC coefficients are all zero is one value, as the full computation gives). A progressive scan adds its bits to the coefficients, which become samples after the last scan. `finish` then upsamples each component a row at a time and converts the colours.
 
-The scans' bit buffer is std.bytes's `jpeg_reader` ([[Language/Standard-library/Bytes#jpeg]]), which undoes the 0xFF 0x00 stuffing and stops at markers; the hot loops keep its `acc` and `n` in local variables and give them back only to call `refill()` ([[Language/Standard-library/Bytes#in-a-hot-loop]]). Loading the bytes by hand in the loop instead measured no faster.
+The scans' bit buffer is std.bytes's `jpeg_reader` ([[Language/Standard-library/Bytes#JPEG]]), which undoes the 0xFF 0x00 stuffing and stops at markers; the hot loops keep its `acc` and `n` in local variables and give them back only to call `refill()` ([[Language/Standard-library/Bytes#In a hot loop]]). Loading the bytes by hand in the loop instead measured no faster.
 
 The tables an encoder needs are at the top of `lib/std/jpeg.my`, for [[MYLA-937]]: the zigzag order (`natural_order`), Annex K's quantisation tables and Huffman tables (`luma_quant`, `chroma_quant`, `std_huffman`), IJG's quality scaling (`quality_scale`, `scaled_quant`), and the colour conversion's fixed-point constants.
 
 ## Speed
 
-Natively (`myla build`, bounds checks on), the fastest of 5 runs on the shared 4-core x86-64 machine (other work running, so runs vary by 10 %), 2026-11-25, beside Pillow 13 (libjpeg-turbo 3.2 with SIMD) on the same files, `benchmarks/images_pillow.py`'s 4000x3000 photo at quality 85:
+Natively (`myla build`, bounds checks on), the fastest of 5 runs, over several runs on the shared 4-core x86-64 machine (other work running, so runs vary by 10 to 15 %), 2026-11-25, beside Pillow 13 (libjpeg-turbo 3.2 with SIMD) on the same files: `benchmarks/images_pillow.py`'s 4000x3000 photo saved by Pillow at quality 85 (`benchmarks/images_std.my` times a JPEG file given as an argument):
 
 | File | std.jpeg | Pillow | Ratio |
 | --- | --- | --- | --- |
-| baseline 4:2:0, 3.3 MB | 418 ms | 74 ms | 5.7 |
-| baseline 4:4:4, 3.5 MB | 470 ms | 77 ms | 6.1 |
-| progressive 4:2:0, 2.9 MB | 668 ms | 177 ms | 3.8 |
+| baseline 4:2:0, 3.3 MB | 400 to 430 ms | 74 ms | 5.5 |
+| baseline 4:4:4, 3.5 MB | 465 to 500 ms | 77 ms | 6.2 |
+| progressive 4:2:0, 2.9 MB | 650 to 780 ms | 177 ms | 3.9 |
 
 Where the time of the baseline 4:2:0 decode goes (phases timed with std.time): the scan about 225 ms (allocating the planes 45, Huffman decoding about 100, the IDCT about 80), then `finish` about 210 ms (allocating the output 85, upsampling 60, colour conversion 65). A third of the whole is `list.filled`, which pushes an element at a time ([[MYLA-949]]): 18 MB of planes and 36 MB of output here, and the 18 million coefficients of a progressive file (60 ms more). The progressive decode's scans take about 330 ms (their Huffman decoding about 225) and its IDCT 145.
 
