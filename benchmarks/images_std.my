@@ -2,7 +2,9 @@
 // doing the same work (benchmarks/images_pillow.py, which makes the same
 // picture). `build/myla build benchmarks/images_std.my -o /tmp/images &&
 // /tmp/images` (natively: the interpreter would take minutes); `/tmp/images
-// 400 300` for a smaller picture.
+// 400 300` for a smaller picture. A JPEG file among the arguments is
+// decoded too (until MYLA-937's encoder makes one: the picture saved by
+// Pillow at quality 85, 4:2:0, as images_pillow.py does).
 //
 // The picture is a 12-MP (4000x3000) RGB "photo": gradients, two discs and
 // a little noise from a hash of x and y, so it compresses as a photo does
@@ -18,7 +20,8 @@
 //     png encode (level 6), 12 MP            3076 ms   MYLA-935: png.encode(img)
 //     png decode, 12 MP                       196 ms   MYLA-935: png.decode(b)
 //     jpeg encode (q85, 4:2:0), 12 MP          44 ms   MYLA-937: jpeg.encode(img, 85)
-//     jpeg decode, 12 MP                       77 ms   MYLA-936: jpeg.decode(b)
+//     jpeg decode, 12 MP                       77 ms   MYLA-936: jpeg.decode(b): 418 ms (2026-11-25;
+//                                                       a third of it list.filled, MYLA-949)
 //     resize 12 MP to 1155x866, bilinear       50 ms   MYLA-941: imgproc.resize(img, 1155, 866, Filter.Bilinear)
 //     resize 12 MP to 1155x866, box (area)     31 ms   MYLA-941: Filter.Area
 //     resize 12 MP to 1155x866, lanczos       125 ms   MYLA-941: Filter.Lanczos3
@@ -32,7 +35,9 @@
 
 import std.bench as bench
 from std.bench import Report
+import std.fs as fs
 import std.image as image
+import std.jpeg as jpeg
 from std.image import Image8
 import std.num as num
 import std.process as process
@@ -120,12 +125,30 @@ fun size_of(argv: [str]) -> (int, int) {
     return (4000, 3000)
 }
 
+// The arguments that aren't a JPEG file's name, and the first that is ("" if
+// none).
+#test(["prog", "400", "300"])[(["prog", "400", "300"], "")]
+#test(["prog", "photo.jpg", "400", "300"])[(["prog", "400", "300"], "photo.jpg")]
+fun jpeg_arg(argv: [str]) -> ([str], str) {
+    var rest: [str] = []
+    var path = ""
+    for a in argv {
+        if (a.ends_with(".jpg") || a.ends_with(".jpeg")) && path.len() == 0 {
+            path = a
+        } else {
+            rest.push(a)
+        }
+    }
+    return (rest, path)
+}
+
 fun show(r: Report) {
     print(r.line())
 }
 
 fun main() {
-    let (w, h) = size_of(process.args())
+    let (argv, jpeg_path) = jpeg_arg(process.args())
+    let (w, h) = size_of(argv)
     let img = photo(w, h)
     print(f"{w}x{h} RGB, {img.data.len()} samples")
     show(bench.run_n(f"make the {w}x{h} picture", 3, () => photo(w, h)))
@@ -135,6 +158,18 @@ fun main() {
     // MYLA-936, MYLA-937: let jpeg_bytes = jpeg.encode(img, 85)
     //     show(bench.run_n("jpeg encode (q85, 4:2:0)", 3, () => jpeg.encode(img, 85)))
     //     show(bench.run_n("jpeg decode", 3, () => jpeg.decode(jpeg_bytes)))
+    if jpeg_path.len() > 0 {
+        match fs.read_bytes(jpeg_path) {
+            Ok(b) => {
+                match jpeg.info(b) {
+                    Ok(i) => print(f"{jpeg_path}: {i.width}x{i.height}, {b.len()} bytes")
+                    Err(e) => print(f"{jpeg_path}: {e}")
+                }
+                show(bench.run_n("jpeg decode", 5, () => jpeg.decode(b)))
+            }
+            Err(e) => print(f"{jpeg_path}: {e}")
+        }
+    }
     // MYLA-941: resize to 1155x866 (bilinear, area, lanczos), then at
     //     1024x1024: gaussian_blur(2.0f32), and gray |> canny(50.0f32, 150.0f32)
     // MYLA-943: the paragraph of images_pillow.py at 16 px with

@@ -76,6 +76,16 @@ EXPECTED = {
     "lzw_and_packbits.my": ("GIF LZW: 256 bytes in 72, 74 as sub-blocks\ndecoded: true\nTIFF LZW: 110 bytes\n"
                             "at most 100 bytes: output longer than max_output\nPackBits: 201 bytes\n"
                             "one byte short: compressed data ends too early\n"),
+    "jpeg_decode.my": (
+        'the arrow: 16x8 rgb\norientation 6, 300x300 dots per inch\n'
+        '     .     =    \n           ==.  \n          .===. \n %%%%%%%%%%==== \n'
+        ' %%%%%%%%%%==== \n          .===. \n           ==.  \n     .     =.   \n'
+        "upright: 8x16, the tip's colour #d5782aff\n        \n   %%   \n   %%   \n"
+        '   %%   \n   %%   \n.  %%  .\n   %%   \n   %%   \n   %%   \n   %%   \n'
+        '  .%%.  \n========\n.====== \n .====. \n  .==.  \n        \n'
+        'cut in the scan: still 16x8, as libjpeg reads it\n'
+        'cut before the scan: truncated input\n'
+    ),
     "draw_chart.my": (
         '                                                \n'
         '          @@@@  @@@  @     @@@@@  @@@@          \n'

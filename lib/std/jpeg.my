@@ -1125,9 +1125,9 @@ impl Decoder {
                     let qo = ci * 64
                     // DC: a difference from the last block's
                     if n < 32 {
-                        let (a, k) = self.fill(acc, n)
-                        acc = a
-                        n = k
+                        let (filled, bits) = self.fill(acc, n)
+                        acc = filled
+                        n = bits
                     }
                     let dt = dcl[b]
                     var sym = look[dt * 512 + (((acc >> ((n - 9) as uint64)) & 511u64) as int)]
@@ -1159,9 +1159,9 @@ impl Decoder {
                     var kmax = 0
                     while k < 64 {
                         if n < 32 {
-                            let (a, k) = self.fill(acc, n)
-                            acc = a
-                            n = k
+                            let (filled, bits) = self.fill(acc, n)
+                            acc = filled
+                            n = bits
                         }
                         var rs = look[at * 512 + (((acc >> ((n - 9) as uint64)) & 511u64) as int)]
                         if rs != 0 {
@@ -1267,9 +1267,9 @@ impl Decoder {
                     if ss == 0 && refine {
                         // DC refinement: the next bit of each block's DC
                         if n < 32 {
-                            let (a, k) = self.fill(acc, n)
-                            acc = a
-                            n = k
+                            let (filled, bits) = self.fill(acc, n)
+                            acc = filled
+                            n = bits
                         }
                         n -= 1
                         if ((acc >> (n as uint64)) & 1u64) != 0u64 {
@@ -1280,9 +1280,9 @@ impl Decoder {
                     if ss == 0 {
                         // DC first: a difference, shifted by Al
                         if n < 32 {
-                            let (a, k) = self.fill(acc, n)
-                            acc = a
-                            n = k
+                            let (filled, bits) = self.fill(acc, n)
+                            acc = filled
+                            n = bits
                         }
                         var sym = look[t * 512 + (((acc >> ((n - 9) as uint64)) & 511u64) as int)]
                         if sym != 0 {
@@ -1322,9 +1322,9 @@ impl Decoder {
                         var k = ss
                         while k <= se {
                             if n < 32 {
-                                let (a, k) = self.fill(acc, n)
-                                acc = a
-                                n = k
+                                let (filled, bits) = self.fill(acc, n)
+                                acc = filled
+                                n = bits
                             }
                             var rs = look[t * 512 + (((acc >> ((n - 9) as uint64)) & 511u64) as int)]
                             if rs != 0 {
@@ -1369,9 +1369,9 @@ impl Decoder {
                     if eobrun == 0 {
                         while k <= se {
                             if n < 32 {
-                                let (a, k) = self.fill(acc, n)
-                                acc = a
-                                n = k
+                                let (filled, bits) = self.fill(acc, n)
+                                acc = filled
+                                n = bits
                             }
                             var rs = look[t * 512 + (((acc >> ((n - 9) as uint64)) & 511u64) as int)]
                             if rs != 0 {
@@ -1408,9 +1408,9 @@ impl Decoder {
                                 let cv = coef[z] as int
                                 if cv != 0 {
                                     if n < 1 {
-                                        let (a, k) = self.fill(acc, n)
-                                        acc = a
-                                        n = k
+                                        let (filled, bits) = self.fill(acc, n)
+                                        acc = filled
+                                        n = bits
                                     }
                                     n -= 1
                                     if ((acc >> (n as uint64)) & 1u64) != 0u64 && (cv & p1) == 0 {
@@ -1437,9 +1437,9 @@ impl Decoder {
                             let cv = coef[z] as int
                             if cv != 0 {
                                 if n < 1 {
-                                    let (a, k) = self.fill(acc, n)
-                                    acc = a
-                                    n = k
+                                    let (filled, bits) = self.fill(acc, n)
+                                    acc = filled
+                                    n = bits
                                 }
                                 n -= 1
                                 if ((acc >> (n as uint64)) & 1u64) != 0u64 && (cv & p1) == 0 {
