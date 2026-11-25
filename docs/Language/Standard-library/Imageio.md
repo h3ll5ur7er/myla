@@ -128,13 +128,16 @@ So a lossless format gives back the same pixels, but not always in the same layo
 
 ## Cost
 
-std.imageio imports all seven codecs, so it costs a program more to check and to build than one codec. A program that loads an image and prints its size (`imageio.load`), against the same through `png.decode` alone and against `print("hi")`, on a shared 4-core x86-64 machine (2026-11-25, the best of seven runs, `build/myla` with the library as files, `--stdlib lib`):
+std.imageio imports all seven codecs, so it costs a program more to check and to build than one codec does. A program that loads an image and prints its size through `imageio.load`, against the same through `png.decode` alone, one that imports the seven codecs itself (and calls each one's `info`), and `print("hi")`, on a shared 4-core x86-64 machine (2026-11-25, the best of seven runs of `build/myla` with the library it embeds):
 
 | Program | `myla check` | `myla build` | Binary |
 | --- | --- | --- | --- |
-| `print("hi")` | 8 ms | 84 ms | 24 KB |
-| `import std.png` | 33 ms | 181 ms | 109 KB |
-| `import std.imageio` | 83 ms | 405 ms | 353 KB |
+| `print("hi")` | 5 ms | 82 ms | 24 KB |
+| `import std.png` | 35 ms | 180 ms | 108 KB |
+| the seven codecs | 58 ms | | |
+| `import std.imageio` | 81 ms | 426 ms | 352 KB |
+
+With the library read from its files (`--stdlib lib`) the times are the same within a few milliseconds (8, 33 and 83 ms to check, 84, 181 and 405 ms to build). So `check` costs about 45 ms more than with std.png alone, most of it the other six codecs, and the binary holds every decoder and encoder: a program that reads one known format and cares about either should import that codec.
 
 ## Tests
 

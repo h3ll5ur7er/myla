@@ -74,10 +74,11 @@ impl Format {
         }
     }
 
-    // Whether `encode` keeps every sample of any image: false for JPEG,
+    // Whether `encode` keeps every pixel of any 8-bit image: false for JPEG,
     // and for GIF, which keeps 256 colours (and alpha only as full or none).
-    // BMP and QOI give a gray image back as RGB, BMP drops an alpha that is
-    // all opaque, and 16 bits are written at 8 by all but PNG, TIFF and PNM.
+    // The layout may come back another: PNG writes gray pixels as gray and
+    // drops an alpha that is all opaque, BMP and QOI write gray as RGB. 16
+    // bits are written at 8 by all but PNG, TIFF and PNM.
     #test(Format.Png)[true]
     #test(Format.Gif)[false]
     #test(Format.Jpeg)[false]
