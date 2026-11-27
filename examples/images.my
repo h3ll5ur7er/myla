@@ -1,0 +1,96 @@
+// Pictures with std.image (MYLA-959): a little scene drawn pixel by pixel,
+// converted to gray and printed as text, reduced to four colours, turned,
+// and previewed in colour by `image.ansi` (give the program an argument to
+// see the preview in a terminal).
+
+import std.image as image
+from std.image import Image8, Layout, Color
+import std.process as process
+
+// The colour of the pixel `(x, y)` of a `size` by `size` scene: a sky that
+// lightens towards the horizon, a sun, and the sea below.
+#test(0, 0, 16)[Color { r: 30u8, g: 60u8, b: 170u8, a: 255u8 }]
+#test(11, 4, 16)[Color { r: 255u8, g: 220u8, b: 90u8, a: 255u8 }]
+#test(0, 15, 16)[Color { r: 10u8, g: 40u8, b: 90u8, a: 255u8 }]
+fun scene_color(x: int, y: int, size: int) -> Color {
+    let horizon = size * 5 / 8
+    if y >= horizon {
+        return image.rgb(10u8, 40u8, 90u8)
+    }
+    let dx = x - size * 11 / 16
+    let dy = y - size / 4
+    if dx * dx + dy * dy <= size * size / 32 {
+        return image.rgb(255u8, 220u8, 90u8)
+    }
+    let t = (y as float32) / (horizon as float32)
+    return image.rgb(30u8, 60u8, 170u8).lerp(image.rgb(250u8, 190u8, 150u8), t)
+}
+
+// The scene as an image.
+#test(2)[image.from_data<uint8>(2, 2, Layout.Rgb, [30u8, 60u8, 170u8, 255u8, 220u8, 90u8, 10u8, 40u8, 90u8, 10u8, 40u8, 90u8]).expect("")]
+fun scene(size: int) -> Image8 {
+    var img: Image8 = image.new(size, size, Layout.Rgb, 0u8)
+    for y in 0..size {
+        for x in 0..size {
+            img.set_color(x, y, scene_color(x, y, size))
+        }
+    }
+    return img
+}
+
+// A gray level as a character, dark to light.
+#test(0u8)[" "]
+#test(128u8)["+"]
+#test(255u8)["@"]
+fun shade(v: uint8) -> str {
+    let ramp = " .:-=+*#%@"
+    let i = (v as int) * ramp.len() / 256
+    return ramp[i:i + 1]
+}
+
+// A gray image as lines of text, a character a pixel.
+#test(image.from_data<uint8>(2, 1, Layout.Gray, [0u8, 255u8]).expect(""))[[" @"]]
+fun text_lines(img: Image8) -> [str] {
+    var out: [str] = []
+    for y in 0..img.height {
+        var line = ""
+        for v in img.row(y) {
+            line = line + shade(v)
+        }
+        out.push(line)
+    }
+    return out
+}
+
+fun main() {
+    let img = scene(16)
+    for line in text_lines(img.convert(Layout.Gray)) {
+        print(line)
+    }
+
+    // the sun's corner of the sky, a quarter turn clockwise
+    let corner = img.crop(image.rect(8, 0, 8, 8)).rotate90()
+    print(f"corner {corner.width}x{corner.height}, top left {corner.color_at(0, 0)}")
+
+    // four colours, dithered: the palette, and each pixel's index into it
+    let q = image.quantize(img, 4)
+    var names: [str] = []
+    for c in q.palette {
+        names.push(f"{c}")
+    }
+    print(f"palette {names.join(" ")}")
+    for y in 0..q.height {
+        var line = ""
+        for x in 0..q.width {
+            line = line + f"{q.indices[y * q.width + x]}"
+        }
+        print(line)
+    }
+
+    // two pixels a character cell in a truecolor terminal
+    let preview = image.ansi(img, 16)
+    print(f"preview: {preview.split("\n").len() - 1} lines of 16 cells")
+    if process.args().len() > 1 {
+        print(preview)
+    }
+}

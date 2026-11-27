@@ -22,10 +22,10 @@ import tempfile
 import unittest
 
 from ._golden import answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, assemble, linux_only, shown
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-from ._tools import STDLIB_ROOT, myla_tool, selfhost_tool
+from ._tools import EXE, STDLIB_ROOT, myla_tool, selfhost_tool
 from ._lsp_scenarios import (LspScenarios, LspRequestHelpers, LspRequestScenarios, ProjectScenarios,
                              WorkspaceScanScenarios, _Client, _uri, rng)
 
@@ -35,14 +35,13 @@ _TMP = tempfile.TemporaryDirectory()
 
 def _self_hosted_build() -> str:
     """The server compiled by the self-hosted compiler (once per run)."""
-    binary = os.path.join(_TMP.name, "myla-lsp")
+    binary = os.path.join(_TMP.name, "myla-lsp" + EXE)
     if not os.path.exists(binary):
         asm = subprocess.run([selfhost_tool("gen_main"), os.path.join(_REPO, "tools", "lsp", "main.my"),
                               STDLIB_ROOT], capture_output=True, text=True, check=True)
         with open(binary + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
-        subprocess.run(["as", "--64", "-o", binary + ".o", binary + ".s"], check=True)
-        subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
+        assemble(binary + ".s", binary)
     return binary
 
 
@@ -82,6 +81,7 @@ class TestMylaLsp(LspScenarios, unittest.TestCase):
         self.client.response(rid)                     # no other diagnostics came first
         self.assertTrue(self.client.messages.empty())
 
+    @linux_only("reads the server's resident size in /proc")
     def test_memory_stays_flat(self):
         # std/json.my matches on Option and Result throughout: checking it
         # leaked about 7 kB a time before loops released what they iterate on
@@ -779,7 +779,8 @@ class TestResolutionCorpus(unittest.TestCase):
         self.assertEqual(uses, ["2:4-5", "3:10-11"])
 
     def _resolve(self, *files: str) -> dict[str, list[str]]:
-        """`lsp --resolve`'s lines for each of `files`."""
+        """`lsp --resolve`'s lines for each of `files`, by the path as it
+        prints it (`shown`: with `/` on Windows, MYLA-926)."""
         out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", STDLIB_ROOT, "--resolve",
                               *files], capture_output=True, text=True, check=True).stdout
         sections = {}
@@ -811,7 +812,7 @@ class TestResolutionCorpus(unittest.TestCase):
                 self.assertNotIn(pos, uses, line)
                 uses.add(pos)
                 if parts[-1] not in ("global", "module", "field", "method", "variant"):
-                    self.assertEqual(parts[4], path, line)
+                    self.assertEqual(parts[4], shown(path), line)
                     dl, dc = parts[5].split(":")
                     # a bound may name a type parameter declared after
                     # it in the same list, `<I: Iterator<T>, T>` (D171)
@@ -844,11 +845,11 @@ class TestResolutionCorpus(unittest.TestCase):
         files = _corpus()
         self.assertGreater(len(files), 50)
         sections = self._resolve(*files)
-        self.assertEqual(sorted(sections), files)
+        self.assertEqual(sorted(sections), sorted(shown(f) for f in files))
         resolved_total = 0
         for path in files:
             with self.subTest(file=os.path.relpath(path, _REPO)):
-                resolved_total += self._resolves(path, sections[path])
+                resolved_total += self._resolves(path, sections[shown(path)])
         self.assertGreater(resolved_total, 30000)
 
     def test_a_member_is_no_global(self) -> None:
@@ -865,14 +866,33 @@ class TestResolutionCorpus(unittest.TestCase):
             path = os.path.join(tmp, "members.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(source)
-            lines = self._resolve(path)[path]
+            lines = self._resolve(path)[shown(path)]
             defs = sorted(line for line in lines if line.startswith("def ") and line.split()[2] not in ("param", "local"))
             self.assertEqual(defs, ["def 0:11-17 field format", "def 0:7-8 global T", "def 12:4-5 global f",
                                     "def 2:11-12 field n", "def 2:7-8 global U", "def 5:8-14 method format",
                                     "def 8:5-6 global E", "def 9:4-5 variant A"])
-            self.assertIn("use 13:16-22 format -> " + path + " 0:11 field", lines)    # the literal's field
-            self.assertIn("use 15:22-23 A -> " + path + " 9:4 variant", lines)        # the pattern's variant
+            self.assertIn("use 13:16-22 format -> " + shown(path) + " 0:11 field", lines)    # the literal's field
+            self.assertIn("use 15:22-23 A -> " + shown(path) + " 9:4 variant", lines)        # the pattern's variant
             self.assertEqual(self._resolves(path, lines), 24)
+
+    def test_aliases_defaults_and_wildcards(self) -> None:
+        # MYLA-955 (found by D313's image modules): an import's alias is a use
+        # of its module, a parameter's default is resolved (as the caller's
+        # expression), and `_` binds nothing, so a `_` pattern needn't resolve
+        source = ("import std.option as option\n\nenum Mode {\n    Fast\n    Slow\n}\n\n"
+                  "struct S { option: int }\n\n"
+                  "fun f(n: int, m: Mode = Mode.Fast) -> int {\n    var c = 0\n"
+                  "    for _ in 0..n {\n        c += 1\n    }\n"
+                  "    return match m {\n        Fast => c\n        _ => 0\n    }\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "aliases.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            lines = self._resolve(path)[shown(path)]
+            self.assertTrue(any(line.startswith("use 0:21-27 option -> ") and line.endswith(" module") for line in lines), lines)
+            self.assertIn("use 9:24-28 Mode -> " + shown(path) + " 2:5 global", lines)    # the default's type name
+            self.assertFalse([line for line in lines if line.split()[-1] == "_"], lines)
+            self._resolves(path, lines)
 
     def test_members_agree_with_the_checker(self) -> None:
         """Where the server resolves `x.f` or `x.m(…)` in an example, it is the
@@ -895,12 +915,12 @@ class TestResolutionCorpus(unittest.TestCase):
             # are where they were
             for line, column, member, kind, decl_line, decl_column in answered_or_recorded(path, _checked_members)[0]:
                 checked += 1
-                found = uses.get((path, line - 1, column - 1))
+                found = uses.get((shown(path), line - 1, column - 1))
                 if found is None:
                     continue
                 resolved += 1
                 with self.subTest(file=os.path.basename(path), line=line, member=member):
-                    self.assertEqual(found[0], path)
+                    self.assertEqual(found[0], shown(path))
                     if kind == "field":
                         self.assertEqual((found[1], found[2]), (decl_line, decl_column))
                     else:
@@ -967,6 +987,10 @@ class SemanticTokenScenarios:
             fh.write(text)
         c = _Client([self.binary, "--stdlib", STDLIB_ROOT])
         self.addCleanup(c.close)
+        # a second more per 100 KB: selfhost/embedded_std.my, 5 MB with the
+        # image modules, took over 10 s on aarch64 beside the other suites
+        # (1.3 s on x86-64, MYLA-929; MYLA-956)
+        c.TIMEOUT = _Client.TIMEOUT + len(text) // 100_000
         rid = c.send("initialize", {"processId": None, "rootUri": _uri(root), "capabilities": {}}, request=True)
         caps = c.response(rid)["result"]["capabilities"]
         self.assertEqual(caps["semanticTokensProvider"]["legend"]["tokenTypes"], LEGEND_TYPES)
@@ -1078,6 +1102,7 @@ def _node_strips_types() -> bool:
 _EXTENSION = os.path.join(_REPO, "vscode-extension", "myla")
 
 
+@linux_only("the extension's choice is checked with POSIX paths (`/r/build/myla-lsp`) and links")
 @unittest.skipUnless(CAN_BUILD_NATIVE and _node_strips_types(), "needs a native toolchain and node 22.6+")
 class TestExtensionStartsTheServer(unittest.TestCase):
     """The VS Code extension's server command (`vscode-extension/myla/src/

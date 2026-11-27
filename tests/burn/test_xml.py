@@ -45,7 +45,7 @@ import tempfile
 import unittest
 import xml.parsers.expat
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -451,14 +451,13 @@ class XmlAgainstReferences(unittest.TestCase):
             fh.write(DRIVER)
         gen = selfhost_tool("gen_main")
         asm = subprocess.run([gen, path, STDLIB_ROOT], capture_output=True, text=True, check=True)
-        native = os.path.join(cls.tmp.name, "native")
+        native = os.path.join(cls.tmp.name, "native" + EXE)
         with open(native + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
-        subprocess.run(["as", "--64", "-o", native + ".o", native + ".s"], check=True)
-        subprocess.run(["ld", "-o", native, native + ".o"], check=True)
+        assemble(native + ".s", native)   # for the machine (MYLA-926: Windows' too)
         cls.native = [native]
         # the same driver built checked, where an integer overflow is an error (D184, MYLA-550)
-        checked = os.path.join(cls.tmp.name, "checked")
+        checked = os.path.join(cls.tmp.name, "checked" + EXE)
         subprocess.run([selfhost_tool("main"), "build", path, "-o", checked, "--stdlib", STDLIB_ROOT, "--checked"],
                        capture_output=True, check=True)
         cls.checked = [checked]

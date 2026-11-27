@@ -1,0 +1,345 @@
+// std.qoi: the Quite OK Image format (MYLA-960), the whole specification
+// (qoiformat.org, version 1.0): a 14-byte header, then each pixel as a run
+// of the one before, an entry of a table of 64 recent colours, a small
+// difference, a luma difference, or the colour itself; 8 bytes end the file.
+// Lossless and fast, for output when PNG's size doesn't matter.
+//
+// The decoder gives Rgb for 3 channels and Rgba for 4, and doesn't insist on
+// the end marker; the encoder writes what the reference encoder (qoi.h)
+// writes, byte for byte. Every offset is checked: a short or broken file is
+// an `Err`, never a runtime error.
+
+import std.image as image
+from std.image import Image, Image8, ImageInfo, ImageError, Layout
+import std.bytes as bytes
+import std.list as list_m // `filled`
+import std.option as option_m // `expect` in the tests
+
+const OP_INDEX: uint8 = 0x00
+const OP_DIFF: uint8 = 0x40
+const OP_LUMA: uint8 = 0x80
+const OP_RUN: uint8 = 0xC0
+const OP_RGB: uint8 = 0xFE
+const OP_RGBA: uint8 = 0xFF
+
+// The header: size, channels (3 or 4), the colour space (0 sRGB with linear
+// alpha, 1 all linear: informative only).
+struct Header {
+    width: int,
+    height: int,
+    channels: int,
+    colorspace: int,
+}
+
+// The header of `b`; past 2^31 - 1 a side is `TooLarge`.
+fun header(b: [uint8]) -> Result<Header, ImageError> {
+    var r = bytes.reader(b)
+    let magic = [113u8, 111u8, 105u8, 102u8] // "qoif"
+    for i in 0..4 {
+        if i >= b.len() {
+            return Err(ImageError.Truncated)
+        }
+        if b[i] != magic[i] {
+            return Err(ImageError.BadSignature)
+        }
+    }
+    r.pos = 4
+    let Some(w) = r.u32_be() else {
+        return Err(ImageError.Truncated)
+    }
+    let Some(h) = r.u32_be() else {
+        return Err(ImageError.Truncated)
+    }
+    let Some(ch) = r.u8() else {
+        return Err(ImageError.Truncated)
+    }
+    let Some(cs) = r.u8() else {
+        return Err(ImageError.Truncated)
+    }
+    if w > 0x7FFFFFFFu32 || h > 0x7FFFFFFFu32 {
+        let px = (w as uint64) * (h as uint64)
+        return Err(ImageError.TooLarge(if px > 0x7FFFFFFFFFFFFFFFu64 { 0x7FFFFFFFFFFFFFFFi64 } else { px as int64 }))
+    }
+    if ch != 3u8 && ch != 4u8 {
+        return Err(ImageError.Corrupt(f"{ch} channels"))
+    }
+    if cs > 1u8 {
+        return Err(ImageError.Corrupt(f"colour space {cs}"))
+    }
+    return Ok(Header { width: w as int, height: h as int, channels: ch as int, colorspace: cs as int })
+}
+
+// The layout of `channels`: Rgb or Rgba.
+fun layout_of(channels: int) -> Layout {
+    return if channels == 4 { Layout.Rgba } else { Layout.Rgb }
+}
+
+// What `b` holds, from its header alone: size, Rgb or Rgba, 8 bits, one
+// frame.
+#test([113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 3u8, 0u8, 0u8, 0u8, 2u8, 4u8, 0u8])[Ok(ImageInfo { width: 3, height: 2, layout: Layout.Rgba, bit_depth: 8, frames: 1, format: "qoi" })]
+#test([113u8, 111u8, 105u8, 103u8])[Err(ImageError.BadSignature)]
+#test([113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 3u8, 0u8, 0u8, 0u8, 2u8, 4u8])[Err(ImageError.Truncated)]
+#test([113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 3u8, 0u8, 0u8, 0u8, 2u8, 5u8, 0u8])[Err(ImageError.Corrupt("5 channels"))]
+pub fun info(b: [uint8]) -> Result<ImageInfo, ImageError> {
+    let h = header(b)?
+    return Ok(ImageInfo { width: h.width, height: h.height, layout: layout_of(h.channels), bit_depth: 8, frames: 1, format: "qoi" })
+}
+
+// The image in `b`, Rgb or Rgba as its header says. More than `max_pixels`
+// pixels is `TooLarge`, before anything is allocated.
+#test([113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8, 1u8, 3u8, 0u8, 254u8, 10u8, 20u8, 30u8, 0x5Fu8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8], 100i64)[Ok(Image { width: 2, height: 1, layout: Layout.Rgb, data: [10u8, 20u8, 30u8, 9u8, 21u8, 31u8] })]
+#test([113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 3u8, 0u8, 0u8, 0u8, 1u8, 4u8, 0u8, 255u8, 1u8, 2u8, 3u8, 4u8, 0xC1u8], 100i64)[Ok(Image { width: 3, height: 1, layout: Layout.Rgba, data: [1u8, 2u8, 3u8, 4u8, 1u8, 2u8, 3u8, 4u8, 1u8, 2u8, 3u8, 4u8] })]
+#test([113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8, 1u8, 3u8, 0u8, 254u8, 10u8, 20u8], 100i64)[Err(ImageError.Truncated)]
+#test([113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 0u8, 3u8, 0u8], 100i64)[Err(ImageError.TooLarge(65536i64))]
+pub fun decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError> {
+    let h = header(b)?
+    image.check_size(h.width, h.height, h.channels, max_pixels)?
+    let alpha = h.channels == 4
+    let n = h.width * h.height
+    var out = list_m.filled(n * h.channels, 0u8)
+    var o = 0
+    // the recent colours, each as red << 24 | green << 16 | blue << 8 | alpha
+    var table = list_m.filled(64, 0u32)
+    var r = 0u8
+    var g = 0u8
+    var bl = 0u8
+    var a = 255u8
+    var p = 14
+    var done = 0
+    let end = b.len()
+    while done < n {
+        if p >= end {
+            return Err(ImageError.Truncated)
+        }
+        let op = b[p]
+        var run = 1
+        if op == OP_RGB {
+            if p + 4 > end {
+                return Err(ImageError.Truncated)
+            }
+            r = b[p + 1]
+            g = b[p + 2]
+            bl = b[p + 3]
+            p += 4
+        } else if op == OP_RGBA {
+            if p + 5 > end {
+                return Err(ImageError.Truncated)
+            }
+            r = b[p + 1]
+            g = b[p + 2]
+            bl = b[p + 3]
+            a = b[p + 4]
+            p += 5
+        } else {
+            let tag = op & 0xC0u8
+            if tag == OP_INDEX {
+                let v = table[op as int]
+                r = (v >> 24u32) as uint8
+                g = ((v >> 16u32) & 255u32) as uint8
+                bl = ((v >> 8u32) & 255u32) as uint8
+                a = (v & 255u32) as uint8
+                p += 1
+            } else if tag == OP_DIFF {
+                r = r.wrapping_add(((op >> 4u8) & 3u8).wrapping_sub(2u8))
+                g = g.wrapping_add(((op >> 2u8) & 3u8).wrapping_sub(2u8))
+                bl = bl.wrapping_add((op & 3u8).wrapping_sub(2u8))
+                p += 1
+            } else if tag == OP_LUMA {
+                if p + 2 > end {
+                    return Err(ImageError.Truncated)
+                }
+                let dg = (op & 0x3Fu8).wrapping_sub(32u8)
+                let next = b[p + 1]
+                r = r.wrapping_add(dg.wrapping_add((next >> 4u8).wrapping_sub(8u8)))
+                g = g.wrapping_add(dg)
+                bl = bl.wrapping_add(dg.wrapping_add((next & 15u8).wrapping_sub(8u8)))
+                p += 2
+            } else {
+                run = ((op & 0x3Fu8) as int) + 1
+                p += 1
+            }
+        }
+        let px = ((r as uint32) << 24u32) | ((g as uint32) << 16u32) | ((bl as uint32) << 8u32) | (a as uint32)
+        table[((r as int) * 3 + (g as int) * 5 + (bl as int) * 7 + (a as int) * 11) & 63] = px
+        if run > n - done {
+            run = n - done
+        }
+        if alpha {
+            for i in 0..run {
+                out[o] = r
+                out[o + 1] = g
+                out[o + 2] = bl
+                out[o + 3] = a
+                o += 4
+            }
+        } else {
+            for i in 0..run {
+                out[o] = r
+                out[o + 1] = g
+                out[o + 2] = bl
+                o += 3
+            }
+        }
+        done += run
+    }
+    return Ok(Image { width: h.width, height: h.height, layout: layout_of(h.channels), data: out })
+}
+
+// `img` as a QOI file, as the reference encoder writes it: 3 channels for
+// gray or RGB, 4 for a layout with alpha, colour space 0 (sRGB, linear
+// alpha). Gray is written as RGB.
+#test(image.from_data<uint8>(1, 1, Layout.Rgb, [10u8, 20u8, 30u8]).expect(""))[[113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 3u8, 0u8, 254u8, 10u8, 20u8, 30u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8]]
+pub fun encode(img: Image8) -> [uint8] {
+    let alpha = img.layout.has_alpha()
+    let src = if img.layout.is_color() { img } else { img.convert(if alpha { Layout.Rgba } else { Layout.Rgb }) }
+    let ch = src.layout.channels()
+    var hw = bytes.writer()
+    hw.put_str("qoif")
+    hw.put_u32_be(src.width as uint32)
+    hw.put_u32_be(src.height as uint32)
+    hw.put_u8(ch as uint8)
+    hw.put_u8(0u8)
+    var out = hw.finish()
+    // the recent colours, packed as the decoder packs them
+    var table = list_m.filled(64, 0u32)
+    let d = src.data
+    var pr = 0u8
+    var pg = 0u8
+    var pb = 0u8
+    var pa = 255u8
+    var run = 0
+    let n = src.width * src.height
+    var i = 0
+    for px in 0..n {
+        let r = d[i]
+        let g = d[i + 1]
+        let bl = d[i + 2]
+        let a = if alpha { d[i + 3] } else { 255u8 }
+        i += ch
+        if r == pr && g == pg && bl == pb && a == pa {
+            run += 1
+            if run == 62 || px == n - 1 {
+                out.push(OP_RUN | ((run - 1) as uint8))
+                run = 0
+            }
+            continue
+        }
+        if run > 0 {
+            out.push(OP_RUN | ((run - 1) as uint8))
+            run = 0
+        }
+        // the colour's slot in the table: its hash
+        let s = ((r as int) * 3 + (g as int) * 5 + (bl as int) * 7 + (a as int) * 11) & 63
+        let v = ((r as uint32) << 24u32) | ((g as uint32) << 16u32) | ((bl as uint32) << 8u32) | (a as uint32)
+        if table[s] == v {
+            out.push(OP_INDEX | (s as uint8))
+        } else {
+            table[s] = v
+            if a == pa {
+                let vr = r.wrapping_sub(pr) as int8 as int
+                let vg = g.wrapping_sub(pg) as int8 as int
+                let vb = bl.wrapping_sub(pb) as int8 as int
+                let vgr = vr - vg
+                let vgb = vb - vg
+                if vr >= -2 && vr <= 1 && vg >= -2 && vg <= 1 && vb >= -2 && vb <= 1 {
+                    out.push(OP_DIFF | (((vr + 2) << 4) | ((vg + 2) << 2) | (vb + 2)) as uint8)
+                } else if vgr >= -8 && vgr <= 7 && vg >= -32 && vg <= 31 && vgb >= -8 && vgb <= 7 {
+                    out.push(OP_LUMA | ((vg + 32) as uint8))
+                    out.push((((vgr + 8) << 4) | (vgb + 8)) as uint8)
+                } else {
+                    out.push(OP_RGB)
+                    out.push(r)
+                    out.push(g)
+                    out.push(bl)
+                }
+            } else {
+                out.push(OP_RGBA)
+                out.push(r)
+                out.push(g)
+                out.push(bl)
+                out.push(a)
+            }
+        }
+        pr = r
+        pg = g
+        pb = bl
+        pa = a
+    }
+    for k in 0..7 {
+        out.push(0u8)
+    }
+    out.push(1u8)
+    return out
+}
+
+// -- tests ----------------------------------------------------------------------
+
+// Pillow's QOI of a 70x1 RGBA image (Pillow writes colour space 1, qoi.h
+// and this module 0): a run of 62 and one more, a difference, two colours as
+// they are, an entry of the table, an alpha change, the table again.
+fun reference() -> [uint8] {
+    return [113u8, 111u8, 105u8, 102u8, 0u8, 0u8, 0u8, 70u8, 0u8, 0u8, 0u8, 1u8, 4u8, 1u8, 254u8, 10u8, 20u8, 30u8, 253u8, 192u8,
+        119u8, 254u8, 30u8, 40u8, 40u8, 254u8, 200u8, 1u8, 90u8, 9u8, 255u8, 10u8, 20u8, 30u8, 7u8, 14u8, 0u8, 0u8, 0u8, 0u8,
+        0u8, 0u8, 0u8, 1u8]
+}
+
+#test
+fun the_reference_encoding() {
+    let img = decode(reference(), image.MAX_PIXELS).expect("decoded")
+    assert(img.width == 70 && img.height == 1 && img.layout == Layout.Rgba)
+    assert(img.data[:4] == [10u8, 20u8, 30u8, 255u8] && img.data[63 * 4:64 * 4] == [10u8, 20u8, 30u8, 255u8])
+    assert(img.data[64 * 4:] == [11u8, 19u8, 31u8, 255u8, 30u8, 40u8, 40u8, 255u8, 200u8, 1u8, 90u8, 255u8,
+        10u8, 20u8, 30u8, 255u8, 10u8, 20u8, 30u8, 7u8, 11u8, 19u8, 31u8, 255u8])
+    var want = reference()
+    want[13] = 0u8
+    assert(encode(img) == want)
+}
+
+// A pseudo-random image (a linear congruential generator) with runs.
+fun noise(w: int, h: int, layout: Layout, seed: uint32) -> Image8 {
+    var s = seed
+    var d: [uint8] = []
+    for i in 0..w * h * layout.channels() {
+        s = s.wrapping_mul(1103515245u32).wrapping_add(12345u32)
+        let v = (s >> 16u32) as uint8
+        // small steps, big jumps and repeats, so every operation is used
+        d.push(if v < 64u8 { 7u8 } else if v < 128u8 { v & 3u8 } else { v })
+    }
+    return image.from_data<uint8>(w, h, layout, d).expect("noise")
+}
+
+#test
+fun images_round_trip() {
+    for layout in [Layout.Rgb, Layout.Rgba] {
+        for seed in [1u32, 2u32, 3u32] {
+            let img = noise(9, 7, layout, seed)
+            let b = encode(img)
+            assert(b[12] == (layout.channels() as uint8) && b[13] == 0u8)
+            assert(decode(b, image.MAX_PIXELS).expect("decoded") == img)
+        }
+    }
+    // gray is written as RGB, a run as long as the image ends it
+    let gray: Image8 = image.new(130, 1, Layout.Gray, 9u8)
+    let b = encode(gray)
+    assert(b.len() == 14 + 2 + 3 + 8) // a luma difference, three runs
+    assert(decode(b, image.MAX_PIXELS).expect("gray") == gray.convert(Layout.Rgb))
+    let ga = noise(4, 3, Layout.GrayAlpha, 5u32)
+    assert(decode(encode(ga), image.MAX_PIXELS).expect("gray+alpha") == ga.convert(Layout.Rgba))
+    let empty: Image8 = image.new(0, 0, Layout.Rgb, 0u8)
+    assert(decode(encode(empty), image.MAX_PIXELS).expect("empty") == empty)
+}
+
+#test
+fun broken_files() {
+    let b = encode(noise(5, 5, Layout.Rgba, 9u32))
+    // cut anywhere before the last operation: Truncated, never a runtime error
+    for n in 0..b.len() - 8 {
+        assert(decode(b[:n], image.MAX_PIXELS) == Err(ImageError.Truncated))
+    }
+    var cs = b
+    cs[13] = 2u8
+    assert(decode(cs, image.MAX_PIXELS) == Err(ImageError.Corrupt("colour space 2")))
+    var big = b
+    big[4] = 0xFFu8
+    assert(decode(big, image.MAX_PIXELS) == Err(ImageError.TooLarge(21390950425i64)))
+}

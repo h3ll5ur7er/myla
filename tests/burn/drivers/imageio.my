@@ -1,0 +1,9 @@
+// std.imageio's `decode` (MYLA-966) under the image corpus's harness: every
+// format's files, each found by its contents, at 8 bits.
+
+import std.imageio as imageio
+import image_driver as driver
+
+fun main() {
+    driver.serve8((b: [uint8], max: int64) => imageio.decode(b, max))
+}

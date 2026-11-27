@@ -1,0 +1,5 @@
+runtime error: cannot hash NaN
+  --> examples/errors/runtime_hash_nan_set.my:10:25
+   |
+10 |     let added = s.insert((1, z / z))
+   |                 ^^^^^^^^^^^^^^^^^^^^

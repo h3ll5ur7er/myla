@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 from tests.burn.test_packed_lists import _PROGRAM as BOOLS, _WIDTHS as WIDTHS
 from tests.burn.test_register_args import ASYNC as CALLS
@@ -122,9 +122,8 @@ class SsaPrototype(unittest.TestCase):
         asm = os.path.join(self.tmp.name, name + ".s")
         with open(asm, "w", encoding="utf-8") as fh:
             fh.write(gen.stdout)
-        obj, exe = asm[:-2] + ".o", asm[:-2]
-        subprocess.run(["as", "--64", "-o", obj, asm], check=True)
-        subprocess.run(["ld", "-o", exe, obj], check=True)
+        exe = asm[:-2] + EXE
+        assemble(asm, exe)   # for the machine (MYLA-926: Windows' too)
         native = subprocess.run([exe], capture_output=True, text=True)
         self.assertEqual((native.stdout, native.returncode), (ran.stdout, 0), native.stderr)
         return path

@@ -1,0 +1,62 @@
+---
+id: MYLA-956
+title: "Images, vision and fonts in std: the owner's decisions and the umbrella"
+type: chore
+status: review
+priority: medium
+labels: [stdlib, images, design]
+---
+The umbrella of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]: image codecs (PNG, JPEG, GIF, TIFF, BMP, PNM, QOI), image processing and computer vision (std.imgproc), 2D drawing (std.draw) and TrueType fonts (std.font), in Myla, for the GUI ([[MYLA-63]]) and for programs before it. The page has the proposed feature set and API, the measurements behind it, and the plan. Its tasks are [[MYLA-957]] to [[MYLA-971]], all in `backlog` until these questions are decided.
+
+## Open questions for the owner
+
+Each has the page's recommendation first. The owner accepted every recommendation on 2026-11-24: D313.
+
+- [x] **std or packages:** in std, as portable computation like std.compress (the GUI, windows and display stay out); or official packages, which [[MYLA-245]] hasn't designed yet. Updates [[Project/Standard-library-roadmap#Left out]] either way
+- [x] **Image type:** a generic `Image<S: Sample>` over `uint8`, `uint16`, `float32` with the aliases `Image8`, `Image16`, `ImageF`; or generated twins as D201 did for the vectors
+- [x] **Storage:** one interleaved row-major `[S]` and a runtime `Layout` (Gray, GrayAlpha, Rgb, Rgba); or a list of pixel structs (2.3 times slower natively, measured)
+- [x] **Errors:** one `ImageError` (a bare enum, D168) for every codec, std.imageio and std.imgproc; or one per module
+- [x] **Style:** methods for what belongs to an image, free functions chained by `|>` for algorithms, a `Canvas` with `var self` methods for drawing
+- [x] **Fixtures:** freely licensed conformance files vendored under `tests/burn/data/`, the expected pixels made once with Pillow and committed (CI needs nothing installed); or Pillow as a test dependency
+- [x] **JPEG exactness:** bit-identical to libjpeg's default decode (islow IDCT, fancy upsampling), so tests compare exactly; or a faster IDCT and a tolerance
+- [x] **Fonts:** a small built-in bitmap font of our own design, TrueType from files, an OFL font's subset vendored for the tests
+
+## Steps
+
+- [x] The questions decided, the decision recorded, the page updated to match (D313)
+- [x] The tasks moved to `todo` in the page's order, step 1 first (three waves of parallel lanes, below)
+- [x] After std.png and std.jpeg: the embedded library's growth measured, before the rest goes ahead (below, 2026-11-25)
+
+## Waves (2026-11-24)
+
+The owner asked for everything to be built in parallel by agents, as far as the dependencies allow. Each lane works in a worktree of its own on a branch `stdlib/MYLA-<n>`; the integrator merges a wave's branches, replaces private helpers, regenerates `selfhost/embedded_std.my` and runs the suite before the next wave starts.
+
+| Wave | Lanes | Why then |
+| --- | --- | --- |
+| 1 | [[MYLA-957]], [[MYLA-958]], [[MYLA-959]], [[MYLA-971]], [[MYLA-967]], [[MYLA-968]] | The groundwork, the core, and the two lanes that only need std.image's types (a skeleton committed first, `lib/std/image.my`) |
+| 2 | [[MYLA-960]], [[MYLA-961]], [[MYLA-962]], [[MYLA-964]], [[MYLA-965]], [[MYLA-969]] | The codecs need the byte readers, LZW and the corpus; fonts need std.draw |
+| 3 | [[MYLA-963]], [[MYLA-966]], [[MYLA-970]] | The JPEG encoder after its decoder, std.imageio after the codecs, tier B in imgproc.my after tier A |
+
+## The embedded library's growth (2026-11-25, at f5821ba)
+
+Measured with every module of waves 1 and 2 merged (std.image, std.bytes's readers, LZW and PackBits, std.draw, std.imgproc A and B, std.pnm, std.bmp, std.qoi, std.png, std.jpeg's decoder, std.gif, std.tiff, std.font): 22,366 lines in the twelve new modules and 1,890 more in std.bytes and std.compress.
+
+| | Before (cc6539e) | After | Growth |
+| --- | --- | --- | --- |
+| `selfhost/embedded_std.my` | 4,018,295 bytes | 5,033,880 bytes | +25 % |
+| `build/myla` | 7,406,648 bytes | 8,392,864 bytes | +13 % |
+| `myla check` of a hello world (best of 7) | 6 ms | 5 ms | none measurable |
+| `myla build` of it (best of 5) | 64 ms | 66 ms | within noise |
+| `myla run` of it (best of 7) | 6 ms | 6 ms | none |
+
+A program that doesn't import the new modules pays nothing measurable; the toolchain binary carries about 1 MB more text. That matches the plan's estimate (about 20 %), so nothing here argues for moving the modules into packages now ([[MYLA-245]] can revisit it).
+
+## Result (2026-11-25)
+
+Every task of the plan, [[MYLA-957]] to [[MYLA-971]], is built, merged into the plan branch and in `review`. The integrator's checks after the last merge:
+
+- `scripts/test.sh all`: 2038 tests, 489 skipped; the 8 failures were `test_lsp`'s resolution corpus on the new modules, three gaps of the language server's resolver, fixed in [[MYLA-955]] (`test_lsp` 171 OK).
+- `scripts/check-seed.sh`: the seeds bootstrap the sources (the fixed point); no new seed needed (D207).
+- Module cases on aarch64 under qemu for the lanes that couldn't run it: all pass.
+
+Toolchain findings filed on the way: [[MYLA-972]], [[MYLA-947]], [[MYLA-948]], [[MYLA-949]], [[MYLA-950]], [[MYLA-951]], [[MYLA-952]], [[MYLA-953]], [[MYLA-954]], [[MYLA-955]].

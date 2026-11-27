@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, SKIP_REASON, assemble, shown
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 PROGRAM = """// MYLA-162's prototype: string concatenation and equality written in Myla
@@ -141,15 +141,14 @@ class RawMemory(unittest.TestCase):
             path = os.path.join(tmp, "concat.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(PROGRAM)
-            exe = os.path.join(tmp, "concat")
+            exe = os.path.join(tmp, "concat" + EXE)
             # a program may call them only for the toolchain's tests
             # (`--primitives`; the review of 2026-11-06, R4)
             asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT, "--primitives"], capture_output=True,
                                  text=True, check=True).stdout
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm)
-            subprocess.run(["as", "--64", "-o", exe + ".o", exe + ".s"], check=True)
-            subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
+            assemble(exe + ".s", exe)   # for the machine (MYLA-926: Windows' too)
             outs = [subprocess.run([exe, mode], capture_output=True, text=True).stdout
                     for mode in ("asm", "myla", "intrinsic")]
             self.assertEqual(outs, ["1360000\n8000\n"] * 3)
@@ -203,7 +202,7 @@ class RawMemory(unittest.TestCase):
                         fh.write(main)
                     ran = subprocess.run([selfhost_tool("main"), "check", path, "--stdlib", STDLIB_ROOT],
                                          capture_output=True, text=True)
-                    where = os.path.join(tmp, directory, module)
+                    where = shown(os.path.join(tmp, directory, module))   # (as myla writes it)
                     if module == "raw.my":
                         self.assertEqual(ran.returncode, 1, ran.stderr)
                         self.assertTrue(ran.stderr.startswith("type error: '__addr_of' reads or writes raw memory: "
@@ -226,8 +225,9 @@ class RawMemory(unittest.TestCase):
                 fh.write(source)
             asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,
                                  check=True).stdout
-            self.assertIn("call myla_std$rt$str_concat", asm)
-            self.assertIn("call myla_std$rt$str_eq", asm)
+            call = "bl" if HOST_TARGET == "aarch64-linux" else "call"   # the machine's call
+            self.assertIn(f"{call} myla_std$rt$str_concat", asm)
+            self.assertIn(f"{call} myla_std$rt$str_eq", asm)
 
 
 if __name__ == "__main__":

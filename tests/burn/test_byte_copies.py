@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, READS_X86, SKIP_REASON, X86_REASON
 from tests.burn._tools import selfhost_tool
 
 _PROGRAM = """fun piece(n: int) -> str {
@@ -60,6 +60,7 @@ fun main() {
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(READS_X86, X86_REASON)
 class ByteCopies(unittest.TestCase):
     def test_copies_of_every_length_print_the_same(self):
         with tempfile.TemporaryDirectory() as tmp:

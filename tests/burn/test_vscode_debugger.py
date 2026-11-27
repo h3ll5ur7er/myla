@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, HOST_TARGET, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -32,12 +32,13 @@ def _node_strips_types() -> bool:
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(shutil.which("gdb"), "needs gdb")
 @unittest.skipUnless(_node_strips_types(), "needs node 22.6+")
+@unittest.skipUnless(HOST_TARGET == "x86_64-linux", "the debugger builds with -g, x86-64 Linux's alone (Language/Targets)")
 class TestDebugAdapter(unittest.TestCase):
     def run_adapter_tests(self, cli: str) -> None:
         env = dict(os.environ, MYLA_CLI=cli)
         env.pop("MYLA_DAP_BUNDLE", None)
         proc = subprocess.run(
-            ["node", "--experimental-strip-types", "--no-warnings", "--test",
+            ["node", "--experimental-strip-types", "--no-warnings", "--test", "--test-reporter=tap",
              os.path.join("test", "integration", "adapter.test.ts")],
             cwd=_EXTENSION, env=env, capture_output=True, text=True, timeout=600)
         self.assertEqual(proc.returncode, 0, proc.stdout[-6000:] + proc.stderr[-2000:])

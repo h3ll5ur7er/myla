@@ -1254,15 +1254,16 @@ pub fun is_notify_primitive(name: str) -> bool {
 }
 
 // The platform primitives of MYLA-336: entropy, file descriptors and
-// children with pipes, MYLA-334's wall clock and MYLA-378's stat of a path,
-// each a function of std.rt (`__open` is `std.rt.open`) over std.platform,
+// children with pipes, MYLA-334's wall clock, MYLA-378's stat of a path and
+// MYLA-841's link read, each a function of std.rt (`__open` is `std.rt.open`) over std.platform,
 // and in the interpreter the host's own.
 #test("__open")[true]
 #test("__wall_ns")[true]
 #test("__path_stat")[true]
+#test("__read_link")[true]
 #test("__read")[false]
 pub fun is_platform_primitive(name: str) -> bool {
-    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__path_stat" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || name == "__poll_write" || is_net_primitive(name) || is_term_primitive(name)
+    return name == "__random_bytes" || name == "__open" || name == "__seek" || name == "__fstat" || name == "__path_stat" || name == "__read_link" || name == "__spawn_piped" || name == "__try_reap" || name == "__wall_ns" || name == "__poll_write" || is_net_primitive(name) || is_term_primitive(name)
 }
 
 // The terminal and signal primitives of MYLA-350 (std.term's and
@@ -1307,7 +1308,7 @@ pub fun is_net_primitive(name: str) -> bool {
 }
 
 // A lot's primitives (MYLA-468): `__sock_lot(n)`, `__sock_park(lot, h,
-// deadline, tag)`, `__sock_ready(lot)`, `__sock_expired(lot, now)`,
+// deadline, tag, events)` (MYLA-833: 1 until readable, 2 until writable), `__sock_ready(lot)`, `__sock_expired(lot, now)`,
 // `__sock_tag(h)`, `__sock_lot_close(lot)`.
 #test("__sock_lot_close")[true]
 #test("__sock_poll")[false]
@@ -1320,6 +1321,7 @@ pub fun is_lot_primitive(name: str) -> bool {
 #test("__sock_close")[("h: int", [Type.TInt(32, true)], Type.TInt(32, true))]
 #test("__net_config")[("which: int", [Type.TInt(32, true)], Type.TStr)]
 #test("__sock_tag")[("h: int", [Type.TInt(32, true)], Type.TInt(64, true))]
+#test("__sock_park")[("lot: int, h: int, deadline: int64, tag: int64, events: int", [Type.TInt(32, true), Type.TInt(32, true), Type.TInt(64, true), Type.TInt(64, true), Type.TInt(32, true)], Type.TInt(32, true))]
 fun net_primitive_sig(name: str) -> (str, [Type], Type) {
     let i = t_int()
     let s = Type.TStr
@@ -1337,7 +1339,7 @@ fun net_primitive_sig(name: str) -> (str, [Type], Type) {
     if name == "__sock_poll" { return ("h: int, events: int, timeout_ms: int", [i, i, i], i) }
     let w = Type.TInt(64, true)
     if name == "__sock_lot" { return ("n: int64", [w], i) }
-    if name == "__sock_park" { return ("lot: int, h: int, deadline: int64, tag: int64", [i, i, w, w], i) }
+    if name == "__sock_park" { return ("lot: int, h: int, deadline: int64, tag: int64, events: int", [i, i, w, w, i], i) }
     if name == "__sock_ready" || name == "__sock_lot_close" { return ("lot: int", [i], i) }
     if name == "__sock_expired" { return ("lot: int, now: int64", [i, w], i) }
     if name == "__sock_tag" { return ("h: int", [i], w) }
@@ -2134,6 +2136,31 @@ fun mentions_param(t: Type, p: str) -> bool {
         Type.TAsync(f) => mentions_param(f, p),
         _ => false,
     }
+}
+
+// Whether `subst` knows every type parameter `t` mentions.
+#test(Type.TList(Type.TParam("T")), [Subst { name: "T", ty: Type.TStr }])[true]
+#test(Type.TMap(Type.TStr, Type.TParam("K")), [Subst { name: "T", ty: Type.TStr }])[false]
+#test(Type.TInt(32, true), [])[true]
+fun params_known(t: Type, subst: [Subst]) -> bool {
+    return match t {
+        Type.TParam(n) => subst_has(subst, n),
+        Type.TTuple(es) => list_params_known(es, subst),
+        Type.TList(e) => params_known(e, subst),
+        Type.TMap(k, v) => params_known(k, subst) && params_known(v, subst),
+        Type.TStruct(n, args) => list_params_known(args, subst),
+        Type.TActor(n, args) => list_params_known(args, subst),
+        Type.TEnum(n, args) => list_params_known(args, subst),
+        Type.TFunc(ps, r) => list_params_known(ps, subst) && (match r { Some(rt) => params_known(rt, subst), None => true }),
+        Type.TAsync(f) => params_known(f, subst),
+        _ => true,
+    }
+}
+
+#test([Type.TStr, Type.TParam("U")], [])[false]
+fun list_params_known(xs: [Type], subst: [Subst]) -> bool {
+    for x in xs { if !params_known(x, subst) { return false } }
+    return true
 }
 
 fun list_mentions(xs: [Type], p: str) -> bool {
@@ -5634,6 +5661,66 @@ impl Checker {
         }
     }
 
+    // The (expanded) arguments of the operator trait `tr` as `c` implements
+    // it with the right operand (or index) `r`, which picks the impl (D200;
+    // `Neg`'s is `c`'s alone): a type parameter's bound's; an impl in
+    // `op_impls`; a number's own operators; a list's, map's or string's
+    // indexing; a signed number's or float's `-`. What a bound such as
+    // `C: Index<int, T>` solves `T` from (MYLA-802); None when it has none.
+    #test(checker_on("[int]"), Type.TList(Type.TStr), "Index", Type.TInt(32, true))[Some([Type.TInt(32, true), Type.TStr])]
+    #test(checker_on("[int]"), Type.TMap(Type.TStr, Type.TFloat(64)), "IndexSet", Type.TStr)[Some([Type.TStr, Type.TFloat(64)])]
+    #test(checker_on("[int]"), Type.TStr, "IndexSet", Type.TInt(32, true))[None]
+    #test(checker_on("[int]"), Type.TFloat(64), "Mul", Type.TFloat(64))[Some([Type.TFloat(64), Type.TFloat(64)])]
+    #test(checker_on("[int]"), Type.TFloat(64), "Mul", Type.TInt(32, true))[None]
+    #test(checker_on("[int]"), Type.TInt(64, true), "Neg", Type.TStr)[Some([Type.TInt(64, true)])]
+    #test(checker_on("struct B<T> { v: T }\nimpl<T> Index<int, T> for B<T> {\n    fun index(self, i: int) -> T { return self.v }\n}"), Type.TStruct("B", [Type.TStr]), "Index", Type.TInt(32, true))[Some([Type.TInt(32, true), Type.TStr])]
+    #test(checker_on("struct B<T> { v: T }\nimpl<T> Index<int, T> for B<T> {\n    fun index(self, i: int) -> T { return self.v }\n}"), Type.TStruct("B", [Type.TStr]), "Index", Type.TStr)[None]
+    fun op_trait_args_of(self, c: Type, tr: str, r: Type) -> Option<[Type]> {
+        match c {
+            Type.TParam(pn) => {
+                for b in self.bounds_cur {
+                    if b.tp != pn { continue }
+                    var j = 0
+                    while j < b.traits.len() {
+                        if b.traits[j] == tr && (tr == "Neg" || type_eq(b.args[j][0], r)) { return Some(b.args[j]) }
+                        j += 1
+                    }
+                }
+                return None
+            },
+            Type.TError => { return None },
+            _ => {},
+        }
+        match self.type_key(c) {
+            Some(key) => {
+                match find_op_impl(self.op_impls, tr, key, c, r) {
+                    Some(oi) => {
+                        let o = subst_type(oi.o, unify_param(oi.target, c, []).subst)
+                        if tr == "Neg" { return Some([o]) }
+                        return Some([r, o])
+                    },
+                    None => {},
+                }
+            },
+            None => {},
+        }
+        if is_arith_trait(tr) && type_eq(r, c) {
+            let ok = match self.type_implements(c, tr) {
+                Ok(b) => b,
+                Err(x) => false,
+            }
+            if ok { return Some([c, c]) }
+        }
+        if tr == "Index" || tr == "IndexSet" {
+            match builtin_index(c, r) {
+                Some(el) => { if tr == "Index" || !is_str(c) { return Some([r, el]) } },
+                None => {},
+            }
+        }
+        if tr == "Neg" && (is_signed_int(c) || is_float(c)) { return Some([c]) }
+        return None
+    }
+
     // `subst` and what the bounds fix once their type parameters are known:
     // `I: Iterator<T>` with `I` a type gives `T` by `I`'s one impl of the
     // trait (D55, D171). A disagreement is left to `check_call_bounds`.
@@ -5647,7 +5734,23 @@ impl Checker {
             let t = match known { Some(x) => x, None => Type.TError }
             var j = 0
             while j < b.traits.len() {
-                if b.args[j].len() > 0 {
+                if is_op_trait(b.traits[j]) {
+                    // an operator's by the impl its right operand (or index)
+                    // picks, once that is known (D200, MYLA-802)
+                    let want = b.args[j]
+                    if want.len() > 0 && (b.traits[j] == "Neg" || params_known(want[0], s)) {
+                        let r = if b.traits[j] == "Neg" { t } else { subst_type(want[0], s) }
+                        match self.op_trait_args_of(t, b.traits[j], r) {
+                            Some(have) => {
+                                if have.len() == want.len() {
+                                    let u = unify_list(want, have, s)
+                                    if u.ok { s = u.subst }
+                                }
+                            },
+                            None => {},
+                        }
+                    }
+                } else if b.args[j].len() > 0 {
                     match self.trait_args_of(t, b.traits[j]) {
                         Some(have) => {
                             if have.len() == b.args[j].len() {
@@ -11564,7 +11667,8 @@ impl Checker {
     // MYLA-336's primitives (`is_platform_primitive`): `__random_bytes(n)`,
     // `__open(path, flags, mode)`, `__seek(fd, offset, whence)`,
     // `__fstat(fd)`, `__spawn_piped(program, argv, opts)`, `__try_reap(pid)`,
-    // MYLA-334's `__wall_ns()` and MYLA-378's `__path_stat(path, follow)`
+    // MYLA-334's `__wall_ns()`, MYLA-378's `__path_stat(path, follow)` and
+    // MYLA-841's `__read_link(path)`
     fun infer_platform_primitive(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         let i64 = Type.TInt(64, true)
         let strs = Type.TList(Type.TStr)
@@ -11596,6 +11700,10 @@ impl Checker {
             want = [Type.TStr, Type.TBool]
             shape = "path: str, follow: bool"
             result = Type.TList(i64)
+        } else if name == "__read_link" {
+            want = [Type.TStr]
+            shape = "path: str"
+            result = Type.TStr
         } else if name == "__spawn_piped" {
             want = [Type.TStr, strs, strs]
             shape = "program: str, argv: [str], opts: [str]"
@@ -11863,8 +11971,16 @@ impl Checker {
                         // an operator's, by its type arguments (D200)
                         if is_op_trait(tr) {
                             if !self.meets_op_bound(concrete, tr, subst_type_list(b.args[j], subst))? {
-                                let why = self.op_bound_arg_why(concrete, tr, subst_type_list(b.args[j], subst))?
-                                return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'{}", type_name(concrete), b.tp, op_bound_text(tr, b.args[j], Type.TParam(b.tp)), unqualified(sig.decl.name), why)))
+                                let want = subst_type_list(b.args[j], subst)
+                                var why = self.op_bound_arg_why(concrete, tr, want)?
+                                // the impl its operand picks gives another result (MYLA-802)
+                                if why == "" && !is_type_param(concrete) {
+                                    match self.op_trait_args_of(concrete, tr, if tr == "Neg" { concrete } else { want[0] }) {
+                                        Some(have) => { why = format(": it implements '{}'", op_bound_text(tr, have, concrete)) },
+                                        None => {},
+                                    }
+                                }
+                                return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'{}", type_name(concrete), b.tp, op_bound_text(tr, want, concrete), unqualified(sig.decl.name), why)))
                             }
                             j += 1
                             continue

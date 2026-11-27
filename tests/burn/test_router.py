@@ -14,8 +14,8 @@ import tempfile
 import unittest
 import zlib
 
-from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, Program, build_and_run_full,
-                                run_source_both_now, selfhost_run, write_program)
+from tests.burn._native import (BUILD_TARGET, CAN_BUILD_NATIVE, ON_WINDOWS, SKIP_REASON, TEST_TARGET, Program,
+                                build_and_run_full, run_source_both_now, selfhost_run, write_program)
 from tests.burn.test_http import NO_SOCKETS, NO_SOCKETS_WHY
 
 PROGRAM = """import std.http as http
@@ -147,8 +147,9 @@ async fun main() {
 
 
 # std.http's static files (D260, MYLA-795): only regular files under the
-# resolved root, no dot files by default, no symbolic links below the root,
-# no FIFO (which would block the worker that opened it) or device; `..` taken
+# resolved root, no dot files by default, no symbolic link that leads out of
+# the root (one that stays in it is followed, MYLA-841, but not to a dot
+# file or a FIFO), no FIFO (which would block the worker that opened it) or device; `..` taken
 # off lexically, never past the root. argv[1] is the root, argv[2] a file
 # outside it.
 POLICY = """import std.http as http
@@ -166,6 +167,8 @@ fun main() {
               "/assets/sub%2f..%2f..%2foutside.txt", "/assets/..%5coutside.txt", "/assets/.env",
               "/assets/.git/config", "/dots/.env", "/dots/.git/config", "/dots/../outside.txt",
               "/assets/leak.txt", "/assets/dirlink/outside.txt", "/assets/inlink.css", "/assets/fifo",
+              "/assets/linkdir/a.txt", "/assets/round.css", "/assets/dotlink.css", "/dots/dotlink.css",
+              "/assets/fifolink", "/assets/linkdir/../app.css", "/assets/selflink/sub/a.txt",
               "/assets/sub", "/assets/", "/assets/missing.css", "/assets/app.css%00.png"] {
         let r = h(http.request("GET", p))
         print(f"{p} {r.status} {r.text()}")
@@ -189,13 +192,23 @@ POLICY_WANT = """/assets/app.css 200 body {}
 /dots/../outside.txt 404 not found
 /assets/leak.txt 404 not found
 /assets/dirlink/outside.txt 404 not found
-/assets/inlink.css 404 not found
+/assets/inlink.css 200 body {}
 /assets/fifo 404 not found
+/assets/linkdir/a.txt 200 a
+/assets/round.css 200 body {}
+/assets/dotlink.css 404 not found
+/dots/dotlink.css 200 SECRET=1
+/assets/fifolink 404 not found
+/assets/linkdir/../app.css 200 body {}
+/assets/selflink/sub/a.txt 200 a
 /assets/sub 404 not found
 /assets/ 404 not found
 /assets/missing.css 404 not found
 /assets/app.css%00.png 404 not found
 """
+# the lines of POLICY_WANT that a link below the root serves (MYLA-841)
+LINKED = {"/assets/inlink.css", "/assets/linkdir/a.txt", "/assets/round.css", "/dots/dotlink.css",
+          "/assets/selflink/sub/a.txt"}
 
 # A file served over loopback is sent as it is read (D260): its bytes, its
 # length for HEAD, and a FIFO in the directory answered 404 at once.
@@ -272,12 +285,18 @@ PATTERNS_WANT = """/files/a/b/meta 200 a file
 """
 
 
+# Whether `make_root` makes its links: not for Windows' programs under Wine,
+# which shows a Unix link as what it names (a link on Windows is a reparse
+# point, which `symlink_metadata` gives as one); their lines are then 404
+# for a name that isn't there. On Windows itself they are made (MYLA-926).
+MAKES_LINKS = BUILD_TARGET != "x86_64-windows" or ON_WINDOWS
+
+
 def make_root(top: str) -> str:
     """The served directory of POLICY and STREAMED under `top`, beside a
-    file and a directory outside it that links below it name (none for
-    Windows, where Wine shows a Unix link as what it names: a link there is
-    a reparse point, which `symlink_metadata` gives as one; their lines are
-    404 for a name that isn't there)."""
+    file and a directory outside it that links below it name
+    (`MAKES_LINKS`), and a FIFO (none on Windows, which has no FIFOs: the
+    name isn't there, 404 too)."""
     root = os.path.join(top, "www")
     os.makedirs(os.path.join(root, "sub"))
     os.makedirs(os.path.join(root, ".git"))
@@ -289,11 +308,17 @@ def make_root(top: str) -> str:
     for path in (os.path.join(top, "outside.txt"), os.path.join(top, "out", "outside.txt")):
         with open(path, "w") as f:
             f.write("TOP SECRET")
-    if TEST_TARGET != "x86_64-windows":
+    if MAKES_LINKS:
         os.symlink(os.path.join(top, "outside.txt"), os.path.join(root, "leak.txt"))
         os.symlink(os.path.join(top, "out"), os.path.join(root, "dirlink"))
         os.symlink("app.css", os.path.join(root, "inlink.css"))
-    os.mkfifo(os.path.join(root, "fifo"))
+        os.symlink("sub", os.path.join(root, "linkdir"))
+        os.symlink(os.path.join("..", "www", "app.css"), os.path.join(root, "round.css"))
+        os.symlink(".env", os.path.join(root, "dotlink.css"))
+        os.symlink("fifo", os.path.join(root, "fifolink"))
+        os.symlink(".", os.path.join(root, "selflink"))
+    if not ON_WINDOWS:
+        os.mkfifo(os.path.join(root, "fifo"))
     return root
 
 
@@ -302,7 +327,12 @@ class StaticFiles(unittest.TestCase):
     def test_policy_in_the_interpreter_and_natively(self) -> None:
         with tempfile.TemporaryDirectory() as top:
             root = make_root(top)
-            self.assertEqual(run_source_both_now(POLICY, [root]), (POLICY_WANT, "", 0))
+            want = POLICY_WANT
+            if not MAKES_LINKS:
+                # no links there (`make_root`): what a link would serve isn't there
+                want = "".join(f"{line.split(' ')[0]} 404 not found\n" if line.split(" ")[0] in LINKED else line + "\n"
+                               for line in POLICY_WANT.splitlines())
+            self.assertEqual(run_source_both_now(POLICY, [root]), (want, "", 0))
 
     @unittest.skipIf(NO_SOCKETS, NO_SOCKETS_WHY)
     def test_streamed_over_loopback(self) -> None:

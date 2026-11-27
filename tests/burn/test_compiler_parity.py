@@ -9,7 +9,7 @@ import unittest
 from tests.burn._targets import program_excuse
 from tests.burn._tools import peak_memory, selfhost_tool
 from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, Program, build_and_run, build_and_run_full, interpret,
-                                native_build, run_argv, run_file_both_now, selfhost_run, write_program)
+                                native_build, run_argv, run_file_both_now, selfhost_run, shown, write_program)
 
 PROGRAMS = {
     # H13 (MYLA-792, MYLA-715): a constant made of an imported constant, or of
@@ -10108,6 +10108,77 @@ fun main() {
     print(indexed(w))
 }
 """,
+    "type_parameters_an_operator_bound_fixes": r"""// MYLA-802: a type parameter only an operator bound names is fixed by the
+// impl the argument's type has for the bound's trait and its known
+// arguments (D200), as `I: Iterator<T>` fixes `T` (D171)
+struct B<T> {
+    v: T,
+}
+
+impl<T> Index<int, T> for B<T> {
+    fun index(self, i: int) -> T {
+        return self.v
+    }
+}
+
+struct V {
+    x: float,
+}
+
+impl Mul<float, str> for V {
+    fun mul(self, k: float) -> str {
+        return f"V*{k}"
+    }
+}
+
+impl Mul<V, float> for V {
+    fun mul(self, o: V) -> float {
+        return self.x * o.x
+    }
+}
+
+impl Neg<int> for V {
+    fun neg(self) -> int {
+        return -(self.x as int)
+    }
+}
+
+fun sum3<C: Index<int, T>, T: Add>(c: C) -> T {
+    return c[0] + c[1] + c[2]
+}
+
+fun at<C: Index<K, T>, K, T>(c: C, k: K) -> T {
+    return c[k]
+}
+
+fun again<D: Index<int, U>, U: Add>(d: D) -> U {
+    return sum3(d)
+}
+
+fun times<A: Mul<R, O>, R, O>(a: A, r: R) -> O {
+    return a * r
+}
+
+fun negated<N: Neg<O>, O>(n: N) -> O {
+    return -n
+}
+
+fun main() {
+    print(sum3(B { v: 2 }))
+    print(sum3([1, 2, 3]))
+    print(sum3([0.5, 0.25, 2.0]))
+    print(sum3("ABC"))
+    print(at(["one": 1, "two": 2], "two"))
+    print(at(B { v: "b" }, 7))
+    print(again(B { v: 5i64 }))
+    print(again([4u8, 5, 6]))
+    print(times(V { x: 1.5 }, 2.0))
+    print(times(V { x: 1.5 }, V { x: 3.0 }))
+    print(times(6, 7))
+    print(negated(V { x: 4.0 }))
+    print(negated(2.5))
+}
+""",
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -11297,10 +11368,10 @@ class TestCompilerParity(unittest.TestCase):
                 out, err, code = selfhost_run(path)
                 self.assertEqual((out, code), ("b\n", 1))
                 self.assertEqual(err.splitlines()[:2], [f"runtime error: invalid char: {value} is not a Unicode scalar value",
-                                                        f"  --> {path}:2:14"])
+                                                        f"  --> {shown(path)}:2:14"])
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path),
                                  ("b\n", f"runtime error: invalid char: {value} is not a Unicode scalar value\n"
-                                          f"  --> {path}:2:14\n", 1))
+                                          f"  --> {shown(path)}:2:14\n", 1))
 
     def test_polymorphic_recursion_is_refused_where_it_is_built(self):
         # MYLA-415 (H5): a generic function calling itself with a larger type
@@ -11333,7 +11404,7 @@ class TestCompilerParity(unittest.TestCase):
                 checked = subprocess.run([myla, "check", path], capture_output=True, text=True, timeout=60)
                 self.assertEqual(checked.returncode, 1, checked.stderr)
                 self.assertTrue(checked.stderr.startswith(f"type error: the instances of '{callee}' nest without end: "
-                                                          f"this call, {what}\n  --> {path}:{at}\n"), checked.stderr)
+                                                          f"this call, {what}\n  --> {shown(path)}:{at}\n"), checked.stderr)
                 self.assertIn(f"note: {how} with a larger type at each step (polymorphic recursion), which native "
                               "code can't be built for\n", checked.stderr)
                 ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
@@ -11371,7 +11442,7 @@ class TestCompilerParity(unittest.TestCase):
                                            capture_output=True, text=True, timeout=60)
                     self.assertEqual(built.returncode, 1, built.stderr)
                     self.assertIn(f"type error: the instances of 'run' nest without end: this call asks for one "
-                                  f"whose type arguments are {why}\n  --> {path}:7:19\n", built.stderr)
+                                  f"whose type arguments are {why}\n  --> {shown(path)}:7:19\n", built.stderr)
                     self.assertIn("(polymorphic recursion)", built.stderr)
 
     def test_a_deep_type_the_program_writes_is_no_recursion(self):
@@ -11431,7 +11502,7 @@ class TestCompilerParity(unittest.TestCase):
             ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
             self.assertEqual((ran.returncode, ran.stderr),
                              (1, "runtime error: no entry point: define '#main' or a function named 'main'\n"))
-            for flags in (["--target", "x86_64-linux"], ["-g"], ["--checked"], ["--target", "aarch64-linux"],
+            for flags in (["--target", "x86_64-linux"], ["--target", "x86_64-linux", "-g"], ["--checked"], ["--target", "aarch64-linux"],
                           ["--target", "wasm32-wasi"]):
                 with self.subTest(flags=flags):
                     out = os.path.join(tmp, "out")
@@ -11631,7 +11702,7 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertEqual(len(at), 1, needle)
                 out, err, code = selfhost_run(path)
                 self.assertEqual(code, 1, err)
-                self.assertEqual(err.splitlines()[:2], [f"runtime error: {message}", f"  --> {path}:{at[0][0]}:{at[0][1]}"])
+                self.assertEqual(err.splitlines()[:2], [f"runtime error: {message}", f"  --> {shown(path)}:{at[0][0]}:{at[0][1]}"])
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(err.splitlines()[:2]) + "\n", 1))
                 if name in ("option_expect", "through_a_tracked_function", "in_a_task"):
                     self.assertEqual(build_and_run_full(Program(path), entry_path=path, checked=True),
@@ -12155,6 +12226,8 @@ PINNED = {
     # `float64`, `int32` and `Option<int32>`)
     "literals_left_of_operators_take_their_type": 'by b\n3\n4\n-1.5\n6\n-12\ntrue true true false true\nfalse false false false false\nfalse false false true true\n',
     "operator_impls_whose_bounds_hold": 'A7*2\n-A7\na7[3]\nA7:5=z\n3\nA7:5=za7\n6\nA7*3 -A7\na7[1] A7:4=q\n',
+    # MYLA-802: new; `cannot infer type parameter(s) T for 'sum3'` before
+    "type_parameters_an_operator_bound_fixes": '6\n6\n2.75\n198\n2\nb\n15\n15\nV*2\n4.5\n42\n-4\n-2.5\n',
 }
 
 

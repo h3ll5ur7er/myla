@@ -1,11 +1,13 @@
 """The aarch64 Linux backend (MYLA-163): programs built with `--target
 aarch64-linux` (selfhost/ir_a64.my, selfhost/runtime_a64.my and
-lib/std/platform_aarch64.my), assembled by clang, linked by ld.lld and run
+lib/std/linux_calls_aarch64.my under lib/std/platform.my, MYLA-758),
+assembled by clang, linked by ld.lld and run
 under qemu-aarch64, give what the same programs built for x86-64 give
 (stdout, stderr and the exit code). The x86-64 build is the reference: its
 own tests hold it to the interpreter.
 
-Skipped where clang, ld.lld or qemu-aarch64 is missing (CI installs them).
+Skipped where clang, ld.lld or qemu-aarch64 is missing (CI installs them),
+and on Windows, which has no qemu-user (MYLA-926).
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ import tempfile
 import unittest
 
 from ._hang import run_watched
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, assemble, linux_only
 from ._tools import STDLIB_ROOT, native_compiler
 from . import test_builtin_impls, test_defer, test_format_specs, test_float_keys, test_float_methods, test_linalg, test_loop_overhead, test_operator_traits, test_register_args, test_router, test_slices, test_time, test_unit_type
 
@@ -25,8 +27,10 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pa
 
 HAVE_A64 = all(shutil.which(t) for t in ("clang", "ld.lld", "qemu-aarch64"))
 A64_SKIP = "the aarch64 tests need clang, ld.lld and qemu-aarch64"
+QEMU_USER = "qemu-user, which runs the aarch64 programs, is Linux's"
 
 
+@linux_only(QEMU_USER)
 @unittest.skipUnless(os.environ.get("MYLA_REQUIRE_TARGETS"), "MYLA_REQUIRE_TARGETS is not set")
 class Aarch64Tools(unittest.TestCase):
     """CI sets MYLA_REQUIRE_TARGETS, so a missing tool fails there instead of
@@ -40,10 +44,13 @@ NOT_YET: set[str] = set()
 
 
 def build_x86(src: str, out: str) -> None:
+    """`src` built for the machine itself, the reference the other targets'
+    runs are compared with: x86-64's on an x86-64 machine (the name's), the
+    machine's own on an aarch64 one or on Windows (MYLA-926; `out` ends in
+    `EXE` there). (With no MYLA_TEST_TARGET, as these modules run.)"""
     with open(out + ".s", "wb") as fh:
         subprocess.run([native_compiler(), src, STDLIB_ROOT], stdout=fh, check=True, cwd=_REPO)
-    subprocess.run(["as", "--64", "-o", out + ".o", out + ".s"], check=True)
-    subprocess.run(["ld", "-o", out, out + ".o"], check=True)
+    assemble(out + ".s", out)
 
 
 def build_a64(src: str, out: str, stdlib: str = STDLIB_ROOT) -> None:
@@ -400,6 +407,7 @@ PROGRAMS["big"] = (
 LIBRARY_WITHOUT_THE_RUNTIME = "fun main() {\n    var xs = [\"a\"]\n    xs.push(f\"b{xs.len()}\")\n    print(xs[1])\n}\n"
 
 
+@linux_only(QEMU_USER)
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_A64, A64_SKIP)
 class Aarch64Parity(unittest.TestCase):
@@ -459,6 +467,7 @@ class Aarch64Parity(unittest.TestCase):
                     self.assertEqual(got, want)
 
 
+@linux_only(QEMU_USER)
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_A64, A64_SKIP)
 class Aarch64Tasks(unittest.TestCase):
@@ -478,6 +487,7 @@ class Aarch64Tasks(unittest.TestCase):
                     self.assertEqual((p.stdout, p.returncode), want, extra)
 
 
+@linux_only(QEMU_USER)
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_A64, A64_SKIP)
 class Aarch64StackOverflow(unittest.TestCase):
@@ -514,6 +524,7 @@ class Aarch64StackOverflow(unittest.TestCase):
             self.assertEqual(self.run_a64(source, MYLA_THREADS="4"), ("", "runtime error: stack overflow\n", 1))
 
 
+@linux_only(QEMU_USER + ", through a #!/bin/sh wrapper")
 @unittest.skipUnless(HAVE_A64, A64_SKIP)
 class Aarch64Time(test_time.Time):
     """test_time's programs (timers, reads that suspend, child processes)

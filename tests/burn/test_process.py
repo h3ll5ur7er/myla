@@ -8,18 +8,24 @@ present helpers (`/bin/echo`, `/bin/sh`) and assert both backends observe the
 same captured output, exit code, and signal.
 """
 import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 from . import test_windows
-from ._native import (
+from ._native import (BUILD_TARGET,
     CAN_BUILD_NATIVE,
     SKIP_REASON,
     TEST_TARGET,
     build_and_run_full,
     check_file,
     interpret_full,
+    linux_only,
+    native_build,
     run_file_both_now,
     run_source_both_now,
+    write_program,
 )
 
 EXAMPLE = os.path.abspath(
@@ -243,7 +249,42 @@ class TestSubprocessParity(unittest.TestCase):
                 self.assertEqual((out, err, code), ("15\n14\n", "", 0))
 
 
-@unittest.skipUnless(TEST_TARGET == "x86_64-windows", "the suites for Windows (scripts/test-target.py x86_64-windows)")
+@unittest.skipUnless(CAN_BUILD_NATIVE and TEST_TARGET in ("", "x86_64-linux") and shutil.which("strace"),
+                     "strace's fault injection, on x86-64 Linux")
+@linux_only("strace's fault injection (Git for Windows' strace is MSYS2's)")
+class FailedPipeRead(unittest.TestCase):
+    """A read of a child's pipe that fails is `Other` of its cause in `run`
+    and `output`, once the child ended (MYLA-862), not the stream's end with
+    the output cut short and `Ok`: strace makes the parent's third read
+    (`run`'s first child: the exec report's, then the output's and the
+    error's) fail with EIO; the second child's reads succeed."""
+
+    def test_a_failed_read_is_the_run_s_error(self):
+        source = (
+            "from std.process import run, command, Output, SpawnError\n\n"
+            "fun said(r: Result<Output, SpawnError>) -> str {\n"
+            "    return match r {\n"
+            "        Ok(o) => f\"ok {o.stdout.len()} {o.stderr.len()}\",\n"
+            "        Err(SpawnError.Other(n)) => f\"other {n}\",\n"
+            "        Err(e) => \"another error\",\n"
+            "    }\n"
+            "}\n\n"
+            "fun main() {\n"
+            "    print(said(run(\"/bin/sh\", [\"-c\", \"echo out; echo err 1>&2\"])))\n"
+            "    print(said(command(\"/bin/sh\").args([\"-c\", \"echo out\"]).output()))\n"
+            "}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = os.path.join(tmp, "prog")
+            native_build(check_file(write_program(tmp, source)), binary)
+            plain = subprocess.run([binary], capture_output=True, text=True)
+            self.assertEqual((plain.stdout, plain.returncode), ("ok 4 4\nok 4 0\n", 0))
+            failed = subprocess.run(["strace", "-qq", "-o", os.devnull, "-e", "trace=read",
+                                     "-e", "inject=read:error=EIO:when=3", binary], capture_output=True, text=True)
+            self.assertEqual((failed.stdout, failed.returncode), ("other 5\nok 4 0\n", 0))
+
+
+@unittest.skipUnless(BUILD_TARGET == "x86_64-windows", "the suites for Windows (scripts/test-target.py x86_64-windows)")
 class WindowsChildren(test_windows.Children):
     """These suites for Windows (MYLA-705): the tests above run Linux's tools
     (`/bin/echo`, `/bin/sh`, `cat`), which a Windows program can't start
@@ -252,4 +293,5 @@ class WindowsChildren(test_windows.Children):
     their ground with a Windows program of its own as the child:
     test_windows.Children's output, error, exit code, command builder, PATH,
     directory, environment, input, waiting in a task, killing, and a test
-    harness's cases as children."""
+    harness's cases as children. On Windows itself (MYLA-926) the same,
+    the programs run as they are."""

@@ -11,7 +11,9 @@ D213, D214).
       when it is on PATH), and myla.exe and myla-lsp.exe, into
       OUT, and writes OUT/cases.json: each case's
       commands and what each must print and exit with (the examples' from
-      the interpreter here, as bootstrap-arm64 takes them).
+      the interpreter here, as bootstrap-arm64 takes them). OUT is emptied
+      first, so it must be new, empty or a bundle built before (with its
+      cases.json): any other directory is refused, left as it is.
 
   windows-runner.py run OUT [--wine [CMD]] [--runs N] [--only TEXT] [--list] [--tally]
       On Windows (CI's windows-latest job): runs every case of OUT and
@@ -51,6 +53,9 @@ STRESS_WORKERS = ["1", "4", "16"]
 LLVM_TOOLS = ["clang", "lld-link", "llvm-dlltool"]
 # what reads a -g program's DWARF (MYLA-757), each in a step of its own
 DEBUG_TOOLS = ["llvm-symbolizer"]
+# the repository's files an example reads, from the repository's root: a
+# case of it has each at the same path under its own directory (MYLA-956)
+EXAMPLE_DATA = {"font_text": ["tests/burn/data/images/fonts/MylaTestSans.ttf"]}
 
 # --- the console cases ---------------------------------------------------------
 # Each: (name, source, steps), a step a dict of `Step`'s fields (see `step`).
@@ -399,6 +404,14 @@ def default_myla() -> str:
     return selfhost_tool("main")
 
 
+def may_empty(out: str) -> bool:
+    """Whether `build` may empty `out`: missing, empty, or a bundle it made
+    before (its cases.json), never a checkout or a home given by mistake."""
+    if not os.path.isdir(out):
+        return True
+    return not os.listdir(out) or os.path.isfile(os.path.join(out, "cases.json"))
+
+
 def build(out: str, myla: str, jobs: int) -> int:
     sys.path.insert(0, _REPO)
     from tests.burn import test_windows as tw
@@ -406,6 +419,9 @@ def build(out: str, myla: str, jobs: int) -> int:
 
     stdlib = os.path.join(_REPO, "lib")
     myla = os.path.abspath(myla)
+    if not may_empty(out):
+        raise SystemExit(f"windows-runner: {out} isn't a bundle (no cases.json) and isn't empty: "
+                         "give a new or empty directory, which build fills")
     if os.path.exists(out):
         shutil.rmtree(out)
     for sub in ("bin", "tools", "files"):
@@ -435,6 +451,13 @@ def build(out: str, myla: str, jobs: int) -> int:
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
         return "files/" + name
+
+    def copied(rel: str) -> str:
+        """The repository's file `rel` kept as OUT/files/`rel`, as it is; its path under OUT."""
+        path = os.path.join(out, "files", *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        shutil.copyfile(os.path.join(_REPO, *rel.split("/")), path)
+        return "files/" + rel
 
     def case(name: str, steps: list[dict], files: dict | None = None, windows_only: str = "") -> None:
         cases.append({"name": name, "steps": steps, "files": files or {}, "windows_only": windows_only})
@@ -511,6 +534,11 @@ def build(out: str, myla: str, jobs: int) -> int:
          [step(["./prog.exe"], "".join(f'[{n}] ["&echo INJECTED"] []\n' for n in names))],
          {"prog.exe": "bin/batch-names.exe", "e.bat": batch, "E.CMD": batch})
     case("files/long-paths", [step(["bin/long-paths.exe"], tw.LONG_PATHS_OUT)])
+    # MYLA-841, MYLA-842: junctions and a symbolic link made by mklink, read,
+    # resolved, opened without following and served
+    program("bin/links.exe", tw.WINDOWS_LINKS)
+    case("files/links", [step(["bin/links.exe"], tw.WINDOWS_LINKS_OUT)],
+         windows_only="Wine's mklink makes no link, and Wine shows a Unix link as what it names")
     # what a child of 16 workers commits (its rings of ready frames are
     # reserved, MYLA-798: they were 128 MiB of it)
     case("process/a-child-s-commit",
@@ -549,7 +577,9 @@ def build(out: str, myla: str, jobs: int) -> int:
         stem = rel[len("examples/"):-len(".my")].replace("/", "-")
         builds.append((f"bin/example-{stem}.exe", rel, _REPO))
         want = linux([myla, "run", rel, "--stdlib", stdlib], _REPO)
-        case(f"examples/{stem}", [step([f"bin/example-{stem}.exe"], want["stdout"], want["stderr"], want["code"])])
+        data = {p: copied(p) for p in EXAMPLE_DATA.get(stem, [])}
+        case(f"examples/{stem}", [step([f"bin/example-{stem}.exe"], want["stdout"], want["stderr"], want["code"])],
+             data)
         # the same through myla.exe's interpreter, the file where it was (an
         # example of a directory of its own with the directory's modules)
         paths = [rel]
@@ -557,7 +587,7 @@ def build(out: str, myla: str, jobs: int) -> int:
             tree = os.path.join(_REPO, os.path.dirname(rel))
             paths = sorted(os.path.relpath(os.path.join(root, n), _REPO).replace(os.sep, "/")
                            for root, _, names in os.walk(tree) for n in names if n.endswith(".my"))
-        files = {}
+        files = dict(data)
         for p in paths:
             with open(os.path.join(_REPO, p), encoding="utf-8") as fh:
                 files[p] = file(p, fh.read())

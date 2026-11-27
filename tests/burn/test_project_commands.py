@@ -10,10 +10,11 @@ test_selfhost_cli.py, so the standard library comes from the binary's location.
 from __future__ import annotations
 
 import os
+import pathlib
 import subprocess
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, SKIP_REASON
 from .test_selfhost_cli import _Layout
 
 GEO_MANIFEST = """\
@@ -114,8 +115,8 @@ class TestNewProject(_Layout):
 
         proc = self.run_in(root, "build")
         self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("", "", 0))
-        binary = os.path.join(root, "build", "hello")
-        self.assertEqual(os.listdir(os.path.join(root, "build")), ["hello"])
+        binary = os.path.join(root, "build", "hello" + EXE)
+        self.assertEqual(os.listdir(os.path.join(root, "build")), ["hello" + EXE])
         run = subprocess.run([binary], capture_output=True, text=True)
         self.assertEqual(run.stdout, "Hello from hello!\n")
 
@@ -134,7 +135,7 @@ class TestNewProject(_Layout):
         _write(os.path.join(root, "myla.toml"),
                '[package]\nname = "cleanme"\nversion = "0.1.0"\n\n[dependencies]\n'
                'greet = { git = "https://example.invalid/greet.git", tag = "v1" }\n')
-        _write(os.path.join(root, "build", "hello"), "")
+        _write(os.path.join(root, "build", "hello" + EXE), "")
         _write(os.path.join(root, ".myla", "deps", "stale"), "")
         proc = self.run_in(root, "check")
         self.assertIn("dependency 'greet' is not locked", proc.stderr)
@@ -216,10 +217,13 @@ class TestPathDependency(_Layout):
                          ("12\n20\nhi!\n../main.my\n", "", 0))
 
     def test_build_and_run_the_binary(self):
-        proc = self.run_in(self.app, "build", "-g")
+        # -g where the machine's target has it (x86-64 Linux's and Windows',
+        # MYLA-757; Language/Targets)
+        proc = self.run_in(self.app, "build", *(["-g"] if HOST_TARGET in ("x86_64-linux", "x86_64-windows") else []))
         self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("", "", 0))
-        run = subprocess.run([os.path.join(self.app, "build", "app"), "q"], capture_output=True, text=True)
-        self.assertEqual(run.stdout, "12\n20\nhi!\n" + os.path.join(self.app, "build", "app") + "\nq\n")
+        binary = os.path.join(self.app, "build", "app" + EXE)
+        run = subprocess.run([binary, "q"], capture_output=True, text=True)
+        self.assertEqual(run.stdout, "12\n20\nhi!\n" + binary + "\nq\n")
 
     def test_test_runs_each_files_own_cases(self):
         proc = self.run_in(self.app, "test")
@@ -306,7 +310,7 @@ class TestProjectErrors(_Layout):
 
     def test_a_locked_git_dependency_that_cannot_be_checked_out(self):
         commit = "4f3c2a1e9b0d5c6a7e8f9a0b1c2d3e4f5a6b7c8d"
-        url = "file://" + os.path.join(self.work, "no-such-repository")
+        url = pathlib.Path(self.work, "no-such-repository").as_uri()
         root = self.project("gitdep", {
             "myla.toml": '[package]\nname = "gitdep"\nversion = "1"\n\n[dependencies]\n'
                          f'json5 = {{ git = "{url}", tag = "v1" }}\n',
@@ -497,7 +501,7 @@ class TestTestsDirectory(_Layout):
         self.assertEqual(proc.stdout, GREETER_WANT)
         self.assertEqual(proc.stderr, "")
         # the program was built first, for test.program()
-        self.assertTrue(os.path.isfile(os.path.join(self.root, "build", "greeter")))
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "build", "greeter" + EXE)))
 
     def test_list_and_only_cover_the_test_programs(self):
         proc = self.run_in(self.root, "test", "--list")

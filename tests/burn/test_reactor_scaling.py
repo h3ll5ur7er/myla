@@ -42,7 +42,8 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, Program, native_build, run_argv, selfhost_run, write_program
+from ._native import (CAN_BUILD_NATIVE, ON_WINDOWS, SKIP_REASON, Program, native_build, run_argv, selfhost_run,
+                      write_program)
 
 # A lot's primitives (MYLA-468, std.http's parked connections) on both
 # runners: sockets parked with deadlines and tags, two made readable in
@@ -70,7 +71,7 @@ async fun main() {
     // parked with deadlines 300, 100, -1, 200 and tags 10..13
     let ds = [300i64, 100i64, -1i64, 200i64]
     for i in 0..4 {
-        print(__sock_park(lot, cs[i].1.handle, ds[i], 10i64 + i as int64))
+        print(__sock_park(lot, cs[i].1.handle, ds[i], 10i64 + i as int64, 1))
     }
     print(__sock_ready(lot))
     // the third and the first get bytes
@@ -206,10 +207,11 @@ async fun timed_rounds(s: TcpStream, rounds: int, times: int) -> int64 {
 }
 
 // The µs of 1,000 round trips alone, then beside `idle` tasks waiting to
-// accept (the best of 5 tries each), in one line.
+// accept, then alone again once they are cancelled (the best of 5 tries
+// each), in one line.
 async fun round_trips(idle: int) -> str {
     let l = listener()
-    async let e = echo(l, 10000)
+    async let e = echo(l, 15000)
     let c = connected(port_of(l))
     let alone = await timed_rounds(c, 1000, 5)
     let quiet = listener()
@@ -227,9 +229,6 @@ async fun round_trips(idle: int) -> str {
     }
     await task.sleep(1000)
     let crowded = await timed_rounds(c, 1000, 5)
-    if await e != 10000 {
-        panic("echo")
-    }
     task.cancel(idlers)
     var none = 0
     for g in await idlers {
@@ -238,7 +237,11 @@ async fun round_trips(idle: int) -> str {
     if none != 0 {
         panic("an idle task accepted")
     }
-    return f"{alone} {crowded}"
+    let again = await timed_rounds(c, 1000, 5)
+    if await e != 15000 {
+        panic("echo")
+    }
+    return f"{alone} {crowded} {again}"
 }
 
 // `waiting` tasks waiting to accept, `n` connections made one at a time,
@@ -451,6 +454,19 @@ async fun main() {
 """
 
 
+def _ended_cpu_seconds(p: subprocess.Popen) -> float:
+    """The CPU time (user and kernel) of the ended Windows process `p`,
+    from its handle (GetProcessTimes; MYLA-926: Windows has no wait4)."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    times = [wintypes.FILETIME() for _ in range(4)]   # created, exited, kernel, user
+    if not k32.GetProcessTimes(int(p._handle), *(ctypes.byref(t) for t in times)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return sum(t.dwHighDateTime << 32 | t.dwLowDateTime for t in times[2:]) / 1e7   # 100 ns units
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class _Built(unittest.TestCase):
     binary = ""
@@ -480,10 +496,15 @@ class RoundTrips(_Built):
     def test_round_trips_beside_many_waiting_frames(self):
         # alone and then crowded in one process, the best of five tries
         # each: the machine may be shared
-        alone, crowded = (int(w) for w in self.run_text("round-trips", 50000, workers=1).split())
+        alone, crowded, again = (int(w) for w in self.run_text("round-trips", 50000, workers=1).split())
         # µs for 1,000: about the same (colder caches), not several times
-        # as much
-        self.assertLess(crowded, 1.5 * alone + 5000, f"{crowded} µs beside 50,000 waiting frames, {alone} µs alone")
+        # as much. Alone measured before and after (the slower of the two):
+        # a machine that a full run loads more meanwhile slows all three
+        # (MYLA-745: 45,470 µs beside the frames, 25,423 µs alone before
+        # them, on aarch64 under qemu in CI)
+        base = max(alone, again)
+        self.assertLess(crowded, 1.5 * base + 5000,
+                        f"{crowded} µs beside 50,000 waiting frames, {alone} µs alone before, {again} µs after")
 
 
 class Accepts(_Built):
@@ -494,12 +515,17 @@ class Accepts(_Built):
         env = dict(os.environ, MYLA_THREADS="2")
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             p = subprocess.Popen(argv, executable=exe, stdout=out, stderr=err, env=env)
-            _, status, usage = os.wait4(p.pid, 0)
-            p.returncode = os.waitstatus_to_exitcode(status)
+            if ON_WINDOWS:
+                p.wait()
+                cpu = _ended_cpu_seconds(p)
+            else:
+                _, status, usage = os.wait4(p.pid, 0)
+                p.returncode = os.waitstatus_to_exitcode(status)
+                cpu = usage.ru_utime + usage.ru_stime
             out.seek(0)
             err.seek(0)
             self.assertEqual((err.read().decode(), p.returncode, out.read().decode().strip()), ("", 0, "200"))
-        return usage.ru_utime + usage.ru_stime
+        return cpu
 
     def test_a_connection_wakes_one_accepting_task(self):
         few = min(self.cpu(200) for _ in range(3))

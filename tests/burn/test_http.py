@@ -35,11 +35,13 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 
-from ._native import (
+from ._native import (BUILD_TARGET,
     CAN_BUILD_NATIVE,
+    ON_WINDOWS,
     SKIP_REASON,
     TEST_TARGET,
     Program,
@@ -376,6 +378,14 @@ class PythonServer:
         self.server.server_close()
 
 
+def stop(proc: subprocess.Popen) -> None:
+    """The server `proc` killed and waited for: on Windows a program still
+    running (TerminateProcess doesn't wait) can't have its file removed with
+    the test's directory."""
+    proc.kill()
+    proc.wait()
+
+
 def free_port() -> int:
     """A port nothing listens on (bound, then closed)."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -664,7 +674,7 @@ class MylaServer(unittest.TestCase):
                         python_clients(self, int(port))
                         rest, err = proc.communicate(timeout=60)
                     finally:
-                        proc.kill()
+                        stop(proc)
                     self.assertEqual((rest, err, proc.returncode), (f"served {SERVER_REQUESTS}\n", "", 0))
 
 
@@ -742,7 +752,7 @@ class KeepAlive(unittest.TestCase):
                             self.assertTrue(0.25 < elapsed < 3, elapsed)
                         rest, err = proc.communicate(timeout=30)
                     finally:
-                        proc.kill()
+                        stop(proc)
                     self.assertEqual((rest, err, proc.returncode), ("stopped\n", "", 0))
 
 
@@ -763,6 +773,12 @@ fun handle(r: Request) -> Response {
     }
     if r.path() == "/echo" {
         return http.response(200, r.body)
+    }
+    if r.path() == "/file" {
+        // the file `?p=` names, sent from the file (`Response.file`)
+        var f = http.response(200, "")
+        f.file = r.query_param("p").unwrap_or("")
+        return f
     }
     return http.response(200, "ok")
 }
@@ -841,6 +857,57 @@ def sockets_of(pid: int) -> int:
     return n
 
 
+def socket_states(pid: int) -> str:
+    """The TCP sockets of the process `pid` (Linux's /proc): each one's
+    local and remote port, state and bytes queued to send and to read, for
+    a test's message."""
+    inodes = set()
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            link = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if link.startswith("socket:["):
+            inodes.add(link[8:-1])
+    states = {"01": "ESTABLISHED", "06": "TIME_WAIT", "07": "CLOSE", "08": "CLOSE_WAIT", "0A": "LISTEN"}
+    out = []
+    for table in ("tcp", "tcp6"):
+        try:
+            with open(f"/proc/{pid}/net/{table}", encoding="ascii") as fh:
+                rows = fh.read().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            w = row.split()
+            if w[9] in inodes:
+                tx, rx = (int(x, 16) for x in w[4].split(":"))
+                out.append(f"{int(w[1].split(':')[1], 16)}->{int(w[2].split(':')[1], 16)} "
+                           f"{states.get(w[3], w[3])} tx {tx} rx {rx}")
+    return "; ".join(out) or "none"
+
+
+def windows_cpu_seconds(pid: int) -> float:
+    """The CPU time (user and kernel) the Windows process `pid` has used,
+    from GetProcessTimes (MYLA-926: no /proc there)."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = k32.OpenProcess(0x1000, False, pid)      # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        times = [wintypes.FILETIME() for _ in range(4)]   # created, exited, kernel, user
+        if not k32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return sum(t.dwHighDateTime << 32 | t.dwLowDateTime for t in times[2:]) / 1e7   # 100 ns units
+    finally:
+        k32.CloseHandle(handle)
+
+
 def wait_for_sockets(pid: int, n: int, limit: float) -> int:
     """Waits, at most `limit` seconds, until the process `pid` has at most
     `n` sockets open; how many it has."""
@@ -894,7 +961,7 @@ class TimeLimits(unittest.TestCase):
             check(port)
             rest, err = proc.communicate(timeout=60)
         finally:
-            proc.kill()
+            stop(proc)
         self.assertEqual((rest, err, proc.returncode), ("stopped\n", "", 0))
 
     def test_idle_non_reading_and_slow_handled_connections(self):
@@ -925,7 +992,17 @@ class TimeLimits(unittest.TestCase):
             # listener only): reading is progress, and a holder read before
             # its write_ms passed gets the whole response (MYLA-555: once in
             # 9 runs under load, the second holder's handler started late)
-            self.assertEqual(wait_for_sockets(self.server_pid, 1, 10), 1)
+            # (the condition waited for, at most 30 s: 10 s once weren't
+            # enough under a full run's load, MYLA-745; the sockets left
+            # say which connection the server kept)
+            if BUILD_TARGET == "x86_64-windows":
+                # (Wine keeps a socket parked on the reactor in its server,
+                # not always among the program's descriptors, MYLA-833; and
+                # Windows itself has no /proc to count them in: so the time
+                # the server takes, write_ms and its keeper's look)
+                time.sleep(2)
+            else:
+                self.assertEqual(wait_for_sockets(self.server_pid, 1, 30), 1, socket_states(self.server_pid))
             for s in hold:
                 got, _ = end_of(s, 5)
                 self.assertLess(len(got), 8 << 20, "closed before the whole response")
@@ -944,6 +1021,97 @@ class TimeLimits(unittest.TestCase):
             for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "300", "300", "300"]).items():
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
+
+    def test_slow_readers_hold_no_worker(self):
+        # MYLA-833 (M8 of the review of 2026-11-17): a response larger than
+        # the socket takes held its worker while its client read slowly,
+        # for write_ms each 64 KiB: as many slow readers as workers held
+        # them all. A response that doesn't go out at once waits parked
+        # until its socket takes more, holding no worker: two slow readers
+        # of 8 MiB and two of a 3 MiB file beside a 4-worker server, and a
+        # request on a connection of its own is answered at once; each
+        # slow reader then gets its whole response, on a connection kept.
+        data = bytes((i * 7 + (i >> 9)) & 255 for i in range(3 * 1024 * 1024 + 123))
+
+        def check(port, big_file):
+            slow = []
+            for i in range(4):
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                s.settimeout(20)
+                s.connect(("127.0.0.1", port))
+                path = b"/big" if i % 2 == 0 else b"/file?p=" + urllib.parse.quote(big_file).encode()
+                s.sendall(b"GET " + path + b" HTTP/1.1\r\nHost: x\r\n\r\n")
+                slow.append(s)
+            time.sleep(0.3)
+            took = []
+            for _ in range(3):
+                out, t = quick_get(port, timeout=5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n"), out)
+                took.append(t)
+                time.sleep(0.2)
+            self.assertLess(max(took), 1.0, took)
+            for i, s in enumerate(slow):
+                r = recv_response(s)
+                head, _, body = r.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 200 OK\r\n"), head)
+                if i % 2 == 0:
+                    self.assertEqual((len(body), body.count(b"x")), (8 << 20, 8 << 20), head)
+                else:
+                    self.assertEqual((len(body), body == data), (len(data), True), head[-200:])
+                s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                out, _ = end_of(s, 5)
+                self.assertTrue(out.startswith(b"HTTP/1.1 200 OK\r\n") and out.endswith(b"\r\n\r\nok"), out)
+                s.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            big_file = os.path.join(tmp, "big.bin")
+            with open(big_file, "wb") as f:
+                f.write(data)
+            for name, (argv, exe) in self.forms(tmp, ["10000", "4", "-", "5000", "5000", "5000"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, lambda port: check(port, big_file))
+
+    def test_what_the_server_opens_is_what_it_checks(self):
+        # MYLA-842: a response's file was looked at by `static_files` and
+        # opened later, when it was sent, and only then checked: a FIFO
+        # swapped in meanwhile blocked the worker in its open until
+        # something wrote to it, and a link was followed. The server opens
+        # the file without waiting and without following a link at the
+        # end, then checks what it opened: the FIFO and the link are 404 at
+        # once, on a one-worker server, and a regular file is served.
+        def check(port, d):
+            cases = [("fifo", b"HTTP/1.1 404 Not Found\r\n"), ("link", b"HTTP/1.1 404 Not Found\r\n"),
+                     ("a.txt", b"HTTP/1.1 200 OK\r\n")]
+            if BUILD_TARGET == "x86_64-windows" and not ON_WINDOWS:
+                # Wine shows a Unix link as what it names (the Windows
+                # runner's `files/links` opens a link on Windows itself)
+                cases = [c for c in cases if c[0] != "link"]
+            if ON_WINDOWS:
+                # (Windows has no FIFOs)
+                cases = [c for c in cases if c[0] != "fifo"]
+            for name, want in cases:
+                path = urllib.parse.quote(os.path.join(d, name)).encode()
+                with socket.create_connection(("127.0.0.1", port), timeout=3) as s:
+                    t0 = time.monotonic()
+                    s.sendall(b"GET /file?p=" + path + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    out, _ = end_of(s, 3)
+                    self.assertTrue(out.startswith(want), (name, out))
+                    self.assertLess(time.monotonic() - t0, 2, name)
+                    if name == "a.txt":
+                        self.assertTrue(out.endswith(b"\r\n\r\nhello"), out)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = os.path.join(tmp, "www")
+            os.mkdir(d)
+            with open(os.path.join(d, "a.txt"), "w") as f:
+                f.write("hello")
+            if not ON_WINDOWS:
+                os.mkfifo(os.path.join(d, "fifo"))
+            os.symlink("a.txt", os.path.join(d, "link"))
+            for name, (argv, exe) in self.forms(tmp, ["4000", "1", "-", "5000", "5000", "5000"]).items():
+                with self.subTest(server=name):
+                    self.serve(argv, exe, lambda port: check(port, d), {"MYLA_THREADS": "1"})
 
     def test_a_request_that_came_while_the_server_was_busy(self):
         # MYLA-756: a parked connection whose request came before its idle
@@ -1059,14 +1227,18 @@ class TimeLimits(unittest.TestCase):
         # worker until a guard's look gave it up for a waiting connection,
         # closing it: the first 200 requests ended in a reset.
         def check(port):
-            kept = []
+            # the 200 first requests sent at once, then their answers read:
+            # one after the other, the first connections waited for their
+            # next request as long as the last ones took, past `idle_ms`
+            # when a full run's load slowed the interpreted server
+            # (MYLA-745: the next request found its connection closed)
             t0 = time.monotonic()
-            for _ in range(200):
-                s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            kept = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(200)]
+            for s in kept:
                 s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            for s in kept:
                 r = recv_response(s)
                 self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"\r\n\r\nok"), r)
-                kept.append(s)
             first = time.monotonic() - t0
             silent = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(100)]
             time.sleep(0.2)
@@ -1083,17 +1255,17 @@ class TimeLimits(unittest.TestCase):
             self.assertLess(first, 10, "200 first requests")
             self.assertLess(took, 1, "a request beside 300 connections")
             self.assertLess(again, 10, "200 kept connections' next requests")
-            # quiet from now on: closed by the server within idle_ms (1.5 s)
+            # quiet from now on: closed by the server within idle_ms (3 s)
             # and a look of its keeper
             t2 = time.monotonic()
             for s in kept + silent:
-                self.assertEqual(end_of(s, 5)[0], b"")
-            self.assertLess(time.monotonic() - t2, 3)
+                self.assertEqual(end_of(s, 7)[0], b"")
+            self.assertLess(time.monotonic() - t2, 4.5)
             for s in kept + silent:
                 s.close()
 
         with tempfile.TemporaryDirectory() as tmp:
-            for name, (argv, exe) in self.forms(tmp, ["12000", "2", "-", "1500", "5000", "5000"]).items():
+            for name, (argv, exe) in self.forms(tmp, ["15000", "2", "-", "3000", "5000", "5000"]).items():
                 with self.subTest(server=name):
                     self.serve(argv, exe, check)
 
@@ -1269,6 +1441,8 @@ class TimeLimits(unittest.TestCase):
         # the CPU it costs now. It is read on where it is kept: a piece
         # costs about the same after 4 MB as after 4 KB.
         def cpu_seconds(pid: int) -> float:
+            if ON_WINDOWS:
+                return windows_cpu_seconds(pid)
             with open(f"/proc/{pid}/stat") as f:
                 fields = f.read().rsplit(")", 1)[1].split()
             return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
@@ -1288,7 +1462,11 @@ class TimeLimits(unittest.TestCase):
                     time.sleep(0.002)
                 for s in socks:
                     r = recv_response(s)
-                    self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"x" * 200), r[:100])
+                    # what came, should it fail: a short body (the connection closed
+                    # under it) or one of its length whose end isn't the bytes sent
+                    self.assertTrue(r.startswith(b"HTTP/1.1 200 OK\r\n") and r.endswith(b"x" * 200),
+                                    f"{len(r)} bytes, {r.count(b'x')} of them x, the first x at {r.find(b'x')}: "
+                                    f"{r[:100]!r} ... {r[-120:]!r}")
                     s.close()
                 used.append(cpu_seconds(self.server_pid) - before)
 
@@ -1526,6 +1704,120 @@ ONE_PROGRAM_OUT = "".join(
 class OneProgram(unittest.TestCase):
     def test_a_client_and_a_server_on_the_reactor(self):
         self.assertEqual(run_both(ONE_PROGRAM), (ONE_PROGRAM_OUT, "", 0))
+
+
+# MYLA-863: `serve_n`'s server counts what its client got. A connection
+# closed under its answer (a client that asks for 8 MiB and closes without
+# reading) is no answer: the server's count reached its limit one request
+# early, and the kept-alive client's last request, sent again on a new
+# connection (the old one closed with the server), waited in the
+# listener's backlog until its time ran out. Then the client sends exactly
+# the server's limit over one kept connection: both counts must agree.
+TO_THE_LIMIT = PRELUDE + r"""import std.task as task
+import std.bytes as bytes
+
+actor Seen {
+    big: bool,
+}
+
+impl Seen {
+    fun saw_big(var self) {
+        self.big = true
+    }
+
+    fun big_seen(self) -> bool {
+        return self.big
+    }
+}
+
+async fun handle(seen: Seen, r: Request) -> Response {
+    if r.path() == "/big" {
+        await seen.saw_big()
+        var piece = StringBuilder()
+        for i in 0..64 {
+            piece.append("0123456789abcdef")
+        }
+        let k = piece.build()
+        var sb = StringBuilder(8388608)
+        for i in 0..8192 {
+            sb.append(k)
+        }
+        return http.response(200, sb.build())
+    }
+    return http.response(200, f"hello {r.path()}")
+}
+
+// a request for 8 MiB on a connection of its own, closed unread once the
+// server has the request
+async fun gone(port: int, seen: Seen) -> str {
+    var s = match await net.connect_async(net.addr(net.loopback(), port)) {
+        Ok(s) => s
+        Err(e) => { return f"connect: {e}" }
+    }
+    match await s.write_async(bytes.from_str("GET /big HTTP/1.1\r\nHost: x\r\n\r\n")) {
+        Ok(_) => {}
+        Err(e) => { return f"write: {e}" }
+    }
+    while !(await seen.big_seen()) {
+        await task.sleep(1)
+    }
+    let c = s.close()
+    return "gone"
+}
+
+// `n` requests over one kept connection: those answered right
+async fun ask(port: int, n: int) -> int {
+    var c = http.client()
+    var right = 0
+    for i in 0..n {
+        match await c.send_async(http.request("GET", f"http://127.0.0.1:{port}/p{i}").with_timeout(10000)) {
+            Ok(r) => {
+                if r.status == 200 && r.text() == f"hello /p{i}" {
+                    right += 1
+                }
+            }
+            Err(e) => { print(f"ask {i}: {e}, {right} answered before") }
+        }
+    }
+    c.close()
+    return right
+}
+
+#main
+async fun main() {
+    let n = 20
+    var l = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic("listen") }
+    }
+    let port = match l.local_addr() {
+        Ok(a) => a.port
+        Err(e) => { panic("addr") }
+    }
+    let seen = Seen { big: false }
+    var o = http.server_options()
+    o.max_requests = n
+    let serve = async () => await http.serve_with(l, o, async (r: Request) => await handle(seen, r))
+    async let served = task.timeout(20000, serve)
+    print(await gone(port, seen))
+    let right = await ask(port, n)
+    let count = match await served {
+        Some(Ok(k)) => f"{k}"
+        Some(Err(e)) => f"{e}"
+        None => "still serving after 20 s"
+    }
+    print(f"client {right} of {n}, server {count}")
+    let c = l.close()
+}
+"""
+TO_THE_LIMIT_OUT = "gone\nclient 20 of 20, server 20\n"
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipIf(NO_SOCKETS, NO_SOCKETS_WHY)
+class ToTheLimit(unittest.TestCase):
+    def test_the_servers_count_is_what_its_clients_got(self):
+        self.assertEqual(run_both(TO_THE_LIMIT), (TO_THE_LIMIT_OUT, "", 0))
 
 
 # --- wasm32: no sockets ------------------------------------------------------------

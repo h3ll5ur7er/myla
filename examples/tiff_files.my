@@ -1,0 +1,123 @@
+// TIFF files with std.tiff (MYLA-965): a 16-bit picture written with each
+// compression, its tags listed by name, read back at 16 and at 8 bits, and
+// a file the module doesn't read, with the reason.
+
+import std.tiff as tiff
+from std.tiff import TagValue, Compression
+import std.image as image
+from std.image import Image, Image16, Layout
+
+// The name of a TIFF tag, or its number.
+#test(256)["ImageWidth"]
+#test(317)["Predictor"]
+#test(40000)["tag 40000"]
+fun tag_name(tag: int) -> str {
+    return match tag {
+        256 => "ImageWidth"
+        257 => "ImageLength"
+        258 => "BitsPerSample"
+        259 => "Compression"
+        262 => "PhotometricInterpretation"
+        273 => "StripOffsets"
+        277 => "SamplesPerPixel"
+        278 => "RowsPerStrip"
+        279 => "StripByteCounts"
+        282 => "XResolution"
+        283 => "YResolution"
+        284 => "PlanarConfiguration"
+        296 => "ResolutionUnit"
+        317 => "Predictor"
+        338 => "ExtraSamples"
+        _ => f"tag {tag}"
+    }
+}
+
+// A `w` by `h` RGB picture at 16 bits: red across, green down, blue in
+// steps of 1024 along the diagonals.
+#test(2, 1)[Image { width: 2, height: 1, layout: Layout.Rgb, data: [0u16, 0u16, 0u16, 21845u16, 0u16, 1024u16] }]
+fun picture(w: int, h: int) -> Image16 {
+    var data: [uint16] = []
+    for y in 0..h {
+        for x in 0..w {
+            data.push((x * 65535 / (if w > 1 { w * 2 - 1 } else { 1 })) as uint16)
+            data.push((y * 65535 / (if h > 1 { h - 1 } else { 1 })) as uint16)
+            data.push(((x + y) * 1024 % 65536) as uint16)
+        }
+    }
+    return Image { width: w, height: h, layout: Layout.Rgb, data: data }
+}
+
+// A file's pages in a line.
+#test(tiff.encode16(picture(2, 1), Compression.Uncompressed))["1 page: 2x1 rgb, 16 bits"]
+#test([1u8, 2u8, 3u8])["not a TIFF: not an image of this format"]
+fun describe(b: [uint8]) -> str {
+    return match tiff.pages(b) {
+        Ok(ps) => {
+            var parts: [str] = []
+            for p in ps {
+                parts.push(f"{p.width}x{p.height} {p.layout}, {p.bit_depth} bits")
+            }
+            let n = if ps.len() == 1 { "1 page" } else { f"{ps.len()} pages" }
+            f"{n}: {parts.join("; ")}"
+        }
+        Err(e) => f"not a TIFF: {e}"
+    }
+}
+
+fun main() {
+    let img = picture(96, 64)
+    var lzw: [uint8] = []
+    for c in [Compression.Uncompressed, Compression.PackBits, Compression.Lzw, Compression.Deflate] {
+        let b = tiff.encode16(img, c)
+        let back = tiff.decode16(b, 0, image.MAX_PIXELS)
+        let same = match back {
+            Ok(d) => d == img
+            Err(_) => false
+        }
+        let name = match c {
+            Uncompressed => "none"
+            PackBits => "PackBits"
+            Lzw => "LZW"
+            Deflate => "Deflate"
+        }
+        print(f"{name:<8} {b.len():>6} bytes, read back the same: {same}")
+        if c == Compression.Lzw {
+            lzw = b
+        }
+    }
+    print(describe(lzw))
+    match tiff.tags(lzw, 0) {
+        Ok(t) => {
+            var numbers = t.keys()
+            numbers.sort()
+            for n in numbers {
+                if n != 273 && n != 279 {
+                    print(f"  {tag_name(n)}: {t[n]}")
+                }
+            }
+        }
+        Err(e) => print(f"tags: {e}")
+    }
+    // at 8 bits, rounded: the middle pixel of the top row
+    if let Ok(small) = tiff.decode(lzw, 0, image.MAX_PIXELS) {
+        print(f"8 bits: pixel (48, 0) is {small.color_at(48, 0)}")
+    }
+    // Photometric 5 is CMYK, which std.tiff doesn't read
+    var cmyk = lzw
+    cmyk[find_entry(lzw, 262) + 8] = 5u8
+    print(describe(cmyk))
+}
+
+// Where the first IFD's entry of `tag` starts in the little-endian `b`.
+#test(tiff.encode16(picture(1, 1), Compression.Uncompressed), 256)[16]
+fun find_entry(b: [uint8], tag: int) -> int {
+    let ifd = (b[4] as int) | ((b[5] as int) << 8) | ((b[6] as int) << 16) | ((b[7] as int) << 24)
+    let n = (b[ifd] as int) | ((b[ifd + 1] as int) << 8)
+    for i in 0..n {
+        let at = ifd + 2 + 12 * i
+        if ((b[at] as int) | ((b[at + 1] as int) << 8)) == tag {
+            return at
+        }
+    }
+    return -1
+}

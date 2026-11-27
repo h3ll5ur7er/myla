@@ -1,0 +1,11 @@
+//~ runtime error: cannot hash NaN
+//~ native: runtime error: cannot hash NaN
+// A set's element is its map's key: a NaN is the runtime error at the
+// call of `insert`, which reports its caller's position (MYLA-850).
+import std.set as set
+
+fun main() {
+    var s: set.Set<(int, float)> = set.new()
+    let z = 0.0
+    let added = s.insert((1, z / z))
+}

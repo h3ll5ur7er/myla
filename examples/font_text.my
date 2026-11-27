@@ -1,0 +1,88 @@
+// Text in a TrueType font with std.font (MYLA-969): the test font of the
+// image corpus parsed, a sentence measured, a paragraph laid out with
+// wrapping and centred lines, and a word drawn on a std.draw canvas
+// through a glyph cache, then printed one character a pixel. Run it from
+// the repository's root, where the font is.
+
+import std.font as font
+import std.draw as draw
+import std.image as image
+import std.fs as fs
+import std.png as png
+import std.process as process
+from std.font import Align
+from std.draw import Canvas, Paint
+
+// The character for a pixel's lightness (0 black to 255 white).
+#test(0)['@']
+#test(255)[' ']
+#test(128)['=']
+fun shade(lightness: int) -> char {
+    let ramp = "@%#*+=-:. "
+    let k = (255 - lightness) * 9 / 255
+    return ramp.chars()[9 - k]
+}
+
+// The canvas as text: a line a row, a character a pixel (its red sample:
+// the drawing is gray).
+#test(draw.blank(3, 2, image.rgb(255u8, 255u8, 255u8)))[["   ", "   "]]
+fun to_text(c: Canvas) -> [str] {
+    var lines: [str] = []
+    for y in 0..c.image.height {
+        var sb = StringBuilder()
+        for x in 0..c.image.width {
+            sb.append_char(shade(c.image.data[(y * c.image.width + x) * 4] as int))
+        }
+        lines.push(sb.build())
+    }
+    return lines
+}
+
+fun main() {
+    let path = "tests/burn/data/images/fonts/MylaTestSans.ttf"
+    let Ok(bytes) = fs.read_bytes(path) else {
+        print(f"{path} not found: run this from the repository's root")
+        return
+    }
+    let f = match font.parse(bytes, 0) {
+        Ok(f) => f
+        Err(e) => {
+            print(f"{path}: {e}")
+            return
+        }
+    }
+    print(f"{f.family} {f.style}: {f.glyph_count} glyphs, {f.units_per_em} units to the em")
+
+    // a sentence's size at 16 px; kerning moves "AV" closer
+    let (w, h) = font.measure(f, "Hello, Myla!", 16.0)
+    print(f"'Hello, Myla!' at 16 px: {w:.2} by {h:.2} px")
+    let av = font.layout(f, "AV", 16.0)
+    let plain = font.layout(f, "AV", 16.0, font.layout_options().with_kerning(false))
+    print(f"V after A: {av.glyphs[1].x:.2} px kerned, {plain.glyphs[1].x:.2} px not")
+
+    // a paragraph wrapped at 150 px, its lines centred
+    let opts = font.layout_options().with_max_width(150.0).with_align(Align.Center)
+    let para = font.layout(f, "The quick brown fox jumps over the lazy dog.", 12.0, opts)
+    print(f"a paragraph at 12 px: {para.lines} lines, {para.width:.2} by {para.height:.2} px")
+
+    // a word drawn through a glyph cache: 'y' twice is rasterised once a quarter pixel
+    let l = font.layout(f, "Myla y", 20.0)
+    var c = draw.blank((l.width as int) + 3, (l.height as int) + 1, image.rgb(255u8, 255u8, 255u8))
+    var cache = font.glyph_cache(f)
+    c.fill_masks(cache.masks(l, 1.0, 0.0), Paint.Solid(image.rgb(0u8, 0u8, 0u8)))
+    for line in to_text(c) {
+        print(line)
+    }
+    print(f"{l.glyphs.len()} glyphs drawn, {cache.count()} masks rasterised")
+
+    // with a file name, the paragraph rendered into a PNG
+    let argv = process.args()
+    if argv.len() > 1 {
+        var page = draw.blank((para.width as int) + 8, (para.height as int) + 8, image.rgb(255u8, 255u8, 255u8))
+        page.fill_masks(cache.masks(para, 4.0, 4.0), Paint.Solid(image.rgb(20u8, 40u8, 120u8)))
+        match fs.write_bytes(argv[1], png.encode(page.image)) {
+            Ok(()) => print(f"wrote {argv[1]}")
+            Err(e) => print(f"{argv[1]}: {e}")
+        }
+    }
+}

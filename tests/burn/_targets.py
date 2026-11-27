@@ -7,6 +7,7 @@ excused from is skipped by the loop itself (`program_excuse`)."""
 from __future__ import annotations
 
 import os
+import sys
 
 TARGETS = ["aarch64-linux", "wasm32-wasi", "x86_64-windows"]
 
@@ -53,6 +54,7 @@ SUITES = [
     # std.toml against tomllib and the toml-test suite, its drivers built for
     # the target (MYLA-424)
     "tests.burn.test_toml",
+    "tests.burn.test_images",
     # the review's generators: deep copies between tasks, reads beside a
     # mutation, writes into containers, generic code per width, the
     # library at extreme arguments, the parsers built --checked (MYLA-555)
@@ -89,6 +91,8 @@ _WIN_SIGNALS = ("a Unix signal is Wine's (SIGINT a Ctrl-C, the rest end Wine), a
 _BOTH = {
     **{t: _X86_CODE for t in _X86_TESTS},
     "test_std_modules.StdModuleCases.test_interpreted": "the interpreter's runs are the host's",
+    "test_float_print.FloatPrint.test_random_floats_print_in_few_instructions":
+        "it counts the host's instructions (an emulator's aren't the program's)",
 }
 
 SKIP: dict[str, dict[str, str]] = {
@@ -140,7 +144,9 @@ SKIP: dict[str, dict[str, str]] = {
         # make of a Unix link: it shows one as what it names (MYLA-708 runs
         # these on Windows)
         **{t: _WINE_LINKS for t in ["test_platform_primitives.Paths",
-                                    "test_fs.DirectoryParity.test_symbolic_links"]},
+                                    "test_fs.DirectoryParity.test_symbolic_links",
+                                    "test_fs.DirectoryParity.test_where_links_lead",
+                                    "test_fs.DirectoryParity.test_opens_that_neither_wait_nor_follow"]},
         "test_fs.DirectoryParity.test_current_dir_removed":
             "Windows can't remove a working directory, and Wine starts a program whose one is gone in C:\\windows",
         # MYLA-705: Windows' children are Windows programs; Linux's tools
@@ -198,13 +204,33 @@ SKIP_PROGRAMS: dict[str, dict[str, str]] = {
 
 
 def target() -> str:
-    return os.environ.get("MYLA_TEST_TARGET", "")
+    """The target whose excuses apply: MYLA_TEST_TARGET's, or on a Windows
+    machine its own, x86_64-windows (MYLA-926 step 2: the suites run there
+    natively, MYLA_TEST_TARGET unset)."""
+    return os.environ.get("MYLA_TEST_TARGET", "") or ("x86_64-windows" if sys.platform == "win32" else "")
+
+
+# The x86_64-windows excuses that are Wine's, not Windows': on Windows
+# itself (MYLA-926 step 2, MYLA_TEST_TARGET unset) these tests run.
+WINE_ONLY = {
+    "test_platform_primitives.Paths",
+    "test_fs.DirectoryParity.test_symbolic_links",
+    "test_fs.DirectoryParity.test_where_links_lead",
+    "test_fs.DirectoryParity.test_opens_that_neither_wait_nor_follow",
+    "test_term.Terminal.test_raw_mode_and_back",
+    "test_reactor_scaling.BusyWorkers.test_round_trips_beside_tasks_that_only_yield",
+    "test_stdio.TestArgsExample.test_native_matches_interpreter",
+    "test_stdio.TestStdioParity.test_args_round_trip",
+}
 
 
 def excuse_for(test_id: str) -> str | None:
     """Why the running target skips the test `test_id` (`module.Class.method`,
     a prefix of it naming a class or module), or None."""
+    native = not os.environ.get("MYLA_TEST_TARGET")
     for key, why in SKIP.get(target(), {}).items():
+        if native and key in WINE_ONLY:
+            continue
         short = test_id.removeprefix("tests.burn.")
         if short == key or short.startswith(key + "."):
             return why

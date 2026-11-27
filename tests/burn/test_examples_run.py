@@ -62,7 +62,189 @@ EXPECTED = {
                                  "Hello, Myla!\nHello, Myla?\n2\n1\nlift-off\n"),
     "time_and_math.my": "1.41\ntrue\n3.141592653589793\nanswered 7\ngave up\n7\ntrue\n",
     "transforms.my": "(243, 275)\n(320, 249)\n(235, 164)\n(320, 154)\n(320, 312)\n(397, 275)\n(320, 179)\n(405, 164)\ntrue\n",
+    "images.my": ("::::::::::::::::\n----------------\n---------%%%%%--\n=========%%%%%==\n=========%%%%%==\n"
+                  "+++++++++%%%%%++\n+++++++++%%%%%++\n****************\n****************\n################\n"
+                  "................\n................\n................\n................\n................\n"
+                  "................\ncorner 8x8, top left #b8979cff\n"
+                  "palette #122f6eff #6b6aa3ff #eac07dff #af929dff\n0100100100100100\n1010101010101011\n"
+                  "1111011102222210\n1101111112222211\n1111111112222211\n1111111112222233\n3333333332222233\n"
+                  "3333333333222233\n3232332323233323\n2223223223222232\n0000000000000000\n0000000000000000\n"
+                  "0000000000000000\n0000000000000000\n0000000000000000\n0000000000000000\n"
+                  "preview: 8 lines of 16 cells\n"),
     "book_api.my": 'GET /api/books/2 -> 200 {"id":2,"title":"The Dispossessed","year":1974} (version 1)\nGET /api/books/search?q=dark -> 200 {"query":"dark","found":[{"id":1,"title":"The Left Hand of Darkness","year":1969}]} (version 1)\nGET /api/books/9 -> 404 {"error":"no book 9"} (version 1)\nPOST /api/books -> 200 {"id":4,"title":"The Lathe of Heaven","year":1971} (version 1)\nPOST /api/books -> 422 {"error":"$.title: missing field"} (version 1)\nDELETE /api/books/2 -> 405 method not allowed (version 1)\nGET / -> 200 see /api/books/{id} (version -)\n',
+    "binary_data.my": "24 bytes\nNAME: 4 bytes\nCODE: 4 bytes\ntrue\ncut short\n",
+    "lzw_and_packbits.my": ("GIF LZW: 256 bytes in 72, 74 as sub-blocks\ndecoded: true\nTIFF LZW: 110 bytes\n"
+                            "at most 100 bytes: output longer than max_output\nPackBits: 201 bytes\n"
+                            "one byte short: compressed data ends too early\n"),
+    "gif_animation.my": (
+        '187 bytes, 4 frames of 20x8\n'
+        'loops 0 (0: forever)\n'
+        'frame at (0, 0), 20x8, 120 ms, Keep\n'
+        'frame at (1, 3), 5x3, 120 ms, Keep\n'
+        'frame at (3, 3), 5x3, 120 ms, Keep\n'
+        'frame at (5, 3), 5x3, 120 ms, Keep\n'
+        'shown as made: true\n'
+        '....................\n'
+        '....................\n'
+        '....................\n'
+        '.......@@@..........\n'
+        '.......@@@..........\n'
+        '.......@@@..........\n'
+        '==--==--==--==--==--\n'
+        '==--==--==--==--==--\n'
+        'info: 20x8, 4 frames\n'
+    ),
+    "image_files.my": ("PAM: 578 bytes, read back: the same\nPPM: 396 bytes, read back: the same\n"
+                       "BMP, 32 bits: 634 bytes, read back: the same\nBMP, 24 bits: 438 bytes, read back: the same\n"
+                       "QOI: 274 bytes, read back: the same\nbmp: 16x8 rgba, 8 bits a sample\n"
+                       "P2\n4 2\n255\n194 178 162 146\n76 61 45 29\nQOI cut short: 20 bytes, read back: truncated input\n"),
+    "png_badge.my": ("drawn: 48x20 rgba, pixels 64c3d222\nPNG: 441 bytes, 48x20 rgba, 8 bits\n"
+                      "decoded back the same: true\npalette PNG: 13 colours, 279 bytes, 48x20 rgba, 4 bits\n"
+                      "the same pixels: true\nerror: checksum mismatch\n"),
+    "tiff_files.my": ('none      37096 bytes, read back the same: true\n'
+                      'PackBits  37408 bytes, read back the same: true\n'
+                      'LZW        2980 bytes, read back the same: true\n'
+                      'Deflate    1108 bytes, read back the same: true\n'
+                      '1 page: 96x64 rgb, 16 bits\n'
+                      '  ImageWidth: 96\n'
+                      '  ImageLength: 64\n'
+                      '  BitsPerSample: 16, 16, 16\n'
+                      '  Compression: 5\n'
+                      '  PhotometricInterpretation: 2\n'
+                      '  SamplesPerPixel: 3\n'
+                      '  RowsPerStrip: 14\n'
+                      '  XResolution: 72/1\n'
+                      '  YResolution: 72/1\n'
+                      '  PlanarConfiguration: 1\n'
+                      '  ResolutionUnit: 2\n'
+                      '  Predictor: 2\n'
+                      '8 bits: pixel (48, 0) is #4000bfff\n'
+                      'not a TIFF: unsupported: CMYK\n'),
+    "draw_chart.my": (
+        '                                                \n'
+        '          @@@@  @@@  @     @@@@@  @@@@          \n'
+        '         @     @   @ @     @     @              \n'
+        '         @     @   @ @     @     @              \n'
+        '          @@@  @@@@@ @     @@@@   @@@           \n'
+        '             @ @   @ @     @         @          \n'
+        '             @ @   @ @     @         @          \n'
+        '         @@@@  @   @ @@@@@ @@@@@ @@@@           \n'
+        '                                                \n'
+        '                                                \n'
+        '                                         .=.    \n'
+        '   @                                    =%%.    \n'
+        '   @                        ..        :#%#=--   \n'
+        '   @                       +@@%*-.  .*@#-----   \n'
+        '   @                     :%%+=*#@@%*%%- .----   \n'
+        '   @          :.        +%#=--- .-+#+   .----   \n'
+        '   @        =#@@%*-.  :#%=:----  .::::  .----   \n'
+        '   @     .+%@#==*#@@%*%#: .----  .----  .----   \n'
+        '   @   :*%%+----- .-+#+   .----  .----  .----   \n'
+        '   @   *#=  .----  .::::  .----  .----  .----   \n'
+        '   @ .::::  .----  .----  .----  .----  .----   \n'
+        '   @ .----  .----  .----  .----  .----  .----   \n'
+        '   @ .----  .----  .----  .----  .----  .----   \n'
+        '   @ .----  .----  .----  .----  .----  .----   \n'
+        '   @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ \n'
+        '                                                \n'
+    ),
+    "edges.my": (
+        "........................................\n"
+        "........................................\n"
+        "........................................\n"
+        ".........###............############....\n"
+        "......###...###.........#..........#....\n"
+        ".....##.......##.......#...........#....\n"
+        ".....#.........#........#..........#....\n"
+        ".....#.........#........############....\n"
+        "....#...........#.......................\n"
+        "....#...........#.......................\n"
+        "....#...........#.......................\n"
+        ".....#.........#........................\n"
+        ".....#.........#........................\n"
+        ".....##.......##........................\n"
+        "......#########.........................\n"
+        "........................................\n"
+        "........................................\n"
+        "threshold 39: 2 shapes\n"
+        "  113 pixels in 13x13 at (4, 3), centre (10.0, 9.0)\n"
+        "  60 pixels in 12x5 at (24, 3), centre (29.5, 5.0)\n"
+        "|   ..:......::::::..|\n"
+        "|  -#%%%*....++++++..|\n"
+        "|  +%%%%%............|\n"
+        "|  .=+++:............|\n"
+    ),
+    "font_text.my": 'Myla Test Sans Regular: 176 glyphs, 2048 units to the em\n'
+        "'Hello, Myla!' at 16 px: 83.58 by 17.88 px\n"
+        'V after A: 9.48 px kerned, 10.67 px not\n'
+        'a paragraph at 12 px: 2 lines, 142.73 by 27.21 px\n'
+        '                                                            \n'
+        '                                                            \n'
+        '                                                            \n'
+        '                             =-                             \n'
+        '  :**.       -**             %#                             \n'
+        '  -@@+       #@@             %#                             \n'
+        '  -@#%      :@#@             %#                             \n'
+        '  -@=@-     +%+@  +-     .+- %#    -+*+-         +-     .+- \n'
+        '  -@:%*     %++@  #%     =@: %#   #%*+*@#        #%     =@: \n'
+        '  -@:+%.   -@:+@  -@=    #%  %#  =@-   +@-       -@=    #%  \n'
+        '  -@:.@=   *# +@   %#   .@=  %#   .    :@=        %#   .@=  \n'
+        '  -@: ##  .%= +@   +@:  =@.  %#    .---+@+        +@:  =@.  \n'
+        '  -@: -@: =%  +@   .@+  #*   %#  .#@%###@+        .@+  #*   \n'
+        '  -@:  %+ #*  +@    #% :@-   %#  #%-   :@+         #% :@-   \n'
+        '  -@:  +%:@-  +@    -@:+%    %#  @*    -@+         -@:+%    \n'
+        '  -@:  :@*%   +@     %*%+    %#  @*    #@+          %*%+    \n'
+        '  -@:   #@+   +@     +%@:    %#  #%-.:#=@#.         +%@:    \n'
+        '  -@:   =@.   +@     .@#     %#  .#@@%= +@%.        .@#     \n'
+        '                     :@-           ..               :@-     \n'
+        '                     *%                             *%      \n'
+        '                  .:*@-                          .:*@-      \n'
+        '                  +@%=                           +@%=       \n'
+        '                   .                              .         \n'
+        '5 glyphs drawn, 4 masks rasterised\n',
+    "page_scan.my": "threshold 134: 1 outline of 227 pixels, simplified to 4 corners\n"
+        "  corner (13, 9), true (14, 9)\n"
+        "  corner (88, 14), true (88, 15)\n"
+        "  corner (81, 55), true (80, 55)\n"
+        "  corner (9, 48), true (9, 47)\n"
+        "....................................\n"
+        "....................................\n"
+        "....................................\n"
+        "......#...#.#...#.#......###........\n"
+        "......##.##.#...#.#.....#...#.......\n"
+        "......#.#.#..#.#..#.....#...#.......\n"
+        "......#.#.#...#...#.....#####.......\n"
+        "......#...#...#...#.....#...#.......\n"
+        "......#...#...#...#.....#...#.......\n"
+        "......#...#...#...#####.#...#.......\n"
+        "....................................\n"
+        "....................................\n"
+        "....................................\n"
+        "......########################......\n"
+        "....................................\n"
+        "....................................\n"
+        "against the page drawn: PSNR 18.7 dB\n",
+    "jpeg_decode.my": 'the arrow: 16x8 rgb\norientation 6, 300x300 dots per inch\n'
+        '     .     =    \n           ==.  \n          .===. \n %%%%%%%%%%==== \n'
+        ' %%%%%%%%%%==== \n          .===. \n           ==.  \n     .     =.   \n'
+        "upright: 8x16, the tip's colour #d5782aff\n        \n   %%   \n   %%   \n"
+        '   %%   \n   %%   \n.  %%  .\n   %%   \n   %%   \n   %%   \n   %%   \n'
+        '  .%%.  \n========\n.====== \n .====. \n  .==.  \n        \n'
+        'cut in the scan: still 16x8, as libjpeg reads it\n'
+        'cut before the scan: truncated input\n',
+    "image_formats.my": "64x48 rgba: 12288 bytes of samples\n"
+        "png     392 bytes (lossless), read as png: the same\n"
+        "gif    3054 bytes (lossy), read as gif: not the same\n"
+        "tiff   1130 bytes (lossless), read as tiff: the same\n"
+        "bmp   12410 bytes (lossless), read as bmp: the same\n"
+        "pnm   12355 bytes (lossless), read as pnm: the same\n"
+        "qoi    5425 bytes (lossless), read as qoi: the same\n"
+        "holiday/IMG_0042.JPG: jpeg\nscan.tiff: tiff\nicon.dib: bmp\nframe.pam: pnm\nnotes.txt: no image format\n"
+        "<html>: not an image of this format\nno/such/picture.png: NotFound\n",
+    "jpeg_encode.my": "the picture: 64x48 rgb, 9216 bytes of samples\n"
+        "quality  50, 4:2:0:   967 bytes, PSNR 26.7 dB\nquality  75, 4:2:0:  1108 bytes, PSNR 28.4 dB\n"
+        "quality  90, 4:2:0:  1391 bytes, PSNR 29.8 dB\nquality  90, 4:2:2:  1481 bytes, PSNR 32.5 dB\n"
+        "quality  90, 4:4:4:  1728 bytes, PSNR 38.0 dB\ngray at quality 75: 663 bytes, read back as gray\n",
 }
 
 def run_file(path: str) -> str:

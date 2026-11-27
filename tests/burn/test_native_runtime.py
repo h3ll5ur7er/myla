@@ -9,10 +9,12 @@ compiler (and for the Python backend until it was retired, MYLA-219).
 - Output isn't lost when a `write` is short or can't proceed yet: here stdout
   is a non-blocking pipe whose reader starts late, so the pipe fills and
   `write` returns EAGAIN or writes part of the buffer.
+
+On Windows (MYLA-926 step 2) the programs are Windows': the address-space
+limits, the non-blocking pipe, gdb and /proc are Linux's (`linux_only`).
 """
 from __future__ import annotations
 
-import fcntl
 import os
 import shutil
 import subprocess
@@ -22,8 +24,9 @@ import time
 import unittest
 
 from ._golden import golden
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble, linux_only
 from ._tools import STDLIB_ROOT, selfhost_tool
+from ._native import HOST_TARGET  # the machine's target (MYLA-926)
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _MYLA = os.path.join(_REPO, "myla.py")
@@ -283,10 +286,10 @@ class NativeRuntime(unittest.TestCase):
         self.write(name + ".my", source, cwd)
         asm = subprocess.run([self.gen, name + ".my", self.stdlib], cwd=cwd,
                              capture_output=True, text=True, check=True).stdout
-        sh = os.path.join(cwd, name + "_self")
-        self.write(name + "_self.s", asm, cwd)
-        subprocess.run(["as", "--64", "-o", sh + ".o", sh + ".s"], check=True)
-        subprocess.run(["ld", "-o", sh, sh + ".o"], check=True)
+        sh = os.path.join(cwd, name + "_self" + EXE)
+        self.write(name + "_self" + EXE + ".s", asm, cwd)
+        # (the machine's assembler and linker: as and ld, or Windows' LLVM)
+        assemble(sh + ".s", sh)
         return [("self-hosted", sh)]
 
     def interpreter_position(self, name: str, cwd: str | None = None) -> str:
@@ -307,6 +310,7 @@ class NativeRuntime(unittest.TestCase):
                                      ("1\n", f"runtime error: {message}\n{where}\n", 1))
                     self.assertEqual(where, self.interpreter_position(name))
 
+    @linux_only("the program reads its resident memory from /proc")
     def test_a_freed_big_list_gives_its_memory_back(self):
         for name, source in (("big_list", BIG_LIST_FREED), ("big_list_tasks", BIG_LIST_FREED_TASKS)):
             for backend, binary in self.binaries(name, source):
@@ -377,6 +381,7 @@ class NativeRuntime(unittest.TestCase):
                     self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
                                      ("", "runtime error: stack overflow\n", 1))
 
+    @linux_only("gdb on a Linux program's registers")
     @unittest.skipUnless(shutil.which("gdb"), "gdb is not installed")
     def test_exit_passes_its_status_sign_extended(self):
         # `exit`'s status reaches std.rt's `exit_program(code: int)` as any
@@ -390,12 +395,15 @@ class NativeRuntime(unittest.TestCase):
         for name, source in (("exit_plain", plain), ("exit_tasks", tasks)):
             for backend, binary in self.binaries(name, source):
                 with self.subTest(program=name, backend=backend):
+                    # the first argument's register: x86-64's %rdi, aarch64's x0
+                    reg = "$x0" if HOST_TARGET == "aarch64-linux" else "$rdi"
                     proc = subprocess.run(["gdb", "-q", "-batch", "-nx", "-ex", "break __exit_program", "-ex", "run",
-                                           "-ex", "printf \"code %ld\\n\", $rdi", binary],
+                                           "-ex", f"printf \"code %ld\\n\", {reg}", binary],
                                           capture_output=True, text=True, timeout=120)
                     self.assertIn("code -1\n", proc.stdout, proc.stdout + proc.stderr)
                     self.assertEqual(subprocess.run([binary]).returncode, 255)
 
+    @linux_only("an address-space limit (bash's ulimit -v)")
     def test_a_tasked_program_reserves_an_arena_per_worker(self):
         # one 4 GiB arena per worker, not 32 always: with one worker a tasked
         # program runs under a 5.7 GB address-space limit (MYLA-172, D106)
@@ -408,6 +416,7 @@ class NativeRuntime(unittest.TestCase):
                                       env={**os.environ, "MYLA_THREADS": "1"})
                 self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("1\n", "", 0))
 
+    @linux_only("an address-space limit (bash's ulimit -v)")
     def test_the_heap_grows_in_chunks_under_a_small_address_space_limit(self):
         # the arenas are mapped as the program allocates (D106 (B), MYLA-162):
         # under a 400 MB limit a program with tasks runs on four workers, and
@@ -446,7 +455,9 @@ class NativeRuntime(unittest.TestCase):
                         self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
                                          ("2\n", f"runtime error: {message}\n{where}\n", 1))
 
+    @linux_only("a non-blocking pipe (fcntl's O_NONBLOCK)")
     def test_no_output_is_lost_on_a_non_blocking_pipe(self):
+        import fcntl
         expected = LINES * 101
         for backend, binary in self.binaries("writer", WRITER):
             with self.subTest(backend=backend):

@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, EXE, ON_WINDOWS, SKIP_REASON
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 _FUNCTIONS = """import std.test as test
@@ -290,6 +290,15 @@ def _myla(args: list[str], cwd: str, env: dict | None = None) -> subprocess.Comp
                           capture_output=True, text=True, cwd=cwd, env=full)
 
 
+def _scratch_env(scratch: str) -> dict:
+    """The environment that makes `scratch` the root of `myla test`'s
+    scratch directories: TMPDIR, and on Windows %TEMP% (and %TMP%), which
+    it takes there (MYLA-728)."""
+    if ON_WINDOWS:
+        return {"TMPDIR": scratch, "TEMP": scratch, "TMP": scratch}
+    return {"TMPDIR": scratch}
+
+
 def _write(tmp: str, name: str, source: str) -> str:
     path = os.path.join(tmp, name)
     with open(path, "w", encoding="utf-8") as fh:
@@ -312,7 +321,7 @@ class TestTestFunctions(unittest.TestCase):
             scratch = os.path.join(tmp, "scratch")
             os.mkdir(scratch)
             path = _write(tmp, "unwind.my", _UNWINDING)
-            proc = _myla(["test", path], tmp, {"TMPDIR": scratch})
+            proc = _myla(["test", path], tmp, _scratch_env(scratch))
             self.assertEqual(proc.returncode, 1, proc.stderr)
             self.assertEqual(proc.stdout, _UNWINDING_WANT)
             # `exit` unwound through the deferred block that wrote the file
@@ -395,7 +404,7 @@ class TestTestFunctions(unittest.TestCase):
                           proc.stderr)
             # natively, the harness of `myla test --native` names the case's
             # directory in MYLA_TEST_DIR; without it there is no case either
-            exe = os.path.join(tmp, "outside")
+            exe = os.path.join(tmp, "outside" + EXE)
             built = _myla(["build", path, "-o", exe], tmp)
             self.assertEqual(built.returncode, 0, built.stderr)
             proc = subprocess.run([exe], capture_output=True, text=True, cwd=tmp)
@@ -406,8 +415,9 @@ class TestTestFunctions(unittest.TestCase):
             proc = subprocess.run([exe], capture_output=True, text=True, cwd=tmp,
                                   env={**os.environ, "MYLA_TEST_DIR": case_dir})
             self.assertEqual(proc.returncode, 0, proc.stderr)
-            # `d` and 16 random hexadecimal digits (std.fs.make_temp_dir_in, MYLA-339)
-            self.assertRegex(proc.stdout, "^" + re.escape(case_dir) + "/d[0-9a-f]{16}\n$")
+            # `d` and 16 random hexadecimal digits (std.fs.make_temp_dir_in, MYLA-339),
+            # joined with the system's separator (`\\` on Windows)
+            self.assertRegex(proc.stdout, "^" + re.escape(case_dir + os.sep) + "d[0-9a-f]{16}\n$")
             self.assertTrue(os.path.isdir(proc.stdout.strip()))
 
 

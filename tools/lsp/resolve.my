@@ -309,7 +309,22 @@ impl Resolver {
                     },
                     None => {
                         var name = p.segments[p.segments.len() - 1]
-                        match alias { Some(a) => { name = a }, None => {} }
+                        match alias {
+                            Some(a) => {
+                                name = a
+                                // the alias, the identifier after the path's
+                                // (the tokens are identifiers only), names the
+                                // module here
+                                let k0 = self.ident_after(p.line, p.col, p.segments[0])
+                                let k = k0 + (p.segments.len() as int32)
+                                if k0 >= 0 && k < self.toks.len() && self.toks[k].lexeme == a && !self.used.contains(k) {
+                                    self.used[k] = true
+                                    let none = Range { start: Pos { line: 0, character: 0 }, end: Pos { line: 0, character: 0 } }
+                                    self.uses.push(Use { range: self.range_of(k), def: Def { name: a, path: file, range: none, kind: DefKind.Module, detail: "", ty: "" } })
+                                }
+                            },
+                            None => {},
+                        }
                         self.modules[name] = file
                     },
                 }
@@ -359,7 +374,10 @@ impl Resolver {
     }
 
     // `declare` with what hover shows of it (a type parameter's bounds).
+    // `_` binds nothing (`for _ in 0..n`, a parameter `_`): it is no
+    // definition, and a `_` pattern elsewhere is no use of it.
     fun declare_detail(var self, line: int32, col: int32, name: str, kind: DefKind, ty: str, detail: str) {
+        if name == "_" { return }
         let k = self.ident_after(line, col, name)
         if k < 0 { return }
         let d = Def { name: name, path: self.path, range: self.range_of(k), kind: kind, detail: detail, ty: ty }
@@ -536,6 +554,10 @@ impl Resolver {
         self.attributes(fd.attributes)
         self.push_scope()
         self.type_params(fd.type_params)
+        // a default is the caller's expression: it sees no parameter
+        for p in fd.params {
+            match p.default { Some(e) => { self.expr(e) }, None => {} }
+        }
         for p in fd.params {
             var shown = ""
             match p.ty {

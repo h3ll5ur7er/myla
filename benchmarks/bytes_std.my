@@ -1,0 +1,227 @@
+// std.bytes's readers and writers against the same loops written by hand
+// (MYLA-957): each pair computes the same value, through the library's
+// `ByteReader`, `MsbBitReader`, `LsbBitReader` and bit writers, and with the
+// buffer kept in local variables, so the difference is what the library's
+// shape costs (a method call, an `Option`, the state in a struct).
+// `build/myla build benchmarks/bytes_std.my -o /tmp/bytes_std && /tmp/bytes_std`
+// (natively; an argument sets the megabytes, 100 by default). The numbers
+// are on Language/Standard-library/Bytes.
+import std.bench as bench
+import std.bytes as bytes
+import std.num as num
+import std.process as process
+from std.bench import Report
+
+// `n` bytes of a 32-bit LCG's high bits.
+#test(3)[[5u8, 4u8, 139u8]]
+fun data_of(n: int) -> [uint8] {
+    var d: [uint8] = []
+    var s: uint32 = 12345
+    for i in 0..n {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223)
+        d.push((s >> 24) as uint8)
+    }
+    return d
+}
+
+// The sum of `d`'s big-endian 32-bit words, through a `ByteReader`.
+#test([0u8, 0u8, 1u8, 2u8, 0u8, 0u8, 0u8, 3u8, 9u8])[261u32]
+fun u32_sum_reader(d: [uint8]) -> uint32 {
+    var r = bytes.reader(d)
+    var s: uint32 = 0
+    while let Some(v) = r.u32_be() {
+        s = s.wrapping_add(v)
+    }
+    return s
+}
+
+// The same with `has` checked once for a run of words: each read still
+// checks, but its `None` arm is never taken.
+#test([0u8, 0u8, 1u8, 2u8, 0u8, 0u8, 0u8, 3u8, 9u8])[261u32]
+fun u32_sum_has(d: [uint8]) -> uint32 {
+    var r = bytes.reader(d)
+    var s: uint32 = 0
+    while r.has(4) {
+        s = s.wrapping_add(r.u32_be().unwrap_or(0))
+    }
+    return s
+}
+
+// The same by hand.
+#test([0u8, 0u8, 1u8, 2u8, 0u8, 0u8, 0u8, 3u8, 9u8])[261u32]
+fun u32_sum_hand(d: [uint8]) -> uint32 {
+    var s: uint32 = 0
+    var i = 0
+    let n = d.len()
+    while i + 4 <= n {
+        let v = ((d[i] as uint32) << 24) | ((d[i + 1] as uint32) << 16) | ((d[i + 2] as uint32) << 8) | (d[i + 3] as uint32)
+        s = s.wrapping_add(v)
+        i += 4
+    }
+    return s
+}
+
+// The sum of `d`'s 13-bit codes, the highest bit first, through an
+// `MsbBitReader`.
+#test([0xFFu8, 0xF8u8, 0x01u8, 0x80u8])[8197u32] // 8191 + 6
+fun msb13_reader(d: [uint8]) -> uint32 {
+    var r = bytes.msb_reader(d)
+    var s: uint32 = 0
+    while let Some(c) = r.bits(13) {
+        s = s.wrapping_add(c)
+    }
+    return s
+}
+
+// The same by hand: the buffer in local variables.
+#test([0xFFu8, 0xF8u8, 0x01u8, 0x80u8])[8197u32] // 8191 + 6
+fun msb13_hand(d: [uint8]) -> uint32 {
+    var s: uint32 = 0
+    var acc: uint64 = 0
+    var nb = 0
+    var i = 0
+    let n = d.len()
+    while true {
+        if nb < 13 {
+            while nb < 56 && i < n {
+                acc = (acc << 8) | (d[i] as uint64)
+                i += 1
+                nb += 8
+            }
+            if nb < 13 { break }
+        }
+        nb -= 13
+        s = s.wrapping_add(((acc >> (nb as uint64)) & 0x1FFFu64) as uint32)
+    }
+    return s
+}
+
+// The sum of `d`'s 13-bit codes, the lowest bit first, through an
+// `LsbBitReader`.
+#test([0xFFu8, 0x1Fu8, 0x00u8, 0x04u8])[8191u32] // 8191 + 0
+fun lsb13_reader(d: [uint8]) -> uint32 {
+    var r = bytes.lsb_reader(d)
+    var s: uint32 = 0
+    while let Some(c) = r.bits(13) {
+        s = s.wrapping_add(c)
+    }
+    return s
+}
+
+// The same with the reader's fields used in the loop: `refill` called only
+// when the buffer runs low.
+#test([0xFFu8, 0x1Fu8, 0x00u8, 0x04u8])[8191u32] // 8191 + 0
+fun lsb13_fields(d: [uint8]) -> uint32 {
+    var r = bytes.lsb_reader(d)
+    var s: uint32 = 0
+    while true {
+        if r.n < 13 {
+            r.refill()
+            if r.n < 13 { break }
+        }
+        s = s.wrapping_add((r.acc & 0x1FFFu64) as uint32)
+        r.acc = r.acc >> 13u64
+        r.n -= 13
+    }
+    return s
+}
+
+#test([0xFFu8, 0x1Fu8, 0x00u8, 0x04u8])[8191u32] // 8191 + 0
+fun lsb13_hand(d: [uint8]) -> uint32 {
+    var s: uint32 = 0
+    var acc: uint64 = 0
+    var nb = 0
+    var i = 0
+    let n = d.len()
+    while true {
+        if nb < 13 {
+            while nb < 56 && i < n {
+                acc = acc | ((d[i] as uint64) << (nb as uint64))
+                i += 1
+                nb += 8
+            }
+            if nb < 13 { break }
+        }
+        s = s.wrapping_add((acc & 0x1FFFu64) as uint32)
+        acc = acc >> 13u64
+        nb -= 13
+    }
+    return s
+}
+
+// A Huffman decoder's step, through an `MsbBitReader`: 16 bits peeked, a
+// code of 1 to 16 bits used (its length from the peeked bits), the codes'
+// sum.
+#test([0xFFu8, 0xFFu8, 0x00u8, 0x00u8])[65535u32]
+fun peek_skip_reader(d: [uint8]) -> uint32 {
+    var r = bytes.msb_reader(d)
+    var s: uint32 = 0
+    while r.bits_left() >= 16 {
+        let v = r.peek(16)
+        let len = ((v >> 12) as int) + 1
+        s = s.wrapping_add(v >> ((16 - len) as uint32))
+        let ok = r.skip_bits(len)
+    }
+    return s
+}
+
+// 13-bit codes written by an `MsbBitWriter`: `n` codes, the output's length.
+#test(5)[9]
+fun msb13_write(n: int) -> int {
+    var w = bytes.msb_writer()
+    var c: uint32 = 0
+    for i in 0..n {
+        w.put_bits(c, 13)
+        c = (c + 7919) & 0x1FFF
+    }
+    return w.finish().len()
+}
+
+#test(5)[9]
+fun msb13_write_hand(n: int) -> int {
+    var out: [uint8] = []
+    var acc: uint64 = 0
+    var nb = 0
+    var c: uint32 = 0
+    for i in 0..n {
+        acc = (acc << 13u64) | (c as uint64)
+        nb += 13
+        while nb >= 8 {
+            nb -= 8
+            out.push(((acc >> (nb as uint64)) & 255u64) as uint8)
+        }
+        c = (c + 7919) & 0x1FFF
+    }
+    if nb > 0 { out.push(((acc << ((8 - nb) as uint64)) & 255u64) as uint8) }
+    return out.len()
+}
+
+fun show(r: Report) {
+    print(r.line())
+}
+
+fun main() {
+    let args = process.args()
+    var mb = 100
+    if args.len() > 1 {
+        mb = num.parse_int(args[1]).unwrap_or(100i64) as int
+    }
+    let d = data_of(mb * 1048576)
+    let codes = d.len() * 8 / 13
+    print(f"{mb} MB, {codes} 13-bit codes")
+    let a = u32_sum_reader(d)
+    let ok = a == u32_sum_hand(d) && a == u32_sum_has(d) && msb13_reader(d) == msb13_hand(d) &&
+        lsb13_reader(d) == lsb13_hand(d) && lsb13_fields(d) == lsb13_hand(d) && msb13_write(codes) == msb13_write_hand(codes)
+    print(if ok { "same results" } else { "DIFFERENT RESULTS" })
+    show(bench.run_n("u32_be, ByteReader", 5, () => u32_sum_reader(d)))
+    show(bench.run_n("u32_be, has() first", 5, () => u32_sum_has(d)))
+    show(bench.run_n("u32_be, by hand", 5, () => u32_sum_hand(d)))
+    show(bench.run_n("13-bit MSB, MsbBitReader", 5, () => msb13_reader(d)))
+    show(bench.run_n("13-bit MSB, by hand", 5, () => msb13_hand(d)))
+    show(bench.run_n("13-bit LSB, LsbBitReader", 5, () => lsb13_reader(d)))
+    show(bench.run_n("13-bit LSB, LsbBitReader's fields", 5, () => lsb13_fields(d)))
+    show(bench.run_n("13-bit LSB, by hand", 5, () => lsb13_hand(d)))
+    show(bench.run_n("peek(16) + skip_bits, MsbBitReader", 5, () => peek_skip_reader(d)))
+    show(bench.run_n("13-bit MSB write, MsbBitWriter", 5, () => msb13_write(codes)))
+    show(bench.run_n("13-bit MSB write, by hand", 5, () => msb13_write_hand(codes)))
+}

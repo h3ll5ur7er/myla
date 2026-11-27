@@ -93,7 +93,23 @@ class _Client:
 
 
 def _uri(path):
+    # (a Windows path's URI is file:///C:/..., MYLA-926; Linux's as it was)
+    if os.name == "nt":
+        import pathlib
+        return pathlib.Path(os.path.realpath(path)).as_uri()
     return "file://" + os.path.realpath(path)
+
+
+def _another_spelling(path):
+    """Another URI of the file `path`, as valid as `_uri`'s (MYLA-938): VS
+    Code's on Windows, the drive lower-case and its colon percent-encoded
+    (`file:///c%3A/Users/...`); elsewhere with each `_` percent-encoded."""
+    from urllib.parse import quote
+    real = os.path.realpath(path)
+    if os.name == "nt":
+        drive, rest = os.path.splitdrive(real)
+        return "file:///" + drive[0].lower() + "%3A" + quote(rest.replace("\\", "/"))
+    return "file://" + quote(real).replace("_", "%5F")
 
 
 class LspScenarios:
@@ -428,6 +444,25 @@ class LspRequestScenarios(LspRequestHelpers):
         self.assertEqual(len(refs), 4)                     # doc.my is in the workspace too: no duplicates
         self.assertIn({"uri": _uri(other), "range": rng(1, 2, 4)}, refs)
 
+    def test_any_spelling_of_a_uri(self):
+        # MYLA-938: a file has more than one URI (VS Code on Windows writes a
+        # drive `file:///c%3A/...`, Python `file:///C:/...`); the server reads
+        # any, and answers in the client's own for an open document and in
+        # `_uri`'s for another
+        other = self.write("other.my", "pub fun helper() -> int {\n    return 1\n}\n")
+        text = ("from .other import helper\nfun twice() -> int {\n    return 2 * helper()\n}\n"
+                "fun main() {\n    print(twice())\n}\n")
+        path = self.write("doc.my", text)
+        uri = _another_spelling(path)
+        self.assertNotEqual(uri, _uri(path))
+        self.client.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "myla", "version": 1, "text": text}})
+        self.assertEqual(self.client.diagnostics(1), {uri: []})          # its import is found
+        self.assertEqual(self.at("textDocument/definition", uri, 5, 10), {"uri": uri, "range": rng(1, 4, 9)})
+        self.assertEqual(self.at("textDocument/definition", uri, 2, 17), {"uri": _uri(other), "range": rng(0, 8, 14)})
+        refs = self.at("textDocument/references", uri, 5, 10, context={"includeDeclaration": True})
+        self.assertEqual([(r["uri"], r["range"]) for r in refs], [(uri, rng(1, 4, 9)), (uri, rng(5, 10, 15))])
+
     # -- hover -----------------------------------------------------------------
 
     def test_hover(self):
@@ -548,7 +583,12 @@ class ProjectScenarios(LspRequestHelpers):
         self.write_in(self.geo, "src/geo.my", GEO)
         self.write_in(self.geo, "src/shapes.my", SHAPES)
         self.manifest = self.write("myla.toml", '[package]\nname = "app"\nversion = "0.1.0"\n\n[dependencies]\n'
-                                   'geo = { path = "%s" }\n' % os.path.relpath(self.geo, self.root))
+                                   'geo = { path = "%s" }\n' % self.geo_path())
+
+    def geo_path(self):
+        """The dependency's path from the manifest, as a TOML string holds it:
+        with `/` (Windows' `\\` would start an escape, MYLA-926)."""
+        return os.path.relpath(self.geo, self.root).replace(os.sep, "/")
 
     def write_in(self, base, name, text):
         path = os.path.join(base, name)
@@ -628,7 +668,7 @@ class ProjectScenarios(LspRequestHelpers):
     def test_a_git_dependency_that_is_not_checked_out(self):
         # the server never fetches: the import fails, and the manifest says why
         self.write("myla.toml", '[package]\nname = "app"\nversion = "0.1.0"\n\n[dependencies]\n'
-                                'geo = { path = "%s" }\n' % os.path.relpath(self.geo, self.root)
+                                'geo = { path = "%s" }\n' % self.geo_path()
                                 + 'color = { git = "https://example.org/color.git" }\n')
         self.write("myla.lock", 'version = 1\n\n[git.color]\nurl = "https://example.org/color.git"\n'
                                 'commit = "0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c"\n')

@@ -128,4 +128,10 @@ export class MemFs {
     this.files.delete(a);
     this.files.set(b, f);
   }
+
+  // It holds no symbolic links (MYLA-841).
+  readlink(path) {
+    if (this.dirs.has(path) || this.files.has(path)) throw fsError("EINVAL");
+    throw fsError("ENOENT");
+  }
 }

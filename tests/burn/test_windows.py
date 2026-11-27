@@ -27,7 +27,11 @@ scripts/host.sh finds Windows and its seed, `BootstrapLink` that it builds a
 stage by `myla build --target x86_64-windows`'s command lines.
 
 Skipped where clang, llvm-dlltool, lld-link or Wine is missing (CI installs
-them, and MYLA_REQUIRE_TARGETS makes a missing one fail there).
+them, and MYLA_REQUIRE_TARGETS makes a missing one fail there). On Windows
+itself (MYLA-926 step 2) `wine()` is [] and `[*wine(), exe]` runs the
+program directly: the classes that only need a Windows program to run run
+there too; what is Wine's (its prefix, its console on a Unix pty, /proc,
+pgrep) is Linux's (`linux_only`).
 """
 from __future__ import annotations
 
@@ -37,16 +41,25 @@ import shutil
 import signal
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, wine, wine_env
+from ._native import CAN_BUILD_NATIVE, ON_WINDOWS, SKIP_REASON, linux_only, wine, wine_env, wine_run
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 TOOLS = ("clang", "llvm-dlltool", "lld-link")
-HAVE_WINDOWS = all(shutil.which(t) for t in TOOLS) and bool(wine())
-WINDOWS_SKIP = "the Windows tests need clang, llvm-dlltool, lld-link and Wine"
+# (on Windows its programs run as they are, with no Wine)
+HAVE_WINDOWS = all(shutil.which(t) for t in TOOLS) and (ON_WINDOWS or bool(wine()))
+WINDOWS_SKIP = "the Windows tests need clang, llvm-dlltool, lld-link and Wine (or Windows itself)"
+
+
+def emulator_env() -> dict:
+    """This process's environment with MYLA_EMULATOR naming Wine for `myla
+    test --target x86_64-windows`'s runs, on Windows itself as it is (the
+    harness runs as it is there)."""
+    return dict(os.environ, MYLA_EMULATOR=" ".join(wine())) if wine() else dict(os.environ)
 
 
 @unittest.skipUnless(os.environ.get("MYLA_REQUIRE_TARGETS"), "MYLA_REQUIRE_TARGETS is not set")
@@ -111,6 +124,67 @@ def coff_imports(path: str) -> dict[str, list[str]]:
         elif words[:1] == ["Symbol:"]:
             out[dll].append(words[1])
     return out
+
+
+@linux_only("Wine's own prefix and server")
+@unittest.skipUnless(bool(wine()), "Wine isn't installed")
+class WinePrefix(unittest.TestCase):
+    def test_a_fresh_prefix_is_made_before_its_server_is_kept(self):
+        """`wine_env` on a prefix that isn't there yet, as on every CI runner
+        (MYLA-759): the prefix is made and its setup has ended (Wine's update
+        stamp written) when it returns, and the server it keeps is still
+        running after a boot's own server would have stopped (3 s). The
+        server was started before the prefix existed, so it stopped at once,
+        and on 2026-11-18 a suite's program got Wine's `configuration ...
+        has been updated` in its output (master's dd57b05)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = os.path.join(tmp, "prefix")
+            env = {k: v for k, v in os.environ.items() if k not in ("WINEPREFIX", "TMPDIR")}
+            env["WINEPREFIX"] = prefix
+            code = ("import sys, os; sys.path.insert(0, os.getcwd())\n"
+                    "from tests.burn import _native\n"
+                    "_native.wine_env(persist='30')\n"
+                    "print(os.path.exists(os.path.join(os.environ['WINEPREFIX'], '.update-timestamp')))\n")
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            proc = subprocess.run(["python3", "-c", code], cwd=root, env=env, capture_output=True, text=True, timeout=600)
+            self.assertEqual((proc.stdout, proc.returncode), ("True\n", 0), proc.stderr)
+            time.sleep(6)
+            server = os.path.join(os.path.dirname(wine()[0]), "wineserver")
+            server = shutil.which("wineserver") or server
+            kill = subprocess.run([server, "-k"], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(kill.returncode, 0, "no server for the prefix 6 s after wine_env")
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE and HAVE_WINDOWS, WINDOWS_SKIP)
+    def test_a_run_ends_with_its_program_whatever_the_services_hold(self):
+        """A program that is the first of its Wine server starts the prefix's
+        services, which outlive it holding its standard error as long as the
+        server lives (MYLA-759): `wine_run`'s run ends with the program. The
+        suites ran programs with `wine()` alone, and on 2026-11-18 a run of
+        `scopes_wait_for_children` that ended at once timed out at 60 s
+        (master's e6e1b9e), one without a time limit waited for over an
+        hour (4c91ba2); here such a run took the server's 30 s."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {k: v for k, v in os.environ.items() if k != "TMPDIR"}
+            env.update(WINEPREFIX=os.path.join(tmp, "prefix"), WINEDEBUG="-all")
+            quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+            server = shutil.which("wineserver") or os.path.join(os.path.dirname(wine()[0]), "wineserver")
+            # the prefix made, its boot's server and services stopped
+            subprocess.run([*wine(), "wineboot", "--init"], env=env, timeout=300, **quiet)
+            subprocess.run([server, "-w"], env=env, timeout=300, **quiet)
+            self.addCleanup(subprocess.run, [server, "-k"], env=env, timeout=60, **quiet)
+            with open(os.path.join(tmp, "main.my"), "w", encoding="utf-8") as fh:
+                fh.write('fun main() {\n    print("hello")\n}\n')
+            built = subprocess.run([selfhost_tool("main"), "build", "main.my", "--target", "x86_64-windows",
+                                    "--stdlib", STDLIB_ROOT, "-o", "prog.exe"], capture_output=True, text=True,
+                                   cwd=tmp, timeout=300)
+            self.assertEqual((built.stderr, built.returncode), ("", 0))
+            # a server kept 30 s, with no services yet: the program starts them
+            subprocess.run([server, "-p30"], env=env, timeout=60, **quiet)
+            start = time.monotonic()
+            ran = subprocess.run([*wine_run(), os.path.join(tmp, "prog.exe")], capture_output=True, cwd=tmp,
+                                 env=env, timeout=60)
+            self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (b"hello\n", b"", 0))
+            self.assertLess(time.monotonic() - start, 20, "the run waited for the server's 30 s")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -356,7 +430,7 @@ fun main() {
     def test_windows_paths(self):
         # D215: std.path is Windows' there (a `\` separates, a drive or a
         # UNC share starts a path) and writes `/`; the working directory is
-        # Windows' own path (Wine's drive Z: is the root)
+        # Windows' own path (Wine's drive Z: is the root; on Windows its own)
         src = r'''import std.path as path
 import std.fs as fs
 import std.glob as glob
@@ -373,7 +447,7 @@ fun main() {
         Err(e) => panic(f"{e}")
     }
     print(cwd)
-    print(path.is_absolute(cwd) && path.anchor(cwd) == "Z:\\")
+    print(path.is_absolute(cwd) && path.anchor(cwd) == "DRIVE\\")
     print(fs.is_file(path.join(cwd, "main.my")))
     print(glob.matches("*/*.my", "src\\main.my"))
     match fs.make_dir_all(cwd + "\\deep\\er") {
@@ -382,8 +456,12 @@ fun main() {
     }
 }
 '''
-        ran = self.build_and_run(src)
-        work = "Z:" + os.path.realpath(self.tmp).replace("/", "\\")
+        if ON_WINDOWS:
+            # the directory it was started in, as Windows names it
+            work = self.tmp
+        else:
+            work = "Z:" + os.path.realpath(self.tmp).replace("/", "\\")
+        ran = self.build_and_run(src.replace("DRIVE", work[:2]))
         want = f"a\\b\nC:\\y\nC:\\a\nnone\nC:/b/c\ntrue\n../d\n{work}\ntrue\ntrue\ntrue\ntrue\n"
         self.assertEqual((ran.stdout.decode(), ran.stderr, ran.returncode), (want, b"", 0))
 
@@ -776,9 +854,12 @@ class Children(unittest.TestCase):
         with open(os.path.join(self.tmp, "echo-args.bat"), "w") as fh:
             fh.write("@echo [%1] [%2] [%3] [%4]\r\n")
         # the helper's directory on PATH: Wine makes a program's PATH of its
-        # registry's and WINEPATH (drive Z: is the Unix root), Windows would
-        # take PATH as it is
-        env = dict(os.environ, WINEPATH="Z:" + self.tmp.replace("/", "\\"), MYLA_B="kept")
+        # registry's and WINEPATH (drive Z: is the Unix root), Windows
+        # takes PATH as it is
+        if ON_WINDOWS:
+            env = dict(os.environ, PATH=self.tmp + os.pathsep + os.environ.get("PATH", ""), MYLA_B="kept")
+        else:
+            env = dict(os.environ, WINEPATH="Z:" + self.tmp.replace("/", "\\"), MYLA_B="kept")
         ran = subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe")], capture_output=True, cwd=self.tmp,
                              timeout=300, env=env)
         self.maxDiff = None
@@ -800,7 +881,8 @@ class Children(unittest.TestCase):
         # D217's `spawns` now true: `myla test --target x86_64-windows` runs
         # the harness once, which starts a child of itself for each case
         # (its scratch directory `c<k>`, where runs of the harness, MYLA-370,
-        # have one for all), under Wine without Wine named again
+        # have one for all), under Wine without Wine named again (on
+        # Windows itself as they are)
         source = ('from std.process import exit, env\nimport std.test as test\nimport std.fs as fs\n\n'
                   '#test(1)[panic("boom")]\n#test(2)[2]\n#test(3)[panic("boom")]\n#test(4)[5]\n'
                   'fun f(x: int) -> int {\n    print(f"f {x}")\n    if x % 2 == 1 { panic("boom") }\n    return x\n}\n\n'
@@ -817,9 +899,8 @@ class Children(unittest.TestCase):
                   '    test.expect(fs.write_to_file(d + "\\\\f.txt", "x").is_ok())\n}\n')
         with open(os.path.join(self.tmp, "t.my"), "w", encoding="utf-8") as fh:
             fh.write(source)
-        env = dict(os.environ, MYLA_EMULATOR=" ".join(wine()))
         ran = subprocess.run([selfhost_tool("main"), "test", "t.my", "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT],
-                             capture_output=True, text=True, cwd=self.tmp, timeout=600, env=env)
+                             capture_output=True, text=True, cwd=self.tmp, timeout=600, env=emulator_env())
         want = ("PASS  f #1\nPASS  f #2\nPASS  f #3\nFAIL  f #4: expected 5, got 4\n      | f 4\n"
                 "PASS  g #1\nPASS  last\nPASS  case_dir #1\nPASS  under_temp #1\nPASS  a_temp_dir\n\n8/9 passed.\n")
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), (want, "", 1))
@@ -940,16 +1021,150 @@ fun handle(r: Request) -> Response {
     return http.response(200, f"hello {r.method} {r.path()}")
 }
 
+// What the HTTP server saw, for a run whose count is wrong (MYLA-863): the
+// paths of the requests it handled with the client's port for each (one
+// port a connection), and `serve_n`'s count once it came (-1: it failed or
+// ran out of time; -2 until then).
+actor Served {
+    paths: [str],
+    ports: [int],
+    count: int,
+}
+
+impl Served {
+    fun saw(var self, path: str, port: int) {
+        self.paths.push(path)
+        self.ports.push(port)
+    }
+
+    fun ended(var self, n: int) {
+        self.count = n
+    }
+
+    fun report(self) -> str {
+        var sb = StringBuilder()
+        sb.append(f"the HTTP server: {self.paths.len()} handled,")
+        var i = 0
+        var last = -1
+        var conns = 0
+        for p in self.paths {
+            if self.ports[i] != last {
+                conns += 1
+                last = self.ports[i]
+            }
+            sb.append(f" {p}@{self.ports[i]}")
+            i += 1
+        }
+        sb.append(f", {conns} connections in turn, ")
+        sb.append(if self.count != -2 { f"serve_n gave {self.count}" } else { "serve_n still serving" })
+        return sb.build()
+    }
+}
+
+// `handle`, the request noted in `seen` first.
+async fun handle_seen(seen: Served, r: Request) -> Response {
+    let port = match r.peer {
+        Some(a) => a.port
+        None => -1
+    }
+    await seen.saw(r.path(), port)
+    return handle(r)
+}
+
+// What the client's socket `h` holds once request `i` has waited 10 s for
+// its answer, which takes milliseconds (MYLA-863: the server counted an
+// answer the client never got). Cancelled, and nothing, once the answer
+// comes. `was` is the socket's local address before the request
+// (`local_of`): a client that saw its connection end sends a GET again on
+// a new one, so a socket closed, or a handle now naming another socket (a
+// value Windows may reuse), says the end came first. Readiness comes from
+// WSAPoll on the socket itself, not from the poller, and Windows waits for
+// a socket's bytes with a read of none, which leaves them in the socket,
+// so a receive here sees what came:
+// - bytes, the answer's head: they came and the client wasn't woken for
+//   them (the poller);
+// - `0` bytes: the server's end came without the answer (the server);
+// - not readable: neither its answer nor its end came (the server, its
+//   send or its close).
+// The receive takes what it reads, and only once the request has failed
+// anyway; a socket that isn't readable isn't read (it may block).
+#allow(primitive)
+async fun probe(h: int, was: str, i: int) -> str {
+    await task.sleep(10000)
+    if task.cancelled() {
+        return ""
+    }
+    if h < 0 {
+        return f"ask {i} after 10 s: no connection kept from the request before"
+    }
+    let at = f"ask {i} after 10 s: the kept connection (port {port_of(was)})"
+    let now = local_of(h)
+    if now == "" {
+        return f"{at} closed: the client saw its end and asked again on a new one"
+    }
+    if now != was {
+        return f"{at} closed, its handle reused (port {port_of(now)}): the client saw its end and asked again"
+    }
+    let ready = __sock_poll(h, 1, 0)
+    if ready <= 0 {
+        return f"{at} not readable ({ready}, errno {__io_errno()}): neither the answer nor the end came"
+    }
+    let got = __sock_recv(h, 4096)
+    let e = __io_errno()
+    if got.len() == 0 {
+        return f"{at} readable, a receive took 0 bytes (errno {e}): the end came without the answer"
+    }
+    var head = got
+    match got.find("\r\n") {
+        Some(k) => { head = got[0:k] }
+        None => {}
+    }
+    return f"{at} readable, a receive took {got.len()} bytes, '{head}': the answer came and the client wasn't woken"
+}
+
+// The local address record of the socket `h` ("" when it isn't open).
+#allow(primitive)
+fun local_of(h: int) -> str {
+    if h < 0 {
+        return ""
+    }
+    let rec = __sock_addr(h, 0)
+    if rec.len() < 3 {
+        return ""
+    }
+    return rec
+}
+
+// The port of an address record (its second and third bytes), -1 for none.
+fun port_of(rec: str) -> int {
+    if rec.len() < 3 {
+        return -1
+    }
+    return (rec[1] as int) * 256 + (rec[2] as int)
+}
+
+// The handle of the connection `c` keeps for its next request, -1 for none.
+fun kept_handle(c: http.Client) -> int {
+    return match c.conn {
+        Some(w) => w.stream.handle
+        None => -1
+    }
+}
+
 // Its own HTTP server asked `n` times: the answers that were right. Each
 // request has 30 s: one the server never answers is `timed out` then, with
 // how long it took and how many came back before, and the run ends with
 // its count (MYLA-798: on Windows the 20th once had no answer, and the run
-// waited 200 s, ending its wait as `connection failed: Cancelled`).
+// waited 200 s, ending its wait as `connection failed: Cancelled`). A
+// request still waiting after 10 s says what its socket held then
+// (`probe`, MYLA-863).
 async fun ask(port: int, n: int) -> int {
     var c = http.client()
     var right = 0
     for i in 0..n {
         let t0 = time.now_ms()
+        let h = kept_handle(c)
+        async let look = probe(h, local_of(h), i)
         match await c.send_async(http.request("GET", f"http://127.0.0.1:{port}/p{i}").with_timeout(30000)) {
             Ok(r) => {
                 if r.status == 200 && r.text() == f"hello GET /p{i}" {
@@ -961,6 +1176,11 @@ async fun ask(port: int, n: int) -> int {
             Err(e) => {
                 let no = failed(f"ask {i}: {e} after {time.now_ms() - t0} ms, {right} answered before")
             }
+        }
+        task.cancel(look)
+        let seen = await look
+        if seen != "" {
+            let no = failed(seen)
         }
     }
     c.close()
@@ -1010,13 +1230,19 @@ async fun serve_within(l: TcpListener, n: int) -> int {
     }
 }
 
-// `http.serve_n`, at most 200 s: how many requests it answered, or -1.
-async fun http_within(l: TcpListener, n: int) -> int {
-    return match await task.timeout(200000, async () => await http.serve_n(l, n, handle)) {
+// `http.serve_n` (`serve_with` and a limit of `n`, its handler noting each
+// request in `seen`), at most 200 s: how many requests it answered, or -1.
+async fun http_within(l: TcpListener, n: int, seen: Served) -> int {
+    var o = http.server_options()
+    o.max_requests = n
+    let serve = async () => await http.serve_with(l, o, async (r: Request) => await handle_seen(seen, r))
+    let k = match await task.timeout(200000, serve) {
         Some(Ok(k)) => k
         Some(Err(e)) => failed(f"the HTTP server: {e}") - 1
         None => failed("the HTTP server: still serving after 200 s") - 1
     }
+    await seen.ended(k)
+    return k
 }
 
 fun number(s: str) -> int {
@@ -1049,7 +1275,8 @@ async fun main() {
         Err(e) => { panic("addr") }
     }
     async let served = serve_within(l, clients)
-    async let answered = http_within(hl, 20)
+    let seen = Served { paths: [], ports: [], count: -2 }
+    async let answered = http_within(hl, 20, seen)
     // tasks 0 to clients - 1 the clients, then the children, then `ask`
     var ended: [bool] = []
     for k in 0..clients + kids + 1 {
@@ -1075,6 +1302,7 @@ async fun main() {
         Some(xs) => { results = xs }
         None => {
             eprintln(f"still running after 200 s, tasks:{await progress.pending()}")
+            eprintln(await seen.report())
             exit(2)
         }
     }
@@ -1085,6 +1313,7 @@ async fun main() {
     if ok != clients + kids + 20 {
         // (a server whose client gave up would wait for it for ever)
         eprintln(f"{ok} of {clients + kids + 20} right")
+        eprintln(await seen.report())
         exit(1)
     }
     let echoed = await served
@@ -1169,6 +1398,14 @@ async fun main() {
 # second, then closes; the client reads 35 s later. Without a limit the
 # send went on until then and the client got every byte; with it, the send
 # going on was cancelled at 30 s and the client gets less (then the end).
+# That is Wine's closesocket, which cancels the send still going on. On
+# Windows itself (run 277) the client read every byte: the close at 30 s
+# ends the program's hold on the socket, its handle and its copy of the
+# bytes, but what Winsock has taken of the send it delivers as a graceful
+# close does, a TCP send not being one it can take back from the middle
+# of a stream (or the send ended within the 30 s, the client's window
+# growing). Either way the program ends with the client's every byte read
+# (MYLA-926).
 CLOSE_GIVES_UP = r"""import std.task as task
 import std.net as net
 import std.bytes as bytes
@@ -1330,8 +1567,9 @@ class Sockets(unittest.TestCase):
         # MYLA-798: at BASE the client read every byte 35 s later
         self.build("prog", CLOSE_GIVES_UP)
         ran = self.run_exe(threads="2", timeout=90)
+        all_read = b"true" if ON_WINDOWS else b"false"
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode),
-                         (b"sent true, all read false, some read true\n", b"", 0))
+                         (b"sent true, all read " + all_read + b", some read true\n", b"", 0))
 
     def test_a_childs_input_written_while_its_output_is_read(self):
         # at BASE (9738e37) one worker never ended (`timeout 30`: 124)
@@ -1470,6 +1708,68 @@ fun main() {
 """
 LONG_PATHS_OUT = "true\nok\nok\ndeep\ndeep\nf.txt\nok\ntrue false\nok\nok\nfalse\n"
 
+# MYLA-841, MYLA-842: links on Windows itself, which Wine doesn't make (its
+# mklink makes none): a junction in the served directory and one out of
+# it, a symbolic link to a file (mklink, with the runner's privilege);
+# what read_link, canonical, a no_follow open and static_files make of
+# them. The Windows runner's case `files/links`.
+WINDOWS_LINKS = r"""import std.fs as fs
+import std.http as http
+import std.process as process
+from std.process import Stdio, ExitStatus
+from std.fs import IoError
+
+// a link made by cmd's mklink (`/J` a junction; without it a symbolic
+// link, which needs the privilege a runner's administrator has)
+fun made(a: [str]) -> bool {
+    var c = process.command("cmd").arg("/c").arg("mklink")
+    for x in a {
+        c = c.arg(x)
+    }
+    return match c.stdout_from(Stdio.Null).stderr_from(Stdio.Null).output() {
+        Ok(out) => out.status == ExitStatus.Exited(0)
+        Err(e) => false
+    }
+}
+
+fun text(r: Result<str, IoError>) -> str {
+    return match r {
+        Ok(s) => s
+        Err(e) => fs.io_error_name(e)
+    }
+}
+
+fun main() {
+    let cwd = text(fs.current_dir())
+    let a = fs.make_dir_all("www\\sub")
+    let b = fs.write_to_file("www\\app.css", "body {}")
+    let c = fs.write_to_file("www\\sub\\a.txt", "a")
+    let d = fs.write_to_file("top.txt", "TOP SECRET")
+    print(made(["/J", "www\\inj", cwd + "\\www\\sub"]))
+    print(made(["/J", "www\\outj", cwd]))
+    print(made(["www\\in.css", "app.css"]))
+    print(fs.is_symlink("www\\inj") && fs.is_symlink("www\\in.css"))
+    print(text(fs.read_link("www\\inj")) == cwd + "\\www\\sub")
+    print(text(fs.read_link("www\\in.css")))
+    print(text(fs.read_link("www\\app.css")))
+    print(text(fs.canonical("www\\inj\\a.txt")) == cwd + "\\www\\sub\\a.txt")
+    print(text(fs.canonical("www\\in.css")) == cwd + "\\www\\app.css")
+    print(text(fs.canonical("www/outj/www/inj/../app.css")) == cwd + "\\www\\app.css")
+    match fs.options().read(true).no_follow(true).open("www\\in.css") {
+        Ok(f) => print("opened a link")
+        Err(e) => print(fs.io_error_name(e))
+    }
+    var app = http.router("")
+    app.static_files("/s", "www")
+    let h = app.handler()
+    for p in ["/s/inj/a.txt", "/s/in.css", "/s/outj/top.txt", "/s/app.css"] {
+        let r = h(http.request("GET", p))
+        print(f"{p} {r.status} {r.text()}")
+    }
+}
+"""
+WINDOWS_LINKS_OUT = 'true\ntrue\ntrue\ntrue\ntrue\napp.css\nInvalidInput\ntrue\ntrue\ntrue\nOther(40)\n/s/inj/a.txt 200 a\n/s/in.css 200 body {}\n/s/outj/top.txt 404 not found\n/s/app.css 200 body {}\n'
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
@@ -1537,12 +1837,17 @@ class PlatformFollowUps(unittest.TestCase):
         ran = subprocess.run([*wine(), os.path.join(self.tmp, "prog.exe")], capture_output=True, cwd=self.tmp,
                              timeout=120, env=dict(os.environ, WINEDEBUG="+file"))
         self.assertEqual(ran.stdout, b"true true true true\n")
+        if ON_WINDOWS:
+            # Windows itself refuses the path given as it was: the four
+            # results say it took them (there is no trace of Wine's)
+            return
         made = [line for line in ran.stderr.decode(errors="replace").splitlines()
                 if "CreateDirectoryW" in line and ("rxxx" in line or '"short"' in line)]
         self.assertEqual(len(made), 2, made)
         self.assertIn('L"\\\\\\\\?\\\\', made[0])   # the absolute path after \\?\
         self.assertIn('L"short"', made[1])          # a short one as given
 
+    @linux_only("it reads Wine's mappings in /proc")
     def test_the_rings_are_reserved_not_committed(self):
         # H12: a program of 16 workers committed their rings of ready frames,
         # 8 MiB each, which Windows counts against the system's limit (Wine
@@ -1565,6 +1870,59 @@ class PlatformFollowUps(unittest.TestCase):
             proc.kill()
             proc.wait()
         self.assertGreaterEqual(biggest, 120 << 20, f"the largest reserved mapping: {biggest >> 20} MiB")
+
+    @linux_only("it reads Wine's mappings in /proc")
+    def test_the_heap_is_committed_as_it_is_used(self):
+        # MYLA-861: each worker that allocated at all (every one that read
+        # the clock while a timer waited) committed a 16 MiB chunk of the
+        # heap; a chunk is reserved now and committed 256 KiB at a time as
+        # cells reach it (Wine maps what is committed `rw-p`). At BASE 8 to
+        # 13 such mappings of 16 MiB, 2026-11-18
+        self.build("prog", HELPER)
+        proc = subprocess.Popen([*wine(), os.path.join(self.tmp, "prog.exe"), "sleep", "3000"], cwd=self.tmp,
+                                env=dict(os.environ, MYLA_THREADS="16"))
+        try:
+            time.sleep(2)
+            chunks = 0
+            with open(f"/proc/{proc.pid}/maps", encoding="ascii") as fh:
+                for line in fh:
+                    span, perms = line.split()[:2]
+                    lo, hi = (int(x, 16) for x in span.split("-"))
+                    if perms == "rw-p" and hi - lo == 16 << 20:
+                        chunks += 1
+            self.assertEqual(proc.wait(timeout=60), 0)
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertEqual(chunks, 0, "chunks of the heap committed whole")
+
+    @linux_only("pgrep finds the child among Wine's processes")
+    def test_a_job_of_its_own_takes_its_children_along(self):
+        # MYLA-819: std.test's test child is in a job of its own on Windows
+        # (`own_job`, killing what is in it once its one handle closes), as
+        # it leads a process group on Linux: a case killed past its time
+        # limit left its children running. Under Wine `myla test` kills the
+        # case's Unix process group, children included, so the case itself
+        # can't show it here: a program in a job of its own ends, and the
+        # child it started, which outlives a program without one, is gone
+        # with it (only CI's Windows job runs a timed-out case's)
+        self.build("helper", HELPER)
+        self.build("prog", 'import std.process as process\nimport std.platform as os\nfrom std.process import Stdio\n\n'
+                           'fun main() {\n    print(os.own_job())\n'
+                           '    let c = process.command("./helper.exe").arg("sleep").arg("60123")\n'
+                           '    match c.stdout_from(Stdio.Null).stderr_from(Stdio.Null).spawn() {\n'
+                           '        Ok(child) => print("started")\n        Err(e) => print(f"{e}")\n    }\n}\n')
+        ran = self.run_exe()
+        self.assertEqual((ran.stdout.decode(), ran.stderr.decode(), ran.returncode), ("true\nstarted\n", "", 0))
+        left = ""
+        for _ in range(50):
+            left = subprocess.run(["pgrep", "-f", "helper.exe sleep 60123"], capture_output=True, text=True).stdout
+            if not left:
+                break
+            time.sleep(0.1)
+        if left:
+            subprocess.run(["pkill", "-f", "helper.exe sleep 60123"])
+        self.assertEqual(left, "", "the child outlived its parent's job")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -1609,6 +1967,7 @@ class Workers(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             self.run_exe(threads="1", timeout=3)
 
+    @linux_only("it reads Wine's mappings in /proc")
     @unittest.skipUnless(os.path.isdir("/proc/self"), "it reads Wine's mappings in /proc")
     def test_big_cells_go_back_whole_with_tasks(self):
         # a cell bigger than a chunk is a mapping of its own, aligned with
@@ -1736,10 +2095,32 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pa
 _HOST_SH = os.path.join(_REPO, "scripts", "host.sh")
 
 
+def bash() -> str:
+    """bash: on Windows Git's (Git Bash, which scripts/host.sh is for), found
+    beside `git`, as a bare `bash` may be System32's, WSL's."""
+    if not ON_WINDOWS:
+        return "bash"
+    git = shutil.which("git")
+    # (git.exe is in Git's cmd\, bin\ or mingw64\bin\; bash.exe in its bin\)
+    up = os.path.dirname(os.path.realpath(git)) if git else ""
+    for _ in range(3):
+        up = os.path.dirname(up)
+        found = os.path.join(up, "bin", "bash.exe")
+        if up and os.path.isfile(found):
+            return found
+    return os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Git", "bin", "bash.exe")
+
+
+def sh_path(path: str) -> str:
+    """`path` as bash reads it in a script: on Windows with `/` (Git Bash
+    takes `C:/…`)."""
+    return path.replace("\\", "/") if ON_WINDOWS else path
+
+
 def host_sh(script: str, env: dict | None = None, cwd: str | None = None) -> subprocess.CompletedProcess:
     """`script` run by bash after sourcing scripts/host.sh, with `env` added
     to this process's environment."""
-    return subprocess.run(["bash", "-c", f'. "{_HOST_SH}"\n{script}'], capture_output=True, text=True,
+    return subprocess.run([bash(), "-c", f'. "{sh_path(_HOST_SH)}"\n{script}'], capture_output=True, text=True,
                           env={**os.environ, **(env or {})}, cwd=cwd or _REPO, timeout=300)
 
 
@@ -1780,6 +2161,39 @@ done
 exec "{real}" "$@"
 """
 
+# On Windows (MYLA-926) a tool's stub is this Python script, `{name}.bat`
+# for `myla build` (which finds it by PATHEXT before the tool itself) and
+# `{name}`, a shell script, for Git Bash, both running it
+_STUB_PY = """import os, shutil, subprocess, sys
+name, real, args = {name!r}, {real!r}, sys.argv[1:]
+with open(os.environ["STUB_LOG"], "a", encoding="utf-8", newline="\\n") as fh:
+    fh.write(name + " " + " ".join(args) + "\\n")
+for a in args:
+    if a.endswith((".s", ".def")):
+        shutil.copy(a, os.environ["STUB_KEEP"])
+sys.exit(subprocess.run([real, *args]).returncode)
+"""
+
+
+def write_stub(stubs: str, name: str) -> None:
+    """The stub of the tool `name` in the directory `stubs`: its command
+    lines logged in $STUB_LOG, the assembly and import lists it reads kept
+    in $STUB_KEEP, then the tool run."""
+    real = shutil.which(name)
+    if not ON_WINDOWS:
+        path = os.path.join(stubs, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_STUB.format(name=name, real=real))
+        os.chmod(path, 0o755)
+        return
+    script = os.path.join(stubs, name + "-stub.py")
+    with open(script, "w", encoding="utf-8") as fh:
+        fh.write(_STUB_PY.format(name=name, real=real))
+    with open(os.path.join(stubs, name + ".bat"), "w", encoding="utf-8") as fh:
+        fh.write(f'@"{sys.executable}" "{script}" %*\n')
+    with open(os.path.join(stubs, name), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(f'#!/bin/sh\nexec "{sh_path(sys.executable)}" "{sh_path(script)}" "$@"\n')
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
@@ -1798,10 +2212,7 @@ class BootstrapLink(unittest.TestCase):
         stubs = os.path.join(self.tmp, "stubs")
         os.mkdir(stubs)
         for name in TOOLS:
-            path = os.path.join(stubs, name)
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(_STUB.format(name=name, real=shutil.which(name)))
-            os.chmod(path, 0o755)
+            write_stub(stubs, name)
         self.path = stubs + os.pathsep + os.environ.get("PATH", "")
 
     def logged(self, where: str, argv: list[str], env: dict | None = None) -> tuple[list[str], dict]:
@@ -1844,7 +2255,7 @@ class BootstrapLink(unittest.TestCase):
         booted = os.path.join(self.tmp, "booted")
         os.mkdir(booted)
         shutil.copy(os.path.join(built, "keep", "prog.exe.s"), booted)
-        by_host, defs_host = self.logged(booted, ["bash", "-c", f'. "{_HOST_SH}"; asm_to_bin prog.exe.s prog.exe'],
+        by_host, defs_host = self.logged(booted, [bash(), "-c", f'. "{sh_path(_HOST_SH)}"; asm_to_bin prog.exe.s prog.exe'],
                                          {"MYLA_OS": "windows", "MYLA_ARCH": "x86_64"})
         self.assertEqual(by_host, by_myla)
         self.assertEqual(defs_host, defs_myla)
@@ -1864,6 +2275,11 @@ HOST_TESTS = ('import std.path as path\nimport std.test as test\nfrom std.proces
               # MYLA-729: the interpreter's case root under %TEMP%, joined with `\`
               '#test()[true]\nfun under_temp() -> bool {\n    let d = test.temp_dir()\n'
               '    return d.starts_with(env("TEMP").unwrap_or("?") + "\\\\myla-test-")\n}\n')
+# MYLA-819: a case that starts a child and waits for it, which `myla test`
+# killed must take along
+HOST_HOLDS = ('import std.process as process\nfrom std.process import Stdio\n\n'
+              '#test\nfun holds() {\n'
+              '    let r = process.command("./helper.exe").arg("sleep").arg("60126").stdout_from(Stdio.Null).output()\n}\n')
 # what only Windows' std.platform declares: checked against Linux's, an error
 HOST_CHECKED = 'import std.platform as platform\n\nfun never() {\n    platform.windows_start()\n}\n\nfun main() {}\n'
 
@@ -1930,7 +2346,11 @@ class HostModules(unittest.TestCase):
         for exe, src in (("myla.exe", "selfhost/main.my"), ("myla-lsp.exe", "tools/lsp/main.my")):
             subprocess.run([selfhost_tool("main"), "build", src, "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT,
                             "-o", os.path.join(cls.tmp, exe)], cwd=_REPO, check=True, timeout=600)
-        for name, text in (("p.my", HOST_PATHS), ("t.my", HOST_TESTS), ("c.my", HOST_CHECKED)):
+        with open(os.path.join(cls.tmp, "helper.my"), "w", encoding="utf-8") as fh:
+            fh.write(HELPER)
+        subprocess.run([selfhost_tool("main"), "build", "helper.my", "--target", "x86_64-windows", "--stdlib", STDLIB_ROOT,
+                        "-o", "helper.exe"], cwd=cls.tmp, check=True, timeout=600)
+        for name, text in (("p.my", HOST_PATHS), ("t.my", HOST_TESTS), ("c.my", HOST_CHECKED), ("k.my", HOST_HOLDS)):
             with open(os.path.join(cls.tmp, name), "w", encoding="utf-8") as fh:
                 fh.write(text)
 
@@ -1951,6 +2371,35 @@ class HostModules(unittest.TestCase):
 
     def test_check(self):
         self.assertEqual(self.myla("check", "c.my"), ("ok\n", "", 0))
+
+    @linux_only("pgrep finds the child among Wine's processes")
+    def test_killed_it_takes_what_its_cases_started_along(self):
+        # MYLA-819: `myla test` is in a job object of its own (`own_job`,
+        # driver.my's `test_in_own_job`), so killed it takes what it
+        # started along, here a case's child, as PR_SET_PDEATHSIG and
+        # std.test's watcher do on Linux. Without the job the child stayed.
+        proc = subprocess.Popen([*wine(), os.path.join(self.tmp, "myla.exe"), "test", "k.my", "--timeout", "0"],
+                                cwd=self.tmp, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            started = ""
+            for _ in range(300):
+                started = subprocess.run(["pgrep", "-f", "helper.exe sleep 60126"], capture_output=True, text=True).stdout
+                if started:
+                    break
+                time.sleep(0.1)
+            self.assertNotEqual(started, "", "the case's child never started")
+        finally:
+            proc.kill()
+            proc.wait()
+        left = ""
+        for _ in range(100):
+            left = subprocess.run(["pgrep", "-f", "helper.exe sleep 60126"], capture_output=True, text=True).stdout
+            if not left:
+                break
+            time.sleep(0.1)
+        if left:
+            subprocess.run(["pkill", "-f", "helper.exe sleep 60126"])
+        self.assertEqual(left, "", "the case's child outlived a killed `myla test`")
 
     def test_repl(self):
         out, err, code = self.myla("repl", stdin=b'import std.path as path\npath.parent("a\\\\b")\n')
@@ -1983,10 +2432,15 @@ class HostModules(unittest.TestCase):
     def test_a_native_harness_is_built_under_temp(self):
         # MYLA-729: under %TEMP%, joined with `\`; Wine has no LLVM for
         # Windows, so the build fails and the harness is kept, its path in
-        # the message (Windows' runner builds and runs it: tools/myla-build)
+        # the message (Windows' runner builds and runs it: tools/myla-build;
+        # so does Windows itself, MYLA-926)
         with open(os.path.join(self.tmp, "sq.my"), "w", encoding="utf-8") as fh:
             fh.write("#test(2)[4]\nfun sq(x: int) -> int {\n    return x * x\n}\n")
         out, err, code = self.myla("test", "sq.my", "--native")
+        if ON_WINDOWS:
+            # Windows has LLVM: the harness is built and run
+            self.assertEqual((out, err, code), ("PASS  sq #1\n\n1/1 passed.\n", "", 0))
+            return
         self.assertEqual((out, code), ("", 1))
         import re
         kept = re.search(r"\(kept at (C:\\users\\[^\\]+\\Temp\\myla-test-\d+)\\harness\.exe\.my\)\n$", err)
@@ -2543,6 +2997,7 @@ class ConsolePty:
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+@linux_only("a Unix pty as Wine's console (Windows' own is the runner's, RUNNER_CASES)")
 class Console(unittest.TestCase):
     """MYLA-707 (D216) under Wine, whose console is a pseudo-terminal this
     side opens: the console as a terminal, raw mode on its input mode, the
@@ -2763,6 +3218,7 @@ fun ctrl_counted() -> (int64, int64) {
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 @unittest.skipUnless(HAVE_WINDOWS, WINDOWS_SKIP)
+@linux_only("the count under Wine's console (Windows' own is the runner's terminal/06-readline)")
 class ControlHandler(unittest.TestCase):
     """MYLA-708: Windows gives a read of the console's lines that a Ctrl-C
     ended 0 bytes and no error, which `read` tells from the end by the
@@ -2780,7 +3236,7 @@ class ControlHandler(unittest.TestCase):
                 fh.write(CTRL_COUNTED)
             ran = subprocess.run([selfhost_tool("main"), "test", module, "--target", "x86_64-windows", "--stdlib", tmp,
                                   "--only", "ctrl_counted"], capture_output=True, text=True, timeout=600,
-                                 env=dict(os.environ, MYLA_EMULATOR=" ".join(wine())))
+                                 env=emulator_env())
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("PASS  ctrl_counted #1\n\n1/1 passed.\n", "", 0))
 
 
@@ -2852,7 +3308,7 @@ class PollerBacklog(unittest.TestCase):
                 fh.write(POLLER_DRAINS)
             ran = subprocess.run([selfhost_tool("main"), "test", module, "--target", "x86_64-windows", "--stdlib", tmp,
                                   "--only", "poller_drains"], capture_output=True, text=True, timeout=600,
-                                 env=dict(os.environ, MYLA_EMULATOR=" ".join(wine())))
+                                 env=emulator_env())
         self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("PASS  poller_drains #1\n\n1/1 passed.\n", "", 0))
 
 

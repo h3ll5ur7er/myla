@@ -4,6 +4,9 @@
 qemu-aarch64 (aarch64-linux), Node (wasm32-wasi) or Wine (x86_64-windows,
 MYLA-702), and the tests that target is excused from are skipped with their
 reason. Which suites run, and the exceptions, are in tests/burn/_targets.py.
+`host` runs every suite of tests/burn for the machine itself, as
+`scripts/test.sh` does but in parallel and each within its limit (MYLA-926:
+CI's native aarch64 runner).
 
 Each suite runs in its own process, as many at once as there are CPUs
 (`-j N` to change), and is stopped after `--limit` seconds (a program hung
@@ -16,6 +19,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import concurrent.futures
+import glob
 import os
 import shutil
 import signal
@@ -59,7 +63,9 @@ TOOLS = {
 def missing_tools(target: str) -> list[str]:
     """The tools `target`'s runs need that aren't on PATH (Wine for Windows'
     wherever `_native.wine` finds it)."""
-    missing = [t for t in ["as", "ld", *TOOLS.get(target, [])] if shutil.which(t) is None]
+    # (the machine's own tools for `host`: as and ld, or Windows' LLVM tools)
+    base = _native._HOST_TOOLS if target == "host" else ["as", "ld"]
+    missing = [t for t in [*base, *TOOLS.get(target, [])] if shutil.which(t) is None]
     if target == "x86_64-windows" and not _native.wine():
         missing.append("wine")
     return missing
@@ -79,9 +85,20 @@ def prepare_wine() -> None:
         atexit.register(subprocess.run, [server, "-k"], capture_output=True)
     else:
         _native.wine_env()
-    wine = _native.wine()
+    # (behind `_wine_run.py`, which ends with the program, whatever
+    # Wine's services still hold, MYLA-759)
+    wine = _native.wine_run()
     if wine and not os.environ.get("MYLA_EMULATOR"):
         os.environ["MYLA_EMULATOR"] = " ".join(wine)
+
+
+def stop_tree(proc: subprocess.Popen) -> None:
+    """`proc` and everything it started stopped: its process group's SIGKILL,
+    or on Windows `taskkill /F /T`, which ends the tree."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        os.killpg(proc.pid, signal.SIGKILL)
 
 
 def run_one(module: str) -> int:
@@ -93,9 +110,13 @@ def run_one(module: str) -> int:
 
 
 def main() -> int:
+    # the suites' logs are UTF-8; a console in another code page (Windows'
+    # cp1252) must not end the run before it prints them (MYLA-926)
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("target", choices=_targets.TARGETS)
-    ap.add_argument("modules", nargs="*", help="suites (default: all of tests/burn/_targets.py SUITES)")
+    ap.add_argument("target", choices=[*_targets.TARGETS, "host"])
+    ap.add_argument("modules", nargs="*",
+                    help="suites (default: all of tests/burn/_targets.py SUITES; for host, every tests/burn/test_*.py)")
     ap.add_argument("-j", type=int, default=os.cpu_count() or 1, help="suites run at once")
     # The longest suite, test_selfhost_codegen on x86_64-windows, took 609 s
     # in CI (2026-11-18, 04d8956); once, on 4c91ba2, it was still running at
@@ -103,7 +124,10 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=1500, help="seconds a suite may run (default 1500)")
     ap.add_argument("--one", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
-    os.environ["MYLA_TEST_TARGET"] = args.target
+    if args.target == "host":
+        os.environ.pop("MYLA_TEST_TARGET", None)
+    else:
+        os.environ["MYLA_TEST_TARGET"] = args.target
     os.chdir(ROOT)
     if args.one:
         return run_one(args.modules[0])
@@ -116,19 +140,25 @@ def main() -> int:
             print(msg, file=sys.stderr)
             return 1
         print(f"warning: {msg}", file=sys.stderr)
-    modules = [m if m.startswith("tests.") else "tests.burn." + m for m in args.modules] or _targets.SUITES
+    every = sorted("tests.burn." + os.path.basename(f)[:-3]
+                   for f in glob.glob(os.path.join(ROOT, "tests", "burn", "test_*.py")))
+    modules = ([m if m.startswith("tests.") else "tests.burn." + m for m in args.modules]
+               or (every if args.target == "host" else _targets.SUITES))
 
     def run(module: str) -> tuple[str, int, float, str]:
         start = time.monotonic()
         with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as log:
-            # its own process group, so that its programs stop with it
+            # its own process group, so that its programs stop with it (on
+            # Windows a new group, its tree ended by taskkill, MYLA-926)
+            group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+                     else {"start_new_session": True})
             proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), args.target, module, "--one"],
-                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                                    stdout=log, stderr=subprocess.STDOUT, **group)
             try:
                 code = proc.wait(timeout=args.limit)
                 note = ""
             except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
+                stop_tree(proc)
                 proc.wait()
                 code = 1
                 note = f"\nSTOPPED after its {args.limit} s (--limit): the test above it was still running"

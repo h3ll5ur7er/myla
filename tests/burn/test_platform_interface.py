@@ -1,9 +1,11 @@
 """Burn test: every platform module offers the same interface, in Myla's
 terms (MYLA-701, D209).
 
-`std.platform` is one module per target (`lib/std/platform.my` for x86-64
-Linux, `platform_aarch64.my`, `platform_wasm.my`, `platform_windows.my`), which the
-loader takes for `std/platform.my` on its target. std.rt and the library
+`std.platform` is one module per system (`lib/std/platform.my` for Linux, on
+x86-64 and aarch64 alike, MYLA-758; `platform_wasm.my`, `platform_windows.my`),
+which the loader takes for `std/platform.my` on its target; Linux's numbers
+are std.linux_calls', a module with a copy per architecture
+(`linux_calls_aarch64.my`). std.rt and the library
 above it are written once against it, so each must give the same functions
 with the same types, and the same constants: the cause codes a failure gives
 (std.ioerror's, which `from_cause` reads), the kinds of a file
@@ -33,21 +35,33 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, run_argv, target_flags, write_program
+from ._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, SKIP_REASON, run_argv, target_flags, write_program
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 STD = os.path.join(STDLIB_ROOT, "std")
-MODULES = {"x86_64-linux": "platform.my", "aarch64-linux": "platform_aarch64.my", "wasm32-wasi": "platform_wasm.my",
+MODULES = {"x86_64-linux": "platform.my", "aarch64-linux": "platform.my", "wasm32-wasi": "platform_wasm.my",
            "x86_64-windows": "platform_windows.my"}
+# where a Linux target's module takes what tells the architectures apart
+# (its `TARGET` is the copy's `TARGET_NAME`)
+CALLS = {"x86_64-linux": "linux_calls.my", "aarch64-linux": "linux_calls_aarch64.my"}
 # the constants that tell the targets apart
-PER_TARGET = {"TARGET", "RETURNS_MEMORY", "HUGE_PAGES", "PROCESSES", "SOCKETS"}
+PER_TARGET = {"TARGET", "RETURNS_MEMORY", "HUGE_PAGES", "HEAP_COMMIT", "PROCESSES", "SOCKETS"}
 # a target's own entry points, which its back end calls by name
 # (`backend_std_functions`): wasm32's and Windows' starts, which lay out the
 # arguments
 OWN = {"wasm32-wasi": {"wasm_start"}, "x86_64-windows": {"windows_start"}}
-# the tools a build for a target needs besides the host's
-BUILD_TOOLS = {"aarch64-linux": ["clang", "ld.lld"], "wasm32-wasi": ["clang", "wasm-ld"],
-               "x86_64-windows": ["clang", "llvm-dlltool", "lld-link"]}
+# the tools a build for a target calls from another machine (target.my's
+# `cross`): a Linux target's from Windows too (MYLA-926), where an `as` or
+# `ld` on PATH is MinGW's, which makes Windows' programs
+BUILD_TOOLS = {"x86_64-linux": ["clang", "ld.lld"], "aarch64-linux": ["clang", "ld.lld"],
+               "wasm32-wasi": ["clang", "wasm-ld"], "x86_64-windows": ["clang", "llvm-dlltool", "lld-link"]}
+
+
+def build_tools(target: str) -> list[str]:
+    """The tools `myla build --target target` calls here: a Linux target's
+    own machine's GNU `as` and `ld` (target.my's `native`), else
+    BUILD_TOOLS'."""
+    return ["as", "ld"] if target == HOST_TARGET and target.endswith("-linux") else BUILD_TOOLS[target]
 
 _FUN = re.compile(r"^pub fun ([a-z_0-9]+)\((.*)\)(?: -> (.+?))? \{$")
 _CONST = re.compile(r"^pub const ([A-Z_0-9]+): ([a-z0-9]+) = (.+?)(?:\s*//.*)?$")
@@ -107,7 +121,11 @@ class Declarations(unittest.TestCase):
                     self.assertEqual(got[c][0], ty, c)
                     if c not in PER_TARGET:
                         self.assertEqual(got[c][1], value, c)
-                self.assertEqual(got["TARGET"][1], f'"{target}"')
+                name = got["TARGET"][1]
+                if target in CALLS:
+                    self.assertEqual(name, "TARGET_NAME")
+                    name = interface(CALLS[target])[1]["TARGET_NAME"][1]
+                self.assertEqual(name, f'"{target}"')
 
     def test_no_errno_crosses_the_interface(self):
         # what MYLA-265 found: Linux's errnos, records and mode bits above
@@ -128,7 +146,7 @@ class Declarations(unittest.TestCase):
 
     def test_the_numbering_outside_agrees(self):
         _, platform = interface(MODULES["x86_64-linux"])
-        causes = {c: v for c, (ty, v) in platform.items() if ty == "int64" and not c.startswith("KIND_")}
+        causes = {c: v for c, (ty, v) in platform.items() if ty == "int64" and not c.startswith("KIND_") and c not in PER_TARGET}
         ioerror = private_consts("ioerror.my")
         for c, v in causes.items():
             self.assertEqual(ioerror.get(c), v, f"std.ioerror's {c}")
@@ -162,12 +180,13 @@ def bindings_program() -> str:
 class TargetCopies(unittest.TestCase):
     """The modules besides std.platform a target has a copy of its own of
     (`for_target`, MYLA-704): Windows' std.path, std.path_style and
-    std.system_error (MYLA-716), which the loader takes for the target's,
-    offer what the others' do."""
+    std.system_error (MYLA-716), and aarch64's std.linux_calls (MYLA-758),
+    which the loader takes for the target's, offer what the others' do."""
 
     def test_each_copy_has_the_same_functions_and_constants(self):
         for name, copy in (("path.my", "path_windows.my"), ("path_style.my", "path_style_windows.my"),
-                           ("system_error.my", "system_error_windows.my")):
+                           ("system_error.my", "system_error_windows.my"),
+                           ("linux_calls.my", "linux_calls_aarch64.my")):
             with self.subTest(module=name):
                 want_funs, want_consts = interface(name)
                 got_funs, got_consts = interface(copy)
@@ -185,7 +204,7 @@ class Types(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, bindings_program())
             for target in MODULES:
-                if not all(shutil.which(t) for t in BUILD_TOOLS.get(target, [])):
+                if not all(shutil.which(t) for t in build_tools(target)):
                     continue
                 with self.subTest(target=target):
                     proc = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--stdlib", STDLIB_ROOT,
@@ -342,7 +361,7 @@ class Behaviour(unittest.TestCase):
             with open(os.path.join(lib, "std", "interface_probe.my"), "w") as fh:
                 fh.write(PROBE)
             path = write_program(src, BEHAVIOUR)
-            binary = os.path.join(src, "prog")
+            binary = os.path.join(src, "prog" + EXE)
             proc = subprocess.run([selfhost_tool("main"), "build", path, "-o", binary, "--stdlib", lib,
                                    *target_flags()], capture_output=True, text=True)
             self.assertEqual((proc.stderr, proc.returncode), ("", 0))

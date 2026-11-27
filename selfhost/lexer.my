@@ -200,8 +200,15 @@ impl Lexer {
     // Record the first error and stop: the scanners return after calling this,
     // and at the end of the input every loop ends. Its range runs to where the
     // lexer stopped, as in the Python lexer.
+    // A lexer that stopped at the "\n" of a "\r\n" (a file written on
+    // Windows) stopped at the line's end: the "\r" is no character of the
+    // line, and the range and the column are those of the line ending in "\n"
+    // alone (MYLA-941).
     fun fail(var self, line: int32, col: int32, msg: str) {
-        self.fail_span(line, col, SrcSpan { sline: line, scol: col, eline: self.line, ecol: self.col }, msg)
+        var ecol = self.col
+        if self.pos > 0 && self.pos < self.n && self.cps[self.pos - 1] == '\r' && self.cps[self.pos] == '\n' { ecol -= 1 }
+        let c = if line == self.line && col > ecol { ecol } else { col }
+        self.fail_span(line, c, SrcSpan { sline: line, scol: c, eline: self.line, ecol: ecol }, msg)
     }
 
     fun fail_span(var self, line: int32, col: int32, sp: SrcSpan, msg: str) {
@@ -1240,6 +1247,12 @@ fun word_at(cps: [char], i: int32, n: int32, w: str) -> bool {
 // each f-string hole is one expression, its brackets closed in it (D186)
 #test("f\"{g(1} {2)}\"")[Err(Diag { kind: "lex error", line: 1, col: 5, sp: SrcSpan { sline: 1, scol: 5, eline: 1, ecol: 6 }, msg: "unclosed '(' in f-string hole (a hole is one expression)" })]
 #test("f\"{x[0)]}\"")[Err(Diag { kind: "lex error", line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 8 }, msg: "unmatched ')' in f-string hole (a hole is one expression)" })]
+// a "\r\n" ends a line as "\n" does, also for an error that runs to its end (MYLA-941)
+#test("x = \"ab\ny")[Err(Diag { kind: "lex error", line: 1, col: 5, sp: SrcSpan { sline: 1, scol: 5, eline: 1, ecol: 8 }, msg: "unterminated string literal" })]
+#test("x = \"ab\r\ny")[Err(Diag { kind: "lex error", line: 1, col: 5, sp: SrcSpan { sline: 1, scol: 5, eline: 1, ecol: 8 }, msg: "unterminated string literal" })]
+#test("x = f\"a{\"b\ny")[Err(Diag { kind: "lex error", line: 1, col: 11, sp: SrcSpan { sline: 1, scol: 11, eline: 1, ecol: 11 }, msg: "unterminated string in f-string expression" })]
+#test("x = f\"a{\"b\r\ny")[Err(Diag { kind: "lex error", line: 1, col: 11, sp: SrcSpan { sline: 1, scol: 11, eline: 1, ecol: 11 }, msg: "unterminated string in f-string expression" })]
+#test("x = f\"ab\r\ny")[Err(Diag { kind: "lex error", line: 1, col: 5, sp: SrcSpan { sline: 1, scol: 5, eline: 1, ecol: 9 }, msg: "unterminated f-string literal (f\"…\" is single-line)" })]
 pub fun lex(src: str) -> Result<[Token], Diag> {
     return lex_with(src, false)
 }

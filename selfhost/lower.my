@@ -4753,11 +4753,64 @@ impl Lower {
             self.add(Inst.Store(w, self.addr(cg, k)))
             return self.slot_addr(w)
         }
-        if is_aggregate(kt) { return self.addr(cg, k) }
+        if is_aggregate(kt) {
+            let a = self.addr(cg, k)
+            self.nan_key_check(cg, kt, a, 0, k)
+            return a
+        }
         let v = self.expr(cg, k)
         let slot = self.new_slot("__key", kt, 8, -1, false)
         self.add(Inst.Store(slot, v))
+        self.nan_key_check(cg, kt, self.slot_addr(slot), 0, k)
         return self.slot_addr(slot)
+    }
+
+    // The runtime error `cannot hash NaN` at the key `k` (in a
+    // `#track_caller` function at its caller's position) when the member of
+    // type `kt` at `off` from the key's address `p` is a NaN float, itself
+    // or in a tuple's or a derived struct's member: where the program's map
+    // operation is, not std.hash's `hash` (MYLA-850; the interpreter's
+    // `nan_key`). A NaN in a list or an enum is std.hash's to find.
+    fun nan_key_check(var self, cg: CodeGen, kt: Type, p: int32, off: int32, k: Expr) {
+        if is_tfloat_ir(kt) {
+            // as `hash_key_member` reads it: a float32 widened in its word
+            let f64 = Type.TFloat(64)
+            let x = self.temp(f64)
+            self.add(Inst.LoadAt(x, p, off, 8))
+            let nan = self.temp(Type.TBool)
+            self.add(Inst.Cmp(nan, "!=", f64, x, x))
+            let bad = self.new_block()
+            let ok = self.new_block()
+            self.finish(Term.Br(nan, bad, ok))
+            self.start(bad)
+            let m = self.temp(Type.TStr)
+            self.add(Inst.Str(m, "cannot hash NaN"))
+            self.finish(self.panic_term(m, Pos { line: k.line, col: k.col }))
+            self.start(ok)
+            return
+        }
+        match kt {
+            Type.TTuple(es) => {
+                var cur = off
+                for et in es {
+                    self.nan_key_check(cg, et, p, cur, k)
+                    cur = cur + cg.stored_size(et)
+                }
+            },
+            Type.TStruct(n, a) => {
+                if cg.derives_hash(n) {
+                    let info = cg.struct_info(n)
+                    let sub = cg.type_subst(info.type_params, a)
+                    var cur = off
+                    for f in info.fields {
+                        let fty = subst_type(f.ty, sub)
+                        self.nan_key_check(cg, fty, p, cur, k)
+                        cur = cur + cg.stored_size(fty)
+                    }
+                }
+            },
+            _ => {},
+        }
     }
 
     // The address of the value of `key` in the map `cell`, borrowed from it;
@@ -6120,9 +6173,9 @@ fun wrap_ir(v: int64, t: Type) -> int64 {
 #test("main")[true]
 #test("std$list$sum")[true]
 #test("std$rt$map_lookup")[false]
-#test("std$platform_aarch64$write")[false]
+#test("std$platform_wasm$write")[false]
 fun checked_code(mangled: str) -> bool {
-    for prefix in ["std$rt$", "std$platform$", "std$platform_aarch64$", "std$platform_wasm$", "std$platform_windows$"] {
+    for prefix in ["std$rt$", "std$platform$", "std$platform_wasm$", "std$platform_windows$"] {
         if mangled.len() >= prefix.len() && mangled[:prefix.len()] == prefix { return false }
     }
     return true

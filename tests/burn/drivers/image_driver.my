@@ -1,0 +1,207 @@
+// The image test drivers' common part (MYLA-971): a codec's driver is a
+// `main` that hands its decoder to one of the `serve` functions below, and
+// tests/burn/_images.py runs it over the corpus and the fuzz cases.
+//
+// The protocol. The driver reads lines from stdin until an empty line or the
+// end: each is an input file's path, or that path, a tab, and an output path.
+// For each it prints one line:
+//
+//     ok <width> <height> <layout> <bits> <frames> <sha256>
+//     err <message>
+//     bad <message>
+//
+// `layout` is std.image's name of it (gray, gray+alpha, rgb, rgba), `bits`
+// 8, 16 or 32 (float32), `frames` how many images the decoder gave (all the
+// same size and layout), `sha256` the hex SHA-256 of every frame's samples,
+// interleaved, row by row, frame after frame: a byte each at 8 bits, two big
+// endian at 16 (as a PAM file holds them), the float's four bytes big endian
+// at 32. With an output path, the frames are written there as PAM images one
+// after the other (not for float32). `err` is the decoder's `Err`; `bad` is a
+// decoder's bug the driver caught: an image whose samples don't fill
+// width x height x channels. A runtime error ends the driver, which the
+// harness reports with the case that caused it.
+//
+// The arguments: `--max-pixels N` is the `max_pixels` given to the decoder
+// (std.image's MAX_PIXELS without it); the fuzz runs pass a small one, so a
+// header that asks for a huge image can't make each case allocate a
+// gigabyte.
+
+import std.image as image
+from std.image import Image, Image8, Image16, ImageF, ImageError, Sample
+import std.digest as digest
+import std.encoding as encoding
+import std.fs as fs
+import std.num as num
+import std.process as process
+from std.io import stdin, println, Reader
+
+// One image of 8-bit samples.
+pub fun serve8(decode: ([uint8], int64) -> Result<Image8, ImageError>) {
+    serve<uint8>(8, (b: [uint8], m: int64) => one<uint8>(decode(b, m)))
+}
+
+// One image of 16-bit samples.
+pub fun serve16(decode: ([uint8], int64) -> Result<Image16, ImageError>) {
+    serve<uint16>(16, (b: [uint8], m: int64) => one<uint16>(decode(b, m)))
+}
+
+// One image of float32 samples (no PAM is written).
+pub fun serve_f32(decode: ([uint8], int64) -> Result<ImageF, ImageError>) {
+    serve<float32>(32, (b: [uint8], m: int64) => one<float32>(decode(b, m)))
+}
+
+// Frames of 8-bit samples: an animation's frames as shown, each the whole
+// canvas.
+pub fun serve8_frames(decode: ([uint8], int64) -> Result<[Image8], ImageError>) {
+    serve<uint8>(8, decode)
+}
+
+// Frames of 16-bit samples.
+pub fun serve16_frames(decode: ([uint8], int64) -> Result<[Image16], ImageError>) {
+    serve<uint16>(16, decode)
+}
+
+fun one<S: Sample>(r: Result<Image<S>, ImageError>) -> Result<[Image<S>], ImageError> {
+    return match r {
+        Ok(img) => Ok([img])
+        Err(e) => Err(e)
+    }
+}
+
+// The `max_pixels` the arguments name.
+#test(["prog"])[268435456i64]
+#test(["prog", "--max-pixels", "4096"])[4096i64]
+#test(["prog", "--max-pixels", "x"])[268435456i64]
+fun max_pixels_of(argv: [str]) -> int64 {
+    var i = 1
+    while i + 1 < argv.len() {
+        if argv[i] == "--max-pixels" {
+            return match num.parse_int(argv[i + 1]) {
+                Some(n) => n
+                None => image.MAX_PIXELS
+            }
+        }
+        i += 1
+    }
+    return image.MAX_PIXELS
+}
+
+struct Lines { r: Reader }
+
+impl Lines {
+    // The next request: the input path and the output path ("" for none).
+    fun next(var self) -> Option<(str, str)> {
+        let line = match self.r.read_line() {
+            Ok(Some(l)) => l
+            _ => ""
+        }
+        if line.len() == 0 {
+            return None
+        }
+        let parts = line.split("\t")
+        if parts.len() >= 2 {
+            return Some((parts[0], parts[1]))
+        }
+        return Some((parts[0], ""))
+    }
+}
+
+// The decoder run over every request on stdin.
+fun serve<S: Sample>(bits: int, decode: ([uint8], int64) -> Result<[Image<S>], ImageError>) {
+    let max = max_pixels_of(process.args())
+    var lines = Lines { r: stdin() }
+    while let Some(req) = lines.next() {
+        match fs.read_bytes(req.0) {
+            Ok(data) => {
+                match decode(data, max) {
+                    Ok(frames) => println(report<S>(frames, bits, req.1))
+                    Err(e) => println("err " + one_line(f"{e}"))
+                }
+            }
+            Err(e) => println(f"bad cannot read {req.0}: {e}")
+        }
+    }
+}
+
+// `s` on one line.
+#test("a\nb\tc")["a b c"]
+fun one_line(s: str) -> str {
+    return s.replace("\n", " ").replace("\t", " ")
+}
+
+// Bytes being put together.
+struct Out { b: [uint8] }
+
+impl Out {
+    fun add(var self, b: [uint8]) {
+        for x in b {
+            self.b.push(x)
+        }
+    }
+
+    // The samples as bytes: one each at 8 bits, two big endian at 16, the
+    // float's bits big endian at 32.
+    fun add_samples<S: Sample>(var self, data: [S], bits: int) {
+        for s in data {
+            let v = s.to_f32()
+            if bits == 8 {
+                self.b.push(v as uint8)
+            } else if bits == 16 {
+                let u = v as uint32
+                self.b.push((u >> 8u32) as uint8)
+                self.b.push((u & 255u32) as uint8)
+            } else {
+                let u = v.to_bits()
+                self.b.push((u >> 24u32) as uint8)
+                self.b.push(((u >> 16u32) & 255u32) as uint8)
+                self.b.push(((u >> 8u32) & 255u32) as uint8)
+                self.b.push((u & 255u32) as uint8)
+            }
+        }
+    }
+}
+
+// The `ok` line of decoded frames (or `bad`), the PAM written to `out`.
+fun report<S: Sample>(frames: [Image<S>], bits: int, out: str) -> str {
+    if frames.len() == 0 {
+        return "bad no frames"
+    }
+    let first = frames[0]
+    var samples = Out { b: [] }
+    for f in frames {
+        if f.width != first.width || f.height != first.height || f.layout != first.layout {
+            return f"bad frames of different sizes: {first.width}x{first.height} {first.layout}, {f.width}x{f.height} {f.layout}"
+        }
+        let n = (f.width as int64) * (f.height as int64) * (f.layout.channels() as int64)
+        if f.width < 0 || f.height < 0 || n != (f.data.len() as int64) {
+            return f"bad {f.width}x{f.height} {f.layout} with {f.data.len()} samples"
+        }
+        samples.add_samples<S>(f.data, bits)
+    }
+    if out.len() > 0 && bits != 32 {
+        var pam = Out { b: [] }
+        for f in frames {
+            pam.add(pam_header(f.width, f.height, f.layout, bits).bytes())
+            pam.add_samples<S>(f.data, bits)
+        }
+        if let Err(e) = fs.write_bytes(out, pam.b) {
+            return f"bad cannot write {out}: {e}"
+        }
+    }
+    let sha = encoding.hex_encode(digest.sha256(samples.b))
+    return f"ok {first.width} {first.height} {first.layout} {bits} {frames.len()} {sha}"
+}
+
+// A PAM header (P7) for a `w` by `h` image of `layout` at `bits`.
+#test(2, 1, image.Layout.Rgb, 8)["P7\nWIDTH 2\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n"]
+#test(1, 3, image.Layout.GrayAlpha, 16)["P7\nWIDTH 1\nHEIGHT 3\nDEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n"]
+fun pam_header(w: int, h: int, layout: image.Layout, bits: int) -> str {
+    let tuple = match layout {
+        Gray => "GRAYSCALE"
+        GrayAlpha => "GRAYSCALE_ALPHA"
+        Rgb => "RGB"
+        Rgba => "RGB_ALPHA"
+    }
+    let maxval = if bits == 16 { 65535 } else { 255 }
+    return f"P7\nWIDTH {w}\nHEIGHT {h}\nDEPTH {layout.channels()}\nMAXVAL {maxval}\nTUPLTYPE {tuple}\nENDHDR\n"
+}
