@@ -2,7 +2,7 @@
 
 Grammar changes that would bring Myla's GUI code close to SwiftUI's, in three tiers. Each tier works without the next, and tier 1 is useful to programs that never open a window. Part of [[Project/GUI-plan]]; what works with today's grammar is on [[Project/GUI-plan/Syntax-without-grammar-change]].
 
-Every form below is a parse error today (tried at `dd57b05`: `f(1, y: 3)`, `g(.Title)`, `[1, if c { 2 }]`, `f(1) { … }`), so none changes the meaning of a program that checks now. Every new word would be a soft keyword, as `defer` is.
+Every form below is a parse error today (tried at `dd57b05`, and again at `28fc64a` on 2026-11-27: `f(1, y: 3)`, `g(.Title)`, `[1, if c { 2 }]`, `f(1) { … }`), so none changes the meaning of a program that checks now. Every new word would be a soft keyword, as `defer` is.
 
 [TOC]
 

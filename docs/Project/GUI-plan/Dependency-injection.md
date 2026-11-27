@@ -147,7 +147,7 @@ What it gives beyond the GUI: a logger, a clock, a random source, a configuratio
 
 ### B. Module replacement in tests
 
-Zero language cost: the loader already takes another file for a module per target (`for_target`, D223). The same seam for tests, `myla test --replace std.time=tests/fakes/time.my` or a `[test.replace]` table in `myla.toml`, swaps a whole module for a fake with the same `pub` functions (the platform interface test shows how to hold two modules to the same functions). It reaches code that calls `time.now_ms()` directly, std's own included, and it is coarse: one replacement for a whole test run, nothing per test or per window.
+Zero language cost: the loader already takes another file for a module per target (`for_target`, D223, D306). The same seam for tests, `myla test --replace std.time=tests/fakes/time.my` or a `[test.replace]` table in `myla.toml`, swaps a whole module for a fake with the same `pub` functions (the platform interface test shows how to hold two modules to the same functions). It reaches code that calls `time.now_ms()` directly, std's own included, and it is coarse: one replacement for a whole test run, nothing per test or per window.
 
 ### C. Smaller helps
 

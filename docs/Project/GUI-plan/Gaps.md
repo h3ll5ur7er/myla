@@ -2,6 +2,8 @@
 
 What a SwiftUI-like GUI needs that Myla, its standard library, its runtime and its platform layers don't have on 18 November 2026, and that no open task covers. Tasks that exist are on [[Project/GUI-plan/Prerequisites]]. Each gap says whether it blocks the start, blocks a phase, or only costs comfort.
 
+Brought up to date on 27 November 2026 (at `28fc64a`): the language, runtime and platform gaps stand as they were, with notes where D313's modules bear on them; in the standard library, images, a renderer's drawing and fonts exist now (D313, [[MYLA-956]]), and the table below says what of each a GUI still lacks.
+
 [TOC]
 
 ## Language
@@ -66,8 +68,8 @@ Costs the SwiftUI look.
 | No `+` on lists | Joining child lists | `a.concat(b)` |
 | No implicit member (`.title`) | `Font.Title`, `Color.Red`, `Alignment.Leading` spelled out | Nothing; tier 1 |
 | No struct field defaults, no `P { ..base }` | Style and configuration structs with many fields | Builder methods that return a changed copy (`style().fg(c).bold()`, as `std.term` does) |
-| No way to put a file's bytes into a program | A bundled default font, icons, images | Read them at run time; or a generated `.my` file with a byte list, which is slow to check and large. An `embed` constant or attribute would be a small feature of its own |
-| No doc comments | A framework's API in the editor | [[MYLA-582]] and the language server's hover |
+| No way to put a file's bytes into a program | A bundled default font, icons, images | Read them at run time; or a generated `.my` file with a byte list, which is slow to check and large. An `embed` constant or attribute would be a small feature of its own. std.draw's built-in bitmap font (ASCII, 6 by 10, D313) is kept in `draw.my` itself, so text with no file works, though not in a TrueType face |
+| Doc comments only on the website | A framework's API in the editor | The comment above a declaration is read by the API reference's generator ([[MYLA-632]]), not yet by the language server's hover |
 | A captured value is copied into each closure, and values cross tasks as deep copies (D93) | A large model sent to a background task is copied | Send only what the task needs |
 
 ## Runtime
@@ -89,11 +91,11 @@ In a page the program must return to the browser between events. The scheduler w
 
 ### R3 Bulk memory operations
 
-`__copy_bytes` exists; a fill of 32-bit words and a row blend don't. A plain loop fills at 2 ns a pixel. Either the hot-loop tasks ([[MYLA-368]], [[MYLA-257]]) bring that near a `memset`, or the renderer gets two or three primitives, std-only.
+`__copy_bytes` exists; a fill of 32-bit words and a row blend don't. A plain loop fills at 2 ns a pixel. Either the hot-loop tasks ([[MYLA-368]], [[MYLA-257]]) bring that near a `memset`, or the renderer gets two or three primitives, std-only. std.draw is written without any primitive and composites about 100 million translucent pixels a second natively; the image lanes filed a fill of a new list ([[MYLA-949]]: `list.filled` pushes element by element) and slices copied as a block ([[MYLA-951]]), which cover part of this gap.
 
 ### R4 Compiled std code under the interpreter
 
-The interpreter runs its primitives through the std compiled into the `myla` binary. The renderer would use that on purpose: `myla run` interprets the framework and calls the compiled renderer through one primitive that takes a display list ([[Project/GUI-plan/Architecture#under-the-interpreter]]). Nothing new in kind, but it makes the renderer part of every `myla` binary.
+The interpreter runs its primitives through the std compiled into the `myla` binary. The rest of std it interprets, std.draw and std.font included (a 3×3 blur runs at about 12,000 pixels a second interpreted, [[Project/Standard-library-roadmap/Images-vision-and-fonts#what-was-measured]]). The renderer would use the compiled std on purpose: `myla run` interprets the framework and calls the compiled renderer through one primitive that takes a display list ([[Project/GUI-plan/Architecture#under-the-interpreter]]). Nothing new in kind, but it makes the renderer part of every `myla` binary.
 
 ## Platform
 
@@ -115,13 +117,13 @@ The interpreter runs its primitives through the std compiled into the `myla` bin
 
 | Module | What | Size | Notes |
 | --- | --- | --- | --- |
-| Geometry | `Point`, `Size`, `Rect`, `Insets`, an affine transform | Small | Over `std.vector32` and D200's operators, or a module of its own with `float32` |
-| Colour | `Color` with sRGB and linear conversions, named colours, premultiplied pixels | Small | `std.term.Color` is the terminal's and stays |
-| Images | A pixel buffer type; a PNG decoder and encoder | Medium | `std.compress` has inflate and deflate, `std.checksum` CRC-32, so PNG is their framing. JPEG later |
-| A renderer | Filled and stroked paths with anti-aliasing, rounded rectangles, gradients, images, clipping, transforms, a display list | Large | Pure Myla |
-| Fonts | TrueType and OpenType parsing (`cmap`, `glyf`, `hmtx`, `kern`, later `CFF` and `GPOS`), outlines to coverage, a glyph cache | Large | Finding the system's fonts without fontconfig: the known directories, or one bundled font (needs L6's embedding) |
-| Text layout | Line breaking, alignment, truncation, measuring; later bidirectional text and shaping for complex scripts | Large | `std.text.wrap` and `std.term.width` do it for cells |
-| `std.unicode` | Grapheme clusters, line-break classes, case mapping | Medium | #10 of [[Project/Standard-library-roadmap]]; [[selfhost/unicode.my]] has the identifier tables only |
+| Geometry | `Point`, `Size`, `Rect`, `Insets`, an affine transform | Small | std.draw takes points as std.vector32's `Vec2` and transforms as std.matrix32's `Mat3`, and std.image has an integer pixel `Rect`. Missing: a `Size`, a `Rect` and `Insets` in points (`float32`) for layout |
+| Colour | `Color` with sRGB and linear conversions, named colours, premultiplied pixels | Small | std.image's `Color` exists (8-bit sRGB, straight alpha, `parse_color`, `lerp`), with premultiplied images and std.imgproc's `to_linear`. Missing: named colours, and linear light for one colour. `std.term.Color` is the terminal's and stays |
+| Images | A pixel buffer type; a PNG decoder and encoder | Medium | Done: std.image's `Image<S>` and std.png ([[MYLA-959]], [[MYLA-961]]), with JPEG, GIF, TIFF, BMP, PNM and QOI, and std.imageio over them |
+| A renderer | Filled and stroked paths with anti-aliasing, rounded rectangles, gradients, images, clipping, transforms, a display list | Large | std.draw ([[MYLA-968]]) has all of it but the display list: exact-area coverage, strokes with joins, caps and dashes, linear and radial gradients, patterns, images drawn and scaled, a transform and clip stack, pure Myla. Missing for a GUI: the display list and its damage, clip paths (the clip is a rectangle of pixels), blend modes beyond source-over. Blurs for shadows are std.imgproc's |
+| Fonts | TrueType and OpenType parsing (`cmap`, `glyf`, `hmtx`, `kern`, later `CFF` and `GPOS`), outlines to coverage, a glyph cache | Large | std.font ([[MYLA-969]]) has TrueType and collections, `cmap` formats 4 and 12, composite glyphs, `kern`, unhinted masks at quarter pixels within 5 levels of FreeType, and a glyph cache. Missing: `CFF` (`.otf`) and `GPOS`, and finding the system's fonts without fontconfig (the known directories); a bundled TrueType font still needs L6's embedding |
+| Text layout | Line breaking, alignment, truncation, measuring; later bidirectional text and shaping for complex scripts | Large | std.font's `layout` and `measure` break lines at spaces, tabs and `\n` within a width, align left, centre or right, and measure, enough for Latin, Greek and Cyrillic. Missing: truncation, Unicode line breaking, a placed glyph's character (for a cursor and selection), bidirectional text and shaping, which D313 leaves out. `std.text.wrap` and `std.term.width` do it for cells |
+| `std.unicode` | Grapheme clusters, line-break classes, case mapping | Medium | #10 of [[Project/Standard-library-roadmap]], still without a task; [[selfhost/unicode.my]] has the identifier tables only |
 | A window module | Windows, events, a surface, the clipboard | Medium, per target | Over the platform gaps above |
 | Animation | Curves, springs, a frame clock | Small | `std.time` and `std.task` carry it |
 
@@ -133,6 +135,7 @@ So that the list above isn't read as "everything is missing":
 - `std.term`: raw mode, keys, colours, cell widths. A terminal target for the framework needs nothing else.
 - `std.vector`, `std.matrix`, float methods, operators between types (in review).
 - `std.compress`, `std.checksum`, `std.bytes`, `std.fs`: image and font files.
+- Since D313: `std.image` and its codecs, `std.draw` (the drawing a renderer needs, and a bitmap font) and `std.font` (TrueType glyphs, a glyph cache and a simple layout), compared with Pillow and FreeType in the burn suites.
 - `std.json`, `std.toml` with `#derive`: themes, settings, and state that can be saved.
 - `std.test` and `#test`: a view's body is a function of its model, so `#test(model)[expected]` works on it.
 - Floats that give the same bits on every target (`std.math` is Myla code): layout computes the same on every target.

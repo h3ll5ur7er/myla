@@ -114,8 +114,8 @@ What must follow the platform regardless of the look, because users feel it: key
 ## Drawing beyond the controls
 
 - **Shapes**: `rectangle()`, `rounded(8)`, `circle()`, `path(…)` with `.fill(…)` and `.stroke(…)`; a shape is a view.
-- **A canvas**: `canvas((c, size) => { … })` gives a drawing context that records into the display list, for charts and custom controls.
-- **Fills** are a colour, a gradient or an image; shadows and blurs are modifiers, with the cost of a blur said in the docs (the software renderer does it on the CPU).
+- **A canvas**: `canvas((c, size) => { … })` gives a drawing context that records into the display list, for charts and custom controls. std.draw's `Canvas` draws into pixels at once; the recording one is the framework's, with std.draw's paths and paints as its vocabulary.
+- **Fills** are a colour, a gradient or an image; shadows and blurs are modifiers, with the cost of a blur said in the docs (the software renderer does it on the CPU). std.draw's `Paint` has these already (`Solid`, the `Linear` and `Radial` gradients, an image's `Pattern`), and std.imgproc has the blur.
 
 ## Animation of style
 

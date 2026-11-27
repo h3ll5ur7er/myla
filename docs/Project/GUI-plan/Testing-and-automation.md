@@ -70,7 +70,7 @@ fun the_settings_sheet_looks_right() {
 ```
 
 - A missing or different picture fails and writes the new one beside a difference picture; `MYLA_PIN_PICTURES=1` accepts, as `MYLA_PIN_DIAGNOSTICS=1` does for pinned diagnostics.
-- Exact comparison by default, because the renderer is deterministic; a tolerance exists for pictures that include a system's text or a GPU renderer later.
+- Exact comparison by default, because the renderer is deterministic; a tolerance exists for pictures that include a system's text or a GPU renderer later. The codec suites work this way already: expected pixels made once with Pillow and committed under `tests/burn/data/`, compared exactly on every target (D313).
 - A single view can be pictured without an app: `ui.picture(card(item), 200, 80)`.
 
 ### 5. End to end
@@ -131,7 +131,7 @@ The semantic tree (role, label, value, state, actions, rectangle of each element
 | --- | --- |
 | A headless window target and the semantic tree | The core, phase 2 of [[Project/GUI-plan]] |
 | A clock a test advances, in both runners | The interpreter's virtual clock is set by an environment variable for `myla run` and native code has none ([[Language/Concurrency]]); the framework's frame clock can be its own, injected into the UI task, which needs nothing from the runtime |
-| PNG encoding and decoding | [[Project/GUI-plan/Gaps#standard-library]] |
+| PNG encoding and decoding | std.png ([[MYLA-961]], D313) |
 | `#test` on an `async fun` | Exists |
 | A `Format` or `Eq` for trees, to compare and print them | The framework's |
-| A bundled font | Embedding ([[Project/GUI-plan/Gaps#l6-smaller-ones]]); without it pictures depend on the machine's fonts |
+| A bundled font | std.draw's built-in bitmap font needs no file. For TrueType text, a test can vendor its font as std's suites do (`tests/burn/data/images/fonts/MylaTestSans.ttf`, a subset of Liberation Sans); a program's own default font needs embedding ([[Project/GUI-plan/Gaps#l6-smaller-ones]]), without which its pictures depend on the machine's fonts |

@@ -24,7 +24,7 @@ What a SwiftUI-like API looks like in the Myla of 18 November 2026: no new synta
 
 ## A program that runs
 
-A small framework core and a counter, complete. It prints the view tree instead of drawing it and presses the buttons from `main`; a real core would lay the tree out and wait for events. It shows that the whole shape type-checks today: one non-generic `View`, modifiers in a chain, a typed model with messages, actions erased by closures, a text binding, a conditional child.
+A small framework core and a counter, complete. It prints the view tree instead of drawing it and presses the buttons from `main`; a real core would lay the tree out and wait for events. It shows that the whole shape type-checks today: one non-generic `View`, modifiers in a chain, a typed model with messages, actions erased by closures, a text binding, a conditional child. Checked again on 2026-11-27 at `28fc64a`: it checks, and `myla run` and the program `myla build` makes print the output below.
 
 ```myla
 // ---- the framework's side ----------------------------------------------

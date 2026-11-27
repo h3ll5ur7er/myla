@@ -11,6 +11,8 @@ A SwiftUI-like way to build user interfaces: views as values composed from small
 > [!NOTE]
 > **On hold** (2026-10-25) until the rest fits: correct toolchains, the IR, concurrency ([[MYLA-61]]) and a project tool ([[MYLA-64]]) come first.
 
+A design brainstorm (2026-11-18, brought up to date with master on 2026-11-27), nothing decided yet: [[Project/GUI-plan]].
+
 ## Graphics without libc
 
 - **Software rendering is fully possible without libc**: draw into memory and hand it to the display through a Wayland `wl_shm` buffer or X11 shared memory (both plain socket protocols plus `mmap`), or directly to the screen through the kernel's DRM/KMS "dumb buffer" ioctls on `/dev/dri/card0` (no display server, driver-independent).

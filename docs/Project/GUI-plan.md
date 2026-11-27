@@ -1,6 +1,8 @@
 # GUI plan
 
-A brainstorm of 18 November 2026 for the next phase of development: a cross-platform, declarative GUI system that looks and feels close to SwiftUI ([[MYLA-63]]). Nothing here is decided. The pages below hold the findings, the answers to the five questions the owner asked, and proposals to choose from; no tasks were created and no existing file was changed.
+A brainstorm of 18 November 2026 for the next phase of development: a cross-platform, declarative GUI system that looks and feels close to SwiftUI ([[MYLA-63]]). Nothing here is decided. The pages below hold the findings, the answers to the five questions the owner asked, and proposals to choose from; no tasks were created, and no existing page or task was changed beyond the links that lead here.
+
+Brought up to date with master on 2026-11-27 (at `28fc64a`): std.draw, std.font, std.image and std.png exist now (D313, [[MYLA-956]]), so text and drawing are no longer missing and phase 3 builds on them; D313 also says where drawing and fonts live, which touches decision 1; [[MYLA-758]] (one Linux platform layer) and [[MYLA-861]] (Windows' heap commit) are built and in review, and round 7's proposals were accepted. The program and the probes' error messages were checked again and still hold.
 
 [SUBPAGES]
 
@@ -21,14 +23,14 @@ A brainstorm of 18 November 2026 for the next phase of development: a cross-plat
 
 ## The short answers
 
-**1. Planned tasks to finish first** ([[Project/GUI-plan/Prerequisites]]). Before any GUI code: round 7's review queue merged (the native memory and place-write bugs are in exactly the code shapes a view tree uses), the design round on what std is and how code is chosen per target ([[MYLA-245]]), leading-dot continuation ([[MYLA-589]]) and private fields ([[MYLA-433]]). Before the first real window: one Linux platform layer ([[MYLA-758]]) and the poller in Myla's terms ([[MYLA-265]], [[MYLA-885]]). The C FFI ([[MYLA-166]]), macOS ([[MYLA-164]]) and wasm exports ([[MYLA-241]]) gate single platforms, not the start.
+**1. Planned tasks to finish first** ([[Project/GUI-plan/Prerequisites]]). Before any GUI code: round 7's review queue closed (the native memory and place-write bugs are in exactly the code shapes a view tree uses; the fixes are in master and wave A's proposals were accepted as D263 to D278, but the tasks still wait in review), the design round on what std is and how code is chosen per target ([[MYLA-245]]), leading-dot continuation ([[MYLA-589]]) and private fields ([[MYLA-433]]). Before the first real window: one Linux platform layer ([[MYLA-758]], built since and in review) and the poller in Myla's terms ([[MYLA-265]], [[MYLA-885]]). The C FFI ([[MYLA-166]]), macOS ([[MYLA-164]]) and wasm exports ([[MYLA-241]]) gate single platforms, not the start.
 
 **2. Gaps no task covers** ([[Project/GUI-plan/Gaps]]). The three that shape the design:
 - **No type-erased storage with typed recovery** (no trait objects, no `Any`, no shared cell): SwiftUI's `@State`, state that belongs to a view and survives its parent's rebuild, can't be written in Myla today. A model with messages can.
 - **No way to hand a window's pixels to the system**: Unix-domain sockets, shared memory, descriptor passing, Windows' `user32`/`gdi32` with a callback, a canvas import on wasm.
-- **No text rendering**: font parsing, glyph rasterising, line breaking, `std.unicode`.
+- **Text for editing**: std.font parses TrueType, rasterises glyphs and breaks lines at spaces ([[MYLA-969]]), but there is no `std.unicode` (grapheme clusters, line-break classes), a laid-out glyph doesn't say which character it came from (a text cursor needs that), and there is no shaping or bidirectional text.
 
-**3. Architecture** ([[Project/GUI-plan/Architecture]]). Six layers: a per-target window layer in `std.platform`, a `window` module (events, a surface), a software renderer that executes a display list, text, the declarative core (view values, a retained element tree, layout, events, state), and the widgets. Myla draws every pixel itself, so a view looks the same on every target and can be tested as a picture without a display. The display list is the seam where `myla run` hands over to compiled code: interpreted pixel loops are about 1,200 times slower than native ones (measured below).
+**3. Architecture** ([[Project/GUI-plan/Architecture]]). Six layers: a per-target window layer in `std.platform`, a `window` module (events, a surface), a software renderer that executes a display list (over std.draw, which exists now), text (over std.font), the declarative core (view values, a retained element tree, layout, events, state), and the widgets. Myla draws every pixel itself, so a view looks the same on every target and can be tested as a picture without a display. The display list is the seam where `myla run` hands over to compiled code: interpreted pixel loops are about 1,200 times slower than native ones (measured below).
 
 **4. Syntax without a grammar change** ([[Project/GUI-plan/Syntax-without-grammar-change]]). Views are values built by functions, children are list literals, modifiers are methods; state is a model struct with an `update` for messages. It type-checks and runs today, interpreted and native:
 
@@ -91,13 +93,15 @@ Done on 2026-11-18 at `dd57b05`, on a 4-CPU Xeon at 2.1 GHz, with the tools buil
 | Source-over blending the same area, native | 10 to 15 ms a frame |
 | The same two loops under `myla run` (at 192×108, scaled by 100) | 4.9 s and 24 s a frame: about 1,200 and 1,600 to 2,400 times slower |
 
+Checked again on 2026-11-27 at `28fc64a`: the program on [[Project/GUI-plan/Syntax-without-grammar-change]] checks and prints its output under `myla run` and natively, every error message in the table is unchanged, and so are the forms that are parse errors. std.draw has measured its own compositing since: about 100 million translucent pixels a second natively ([[Language/Standard-library/Draw#accuracy-and-speed]]), of the same order as the blending row.
+
 ## Decisions the owner would have to take
 
 In the order they block work. Each has a recommendation on the page that discusses it.
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
-| 1 | **Where the GUI lives**: std, an official package, or both ([[MYLA-245]]; the roadmap's "left out" says package, the owner leaned toward std) | Both: the window layer, the renderer and text in std (they need primitives and compiled speed under `myla run`), the declarative framework as a package of pure Myla |
+| 1 | **Where the GUI lives**: std, an official package, or both ([[MYLA-245]]; the owner leaned toward std). Since D313 (2026-11-24) 2D drawing and TrueType fonts are std modules, std.draw and std.font, and the roadmap's "left out" says displays, windows and the GUI stay out of std | Both: the window layer, the renderer and text in std (the window layer needs primitives, the renderer compiled speed under `myla run`), the declarative framework as a package of pure Myla. D313 settled the renderer's and text's foundations as recommended; the window layer in std goes against D313's "displays and windows stay out", so that part is for the owner to settle again, with [[MYLA-245]] |
 | 2 | **Who draws**: Myla's own renderer everywhere, or each system's drawing and text | Myla's own: the same pixels on every target, golden-image tests, no FFI for Linux. Native text and GPU drawing can replace the renderer behind the display list later |
 | 3 | **The state model**: a model with messages, shared state cells, or both | Both, in that order: the model with messages first (no language change, testable with `#test`), then cells for a view's own state once type-erased storage exists |
 | 4 | **Type-erased storage**: a cell primitive in std, an `Any` type, or trait objects | A cell primitive first (small, std-only), trait objects as a language feature of their own later |
@@ -111,7 +115,7 @@ Each phase ends with something that runs and is tested; none needs the one after
 
 1. **Decisions and prerequisites**: the table above, and the tasks of [[Project/GUI-plan/Prerequisites]].
 2. **The declarative core without pixels**: view values, state, the element tree, layout, events and focus, against a headless target (a tree and a grid of character cells) and the terminal through `std.term`. This proves the API on every target and under the interpreter with no platform work.
-3. **Pixels without a window**: the software renderer, fonts and text, PNG output; golden-image tests on every target.
+3. **Pixels without a window**: the software renderer, fonts and text, PNG output; golden-image tests on every target. std.draw, std.font and std.png exist (D313), so what is left here is the display list, its executor over std.draw, damage, and the golden-image tests.
 4. **The first window**: X11 on Linux, both architectures.
 5. **Windows**, then **the browser**.
 6. **Later**: Wayland, macOS, accessibility, input methods, animation, a GPU renderer.
