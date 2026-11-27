@@ -1,4 +1,4 @@
-// std.gif: GIF images and animations (D311, MYLA-938). GIF87a and GIF89a:
+// std.gif: GIF images and animations (D313, MYLA-964). GIF87a and GIF89a:
 // global and local palettes, transparency, interlacing, the graphic control
 // extension (a frame's delay and disposal) and the NETSCAPE2.0 loop count.
 // The pixel data is LZW (std.compress's `lzw_decode_gif` and

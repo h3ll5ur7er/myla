@@ -1,5 +1,5 @@
 ---
-id: MYLA-938
+id: MYLA-964
 title: "std.gif: frames, animation and encoding"
 type: feature
 status: review
@@ -9,14 +9,14 @@ labels: [stdlib, images, gif]
 Step 3 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]].
 
 - **Owns:** `lib/std/gif.my`, `docs/Language/Standard-library/Gif.md`, `tests/burn/drivers/gif.my`, `tests/burn/drivers/gif_encode.my`, `tests/burn/test_gif.py`, `examples/gif_animation.my`
-- **Needs:** [[MYLA-933]], [[MYLA-932]] (LZW), [[MYLA-945]]
+- **Needs:** [[MYLA-959]], [[MYLA-958]] (LZW), [[MYLA-971]]
 - Work by the lane rules of [[Project/Standard-library-roadmap#Working in parallel]]: touch only the files this task owns, plus one row of the index table on [[Language/Standard-library]]; don't commit seeds or `selfhost/embedded_std.my`.
 
 - [x] `decode` (the first frame) and `decode_all` (an `Animation` of `Frame`s): GIF87a and GIF89a, global and local palettes, transparency, interlacing, delays, disposal, the NETSCAPE2.0 loop count; `max_pixels` over all frames together
 - [x] `composite`: every frame as shown, the three disposal methods applied, equal to Pillow's frames of the corpus
 - [x] `encode` and `encode_all` through `image.quantize`; transparency kept; frames that change only part of the canvas written as their rectangle
 - [x] Pillow reads every output with the same frames, delays and loop count
-- [x] Its corpus and fuzz cases in [[MYLA-945]]'s harness: truncations and seeded mutations are `Ok` or `Err`, never a runtime error, natively plain and `--checked`
+- [x] Its corpus and fuzz cases in [[MYLA-971]]'s harness: truncations and seeded mutations are `Ok` or `Err`, never a runtime error, natively plain and `--checked`
 - [x] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node): all but aarch64, as qemu-aarch64 isn't installed on the lane's machine (aarch64 run by the integrator after the merge, 2026-11-25, under qemu: gif 43/43)
 - [x] Its page below [[Language/Standard-library]] with a doc block that runs, the skill's `reference/stdlib.md`, and an example in `examples/`, registered
 
@@ -33,7 +33,7 @@ Step 3 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]].
 
 ## Evidence
 
-Measured on 2026-11-25 in the lane's worktree (branch `stdlib/MYLA-938` over `088e285`), on a shared 4-core x86-64 machine.
+Measured on 2026-11-25 in the lane's worktree (branch `stdlib/MYLA-964` over `088e285`), on a shared 4-core x86-64 machine.
 
 - **Pillow's compositing modelled first**: a Python model of the decoder and of the compositing rules above, run over the corpus before any Myla was written, matched all 10 `ok` GIFs' expected PAM files; with `Background` clearing to `(0, 0, 0, 0)` instead it failed `animated-disposal2.gif` (30 pixels in each of frames 1 to 3), which is why `background` exists.
 - **Module cases** (`lib/std/gif.my`, 43 cases: `#test` cases on `disposal_of`, `code`, `format`, `info` and the helpers; test functions decoding Pillow's 2×2, transparent 3×2, interlaced 1×8 and three-frame 3×3 files to their pixels as Pillow gives them, the broken files (cut in each part, code size 12, GIF88a, `max_pixels` of one frame and of an animation, a first frame wider than the screen, no palette), round trips of `encode` (exact colours, gray, alpha below and above 128, 300 colours quantised) and of `encode_all` (changed rectangles, delays, loops, a hole needing `Background`, a `Previous` frame), and `composite`'s disposals and clipping): `build/myla test lib/std/gif.my --stdlib lib` 43/43 in 1.3 s; `--native` 43/43; `--target wasm32-wasi` with `MYLA_EMULATOR="node tools/wasm/run.mjs"` 43/43. aarch64 not run: no `qemu-aarch64` here. Failing first: `broken_files` failed (a code size written at the wrong offset of the test file, then a frame-growth expectation that forgot the background shows through), and the encoder's burn test failed until its animation cleared each frame (`Disposal.Background`), so that the hole is shown at all.

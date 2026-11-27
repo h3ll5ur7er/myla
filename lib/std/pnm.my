@@ -1,4 +1,4 @@
-// std.pnm: the Netpbm formats (MYLA-934). PBM (P1, P4), PGM (P2, P5),
+// std.pnm: the Netpbm formats (MYLA-960). PBM (P1, P4), PGM (P2, P5),
 // PPM (P3, P6), each in its ASCII ("plain") and binary form, and PAM (P7)
 // with every tuple type of 1 to 4 channels; samples of 1 to 16 bits (any
 // MAXVAL from 1 to 65535). This is the format the image tests write their

@@ -1,4 +1,4 @@
-"""Burn tests: std.compress's LZW (GIF and TIFF) and PackBits (MYLA-932).
+"""Burn tests: std.compress's LZW (GIF and TIFF) and PackBits (MYLA-958).
 
 The corpus in `tests/burn/data/lzw/` holds LZW streams of GIF images written
 by Pillow (minimum code size 8) and ImageMagick (2 to 8), the LZW and

@@ -1,4 +1,4 @@
-// std.jpeg's encoder under tests/burn/test_jpeg_encode.py (MYLA-937): each
+// std.jpeg's encoder under tests/burn/test_jpeg_encode.py (MYLA-963): each
 // line of stdin is `<input>\t<output>\t<quality>\t<subsampling>`, the input
 // a PNM or PAM image (std.pnm) or `photo:<w>x<h>`, benchmarks/images_std.my's
 // picture of that size; the subsampling `444`, `422` or `420`. The image is

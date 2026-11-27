@@ -1,4 +1,4 @@
-// Binary data with std.bytes (MYLA-931): a small chunked file format written
+// Binary data with std.bytes (MYLA-957): a small chunked file format written
 // with a `ByteWriter` and read back with a `ByteReader`, and 5-bit codes
 // packed with an `MsbBitWriter` and unpacked with an `MsbBitReader`. Every
 // read gives an `Option`, so input that is cut short or wrong gives `None`,

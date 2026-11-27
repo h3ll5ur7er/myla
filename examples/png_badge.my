@@ -1,4 +1,4 @@
-// A badge drawn with std.draw and kept as PNG with std.png (MYLA-935):
+// A badge drawn with std.draw and kept as PNG with std.png (MYLA-961):
 // encoded with adaptive filtering, decoded back to the same pixels, then
 // written again as a palette image of its colours, and a file with a broken
 // byte refused. A program would write the bytes with `fs.write_bytes`.

@@ -1,4 +1,4 @@
-// std.font's driver for tests/burn/test_font.py (MYLA-943).
+// std.font's driver for tests/burn/test_font.py (MYLA-969).
 //
 // Without arguments it speaks the image drivers' protocol (tests/burn/_images.py)
 // for the fuzz runs: each line of stdin a font file, and for each a line

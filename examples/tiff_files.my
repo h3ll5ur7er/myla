@@ -1,4 +1,4 @@
-// TIFF files with std.tiff (MYLA-939): a 16-bit picture written with each
+// TIFF files with std.tiff (MYLA-965): a 16-bit picture written with each
 // compression, its tags listed by name, read back at 16 and at 8 bits, and
 // a file the module doesn't read, with the reason.
 

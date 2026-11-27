@@ -1,4 +1,4 @@
-"""Pillow's times for the work benchmarks/images_std.my does (MYLA-945):
+"""Pillow's times for the work benchmarks/images_std.my does (MYLA-971):
 `python3 benchmarks/images_pillow.py` (needs Pillow and numpy).
 
 The picture is the same as images_std.my's `photo` (the formula is in

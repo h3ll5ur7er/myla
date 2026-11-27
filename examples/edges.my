@@ -1,4 +1,4 @@
-// Edge detection with std.imgproc (MYLA-941): a generated scene, a disc
+// Edge detection with std.imgproc (MYLA-967): a generated scene, a disc
 // and a bar on a soft ramp, is blurred and its Canny edges drawn as text;
 // Otsu's threshold and the connected components find its two shapes, and
 // an area-averaged thumbnail is drawn in shades.

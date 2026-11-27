@@ -1,4 +1,4 @@
-// std.font: TrueType fonts (D311, MYLA-943). Parsing of `.ttf` files and
+// std.font: TrueType fonts (D313, MYLA-969). Parsing of `.ttf` files and
 // `.ttc` collections, glyph outlines as std.draw paths, glyph masks
 // rasterised unhinted at a quarter of a pixel, and a simple text layout:
 // characters to glyphs through `cmap`, advances, `kern` pairs, lines broken

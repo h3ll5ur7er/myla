@@ -1,6 +1,6 @@
 # std.draw
 
-2D vector drawing ([[MYLA-942]], D311): paths of lines and Bézier curves, a rasteriser that gives each pixel the exact share of it a path covers, strokes with joins, caps and dashes, and an RGBA canvas that fills, strokes and composites onto an `Image8` ([[Language/Standard-library/Image]]). It has a built-in bitmap font, so a program can write text with no font file; TrueType text goes through std.font, which hands this module its glyph outlines. The plan is [[Project/Standard-library-roadmap/Images-vision-and-fonts#std.draw: 2D vector drawing (MYLA-942)]].
+2D vector drawing ([[MYLA-968]], D313): paths of lines and Bézier curves, a rasteriser that gives each pixel the exact share of it a path covers, strokes with joins, caps and dashes, and an RGBA canvas that fills, strokes and composites onto an `Image8` ([[Language/Standard-library/Image]]). It has a built-in bitmap font, so a program can write text with no font file; TrueType text goes through std.font, which hands this module its glyph outlines. The plan is [[Project/Standard-library-roadmap/Images-vision-and-fonts#std.draw: 2D vector drawing (MYLA-968)]].
 
 ```myla
 import std.draw as draw
@@ -167,7 +167,7 @@ The font was drawn for std.draw. It covers ASCII 32 to 126, and any other charac
 ## Accuracy and speed
 
 - **References** (`tests/burn/test_draw.py`). Random polygons, including convex, star-shaped, self-intersecting and clipped ones, by both rules, are compared with exact per-pixel areas computed in Python, within one level. Circles, ellipses, rounded rectangles, an even-odd ring and strokes of every join, cap and a dash pattern, at 0.01 px, are compared with numpy references sampled 32 × 32 a pixel, within 4 levels, 0.4 on average. Lines are compared with Pillow's `ImageDraw.line`, rectangles with `ImageDraw.rectangle`, and scaling with `Image.resize` (nearest: equal; bilinear upscaling: within one level).
-- **Speed**, natively on 1024 × 1024 (measured on 2026-11-25 on a shared 4-core x86-64 machine, the working tree of [[MYLA-942]] over `0ad529e`): 10,000 random triangles within 64-pixel boxes, translucent, fill in about 0.11 s; 10,000 triangles with vertices anywhere on the canvas (about 90,000 pixels each) in about 8.5 s, about 100 million composited pixels a second; a polyline of 1000 random points, 3 pixels wide, strokes in 0.05 to 0.07 s depending on the join.
+- **Speed**, natively on 1024 × 1024 (measured on 2026-11-25 on a shared 4-core x86-64 machine, the working tree of [[MYLA-968]] over `0ad529e`): 10,000 random triangles within 64-pixel boxes, translucent, fill in about 0.11 s; 10,000 triangles with vertices anywhere on the canvas (about 90,000 pixels each) in about 8.5 s, about 100 million composited pixels a second; a polyline of 1000 random points, 3 pixels wide, strokes in 0.05 to 0.07 s depending on the join.
 - At the default tolerance the chords of a curve lie inside it, by at most a quarter of a pixel. A thin, small circle loses a little area this way, as in other renderers that flatten. Pass a smaller tolerance to `rasterize` or `coverage` for more exact curves.
 
 ## Not yet

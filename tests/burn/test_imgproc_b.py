@@ -1,4 +1,4 @@
-"""Burn tests: `std.imgproc`'s tier B (MYLA-944) against OpenCV and ground truth.
+"""Burn tests: `std.imgproc`'s tier B (MYLA-970) against OpenCV and ground truth.
 
 As `test_imgproc` (tier A), each case runs one function through a driver
 (`DRIVER`, built natively once) on inputs pure Python makes from a seed, and

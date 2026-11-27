@@ -1,4 +1,4 @@
-// The image, vision and font modules timed (MYLA-945, D311), beside Pillow
+// The image, vision and font modules timed (MYLA-971, D313), beside Pillow
 // doing the same work (benchmarks/images_pillow.py, which makes the same
 // picture). `build/myla build benchmarks/images_std.my -o /tmp/images &&
 // /tmp/images` (natively: the interpreter would take minutes); `/tmp/images
@@ -17,24 +17,24 @@
 // 3.2 with SIMD, FreeType 2.14), on the shared 4-core x86-64 machine of
 // 2026-11-24, the fastest of 5 runs:
 //
-//     png encode (level 6), 12 MP            3076 ms   MYLA-935: png.encode(img)
+//     png encode (level 6), 12 MP            3076 ms   MYLA-961: png.encode(img)
 //                                                       std.png 5190 ms (std.compress's deflate 4.7 s),
 //                                                       13.66 MB to Pillow's 14.7 MB
-//     png decode, 12 MP                       196 ms   MYLA-935: png.decode(b)
+//     png decode, 12 MP                       196 ms   MYLA-961: png.decode(b)
 //                                                       std.png 402 ms (std.compress's inflate 255 ms)
-//     jpeg encode (q85, 4:2:0), 12 MP          44 ms   MYLA-937: jpeg.encode(img, 85): 300-305 ms (2026-11-25),
+//     jpeg encode (q85, 4:2:0), 12 MP          44 ms   MYLA-963: jpeg.encode(img, 85): 300-305 ms (2026-11-25),
 //                                                       Pillow's 3,278,764 bytes exactly; 4:4:4 390-430 ms
 //                                                       to Pillow's 59
-//     jpeg decode, 12 MP                       77 ms   MYLA-936: jpeg.decode(b): 418 ms (2026-11-25;
+//     jpeg decode, 12 MP                       77 ms   MYLA-962: jpeg.decode(b): 418 ms (2026-11-25;
 //                                                       a third of it list.filled, MYLA-949)
-//     resize 12 MP to 1155x866, bilinear       50 ms   MYLA-941: imgproc.resize(img, 1155, 866, Filter.Bilinear)
-//     resize 12 MP to 1155x866, box (area)     31 ms   MYLA-941: Filter.Area
-//     resize 12 MP to 1155x866, lanczos       125 ms   MYLA-941: Filter.Lanczos3
-//     gaussian blur 1 MP, sigma 2              28 ms   MYLA-941: imgproc.gaussian_blur(small, 2.0f32)
+//     resize 12 MP to 1155x866, bilinear       50 ms   MYLA-967: imgproc.resize(img, 1155, 866, Filter.Bilinear)
+//     resize 12 MP to 1155x866, box (area)     31 ms   MYLA-967: Filter.Area
+//     resize 12 MP to 1155x866, lanczos       125 ms   MYLA-967: Filter.Lanczos3
+//     gaussian blur 1 MP, sigma 2              28 ms   MYLA-967: imgproc.gaussian_blur(small, 2.0f32)
 //                                                       (Pillow's is three box blurs, not a true Gaussian)
-//     find edges 1 MP gray (3x3)               11 ms   MYLA-941: imgproc.canny(gray, 50.0f32, 150.0f32)
+//     find edges 1 MP gray (3x3)               11 ms   MYLA-967: imgproc.canny(gray, 50.0f32, 150.0f32)
 //                                                       (Pillow has no Canny: a 3x3 kernel is no match)
-//     text: 804 characters at 16 px, wrapped   25 ms   MYLA-943: font.layout + glyph_cache masks + fill_mask
+//     text: 804 characters at 16 px, wrapped   25 ms   MYLA-969: font.layout + glyph_cache masks + fill_mask
 //                                                       (2026-11-25: 5.5 ms with a new cache, 3.8 ms with
 //                                                       one kept, of which 2.9 ms make the canvas)
 //
@@ -186,12 +186,12 @@ fun main() {
             Err(e) => print(f"{jpeg_path}: {e}")
         }
     }
-    // MYLA-941: resize to 1155x866 (bilinear, area, lanczos), then at
+    // MYLA-967: resize to 1155x866 (bilinear, area, lanczos), then at
     //     1024x1024: gaussian_blur(2.0f32), and gray |> canny(50.0f32, 150.0f32)
     text_bench()
 }
 
-// MYLA-943: the paragraph of images_pillow.py at 16 px with
+// MYLA-969: the paragraph of images_pillow.py at 16 px with
 // tests/burn/data/images/fonts/MylaTestSans.ttf, wrapped at 780 px: layout,
 // the glyph cache's masks, filled on an 800x400 canvas; with a new cache
 // each time (every glyph rasterised) and with one kept (none). Run from the

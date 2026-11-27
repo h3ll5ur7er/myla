@@ -1,6 +1,6 @@
 # std.pnm
 
-The Netpbm formats ([[MYLA-934]], the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): PBM (bilevel), PGM (gray) and PPM (RGB), each in its plain (ASCII) and its binary form, and PAM with every tuple type of one to four channels, at any MAXVAL from 1 to 65535. They are the simplest image files there are, a short text header and the samples as they are, so the image tests write their expected pixels in PAM, and any program can read or write them with no library at all. Images are [[Language/Standard-library/Image]]'s.
+The Netpbm formats ([[MYLA-960]], the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): PBM (bilevel), PGM (gray) and PPM (RGB), each in its plain (ASCII) and its binary form, and PAM with every tuple type of one to four channels, at any MAXVAL from 1 to 65535. They are the simplest image files there are, a short text header and the samples as they are, so the image tests write their expected pixels in PAM, and any program can read or write them with no library at all. Images are [[Language/Standard-library/Image]]'s.
 
 ```myla
 import std.image as image

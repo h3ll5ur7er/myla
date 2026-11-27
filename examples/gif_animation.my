@@ -1,4 +1,4 @@
-// An animated GIF with std.gif (MYLA-938): a ball rolling over a striped
+// An animated GIF with std.gif (MYLA-964): a ball rolling over a striped
 // floor, made frame by frame, written with `encode_all` and read back with
 // `decode_all`. The encoder writes each frame after the first as the
 // rectangle that changed, so the frames read back are small; `composite`

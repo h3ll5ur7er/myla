@@ -1,4 +1,4 @@
-"""Burn tests: `std.imgproc` (MYLA-941) against references independent of it.
+"""Burn tests: `std.imgproc` (MYLA-967) against references independent of it.
 
 Each case runs one function of the module through a driver (`DRIVER`, built
 natively once) on images that pure Python makes from a seed (a scene of a

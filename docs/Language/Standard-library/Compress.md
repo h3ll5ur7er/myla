@@ -1,6 +1,6 @@
 # std.compress
 
-DEFLATE decompression ([[MYLA-344]]) and compression ([[MYLA-352]]), and the gzip and zlib formats around them; LZW and PackBits, the codecs of GIF and TIFF ([[MYLA-932]], [below](#lzw-and-packbits)). tar and zip archives are [[Language/Standard-library/Archive]].
+DEFLATE decompression ([[MYLA-344]]) and compression ([[MYLA-352]]), and the gzip and zlib formats around them; LZW and PackBits, the codecs of GIF and TIFF ([[MYLA-958]], [below](#lzw-and-packbits)). tar and zip archives are [[Language/Standard-library/Archive]].
 
 ```myla
 import std.compress as compress
@@ -179,7 +179,7 @@ fun main() {
 
 ## LZW and PackBits
 
-The codecs inside GIF and TIFF files ([[MYLA-932]], for [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): LZW in GIF's form and in TIFF's, and PackBits. Each works on one stream's bytes, whole; the image formats around them (sub-blocks, strips, predictors) are the image modules' work.
+The codecs inside GIF and TIFF files ([[MYLA-958]], for [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): LZW in GIF's form and in TIFF's, and PackBits. Each works on one stream's bytes, whole; the image formats around them (sub-blocks, strips, predictors) are the image modules' work.
 
 ```myla
 import std.compress as compress
@@ -335,6 +335,6 @@ The compressor's cases (MYLA-352) are outputs checked against Python's `zlib` (t
 
 `tests/burn/test_archive.py` compresses text, random bytes, long runs, a mix of them and matches exactly 32768 bytes back (and one byte further) at every level, in each container, with the functions and with a writer given pieces of 1 to 9973 bytes, and 3 MB of text, and decompresses each with Python's `zlib`, `gzip -d` and this module; the output may be at most 2 % bigger than zlib's at the same level (it is smaller on text). It gunzips 1 GiB of zeros in 1 MB with a `max_output` of 1 MiB, in a process limited to 256 MiB of address space, built plain and `--checked`: `TooLarge`.
 
-LZW and PackBits ([[MYLA-932]]) have cases on each function: vectors from Pillow's GIF and libtiff's TIFF encoders and by hand (a clear and an end code alone, the entry a code is about to add, no clear code first, no end code, bits after it, a code past the table and an entry right after a clear, minimum code sizes outside 1 to 8, the old LZW of TIFF 5.0, PackBits' -128, its longest repeat and runs cut short), `max_output` at and one byte below the output in a literal and in an entry's string and below 0; and test functions: inputs of six kinds and of every minimum code size from 2 to 8 through both LZWs and PackBits and back, a table that fills up without a clear (the encoder made to defer it), and GIF's LZW with 8 bits read as TIFF's old LZW. All pass interpreted, natively and on wasm32 under Node.
+LZW and PackBits ([[MYLA-958]]) have cases on each function: vectors from Pillow's GIF and libtiff's TIFF encoders and by hand (a clear and an end code alone, the entry a code is about to add, no clear code first, no end code, bits after it, a code past the table and an entry right after a clear, minimum code sizes outside 1 to 8, the old LZW of TIFF 5.0, PackBits' -128, its longest repeat and runs cut short), `max_output` at and one byte below the output in a literal and in an entry's string and below 0; and test functions: inputs of six kinds and of every minimum code size from 2 to 8 through both LZWs and PackBits and back, a table that fills up without a clear (the encoder made to defer it), and GIF's LZW with 8 bits read as TIFF's old LZW. All pass interpreted, natively and on wasm32 under Node.
 
 `tests/burn/test_lzw.py` decodes a corpus vendored in `tests/burn/data/lzw/` (`--vendor` makes it again with Pillow, ImageMagick and ffmpeg): the LZW data of GIF images by Pillow (minimum code size 8, interlaced and not) and by ImageMagick (2 to 8), and the LZW and PackBits strips of TIFF images, grey, RGB, random RGB and bilevel, by libtiff (through Pillow) and by ffmpeg; each must give the bytes those tools decode, and `TooLarge` a byte below. It encodes empty input, a byte, random bytes, 200,000 zeros, runs of 1 to 300, periodic bytes, 300 KB of the repository's text, a picture and pairs, for GIF at the minimum code sizes 2, 3, 5, 7 and 8; each must come back through this module, through a decoder written in the test from the specifications, and through Pillow inside a GIF or TIFF file it builds. It mutates the corpus 3,000 times (cut short, bits flipped, bytes changed or added, random bytes, another minimum code size, a small `max_output`): each must give what the test's decoder gives, the same bytes or the same error, built plain and `--checked` alike, never a runtime error. The encoders run interpreted too.

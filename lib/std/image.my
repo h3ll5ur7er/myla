@@ -1,10 +1,10 @@
 // std.image: the image type the codecs, std.imgproc, std.draw and std.font
-// share (D311, MYLA-933). An `Image<S>` holds its samples interleaved, row
+// share (D313, MYLA-959). An `Image<S>` holds its samples interleaved, row
 // by row, without padding: the sample `c` of the pixel `(x, y)` is
 // `data[(y * width + x) * channels + c]`.
 //
 // This is the skeleton the lanes of wave 1 build on: the types and their
-// basic access. MYLA-933 completes the module; what is declared here keeps
+// basic access. MYLA-959 completes the module; what is declared here keeps
 // its names and signatures.
 
 from std.ioerror import IoError, io_error_name
@@ -341,7 +341,7 @@ pub struct ImageInfo {
     format: str,
 }
 
-// The errors of every codec, std.imageio and std.imgproc (D311, D168).
+// The errors of every codec, std.imageio and std.imgproc (D313, D168).
 #derive(Eq)
 pub enum ImageError {
     // The input ends early.

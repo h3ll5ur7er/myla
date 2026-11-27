@@ -1,4 +1,4 @@
-// std.tiff: baseline TIFF files, read and written (MYLA-939, D311).
+// std.tiff: baseline TIFF files, read and written (MYLA-965, D313).
 //
 // A TIFF file is a header (the byte order, "II" or "MM", and 42) and a chain
 // of image file directories (IFDs), one a page. An IFD is a list of tags,

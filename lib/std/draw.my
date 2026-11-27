@@ -1,4 +1,4 @@
-// std.draw: 2D vector drawing (D311, MYLA-942). Paths of lines and Bézier
+// std.draw: 2D vector drawing (D313, MYLA-968). Paths of lines and Bézier
 // curves, a rasteriser that gives each pixel the exact area of it a path
 // covers (as FreeType's "smooth" renderer and font-rs compute it), by the
 // non-zero or the even-odd rule, and an RGBA canvas that fills, strokes and

@@ -1,4 +1,4 @@
-"""The image and font corpus and the harness the codec lanes plug into (MYLA-945).
+"""The image and font corpus and the harness the codec lanes plug into (MYLA-971).
 
 The corpus is `tests/burn/data/images/`: a folder per format (`png/`, `jpeg/`,
 `gif/`, `tiff/`, `bmp/`, `pnm/`, `qoi/`, `fonts/`), the expected pixels under

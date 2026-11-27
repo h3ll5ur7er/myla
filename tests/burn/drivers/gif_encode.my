@@ -1,4 +1,4 @@
-// std.gif's encoder driver for tests/burn/test_gif.py (MYLA-938). It reads
+// std.gif's encoder driver for tests/burn/test_gif.py (MYLA-964). It reads
 // lines from stdin until an empty one or the end, each `<input>\t<output>`:
 // the input a GIF file, decoded with `decode_all`, or `synth:<w>:<h>:<n>:<kind>`,
 // an animation of `n` frames made here (`few` colours or `many`, with a

@@ -6,7 +6,7 @@ status: todo
 priority: medium
 labels: [checker, f-strings, diagnostics]
 ---
-Found by [[MYLA-940]] and [[MYLA-939]]:
+Found by [[MYLA-966]] and [[MYLA-965]]:
 
 ```myla fragment
 fun f(format: str) -> str {

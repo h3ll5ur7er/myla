@@ -1,4 +1,4 @@
-// std.gif's driver for tests/burn/test_images.py (MYLA-938): every frame of
+// std.gif's driver for tests/burn/test_images.py (MYLA-964): every frame of
 // an animation as it is shown (`decode_all`, then `composite`), each checked
 // against `decode`, which must give the first of them.
 

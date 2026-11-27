@@ -1,4 +1,4 @@
-// std.jpeg: JPEG decoding (MYLA-936) and baseline encoding (MYLA-937).
+// std.jpeg: JPEG decoding (MYLA-962) and baseline encoding (MYLA-963).
 //
 // The decoder reads baseline and extended sequential DCT (SOF0, SOF1) and
 // progressive DCT (SOF2), Huffman coded, 8 bits a sample, one, three or four
@@ -6,7 +6,7 @@
 // APP14 (RGB, CMYK and YCCK). Arithmetic coding, lossless and hierarchical
 // JPEG and 12-bit samples are `Unsupported`, by name.
 //
-// It gives what libjpeg gives with its defaults, bit for bit (D311, decision
+// It gives what libjpeg gives with its defaults, bit for bit (D313, decision
 // 7): the IDCT is libjpeg's "islow" (jidctint.c, the integer one with 13 bits
 // of fraction), the chroma is upsampled by its "fancy" triangle filters where
 // it has them (jdsample.c: 2x1, 1x2 and 2x2; other ratios are replicated, as
@@ -1862,7 +1862,7 @@ pub fun apply_orientation<S: Sample>(img: Image<S>, o: int) -> Image<S> {
 }
 
 // ---------------------------------------------------------------------------
-// Encoding (MYLA-937)
+// Encoding (MYLA-963)
 // ---------------------------------------------------------------------------
 
 // How `encode` samples a colour image's chroma (Cb and Cr): at every pixel

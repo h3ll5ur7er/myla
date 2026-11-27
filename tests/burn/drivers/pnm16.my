@@ -1,4 +1,4 @@
-// std.pnm's `decode16` through image_driver's protocol (MYLA-934).
+// std.pnm's `decode16` through image_driver's protocol (MYLA-960).
 import std.pnm as pnm
 import image_driver as driver
 

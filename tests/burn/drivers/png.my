@@ -1,5 +1,5 @@
 // std.png's `decode` (8 bits, 16 rounded) under the image corpus's harness
-// (tests/burn/test_images.py, MYLA-935).
+// (tests/burn/test_images.py, MYLA-961).
 
 import std.png as png
 import image_driver as driver

@@ -1,6 +1,6 @@
 # The image and font corpus: sources and licences
 
-MYLA-945. `manifest.json` lists every file with its `source`; `python3 -m tests.burn.test_images --vendor` makes the corpus again (`tests/burn/_images_vendor.py`). The fields and the driver protocol are described in `tests/burn/_images.py`.
+MYLA-971. `manifest.json` lists every file with its `source`; `python3 -m tests.burn.test_images --vendor` makes the corpus again (`tests/burn/_images_vendor.py`). The fields and the driver protocol are described in `tests/burn/_images.py`.
 
 | Files | Source | Licence |
 | --- | --- | --- |

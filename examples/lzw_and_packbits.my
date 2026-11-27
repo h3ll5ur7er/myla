@@ -1,4 +1,4 @@
-// The codecs inside GIF and TIFF files, from std.compress (MYLA-932): LZW
+// The codecs inside GIF and TIFF files, from std.compress (MYLA-958): LZW
 // in GIF's and in TIFF's form, and PackBits.
 import std.compress as compress
 

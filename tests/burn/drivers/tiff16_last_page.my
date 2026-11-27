@@ -1,4 +1,4 @@
-// std.tiff's `decode16` (MYLA-939) through image_driver's protocol: the
+// std.tiff's `decode16` (MYLA-965) through image_driver's protocol: the
 // last page `pages` finds, at 16 bits (page 0 where `pages` fails).
 
 import std.tiff as tiff

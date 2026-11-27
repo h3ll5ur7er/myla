@@ -1,4 +1,4 @@
-// Encoding JPEG files with std.jpeg (MYLA-937): a picture drawn pixel by
+// Encoding JPEG files with std.jpeg (MYLA-963): a picture drawn pixel by
 // pixel, encoded at several qualities and chroma subsamplings, decoded back,
 // and compared with the original: the file's size and the PSNR. The files
 // are the bytes Pillow (libjpeg) writes for the same pixels and settings.

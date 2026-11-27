@@ -1,4 +1,4 @@
-// Pictures with std.image (MYLA-933): a little scene drawn pixel by pixel,
+// Pictures with std.image (MYLA-959): a little scene drawn pixel by pixel,
 // converted to gray and printed as text, reduced to four colours, turned,
 // and previewed in colour by `image.ansi` (give the program an argument to
 // see the preview in a terminal).

@@ -6,7 +6,7 @@ status: todo
 priority: medium
 labels: [codegen, ir]
 ---
-Found by [[MYLA-932]]. `myla check` and `myla run` accept this; `myla build` stops with `runtime error: internal error: main can't be lowered to the IR: a call without a value used as one --> selfhost/codegen.my:2863:32`.
+Found by [[MYLA-958]]. `myla check` and `myla run` accept this; `myla build` stops with `runtime error: internal error: main can't be lowered to the IR: a call without a value used as one --> selfhost/codegen.my:2863:32`.
 
 ```myla fragment
 import std.process as process

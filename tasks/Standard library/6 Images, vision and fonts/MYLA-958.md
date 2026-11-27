@@ -1,5 +1,5 @@
 ---
-id: MYLA-932
+id: MYLA-958
 title: "std.compress: LZW (GIF and TIFF) and PackBits"
 type: feature
 status: review
@@ -9,7 +9,7 @@ labels: [stdlib, compression, images]
 Step 1 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]. The codecs GIF and TIFF need, beside DEFLATE.
 
 - **Owns:** the new parts of `lib/std/compress.my`, [[Language/Standard-library/Compress]]
-- **Needs:** [[MYLA-931]] (the bit readers), [[MYLA-930]]
+- **Needs:** [[MYLA-957]] (the bit readers), [[MYLA-956]]
 - Work by the lane rules of [[Project/Standard-library-roadmap#Working in parallel]]: touch only the files this task owns, plus one row of the index table on [[Language/Standard-library]]; don't commit seeds or `selfhost/embedded_std.my`.
 
 - [x] `lzw_decode_gif(b, min_code_size, max_output)` and `lzw_encode_gif`: LSB-first, codes growing to 12 bits, clear and end codes, a full table kept (deferred clear) as decoders must accept
@@ -22,7 +22,7 @@ Step 1 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]. The code
 
 ## Evidence
 
-Branch `stdlib/MYLA-932`, from `claude/stdlib-image-vision-plan-gm6jy5` at `0ad529e`.
+Branch `stdlib/MYLA-958`, from `claude/stdlib-image-vision-plan-gm6jy5` at `0ad529e`.
 
 **API** (all in `std.compress`, [[Language/Standard-library/Compress#lzw-and-packbits]]):
 
@@ -34,7 +34,7 @@ Errors: a code past the table (or an entry code right after a clear) is the exis
 
 Decisions: one LZW core for both forms, parameterised by bit order and early change (0 or 1); width grows when the next entry `>= (1 << width) - early` (with `>=`, so GIF's degenerate minimum code size 1 grows as giflib does). The decoder keeps each entry as (start, length) in the output it already wrote, so a string is copied from there, no prefix chains. The data ends at the end code (what follows is ignored) or with the input (no end code needed, as libtiff and browsers accept; image decoders count their pixels). The GIF encoder clears when the table reaches 4096, the TIFF one before entry 4094 (libtiff's rule), both after a leading clear.
 
-**Private helpers to be replaced:** `CodeReader` (LSB-/MSB-first code reader) and `CodeWriter` (its writer) in `lib/std/compress.my`, to become std.bytes's `BitReader`/`BitWriter` ([[MYLA-931]]). Also `PackBitsWriter`, a two-field struct that only exists because a function can't mutate a list it is passed (it can stay).
+**Private helpers to be replaced:** `CodeReader` (LSB-/MSB-first code reader) and `CodeWriter` (its writer) in `lib/std/compress.my`, to become std.bytes's `BitReader`/`BitWriter` ([[MYLA-957]]). Also `PackBitsWriter`, a two-field struct that only exists because a function can't mutate a list it is passed (it can stay).
 
 **Tests, before and after (soft TDD):** with the public functions stubbed (`Ok([])`/`[]`), `build/myla test lib/std/compress.my --stdlib lib` gave 164/208 passed (every new case but the few whose answer is empty failed); with the code 207/208, the one failure a wrong hand-made vector (`01` is the codes 1 and 0, not 1 alone), fixed to `29`. Now the module has 209 cases (155 before, 54 new), all passing interpreted (51 s), natively (`--native`) and on wasm32 under Node (`MYLA_EMULATOR="node tools/wasm/run.mjs" ... --target wasm32-wasi`). aarch64 wasn't run: no `qemu-aarch64` here.
 

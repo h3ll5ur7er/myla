@@ -1,4 +1,4 @@
-"""Burn tests: std.gif's encoder (MYLA-938).
+"""Burn tests: std.gif's encoder (MYLA-964).
 
 `tests/burn/drivers/gif_encode.my` encodes, natively, every GIF of the
 corpus again (`decode_all`, then `encode_all`) and two animations it makes

@@ -1,6 +1,6 @@
 # std.qoi
 
-The Quite OK Image format ([[MYLA-934]], the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): lossless RGB and RGBA in a format whose whole specification ([qoiformat.org](https://qoiformat.org/qoi-specification.pdf), version 1.0) is a page. Its files are larger than PNG's but much quicker to write and read: for output when PNG's size doesn't matter. Images are [[Language/Standard-library/Image]]'s.
+The Quite OK Image format ([[MYLA-960]], the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): lossless RGB and RGBA in a format whose whole specification ([qoiformat.org](https://qoiformat.org/qoi-specification.pdf), version 1.0) is a page. Its files are larger than PNG's but much quicker to write and read: for output when PNG's size doesn't matter. Images are [[Language/Standard-library/Image]]'s.
 
 ```myla
 import std.image as image

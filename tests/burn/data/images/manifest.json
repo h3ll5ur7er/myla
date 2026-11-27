@@ -1,5 +1,5 @@
 {
- "about": "MYLA-945's image and font corpus: see tests/burn/_images.py for the fields and LICENSES.md for the sources; made by `python3 -m tests.burn.test_images --vendor`",
+ "about": "MYLA-971's image and font corpus: see tests/burn/_images.py for the fields and LICENSES.md for the sources; made by `python3 -m tests.burn.test_images --vendor`",
  "pillow": "13.0.0",
  "libjpeg_turbo": "3.2.0",
  "freetype": "2.14.3",
@@ -7017,7 +7017,7 @@
    "pam": "expected/fonts/unhinted/avatar-to-yo-24px.pam",
    "sha256": "30dc4bc53d2a76e8311b50c3d6352e2af1283c984090439a2b882237aa1bad3f",
    "engine": "freetype-unhinted",
-   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; each glyph at its fractional pen position (unhinted advances, from the origin on the baseline), coverage added and clamped where glyphs overlap; not kerned: FreeType's get_kerning gave 0 for the kern table's pairs here (MYLA-943 found the strings match unkerned pens, to 2 levels, and not kerned ones)"
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; each glyph at its fractional pen position (unhinted advances, from the origin on the baseline), coverage added and clamped where glyphs overlap; not kerned: FreeType's get_kerning gave 0 for the kern table's pairs here (MYLA-969 found the strings match unkerned pens, to 2 levels, and not kerned ones)"
   },
   {
    "font": "fonts/MylaTestSans.ttf",
@@ -7032,7 +7032,7 @@
    "pam": "expected/fonts/unhinted/hello--world-16px.pam",
    "sha256": "df68cf6f95410443b34f406a0222b553f59c8dc9b7219ca3ecf69ce4492052de",
    "engine": "freetype-unhinted",
-   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; each glyph at its fractional pen position (unhinted advances, from the origin on the baseline), coverage added and clamped where glyphs overlap; not kerned: FreeType's get_kerning gave 0 for the kern table's pairs here (MYLA-943 found the strings match unkerned pens, to 2 levels, and not kerned ones)"
+   "notes": "FreeType 2.13.2 through freetype-py, FT_LOAD_NO_HINTING, the normal (exact area, 256 levels) renderer: the coverage std.font's rasteriser should give within a level or two; each glyph at its fractional pen position (unhinted advances, from the origin on the baseline), coverage added and clamped where glyphs overlap; not kerned: FreeType's get_kerning gave 0 for the kern table's pairs here (MYLA-969 found the strings match unkerned pens, to 2 levels, and not kerned ones)"
   }
  ]
 }

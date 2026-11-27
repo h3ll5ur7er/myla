@@ -1,4 +1,4 @@
-// A small chart drawn with std.draw (MYLA-942): bars filled through the
+// A small chart drawn with std.draw (MYLA-968): bars filled through the
 // coverage rasteriser, a stroked line with round joins, axes as aliased
 // lines and a title in the built-in bitmap font, then printed in the
 // terminal, one character a pixel, darker pixels as denser characters.

@@ -1,6 +1,6 @@
 # std.gif
 
-GIF images and animations ([[MYLA-938]], D311): GIF87a and GIF89a, global and local palettes, transparency, interlacing, each frame's delay and disposal (the graphic control extension) and the NETSCAPE2.0 loop count, read and written. The pixel data is LZW, from [[Language/Standard-library/Compress#LZW and PackBits]]; the images are [[Language/Standard-library/Image]]'s `Image8`, and the encoder reduces colours with its `quantize`. The plan is [[Project/Standard-library-roadmap/Images-vision-and-fonts#std.gif (MYLA-938)]].
+GIF images and animations ([[MYLA-964]], D313): GIF87a and GIF89a, global and local palettes, transparency, interlacing, each frame's delay and disposal (the graphic control extension) and the NETSCAPE2.0 loop count, read and written. The pixel data is LZW, from [[Language/Standard-library/Compress#LZW and PackBits]]; the images are [[Language/Standard-library/Image]]'s `Image8`, and the encoder reduces colours with its `quantize`. The plan is [[Project/Standard-library-roadmap/Images-vision-and-fonts#std.gif (MYLA-964)]].
 
 ```myla
 import std.gif as gif

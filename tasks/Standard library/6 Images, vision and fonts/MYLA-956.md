@@ -1,16 +1,16 @@
 ---
-id: MYLA-930
+id: MYLA-956
 title: "Images, vision and fonts in std: the owner's decisions and the umbrella"
 type: chore
 status: review
 priority: medium
 labels: [stdlib, images, design]
 ---
-The umbrella of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]: image codecs (PNG, JPEG, GIF, TIFF, BMP, PNM, QOI), image processing and computer vision (std.imgproc), 2D drawing (std.draw) and TrueType fonts (std.font), in Myla, for the GUI ([[MYLA-63]]) and for programs before it. The page has the proposed feature set and API, the measurements behind it, and the plan. Its tasks are [[MYLA-931]] to [[MYLA-945]], all in `backlog` until these questions are decided.
+The umbrella of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]: image codecs (PNG, JPEG, GIF, TIFF, BMP, PNM, QOI), image processing and computer vision (std.imgproc), 2D drawing (std.draw) and TrueType fonts (std.font), in Myla, for the GUI ([[MYLA-63]]) and for programs before it. The page has the proposed feature set and API, the measurements behind it, and the plan. Its tasks are [[MYLA-957]] to [[MYLA-971]], all in `backlog` until these questions are decided.
 
 ## Open questions for the owner
 
-Each has the page's recommendation first. The owner accepted every recommendation on 2026-11-24: D311.
+Each has the page's recommendation first. The owner accepted every recommendation on 2026-11-24: D313.
 
 - [x] **std or packages:** in std, as portable computation like std.compress (the GUI, windows and display stay out); or official packages, which [[MYLA-245]] hasn't designed yet. Updates [[Project/Standard-library-roadmap#Left out]] either way
 - [x] **Image type:** a generic `Image<S: Sample>` over `uint8`, `uint16`, `float32` with the aliases `Image8`, `Image16`, `ImageF`; or generated twins as D201 did for the vectors
@@ -23,7 +23,7 @@ Each has the page's recommendation first. The owner accepted every recommendatio
 
 ## Steps
 
-- [x] The questions decided, the decision recorded, the page updated to match (D311)
+- [x] The questions decided, the decision recorded, the page updated to match (D313)
 - [x] The tasks moved to `todo` in the page's order, step 1 first (three waves of parallel lanes, below)
 - [x] After std.png and std.jpeg: the embedded library's growth measured, before the rest goes ahead (below, 2026-11-25)
 
@@ -33,9 +33,9 @@ The owner asked for everything to be built in parallel by agents, as far as the 
 
 | Wave | Lanes | Why then |
 | --- | --- | --- |
-| 1 | [[MYLA-931]], [[MYLA-932]], [[MYLA-933]], [[MYLA-945]], [[MYLA-941]], [[MYLA-942]] | The groundwork, the core, and the two lanes that only need std.image's types (a skeleton committed first, `lib/std/image.my`) |
-| 2 | [[MYLA-934]], [[MYLA-935]], [[MYLA-936]], [[MYLA-938]], [[MYLA-939]], [[MYLA-943]] | The codecs need the byte readers, LZW and the corpus; fonts need std.draw |
-| 3 | [[MYLA-937]], [[MYLA-940]], [[MYLA-944]] | The JPEG encoder after its decoder, std.imageio after the codecs, tier B in imgproc.my after tier A |
+| 1 | [[MYLA-957]], [[MYLA-958]], [[MYLA-959]], [[MYLA-971]], [[MYLA-967]], [[MYLA-968]] | The groundwork, the core, and the two lanes that only need std.image's types (a skeleton committed first, `lib/std/image.my`) |
+| 2 | [[MYLA-960]], [[MYLA-961]], [[MYLA-962]], [[MYLA-964]], [[MYLA-965]], [[MYLA-969]] | The codecs need the byte readers, LZW and the corpus; fonts need std.draw |
+| 3 | [[MYLA-963]], [[MYLA-966]], [[MYLA-970]] | The JPEG encoder after its decoder, std.imageio after the codecs, tier B in imgproc.my after tier A |
 
 ## The embedded library's growth (2026-11-25, at f5821ba)
 
@@ -53,10 +53,10 @@ A program that doesn't import the new modules pays nothing measurable; the toolc
 
 ## Result (2026-11-25)
 
-Every task of the plan, [[MYLA-931]] to [[MYLA-945]], is built, merged into the plan branch and in `review`. The integrator's checks after the last merge:
+Every task of the plan, [[MYLA-957]] to [[MYLA-971]], is built, merged into the plan branch and in `review`. The integrator's checks after the last merge:
 
 - `scripts/test.sh all`: 2038 tests, 489 skipped; the 8 failures were `test_lsp`'s resolution corpus on the new modules, three gaps of the language server's resolver, fixed in [[MYLA-955]] (`test_lsp` 171 OK).
 - `scripts/check-seed.sh`: the seeds bootstrap the sources (the fixed point); no new seed needed (D207).
 - Module cases on aarch64 under qemu for the lanes that couldn't run it: all pass.
 
-Toolchain findings filed on the way: [[MYLA-946]], [[MYLA-947]], [[MYLA-948]], [[MYLA-949]], [[MYLA-950]], [[MYLA-951]], [[MYLA-952]], [[MYLA-953]], [[MYLA-954]], [[MYLA-955]].
+Toolchain findings filed on the way: [[MYLA-972]], [[MYLA-947]], [[MYLA-948]], [[MYLA-949]], [[MYLA-950]], [[MYLA-951]], [[MYLA-952]], [[MYLA-953]], [[MYLA-954]], [[MYLA-955]].

@@ -6,7 +6,7 @@ status: todo
 priority: medium
 labels: [loader, checker, traits]
 ---
-Found by [[MYLA-940]] (std.imageio's `enum Format`). A module with `pub enum Format { … }` and `impl Format for Format { … }` checks on its own; importing it fails:
+Found by [[MYLA-966]] (std.imageio's `enum Format`). A module with `pub enum Format { … }` and `impl Format for Format { … }` checks on its own; importing it fails:
 
 ```myla fragment
 // kinds.my

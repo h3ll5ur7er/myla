@@ -1,4 +1,4 @@
-// std.imageio (MYLA-940) against the codecs under it, for
+// std.imageio (MYLA-966) against the codecs under it, for
 // tests/burn/test_imageio.py. It reads requests from stdin, a line each,
 // fields separated by tabs, until an empty line or the end, and prints a
 // line for each:

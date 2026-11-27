@@ -1,4 +1,4 @@
-// Text in a TrueType font with std.font (MYLA-943): the test font of the
+// Text in a TrueType font with std.font (MYLA-969): the test font of the
 // image corpus parsed, a sentence measured, a paragraph laid out with
 // wrapping and centred lines, and a word drawn on a std.draw canvas
 // through a glyph cache, then printed one character a pixel. Run it from

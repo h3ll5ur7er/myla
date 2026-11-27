@@ -1,7 +1,7 @@
-// std.imgproc: image processing over std.image's `Image<S>` (D311,
-// MYLA-941): colour and point operations, geometry, filters, morphology,
+// std.imgproc: image processing over std.image's `Image<S>` (D313,
+// MYLA-967): colour and point operations, geometry, filters, morphology,
 // edges and corners, template matching, connected regions and quality
-// measures; and tier B (MYLA-944, after `empty_images`): contours and
+// measures; and tier B (MYLA-970, after `empty_images`): contours and
 // shapes, Hough transforms, FAST and ORB features, RANSAC estimation,
 // optical flow, the bilateral filter, the watershed and CLAHE.
 //
@@ -2625,7 +2625,7 @@ pub fun ellipse(w: int, h: int) -> Element {
 // The minimum (or the maximum, `take_max`) of each channel under the
 // element anchored at (ax, ay), pixels past the edge ignored: van Herk and
 // Gil-Werman's passes for a rectangle whose sides add up to 8 or more
-// (MYLA-944: the same work at any size, 33 ms for 1024 by 1024 where the
+// (MYLA-970: the same work at any size, 33 ms for 1024 by 1024 where the
 // runs take 30 ms at 3 by 3, 41 at 5 by 5 and 84 at 15 by 15), else
 // `morph_runs`.
 fun morph_core(img: Image8, se: Element, ax: int, ay: int, take_max: bool) -> Image8 {
@@ -3569,7 +3569,7 @@ fun empty_images() {
     assert(resize(e, 2, 2).data.len() == 12 && rotate(e, 30.0f32).width == 0)
 }
 
-// ==== tier B (MYLA-944): contours, shapes, Hough, features, estimation,
+// ==== tier B (MYLA-970): contours, shapes, Hough, features, estimation,
 // motion and more filters ====
 
 // ---- contours and shapes ----

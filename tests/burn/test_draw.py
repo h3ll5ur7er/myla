@@ -1,4 +1,4 @@
-"""Burn tests: `std.draw` (MYLA-942) against exact areas, supersampled
+"""Burn tests: `std.draw` (MYLA-968) against exact areas, supersampled
 references and Pillow.
 
 A Myla driver (`DRIVER`) reads one command a line from stdin and answers

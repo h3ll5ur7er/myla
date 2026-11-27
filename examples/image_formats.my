@@ -1,4 +1,4 @@
-// One picture in every image format through std.imageio (MYLA-940):
+// One picture in every image format through std.imageio (MYLA-966):
 // written in memory by `imageio.encode`, read back by `imageio.decode`,
 // which finds the format by the file's first bytes, and compared. Then the
 // formats file names ask for, and what goes wrong with a file that isn't an

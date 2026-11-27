@@ -1,4 +1,4 @@
-// std.bmp: Windows bitmaps (MYLA-934). Reads 1, 4 and 8 bits a pixel with a
+// std.bmp: Windows bitmaps (MYLA-960). Reads 1, 4 and 8 bits a pixel with a
 // palette, 16, 24 and 32 bits, bottom-up and top-down, uncompressed
 // (BI_RGB), RLE8, RLE4 and BI_BITFIELDS (with an alpha mask, or
 // BI_ALPHABITFIELDS), in the core (OS/2 1.x), BITMAPINFOHEADER, V2, V3, V4

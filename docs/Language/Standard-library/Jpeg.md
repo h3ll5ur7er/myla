@@ -1,6 +1,6 @@
 # std.jpeg
 
-JPEG decoding ([[MYLA-936]], D311, the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): baseline, extended sequential and progressive JPEG, Huffman coded, 8 bits a sample, gray, YCbCr, RGB and Adobe's CMYK and YCCK, every sampling factor libjpeg reads, restart intervals, and the metadata beside the pixels (JFIF's density, EXIF and its orientation, the ICC profile). It decodes to the same pixels as libjpeg with its defaults, bit for bit, so to what Pillow gives, on every target. And baseline encoding ([[MYLA-937]], [below](#encoding)): a JFIF file at a quality of 1 to 100 with the chroma at 4:4:4, 4:2:2 or 4:2:0, byte for byte the file libjpeg (Pillow) writes with the same settings. Images are std.image's ([[Language/Standard-library/Image]]).
+JPEG decoding ([[MYLA-962]], D313, the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): baseline, extended sequential and progressive JPEG, Huffman coded, 8 bits a sample, gray, YCbCr, RGB and Adobe's CMYK and YCCK, every sampling factor libjpeg reads, restart intervals, and the metadata beside the pixels (JFIF's density, EXIF and its orientation, the ICC profile). It decodes to the same pixels as libjpeg with its defaults, bit for bit, so to what Pillow gives, on every target. And baseline encoding ([[MYLA-963]], [below](#encoding)): a JFIF file at a quality of 1 to 100 with the chroma at 4:4:4, 4:2:2 or 4:2:0, byte for byte the file libjpeg (Pillow) writes with the same settings. Images are std.image's ([[Language/Standard-library/Image]]).
 
 ```myla
 import std.jpeg as jpeg
@@ -85,13 +85,13 @@ A scan whose data ends early, or a file without EOI, is decoded on as if zero bi
 
 ## Exactness
 
-The decoder is libjpeg's, step by step, so a JPEG decodes to the same pixels everywhere and to what Pillow (libjpeg-turbo) gives (D311, decision 7):
+The decoder is libjpeg's, step by step, so a JPEG decodes to the same pixels everywhere and to what Pillow (libjpeg-turbo) gives (D313, decision 7):
 
 - the **IDCT** is jidctint.c's "islow": integers with 13 bits of fraction, two passes with 2 more bits between them, and the output through its range limit (which wraps at 1024, so a wild value gives what libjpeg gives); here in `int64`, so no input overflows;
 - **upsampling** is jdsample.c's "fancy" one: the triangle filter across for 2x1 (`h2v1`), down for 1x2 (`h1v2`) and both for 2x2 (`h2v2`), each output sample 3/4 of the nearer input sample and 1/4 of the further, with libjpeg's rounding (alternately 1 and 2, or 8 and 7 in sixteenths) and the edges repeated; a component 2 samples wide or less is repeated instead, as libjpeg does, and so are the other ratios (4:1:1's 4x1);
 - **colour** is jdcolor.c's fixed point: YCbCr to RGB by its four tables at 16 bits of fraction, the result clamped. A JFIF file is YCbCr; without JFIF, Adobe's transform says (0 RGB, 1 YCbCr), and without either, components named `R`, `G`, `B` are RGB.
 
-The corpus of [[MYLA-945]] (`tests/burn/data/images/jpeg/`) holds every sampling factor, progressive files with spectral selection, successive approximation and restart markers, optimised tables, Adobe CMYK and EXIF orientations: each decodes to Pillow's pixels exactly, natively and `--checked`, under qemu-aarch64 and on wasm32 under Node; so do 12-megapixel baseline (4:2:0, 4:4:4) and progressive photos ([below](#speed)). Not covered by the corpus: YCCK, and a progressive file whose scans leave a coefficient not fully known, where libjpeg smooths the blocks (`do_block_smoothing`) and this decoder doesn't.
+The corpus of [[MYLA-971]] (`tests/burn/data/images/jpeg/`) holds every sampling factor, progressive files with spectral selection, successive approximation and restart markers, optimised tables, Adobe CMYK and EXIF orientations: each decodes to Pillow's pixels exactly, natively and `--checked`, under qemu-aarch64 and on wasm32 under Node; so do 12-megapixel baseline (4:2:0, 4:4:4) and progressive photos ([below](#speed)). Not covered by the corpus: YCCK, and a progressive file whose scans leave a coefficient not fully known, where libjpeg smooths the blocks (`do_block_smoothing`) and this decoder doesn't.
 
 ### CMYK and YCCK
 

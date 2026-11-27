@@ -1,5 +1,5 @@
 """Burn tests: the image and font corpus, and every image codec against it
-(MYLA-945, D311).
+(MYLA-971, D313).
 
 The corpus (`tests/burn/data/images/`, `LICENSES.md` there) is checked
 first, with nothing but Python's own modules: every file is in the manifest
@@ -86,7 +86,7 @@ class Codec:
         return [e for e in found if self.accepts(e)]
 
 
-# The codec lanes add or change their rows here (MYLA-934 to MYLA-939): a
+# The codec lanes add or change their rows here (MYLA-960 to MYLA-965): a
 # driver per decoder function (std.png's `decode` and `decode16`, TIFF's
 # `decode_f32` would be a third with `serve_f32`), each skipped until its
 # module and its driver exist.

@@ -876,7 +876,7 @@ class TestResolutionCorpus(unittest.TestCase):
             self.assertEqual(self._resolves(path, lines), 24)
 
     def test_aliases_defaults_and_wildcards(self) -> None:
-        # MYLA-955 (found by D311's image modules): an import's alias is a use
+        # MYLA-955 (found by D313's image modules): an import's alias is a use
         # of its module, a parameter's default is resolved (as the caller's
         # expression), and `_` binds nothing, so a `_` pattern needn't resolve
         source = ("import std.option as option\n\nenum Mode {\n    Fast\n    Slow\n}\n\n"

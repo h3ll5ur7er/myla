@@ -1,4 +1,4 @@
-"""Burn tests: std.png's encoders (MYLA-935). Its decoders are tested over
+"""Burn tests: std.png's encoders (MYLA-961). Its decoders are tested over
 the image corpus by test_images.py (`PngDecoder`, `Png16Decoder`).
 
 A driver (`tests/burn/drivers/png_roundtrip.my`) decodes every PNG of the

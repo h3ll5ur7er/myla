@@ -1,4 +1,4 @@
-// Image files with std.pnm, std.bmp and std.qoi (MYLA-934): a small
+// Image files with std.pnm, std.bmp and std.qoi (MYLA-960): a small
 // picture written in each format, the size of each file, each read back, a
 // tiny plain PGM shown as the text it is, and a file cut short.
 

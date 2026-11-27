@@ -1,6 +1,6 @@
 # std.bytes
 
-Strings and bytes ([[MYLA-329]]), and binary data ([[MYLA-931]]). A `str` is bytes (D164), so a string becomes a `[uint8]` and back as its bytes are, whatever they are. UTF-8 is checked and built here, where it matters: `is_utf8`, `utf8_error`, `encode_char` and `decode_char`. The [second half](#binary-data) reads and writes binary formats: integers and floats of either byte order ([ByteReader](#bytereader), [ByteWriter](#bytewriter)) and bit streams of either bit order ([bit readers](#bit-readers), [bit writers](#bit-writers)), for the image codecs, fonts and anything else with a file format.
+Strings and bytes ([[MYLA-329]]), and binary data ([[MYLA-957]]). A `str` is bytes (D164), so a string becomes a `[uint8]` and back as its bytes are, whatever they are. UTF-8 is checked and built here, where it matters: `is_utf8`, `utf8_error`, `encode_char` and `decode_char`. The [second half](#binary-data) reads and writes binary formats: integers and floats of either byte order ([ByteReader](#bytereader), [ByteWriter](#bytewriter)) and bit streams of either bit order ([bit readers](#bit-readers), [bit writers](#bit-writers)), for the image codecs, fonts and anything else with a file format.
 
 ```myla
 import std.bytes as bytes

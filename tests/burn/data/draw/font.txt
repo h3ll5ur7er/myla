@@ -1,4 +1,4 @@
-# std.draw's bitmap font (MYLA-942): ASCII 32 to 126 and the replacement
+# std.draw's bitmap font (MYLA-968): ASCII 32 to 126 and the replacement
 # glyph, 5 by 10 pixels each in a 6 by 10 cell. Drawn for std.draw; the
 # constant FONT in lib/std/draw.my is this file encoded (test_draw.py).
 

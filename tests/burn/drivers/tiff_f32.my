@@ -1,4 +1,4 @@
-// std.tiff's `decode_f32` (MYLA-939) through image_driver's protocol:
+// std.tiff's `decode_f32` (MYLA-965) through image_driver's protocol:
 // page 0 with float32 samples.
 
 import std.tiff as tiff

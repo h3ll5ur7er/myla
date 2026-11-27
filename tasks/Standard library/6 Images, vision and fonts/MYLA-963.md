@@ -1,15 +1,15 @@
 ---
-id: MYLA-937
+id: MYLA-963
 title: "std.jpeg: baseline encoding"
 type: feature
 status: review
 priority: low
 labels: [stdlib, images, jpeg]
 ---
-Step 4 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]], after the decoder ([[MYLA-936]]).
+Step 4 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]], after the decoder ([[MYLA-962]]).
 
 - **Owns:** the encoder in `lib/std/jpeg.my` and its section of the page
-- **Needs:** [[MYLA-936]]
+- **Needs:** [[MYLA-962]]
 - Work by the lane rules of [[Project/Standard-library-roadmap#Working in parallel]]: touch only the files this task owns, plus one row of the index table on [[Language/Standard-library]]; don't commit seeds or `selfhost/embedded_std.my`.
 
 - [x] `encode(img, quality, subsampling)`: JFIF, baseline, the Annex K tables scaled for quality 1 to 100 as IJG scales them, 4:4:4, 4:2:2 and 4:2:0 (box-filtered chroma), the islow forward DCT, the standard Huffman tables; gray images as one component
@@ -23,7 +23,7 @@ Box-filtered chroma: libjpeg's h2v1/h2v2 downsampling is a box filter (the mean 
 
 ## Evidence
 
-Branch `stdlib/MYLA-937` (rebased onto `claude/stdlib-image-vision-plan-gm6jy5` at `a72676e`, after std.imageio). The API: `#derive(Eq) pub enum Subsampling { S444, S422, S420 }` and `pub fun encode(img: Image8, quality: int = 85, subsampling: Subsampling = Subsampling.S420) -> [uint8]` in `lib/std/jpeg.my` ([[Language/Standard-library/Jpeg#Encoding]]).
+Branch `stdlib/MYLA-963` (rebased onto `claude/stdlib-image-vision-plan-gm6jy5` at `a72676e`, after std.imageio). The API: `#derive(Eq) pub enum Subsampling { S444, S422, S420 }` and `pub fun encode(img: Image8, quality: int = 85, subsampling: Subsampling = Subsampling.S420) -> [uint8]` in `lib/std/jpeg.my` ([[Language/Standard-library/Jpeg#Encoding]]).
 
 - **Exact, beyond the task's tolerance:** every file is the one Pillow 13.0 (libjpeg-turbo 3.2, `optimize=False`, not progressive) writes for the same pixels, quality and subsampling, byte for byte, including the 12-MP picture of `benchmarks/images_std.my` (q85 4:2:0: 3,278,764 bytes, SHA-256 0e0a0d98...). The first comparison, of 192 cases (8 sizes from 1x1 to 100x75, RGB in each subsampling and gray, qualities 1 to 100), was identical on the first build. So the PSNR is Pillow's and the size too (12 MP 4:2:0: q50 1,085,565 bytes 29.72 dB, q75 2,127,856 31.03 dB, q85 3,278,764 33.21 dB, q90 4,222,178 35.88 dB, q95 5,831,278 40.57 dB, the same numbers as Pillow's).
 - **`lib/std/jpeg.my`:** 88/88 cases pass interpreted (7.7 s), `--native`, `--target aarch64-linux` (qemu) and `--target wasm32-wasi` (Node); the decoder's 65 as before, 23 new. New: `#test` cases on `rgb_to_ycc`, `reciprocal`, `quantize`, `huffman_codes`, `fdct_block`; test functions `quantising_is_rounding` (every q 1..255), `encodes_as_libjpeg_does` (10 small images to Pillow's length and CRC-32: 4:4:4, 4:2:2 13x9, 4:2:0, gray, 1x1, RGBA, gray + alpha, q1, q100, 24x18 with dummy blocks), `encodes_what_it_can_and_nothing_else` (headers, every quality -5..101 decodes, clamping, `[]` for a 0 side, a 70000-wide image and data that doesn't fit).
@@ -32,5 +32,5 @@ Branch `stdlib/MYLA-937` (rebased onto `claude/stdlib-image-vision-plan-gm6jy5` 
 - **Speed** (natively, fastest of 5, idle 4-core machine, 2026-11-25), 12-MP picture at q85: 4:2:0 300 to 305 ms (Pillow 45 ms, 6.7x), 4:4:4 390 to 430 ms (Pillow 59 ms, 7x). The first version took 507 ms; quantising inside the Huffman coder's loop with a zero threshold of 4q made it 329 ms, converting and downsampling in one loop 300 ms. Callgrind: the DCT about 40 %, conversion and downsampling a third, quantisation and Huffman coding a quarter. `benchmarks/images_std.my` now times encode (4:2:0, 4:4:4) and the decode of its own output.
 - **Example:** `examples/jpeg_encode.my` (a 64x48 picture at q50/75/90 4:2:0, q90 4:2:2 and 4:4:4, and gray: size and PSNR through `imgproc.psnr`; a file name argument writes it), registered in test_examples_run and test_examples_compile; its 5 cases pass, also on aarch64.
 - **Docs:** [[Language/Standard-library/Jpeg]] (intro, the function's row, `## Encoding` with a doc block that runs, what it writes, each step as libjpeg does it, speed, tests), the row on [[Language/Standard-library]], the std.jpeg section of both copies of the skill's `reference/stdlib.md`.
-- **For the integrator:** std.imageio's private `encode_jpeg` (MYLA-940) can now be `return Some(jpeg.encode(img, quality, jpeg.Subsampling.S420))`; with that change in a scratch copy, `lib/std/imageio.my`'s 86 cases pass natively. Not done here (not this task's file). `selfhost/embedded_std.my` not regenerated (the lane rules).
+- **For the integrator:** std.imageio's private `encode_jpeg` (MYLA-966) can now be `return Some(jpeg.encode(img, quality, jpeg.Subsampling.S420))`; with that change in a scratch copy, `lib/std/imageio.my`'s 86 cases pass natively. Not done here (not this task's file). `selfhost/embedded_std.my` not regenerated (the lane rules).
 - Shared private helpers: none needed; the decoder's tables (`natural_order`, `luma_quant`, `chroma_quant`, `std_huffman`, `scaled_quant`) are used as they were, and the decoder's code is unchanged.

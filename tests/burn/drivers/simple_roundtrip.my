@@ -1,4 +1,4 @@
-// The round trips of std.pnm, std.bmp and std.qoi (MYLA-934), for
+// The round trips of std.pnm, std.bmp and std.qoi (MYLA-960), for
 // tests/burn/test_simple_images.py. Each line of stdin is an input file and
 // an output prefix, apart by a tab, until an empty line or the end. The
 // input is decoded by its extension (.qoi, .bmp, anything else std.pnm), at

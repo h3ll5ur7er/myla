@@ -1,4 +1,4 @@
-"""Burn tests: std.pnm, std.bmp and std.qoi's encoders (MYLA-934).
+"""Burn tests: std.pnm, std.bmp and std.qoi's encoders (MYLA-960).
 
 Their decoders are tests.burn.test_images's `PnmDecoder`, `Pnm16Decoder`,
 `BmpDecoder` and `QoiDecoder` (the corpus, natively and `--checked`, the

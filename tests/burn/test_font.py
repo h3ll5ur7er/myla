@@ -1,4 +1,4 @@
-"""Burn tests: `std.font` (MYLA-943) against the font corpus of MYLA-945.
+"""Burn tests: `std.font` (MYLA-969) against the font corpus of MYLA-971.
 
 The fonts are `tests/burn/data/images/fonts/MylaTestSans.ttf` (a subset of
 Liberation Sans: 176 glyphs, 49 of them composite, a format 0 `kern` table

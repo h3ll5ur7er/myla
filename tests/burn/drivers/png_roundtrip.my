@@ -1,4 +1,4 @@
-// std.png's encoders under tests/burn/test_png.py (MYLA-935): each line of
+// std.png's encoders under tests/burn/test_png.py (MYLA-961): each line of
 // stdin is `<input>\t<output>\t<mode>`; the input PNG is decoded, encoded
 // again into the output file, and that is decoded and compared with the
 // first decode. The modes: `8` (`decode`, `encode`), `16` (`decode16`,

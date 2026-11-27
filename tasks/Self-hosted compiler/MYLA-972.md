@@ -1,12 +1,12 @@
 ---
-id: MYLA-946
+id: MYLA-972
 title: "Interpreted `myla test`: a call in a `#test` argument that leaves out a defaulted parameter crashes the runner"
 type: bug
 status: todo
 priority: medium
 labels: [interpreter, testing]
 ---
-Found by [[MYLA-931]]. A `#test` argument that calls a function and leaves out a parameter with a default fails the runner itself, interpreted; `--native` passes.
+Found by [[MYLA-957]]. A `#test` argument that calls a function and leaves out a parameter with a default fails the runner itself, interpreted; `--native` passes.
 
 ```myla fragment
 struct Box {

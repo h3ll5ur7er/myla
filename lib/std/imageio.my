@@ -1,5 +1,5 @@
 // std.imageio: images read and written in any format the standard library
-// knows (MYLA-940), the module most programs import. A file's format is
+// knows (MYLA-966), the module most programs import. A file's format is
 // found by its contents (`sniff`, the magic bytes), never by its name, when
 // it is read; by its name's extension (`format_of`) when it is written.
 //
@@ -350,7 +350,7 @@ pub fun load16(path: str, max_pixels: int64 = image.MAX_PIXELS) -> Result<Image1
     return Ok(img)
 }
 
-// `img` as a JPEG file at `quality`, 4:2:0 (std.jpeg's `encode`, MYLA-937);
+// `img` as a JPEG file at `quality`, 4:2:0 (std.jpeg's `encode`, MYLA-963);
 // None for an image JPEG can't hold (a side of 0 or past 65535).
 fun encode_jpeg(img: Image8, quality: int) -> Option<[uint8]> {
     let b = jpeg.encode(img, quality, jpeg.Subsampling.S420)

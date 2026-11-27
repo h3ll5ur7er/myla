@@ -1,5 +1,5 @@
 ---
-id: MYLA-943
+id: MYLA-969
 title: "std.font: TrueType parsing, glyph rendering and simple text layout"
 type: feature
 status: review
@@ -9,22 +9,22 @@ labels: [stdlib, fonts, graphics]
 Step 5 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]].
 
 - **Owns:** `lib/std/font.my`, `docs/Language/Standard-library/Font.md`, the vendored test font and its licence
-- **Needs:** [[MYLA-942]], [[MYLA-931]], [[MYLA-945]]
+- **Needs:** [[MYLA-968]], [[MYLA-957]], [[MYLA-971]]
 - Work by the lane rules of [[Project/Standard-library-roadmap#Working in parallel]]: touch only the files this task owns, plus one row of the index table on [[Language/Standard-library]]; don't commit seeds or `selfhost/embedded_std.my`.
 
 - [x] `parse`: `head`, `hhea`, `hmtx`, `maxp`, `cmap` 4 and 12, `loca` (both formats), `glyf` (simple and composite, nesting at most 8 deep), `kern` 0, `name`, `OS/2`, collections; every offset checked
 - [x] Glyph outlines as `draw.Path`s; rasterised masks at a quarter-pixel offset; equal to the outline's exact area within a tolerance, and visually checked against Pillow's FreeType rendering of the vendored font (unhinted)
 - [x] `layout`, `measure`: cmap, advances, kerning, wrapping at spaces within `max_width`, `\n`, alignment, line height
 - [x] `GlyphCache` and `masks`; `Canvas.fill_mask` draws them
-- [x] An example: a paragraph rendered to a PNG. `examples/font_text.my` measures, lays out a wrapped paragraph and draws a word on a canvas, printed as text (one character a pixel); given a file name (`myla run examples/font_text.my para.png`), it renders the centred paragraph into that PNG through std.png (added by the integrator after [[MYLA-935]] merged; checked by eye and by Pillow opening it, 150×35 RGB).
+- [x] An example: a paragraph rendered to a PNG. `examples/font_text.my` measures, lays out a wrapped paragraph and draws a word on a canvas, printed as text (one character a pixel); given a file name (`myla run examples/font_text.my para.png`), it renders the centred paragraph into that PNG through std.png (added by the integrator after [[MYLA-961]] merged; checked by eye and by Pillow opening it, 150×35 RGB).
 - [ ] Later steps, each its own box when it starts: `GPOS` pair kerning, `CFF` outlines, WOFF 1
-- [x] Its corpus and fuzz cases in [[MYLA-945]]'s harness: truncations and seeded mutations are `Ok` or `Err`, never a runtime error, natively plain and `--checked`
+- [x] Its corpus and fuzz cases in [[MYLA-971]]'s harness: truncations and seeded mutations are `Ok` or `Err`, never a runtime error, natively plain and `--checked`
 - [x] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node)
 - [x] Its page below [[Language/Standard-library]] with a doc block that runs, the skill's `reference/stdlib.md`, and an example in `examples/`, registered
 
 ## Evidence
 
-Measured on 2026-11-25 in the lane's worktree (branch `stdlib/MYLA-943` over `088e285`), on a shared 4-core x86-64 machine.
+Measured on 2026-11-25 in the lane's worktree (branch `stdlib/MYLA-969` over `088e285`), on a shared 4-core x86-64 machine.
 
 - **API** ([[Language/Standard-library/Font]]): `parse(b, index = 0) -> Result<Font, FontError>`, `face_count(b)`; `Font { family, style, units_per_em, ascender, descender, line_gap, glyph_count, … }` with `glyph(c)`, `advance(g)`, `lsb(g)`, `kerning(a, b)`, `outline(g) -> Option<draw.Path>`, `scale(px)`; `FontError { Truncated, BadSignature, MissingTable(str), Unsupported(str), Corrupt(str), NoFace(int) }` (its own enum, not `ImageError`: a font's errors name tables and faces); `render_glyph(f, g, px, dx = 0.0) -> draw.Mask` placed from the pen on the baseline; `layout(f, text, px, opts) -> TextLayout { glyphs: [Placed], width, height, lines, px }`, `measure`, `LayoutOptions { max_width, align, line_height, tab, kerning }` with `with_*` copies; `glyph_cache(f) -> GlyphCache` with `masks(l, x, y)`, `mask(g, px, x, y)`, `count()`; on `Canvas`: `fill_masks(ms, paint)` and `fill_text(f, text, x, y, px, paint)` (`var self` methods std.font adds, so the canvas isn't copied).
 - **Module cases** (`lib/std/font.my`, 53: `#test` cases on the public functions and methods with values, test functions on a 6-glyph font the module builds for its tests: format 4 cmap through the glyph array and by delta, a format 12 face in a `.ttc`, short and long `loca`, repeated flags and short coordinates, all-off-curve contours, a scaled composite and one placed by point matching, trailing left side bearings, Mac Roman names, OS/2 typo metrics, kerning, layouts with wrapping, alignment, tabs, line height and control characters, the cache's quarter pixels, drawing): `build/myla test lib/std/font.my --stdlib lib` 53/53 (13 s); `--native` 53/53; `--target aarch64-linux` (qemu) 53/53; `--target wasm32-wasi` with `MYLA_EMULATOR="node tools/wasm/run.mjs"` 53/53. A test function also parses every prefix of that font and every one of its bytes inverted, and renders and lays out what parses.
@@ -35,5 +35,5 @@ Measured on 2026-11-25 in the lane's worktree (branch `stdlib/MYLA-943` over `08
 - **Speed** natively (`benchmarks/images_std.my`, `text_bench`): `parse` about 3 µs (glyphs read lazily); the 804-character paragraph at 16 px wrapped at 780 px laid out in 0.09 to 0.12 ms; layout, 153 masks rasterised with a new cache and 660 glyphs filled on an 800 by 400 canvas 5.5 ms, of which `draw.blank` takes 2.9 ms; with the cache kept 3.8 ms. Pillow: 25 ms.
 - **Example** `examples/font_text.my`: its cases pass, registered in `test_examples_run.EXPECTED` and `test_examples_compile.EXAMPLES`; interpreted and native output identical; `test_examples_run -k font_text`, `test_examples_compile -k font_text` and `test_examples_tests -k every_value` OK. It reads the test font from the repository's root, as the example tests run.
 - **Docs**: [[Language/Standard-library/Font]]'s doc block checks, runs and prints its output interpreted and natively (checked as `test_doc_blocks` does, for this page); the row on [[Language/Standard-library]]; the section `std.font` in both copies of the skill's `reference/stdlib.md` (identical).
-- **Outside the owned files**: the corpus notes above (`manifest.json`, `_images_vendor.py`, `_images.py`, `docs/Development/Testing.md`), the `MYLA-943` slot of `benchmarks/images_std.my` filled, the driver `tests/burn/drivers/font_driver.my` and `tests/burn/test_font.py`.
+- **Outside the owned files**: the corpus notes above (`manifest.json`, `_images_vendor.py`, `_images.py`, `docs/Development/Testing.md`), the `MYLA-969` slot of `benchmarks/images_std.my` filled, the driver `tests/burn/drivers/font_driver.my` and `tests/burn/test_font.py`.
 - **Toolchain bug found**: in a std module, a map keyed by a tuple holding a `float32` builds in programs but its `myla test --native` harness fails to link (`undefined reference to myla_float64.hash`); the cache keys the size by its bits (`px.to_bits()`) instead. No private helpers of other lanes.

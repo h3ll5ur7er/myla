@@ -1,4 +1,4 @@
-"""Makes the image and font corpus of `tests/burn/data/images/` (MYLA-945):
+"""Makes the image and font corpus of `tests/burn/data/images/` (MYLA-971):
 `python3 -m tests.burn.test_images --vendor`.
 
 It needs Pillow and numpy (the tests that read the corpus need neither).
@@ -17,7 +17,7 @@ What it makes:
   4:2:0, gray, progressive, restart markers, optimised Huffman tables,
   Adobe CMYK, EXIF orientations; ImageMagick (if installed) adds 4:4:0 and
   4:1:1, which Pillow can't write. The expected pixels are Pillow's decode
-  (islow IDCT, fancy upsampling: libjpeg's defaults, D311's decision 7).
+  (islow IDCT, fancy upsampling: libjpeg's defaults, D313's decision 7).
 - GIF: Pillow writes static, transparent, interlaced, tiny-palette and
   animated files (each disposal method, local palettes); the expected
   frames are Pillow's, composited, as RGBA.
@@ -1353,7 +1353,7 @@ def make(path, style):
         elif rec.nameID == 2:
             rec.string = style
         elif rec.nameID == 5:
-            rec.string = rec.toUnicode() + "; subset (MYLA-945)"
+            rec.string = rec.toUnicode() + "; subset (MYLA-971)"
     return f
 reg = make(src, "Regular")
 reg.save(out)
@@ -1534,7 +1534,7 @@ def make_unhinted(c: Corpus, ttf: str, python: str) -> None:
                           "notes": note + "; each glyph at its fractional pen position (unhinted advances, from "
                                           "the origin on the baseline), coverage added and clamped where glyphs "
                                           "overlap; not kerned: FreeType's get_kerning gave 0 for the kern table's "
-                                          "pairs here (MYLA-943 found the strings match unkerned pens, to 2 "
+                                          "pairs here (MYLA-969 found the strings match unkerned pens, to 2 "
                                           "levels, and not kerned ones)"})
 
 
@@ -1554,7 +1554,7 @@ def _write_ofl(copyright_text: str, out: str) -> None:
         s = l[1:] if l.startswith(" ") else l
         body.append("" if s == "." else s.replace(" ? ", " -- ").replace("?", "--"))
     text = ("Myla Test Sans is a subset of Liberation Sans 2.1.5 (Regular and Bold), renamed as the licence\n"
-            "asks of a Modified Version, with its hinting removed (MYLA-945).\n\n" + "\n".join(keep) + "\n\n"
+            "asks of a Modified Version, with its hinting removed (MYLA-971).\n\n" + "\n".join(keep) + "\n\n"
             + "\n".join(body).strip() + "\n")
     with open(out, "w", encoding="utf-8") as fh:
         fh.write(text)
@@ -1587,7 +1587,7 @@ def vendor() -> None:
     make_pnm(c)
     make_qoi(c)
     make_fonts(c)
-    m = {"about": "MYLA-945's image and font corpus: see tests/burn/_images.py for the fields and LICENSES.md for the "
+    m = {"about": "MYLA-971's image and font corpus: see tests/burn/_images.py for the fields and LICENSES.md for the "
                   "sources; made by `python3 -m tests.burn.test_images --vendor`",
          "pillow": Image.__version__, "libjpeg_turbo": features.version("libjpeg_turbo"),
          "freetype": features.version("freetype2"), "zlib": features.version("zlib"),

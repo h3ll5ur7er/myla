@@ -1,6 +1,6 @@
 # std.bmp
 
-Windows bitmaps ([[MYLA-934]], the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): the format of Windows' clipboard and of the images inside icons. It reads what is in use, from 1-bit palettes to 32 bits with an alpha mask, uncompressed or run-length encoded, and writes 24 bits, or 32 when the image has alpha. Images are [[Language/Standard-library/Image]]'s.
+Windows bitmaps ([[MYLA-960]], the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): the format of Windows' clipboard and of the images inside icons. It reads what is in use, from 1-bit palettes to 32 bits with an alpha mask, uncompressed or run-length encoded, and writes 24 bits, or 32 when the image has alpha. Images are [[Language/Standard-library/Image]]'s.
 
 ```myla
 import std.image as image

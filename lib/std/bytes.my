@@ -4,7 +4,7 @@
 // bytes are, any bytes; `is_utf8`, `utf8_error`, `encode_char` and
 // `decode_char` are where UTF-8 is checked and built.
 //
-// The readers and writers of binary data at the end (MYLA-931) read and
+// The readers and writers of binary data at the end (MYLA-957) read and
 // write integers of both byte orders, floats, and bit streams of both bit
 // orders, for the codecs.
 
@@ -209,7 +209,7 @@ fun every_byte_round_trips() {
     assert(s[0] == 0u8 && s.len() == 256 && all[0] == 0u8, "copies, not shared")
 }
 
-// --- Reading and writing binary data (MYLA-931) ----------------------------
+// --- Reading and writing binary data (MYLA-957) ----------------------------
 //
 // What every codec needs: integers of both byte orders read from bytes and
 // written to them (`ByteReader`, `ByteWriter`), and bit streams of both bit

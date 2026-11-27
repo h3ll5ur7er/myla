@@ -1,4 +1,4 @@
-"""Burn tests: std.jpeg's encoder (MYLA-937). Its decoder is tested over the
+"""Burn tests: std.jpeg's encoder (MYLA-963). Its decoder is tested over the
 image corpus by test_images.py (`JpegDecoder`).
 
 A driver (`tests/burn/drivers/jpeg_encode.my`) encodes an image (a PAM file,
@@ -6,7 +6,7 @@ or benchmarks/images_std.my's picture), writes the file and reads it back
 with std.jpeg's decoder; it answers with the file's SHA-256, the decoded
 samples' and their PSNR against the image. The images:
 
-- every 8-bit still image of the corpus (MYLA-945) with its pixels, at
+- every 8-bit still image of the corpus (MYLA-971) with its pixels, at
   quality 75 and each subsampling (gray ones once);
 - its photo-like JPEG images at qualities 50, 75, 90 and 95, each
   subsampling;
@@ -192,7 +192,7 @@ def vendor(out: str = VENDORED) -> None:
             v = pillow_psnr(img, data)
             entry.append(None if v == float("inf") else round(v, 3))     # null: the same pixels
         result[c.name] = entry
-    about = ("MYLA-937: for each case of tests/burn/test_jpeg_encode.py, the size of the JPEG file Pillow writes "
+    about = ("MYLA-963: for each case of tests/burn/test_jpeg_encode.py, the size of the JPEG file Pillow writes "
              f"(optimize off, not progressive), the first {SHA_DIGITS} hex digits of its SHA-256, and its PSNR for "
              "the photo-like ones. Made by `python3 -m tests.burn.test_jpeg_encode --vendor` with Pillow "
              f"{Image.__version__} (libjpeg-turbo {features.version('libjpeg_turbo')}).")

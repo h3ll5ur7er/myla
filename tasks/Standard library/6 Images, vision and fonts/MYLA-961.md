@@ -1,5 +1,5 @@
 ---
-id: MYLA-935
+id: MYLA-961
 title: "std.png: decode and encode"
 type: feature
 status: review
@@ -9,7 +9,7 @@ labels: [stdlib, images, png]
 Step 3 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]].
 
 - **Owns:** `lib/std/png.my`, `docs/Language/Standard-library/Png.md`
-- **Needs:** [[MYLA-933]], [[MYLA-931]], [[MYLA-945]] (the corpus); std.compress and std.checksum as they are
+- **Needs:** [[MYLA-959]], [[MYLA-957]], [[MYLA-971]] (the corpus); std.compress and std.checksum as they are
 - Work by the lane rules of [[Project/Standard-library-roadmap#Working in parallel]]: touch only the files this task owns, plus one row of the index table on [[Language/Standard-library]]; don't commit seeds or `selfhost/embedded_std.my`.
 
 - [x] `info`, `decode`, `decode16`, `decode_with_meta`: every colour type and bit depth, `tRNS`, Adam7, the five filters, CRC-32 on every chunk, inflate bounded by the size the header claims, `PngMeta` (`gAMA`, `sRGB`, `iCCP`, `pHYs`, the text chunks)
@@ -17,13 +17,13 @@ Step 3 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]].
 - [x] `encode`, `encode16`, `encode_indexed`: adaptive filtering by the minimum sum of absolute differences, levels through `zlib_compress`, the smallest lossless colour type
 - [x] Round trips through our decoder and Pillow's; the size at level 6 compared with Pillow's `optimize=False` output on the corpus
 - [x] Measured natively: decode and encode of a 12-megapixel photo saved as PNG, beside Pillow's numbers
-- [x] Its corpus and fuzz cases in [[MYLA-945]]'s harness: truncations and seeded mutations are `Ok` or `Err`, never a runtime error, natively plain and `--checked`
+- [x] Its corpus and fuzz cases in [[MYLA-971]]'s harness: truncations and seeded mutations are `Ok` or `Err`, never a runtime error, natively plain and `--checked`
 - [x] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node). *aarch64 not run: there is no `qemu-aarch64` on this machine; the driver builds for `aarch64-linux`.* (aarch64 run by the integrator after the merge, 2026-11-25, under qemu: png 91/91)
 - [x] Its page below [[Language/Standard-library]] with a doc block that runs, the skill's `reference/stdlib.md`, and an example in `examples/`, registered
 
 ## Evidence
 
-Branch `stdlib/MYLA-935` over `088e285`, measured on 2026-11-25 on the shared 4-core machine (other lanes running).
+Branch `stdlib/MYLA-961` over `088e285`, measured on 2026-11-25 on the shared 4-core machine (other lanes running).
 
 - **Module cases:** `build/myla test lib/std/png.my` 91/91 interpreted (about 4 s), `--native` 91/91, `--target wasm32-wasi` under Node 91/91. aarch64: built only (no qemu). Hand-made vectors (Python's zlib, no Pillow) for a 4-bit palette with `tRNS`, 16-bit RGB with a colour key, 1-bit gray, a 2-bit Adam7 image, every metadata chunk, a huge IHDR, no IDAT, a filter byte 5; round trips of every filter, layout, 16 bits and palette depths 1, 2, 4, 8; the encoders' bytes pinned after Python's zlib and CRC read them back. The cases first failed where the test was wrong (a rounding expectation) or the vectors were placeholders; review then found two bugs the tests now pin: a file with IHDR and IEND but no IDAT was `Truncated` (now `Corrupt("no IDAT")`), and a filter byte 5 after an Average first row was accepted as the internal "average with nothing above" (now `Corrupt("filter type 5 at row 1")`).
 - **Corpus** (`python3 -m unittest tests.burn.test_images.PngDecoder tests.burn.test_images.Png16Decoder`, 10 tests, OK): `decode` over all 195 PNG entries (171 ok, every PngSuite file and the generated ones, exact against the PAMs, 16-bit files compared rounded to 8; all 22 `err` refused, `xcsn0g01` included: its IDAT CRC is checked, the manifest already said `err`; the 2 `any` decode), natively and `--checked`; `decode16` over the 59 entries of 16 bits or broken; the smallest files interpreted; the fuzz runs (truncations up to 512 bytes and 10,000 seeded mutations, plain and `--checked`), and once more with `MYLA_FUZZ_CASES=50000 MYLA_FUZZ_SEED=935`: never a runtime error or `bad`. No manifest entry needed changing.

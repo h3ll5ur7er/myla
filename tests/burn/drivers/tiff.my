@@ -1,4 +1,4 @@
-// std.tiff's `decode` (MYLA-939) through image_driver's protocol: page 0 at
+// std.tiff's `decode` (MYLA-965) through image_driver's protocol: page 0 at
 // 8 bits. `pages` and `tags` run on every input too, so the fuzz runs reach
 // them; their results don't matter here.
 

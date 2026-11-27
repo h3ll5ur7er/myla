@@ -1,4 +1,4 @@
-"""Burn tests: `std.imageio` (MYLA-940) over the image corpus (MYLA-945).
+"""Burn tests: `std.imageio` (MYLA-966) over the image corpus (MYLA-971).
 
 Two drivers. `tests/burn/drivers/imageio.my` is `imageio.decode` under the
 corpus's harness (`_images.py`): every file of every format, found by its
@@ -23,7 +23,7 @@ says which):
 - every readable 8-bit file saved in each format through a temporary
   directory and loaded back is the same image for the lossless ones (PNG,
   TIFF, BMP, PNM, QOI; BMP and QOI make gray RGB), the same size for GIF,
-  and the same size for JPEG (std.jpeg's encoder, MYLA-937); every 16-bit file
+  and the same size for JPEG (std.jpeg's encoder, MYLA-963); every 16-bit file
   through `save16` and `load16` as PNG, TIFF and PNM is the same image;
 - with Pillow installed, Pillow reads what `save` wrote as the same pixels;
 - a missing file is `ImageError.Io`, a file of no known format

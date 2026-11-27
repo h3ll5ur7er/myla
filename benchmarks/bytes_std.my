@@ -1,5 +1,5 @@
 // std.bytes's readers and writers against the same loops written by hand
-// (MYLA-931): each pair computes the same value, through the library's
+// (MYLA-957): each pair computes the same value, through the library's
 // `ByteReader`, `MsbBitReader`, `LsbBitReader` and bit writers, and with the
 // buffer kept in local variables, so the difference is what the library's
 // shape costs (a method call, an `Option`, the state in a struct).

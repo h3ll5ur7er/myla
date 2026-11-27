@@ -1,5 +1,5 @@
 ---
-id: MYLA-933
+id: MYLA-959
 title: "std.image: Image, Color, Rect, ImageError, quantize and the terminal preview"
 type: feature
 status: review
@@ -9,7 +9,7 @@ labels: [stdlib, images]
 Step 2 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]: the type every other module of the plan builds on.
 
 - **Owns:** `lib/std/image.my`, `docs/Language/Standard-library/Image.md`
-- **Needs:** [[MYLA-930]] (its decisions on the type, the storage and the errors)
+- **Needs:** [[MYLA-956]] (its decisions on the type, the storage and the errors)
 - Work by the lane rules of [[Project/Standard-library-roadmap#Working in parallel]]: touch only the files this task owns, plus one row of the index table on [[Language/Standard-library]]; don't commit seeds or `selfhost/embedded_std.my`.
 
 - [x] `Sample` with impls on `uint8`, `uint16`, `float32`; `Layout`; `Image<S>` and the aliases; `Color`, `Rect`, `ImageInfo`, `ImageError` (D168, `message()`, `Format`), `MAX_PIXELS`
@@ -26,7 +26,7 @@ Step 2 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]: the type
 
 ## Evidence
 
-Branch `stdlib/MYLA-933` over `0ad529e`, measured on 2026-11-24.
+Branch `stdlib/MYLA-959` over `0ad529e`, measured on 2026-11-24.
 
 - **Tests:** `build/myla test lib/std/image.my` 121/121 passed interpreted, `--native` 121/121, `--target wasm32-wasi` under Node 121/121 (aarch64 not run: no `qemu-aarch64` here). Before the implementation the new test functions failed to check (`unknown function 'ansi'`, eight errors). `examples/images.my`: 8/8 cases; `tests.burn.test_examples_run`, `test_examples_tests` (45 tests) and `test_examples_compile` (40) OK, interpreted and native output the same; `tests.burn.test_doc_blocks` OK (5 tests, 40 s, the new page's block included).
 - **Pillow 13 as the oracle** (run once, not in CI): `(R * 19595 + G * 38470 + B * 7471 + 0x8000) >> 16` equals `convert("L")` on all 16,777,216 RGB triples (0 mismatches); `uint8.mul_alpha` equals `convert("RGBa")` and `div_alpha` (truncated, unchanged at alpha 0) `"RGBa"` to `"RGBA"` on all 65,536 (value, alpha) pairs. The cases marked "Pillow" in the module are its values. Rounding through float32 would get uint16 premultiplication wrong (39196 × 5505 / 65535 = 3292.4997 rounds to 3293), hence the integer `mul_alpha`/`div_alpha` and a case for it.

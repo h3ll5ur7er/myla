@@ -1,5 +1,5 @@
 ---
-id: MYLA-944
+id: MYLA-970
 title: "std.imgproc, tier B: contours, Hough, features, homographies, optical flow"
 type: feature
 status: review
@@ -9,7 +9,7 @@ labels: [stdlib, images, vision]
 Step 6 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]: computer vision beyond filters. Optional; each part may become a task of its own when it starts.
 
 - **Owns:** the tier-B parts of `lib/std/imgproc.my` and its page
-- **Needs:** [[MYLA-941]]
+- **Needs:** [[MYLA-967]]
 - Work by the lane rules of [[Project/Standard-library-roadmap#Working in parallel]]: touch only the files this task owns, plus one row of the index table on [[Language/Standard-library]]; don't commit seeds or `selfhost/embedded_std.my`.
 
 - [x] Contours and shapes: `find_contours` (Suzuki–Abe, with the hierarchy), `contour_area`, `arc_length`, `bounding_rect`, `min_area_rect`, `convex_hull`, `approx_poly`, `moments` and Hu's invariants, `point_in_polygon`
@@ -24,7 +24,7 @@ Step 6 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]: computer
 
 ## Evidence
 
-On branch `stdlib/MYLA-944` (from `claude/stdlib-image-vision-plan-gm6jy5` at fbfa00a), 2026-11-25, x86-64, with five other lanes on the machine's four cores.
+On branch `stdlib/MYLA-970` (from `claude/stdlib-image-vision-plan-gm6jy5` at fbfa00a), 2026-11-25, x86-64, with five other lanes on the machine's four cores.
 
 - **API** (appended to `lib/std/imgproc.my` after tier A's `empty_images`; documented on [[Language/Standard-library/Imgproc]]): `RetrievalMode`, `Contour`, `find_contours`, `contour_area`, `arc_length`, `bounding_rect`, `convex_hull`, `approx_poly`, `RotatedRect` (`corners`), `min_area_rect`, `Moments`, `moments`, `image_moments`, `hu_moments`, `point_in_polygon`, `polygon_distance`; `Line`, `Segment`, `Circle`, `hough_lines`, `hough_segments`, `hough_circles`; `Keypoint`, `Feature`, `FeatureMatch`, `fast`, `orb`, `hamming`, `match_features`; `find_homography`, `find_affine`; `optical_flow`; `bilateral`, `watershed`, `clahe`. `erode`/`dilate` of a full rectangle whose sides add up to 8 or more now go by van Herk–Gil-Werman (`rect_morph`); tier A's run-based code is `morph_runs`, `morph_core` chooses. The plan's `Match` result is `FeatureMatch` (tier A's `Match` is template matching's enum), and `optical_flow` returns a `Result` (`Mismatch` for two sizes), as the module's conventions have it.
 - **Module cases** (`build/myla test lib/std/imgproc.my`): 168/168 interpreted, `--native` 168/168, `--target aarch64-linux` (qemu-aarch64) 168/168, `--target wasm32-wasi` (`MYLA_EMULATOR="node tools/wasm/run.mjs"`) 168/168; tier B adds 54 (cases on every public non-generic function with values to compare, and the test functions `contours_and_shapes`, `hough`, `features`, `estimation`, `motion`, `more_filters`, the last checking `rect_morph` against `morph_runs` for 24 sizes, anchors and both extremes). Soft TDD: the cases came with each function; first runs failed on my own expected values (a hole's area 20 for 34, a bilateral 15 for 18, a CLAHE 64 for 128, all hand-computed wrongly) and on FAST's suppression of equal neighbours (the test's square changed).
@@ -34,5 +34,5 @@ On branch `stdlib/MYLA-944` (from `claude/stdlib-image-vision-plan-gm6jy5` at fb
 - **Example** `examples/page_scan.my`: a page drawn with std.draw (bitmap text, a rule), photographed through `perspective_from` + `warp_perspective` onto a desk; `otsu`, `find_contours(External)`, `approx_poly(0.02·arc_length)` give four corners within 1 px of the true ones; `perspective_from` + `warp_perspective` flatten it back (printed as text, PSNR 18.7 dB against the page). Interpreted 1.9 s; native and interpreted outputs are identical; registered in both example tests.
 - **Measured** natively at 1024×1024 gray (best of five; OpenCV 5.1 single-threaded beside it): `find_contours` 8.0 ms (12), `hough_lines` of Canny's edges 48 ms (8.6), `fast` 11 ms (0.33), `orb` 500 features 124 ms (9.0), `find_homography` 1000 pairs 50 % outliers 3.8 ms (1.7), `optical_flow` 200 points 42 ms (4.8), `bilateral` d 9 134 ms (25), `erode` 15×15 33 ms (0.44), `clahe` 44 ms (4.4), `watershed` 64 seeds 97 ms (58). Optimisations made by measuring: branch-free rounding in the Hough votes (112 → 48 ms) and absolute value in the bilateral (398 → 131 ms: mispredicted branches on noise), ORB's blur only around keypoints and in integers, the features read `[uint8]` instead of filling int lists (`list.filled` of int32 is slow, 16 % of ORB under callgrind; ORB 334 → 124 ms), LK's derivatives only in each window and an integer `pyr_down` for gray (291 → 42 ms), van Herk–Gil-Werman done row-wise (68 → 33 ms). vHGW vs the runs at 1 MP: 33–36 ms at any size against 30 (3×3), 41 (5×5), 53 (9×9), 84 (15×15), hence the rule (sides adding to 8 or more).
 - Private helpers to be replaced: none from other lanes. `pyr_down_gray` duplicates `pyr_down` for a gray `Image8` in integers (asserted equal in `motion`); tier A's generic `pyr_down` takes 60 ms at 1 MP where this takes about 4, so `pyr_down` could use it for `Image8` later.
-- Outside the owned files: the `std.imgproc` row of [[Language/Standard-library]], the `std.imgproc` section of both copies of the skill's `reference/stdlib.md` (identical), `examples/page_scan.my` and its registrations; and in `tests/burn/test_examples_run.py` a missing `),` after `draw_chart.my`'s expected output (lost in the MYLA-941 merge: the file didn't parse at fbfa00a), restored.
+- Outside the owned files: the `std.imgproc` row of [[Language/Standard-library]], the `std.imgproc` section of both copies of the skill's `reference/stdlib.md` (identical), `examples/page_scan.my` and its registrations; and in `tests/burn/test_examples_run.py` a missing `),` after `draw_chart.my`'s expected output (lost in the MYLA-967 merge: the file didn't parse at fbfa00a), restored.
 - Left as they are: ORB's pattern is a seeded Gaussian one, not OpenCV's learnt table (documented); `hough_circles`' radius estimate and refinement are this module's own (Kåsa's fit), not OpenCV's; `approx_poly`'s start differs from OpenCV's (corners agree, the burn test checks them geometrically).

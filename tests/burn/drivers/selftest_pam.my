@@ -1,4 +1,4 @@
-// The harness's own driver (MYLA-945): a reader of 8-bit PAM files (P7),
+// The harness's own driver (MYLA-971): a reader of 8-bit PAM files (P7),
 // one image or several one after the other, through image_driver's
 // protocol. tests/burn/test_images.py runs it over the corpus's expected
 // PAM files and fuzzes it, so the harness is tested before any codec exists.

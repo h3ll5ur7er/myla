@@ -1,4 +1,4 @@
-// std.jpeg's driver (MYLA-936): `decode` over the corpus and the fuzz cases,
+// std.jpeg's driver (MYLA-962): `decode` over the corpus and the fuzz cases,
 // through image_driver's protocol.
 
 import std.jpeg as jpeg

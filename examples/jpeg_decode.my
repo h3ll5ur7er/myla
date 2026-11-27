@@ -1,4 +1,4 @@
-// Decoding JPEG files with std.jpeg (MYLA-936): a small picture the program
+// Decoding JPEG files with std.jpeg (MYLA-962): a small picture the program
 // carries as hex, its size and metadata, its pixels as text, and the picture
 // turned upright as its EXIF orientation asks. Give the program JPEG files
 // as arguments to see theirs, with a preview in a truecolor terminal.

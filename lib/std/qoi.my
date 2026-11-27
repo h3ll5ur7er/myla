@@ -1,4 +1,4 @@
-// std.qoi: the Quite OK Image format (MYLA-934), the whole specification
+// std.qoi: the Quite OK Image format (MYLA-960), the whole specification
 // (qoiformat.org, version 1.0): a 14-byte header, then each pixel as a run
 // of the one before, an entry of a table of 64 recent colours, a small
 // difference, a luma difference, or the colour itself; 8 bytes end the file.

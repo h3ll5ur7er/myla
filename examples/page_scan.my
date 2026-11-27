@@ -1,4 +1,4 @@
-// A photo of a page, flattened (MYLA-944): a page is drawn with std.draw,
+// A photo of a page, flattened (MYLA-970): a page is drawn with std.draw,
 // then photographed at an angle (a homography puts its corners on a
 // quadrilateral of a dark desk). std.imgproc finds the page's outline
 // (Otsu's threshold, the outer contours), its four corners (Ramer, Douglas

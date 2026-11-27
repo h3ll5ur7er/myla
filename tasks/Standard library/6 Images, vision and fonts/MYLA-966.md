@@ -1,5 +1,5 @@
 ---
-id: MYLA-940
+id: MYLA-966
 title: "std.imageio: load and save any supported format"
 type: feature
 status: review
@@ -9,11 +9,11 @@ labels: [stdlib, images]
 Step 4 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]: the module most programs import.
 
 - **Owns:** `lib/std/imageio.my`, `docs/Language/Standard-library/Imageio.md`
-- **Needs:** [[MYLA-934]], [[MYLA-935]], [[MYLA-936]]; [[MYLA-938]] and [[MYLA-939]] as they land
+- **Needs:** [[MYLA-960]], [[MYLA-961]], [[MYLA-962]]; [[MYLA-964]] and [[MYLA-965]] as they land
 - Work by the lane rules of [[Project/Standard-library-roadmap#Working in parallel]]: touch only the files this task owns, plus one row of the index table on [[Language/Standard-library]]; don't commit seeds or `selfhost/embedded_std.my`.
 
 - [x] `Format`, `sniff` (magic bytes), `format_of` (extension, case-insensitive)
-- [x] `info`, `decode`, `encode`, `load` (EXIF orientation applied), `save` (format from the extension, `quality` for JPEG); file errors as `ImageError.Io`. JPEG encoding goes through a private helper until [[MYLA-937]]'s `jpeg.encode` lands (see Evidence): until then `save` of a `.jpg` is `Unsupported("jpeg encoding")` and `encode(img, Format.Jpeg)` a failure
+- [x] `info`, `decode`, `encode`, `load` (EXIF orientation applied), `save` (format from the extension, `quality` for JPEG); file errors as `ImageError.Io`. JPEG encoding goes through a private helper until [[MYLA-963]]'s `jpeg.encode` lands (see Evidence): until then `save` of a `.jpg` is `Unsupported("jpeg encoding")` and `encode(img, Format.Jpeg)` a failure
 - [x] A file whose extension and contents disagree is read by its contents
 - [x] Measured: the check time of a program that imports std.imageio, against one that imports std.png alone
 - [x] `#test` cases on every public function that has values to compare (images up to about 16×16), test functions for the generic ones (D162), passing interpreted and `--native`, and on aarch64 (qemu) and wasm32 (Node)

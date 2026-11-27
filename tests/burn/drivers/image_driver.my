@@ -1,4 +1,4 @@
-// The image test drivers' common part (MYLA-945): a codec's driver is a
+// The image test drivers' common part (MYLA-971): a codec's driver is a
 // `main` that hands its decoder to one of the `serve` functions below, and
 // tests/burn/_images.py runs it over the corpus and the fuzz cases.
 //

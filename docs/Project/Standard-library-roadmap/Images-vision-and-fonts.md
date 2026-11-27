@@ -1,30 +1,30 @@
 # Images, vision and fonts
 
-The plan for image files (PNG, JPEG, GIF, TIFF and a few simple formats), image processing and computer vision (a "poor man's OpenCV"), 2D vector drawing, and TrueType font rendering, all in Myla. The GUI ([[MYLA-63]]) will need all of it. Before then, it lets programs make charts and thumbnails, check screenshots in tests, look at images in a terminal, and run vision algorithms over files. The umbrella task is [[MYLA-930]], which holds the decisions this page asks for. The work is planned as tasks [[MYLA-931]] to [[MYLA-945]] in `tasks/Standard library/6 Images, vision and fonts/`.
+The plan for image files (PNG, JPEG, GIF, TIFF and a few simple formats), image processing and computer vision (a "poor man's OpenCV"), 2D vector drawing, and TrueType font rendering, all in Myla. The GUI ([[MYLA-63]]) will need all of it. Before then, it lets programs make charts and thumbnails, check screenshots in tests, look at images in a terminal, and run vision algorithms over files. The umbrella task is [[MYLA-956]], which holds the decisions this page asks for. The work is planned as tasks [[MYLA-957]] to [[MYLA-971]] in `tasks/Standard library/6 Images, vision and fonts/`.
 
 [TOC]
 
 ## Status (2026-11-25)
 
-Built, merged and in review: every module below, by parallel lanes in three waves ([[MYLA-930]]). Each module has its page under [[Language/Standard-library]]; the numbers there were measured natively against Pillow and OpenCV.
+Built, merged and in review: every module below, by parallel lanes in three waves ([[MYLA-956]]). Each module has its page under [[Language/Standard-library]]; the numbers there were measured natively against Pillow and OpenCV.
 
 | Module | Task | In short |
 | --- | --- | --- |
-| std.image | [[MYLA-933]] | `Image<S>`, layouts, conversions (Pillow's luma exactly), geometry, `quantize`, `ansi` |
-| std.bytes, std.compress | [[MYLA-931]], [[MYLA-932]] | byte and bit readers and writers; LZW (GIF, TIFF), PackBits |
-| std.pnm, std.bmp, std.qoi | [[MYLA-934]] | read and write; QOI byte for byte as the reference encoder |
-| std.png | [[MYLA-935]] | every PNG of PngSuite as Pillow reads it, the broken ones refused; encoder within 1 % of Pillow's size |
-| std.jpeg | [[MYLA-936]], [[MYLA-937]] | baseline and progressive decoding bit-identical to Pillow (D311); encoding byte for byte as libjpeg writes |
-| std.gif, std.tiff | [[MYLA-938]], [[MYLA-939]] | animations composited as Pillow does; baseline TIFF with pages and float samples |
-| std.imageio | [[MYLA-940]] | `load`, `save`, `sniff` over all of them |
-| std.imgproc | [[MYLA-941]], [[MYLA-944]] | tiers A and B, most of them exact against Pillow or OpenCV |
-| std.draw, std.font | [[MYLA-942]], [[MYLA-943]] | coverage rasteriser and canvas; TrueType within 5 levels of FreeType |
+| std.image | [[MYLA-959]] | `Image<S>`, layouts, conversions (Pillow's luma exactly), geometry, `quantize`, `ansi` |
+| std.bytes, std.compress | [[MYLA-957]], [[MYLA-958]] | byte and bit readers and writers; LZW (GIF, TIFF), PackBits |
+| std.pnm, std.bmp, std.qoi | [[MYLA-960]] | read and write; QOI byte for byte as the reference encoder |
+| std.png | [[MYLA-961]] | every PNG of PngSuite as Pillow reads it, the broken ones refused; encoder within 1 % of Pillow's size |
+| std.jpeg | [[MYLA-962]], [[MYLA-963]] | baseline and progressive decoding bit-identical to Pillow (D313); encoding byte for byte as libjpeg writes |
+| std.gif, std.tiff | [[MYLA-964]], [[MYLA-965]] | animations composited as Pillow does; baseline TIFF with pages and float samples |
+| std.imageio | [[MYLA-966]] | `load`, `save`, `sniff` over all of them |
+| std.imgproc | [[MYLA-967]], [[MYLA-970]] | tiers A and B, most of them exact against Pillow or OpenCV |
+| std.draw, std.font | [[MYLA-968]], [[MYLA-969]] | coverage rasteriser and canvas; TrueType within 5 levels of FreeType |
 
 Speed: the codecs and filters take 2 to 7 times Pillow's or OpenCV's time (a few, such as median filtering and contours, are faster). The causes found are the compiler's ([[MYLA-947]], [[MYLA-949]], [[MYLA-950]], [[MYLA-951]]), not the modules'.
 
 ## Decisions
 
-The owner accepted every recommendation below on 2026-11-24 (D311, [[MYLA-930]]).
+The owner accepted every recommendation below on 2026-11-24 (D313, [[MYLA-956]]).
 
 1. **std or official packages?** [[Project/Standard-library-roadmap#Left out]] puts "graphics, audio, GUI and databases" in packages, and [[MYLA-245]] hasn't decided yet what std is. MYLA-587 names `std.jpeg` and `std.imgproc` as things std.vector builds toward. **Recommendation: std.** Codecs, image processing and font parsing are portable computation with no system interface, the same kind of code as std.compress and std.json. A module costs only the programs that import it. The display, the windowing and the GUI stay out of std. The cost is size: `selfhost/embedded_std.my` is 4.0 MB today (85,600 lines of `lib/std/`), and these modules would add an estimated 15,000 to 20,000 lines, so the toolchain binaries carry roughly 20 % more library text. If MYLA-245 later moves modules into packages, these are the first candidates, and nothing in their API depends on where they live.
 2. **One generic image type or twins?** **Recommendation: generic `Image<S: Sample>`**, with `S` one of `uint8`, `uint16` and `float32`, plus the aliases `Image8`, `Image16` and `ImageF`. D201 generated twins for the vectors because `Vec3<float>` would have to be spelled everywhere. Images are fewer types, generic code (crop, flip, resize, convolution) is the bulk of the library, and the aliases keep the spelling short. A prototype type-checks and runs this shape interpreted and natively ([[#What was measured]]).
@@ -88,7 +88,7 @@ graph TD
 
 Each format is its own module, so a program pays only for the formats it imports (check time grew from 34 to 47 ms when std.vector started importing std.json, [[MYLA-587]]). std.imageio is the one that imports all of them.
 
-### std.image: the core ([[MYLA-933]])
+### std.image: the core ([[MYLA-959]])
 
 ```myla fragment
 pub trait Sample {                       // uint8, uint16, float32
@@ -141,7 +141,7 @@ pub enum ImageError {
 
 `ImageInfo { width, height, layout, bit_depth: int, frames: int, format: str }` is what every codec's `info` returns without decoding.
 
-### Simple formats: std.pnm, std.bmp, std.qoi ([[MYLA-934]])
+### Simple formats: std.pnm, std.bmp, std.qoi ([[MYLA-960]])
 
 - **std.pnm**: PBM, PGM, PPM (ASCII and binary) and PAM, 8 and 16 bits; read and write. This is the format the tests write expected pixels in: trivial, exact and readable by Pillow.
 - **std.bmp**: read 1, 4, 8, 16, 24 and 32 bits, bottom-up and top-down, BI_RGB, RLE4, RLE8 and BI_BITFIELDS; write 24 and 32 bits. Windows' clipboard and icons use BMP.
@@ -149,7 +149,7 @@ pub enum ImageError {
 
 Each module has the same shape as the bigger codecs: `info(b)`, `decode(b, max_pixels = image.MAX_PIXELS) -> Result<Image8, ImageError>`, `encode(img) -> [uint8]`.
 
-### std.png ([[MYLA-935]])
+### std.png ([[MYLA-961]])
 
 ```myla fragment
 pub fun info(b: [uint8]) -> Result<ImageInfo, ImageError>
@@ -166,7 +166,7 @@ pub fun encode_indexed(ix: image.Indexed, level: int = 6) -> [uint8]
 - **Later:** APNG (`acTL`/`fcTL`/`fdAT`) through the frame API of std.gif.
 - **Measured against:** PngSuite (all of its valid files decode exactly as Pillow decodes them; all of its broken `x*` files are `Err`), and round trips through Pillow.
 
-### std.jpeg ([[MYLA-936]], [[MYLA-937]])
+### std.jpeg ([[MYLA-962]], [[MYLA-963]])
 
 ```myla fragment
 pub fun info(b: [uint8]) -> Result<ImageInfo, ImageError>
@@ -181,10 +181,10 @@ pub fun apply_orientation<S: Sample>(img: Image<S>, o: int) -> Image<S>
 - **Decode, step 2 (progressive):** spectral selection and successive approximation. Many photographs on the web are progressive, so a useful decoder can't do without it.
 - **Decode, step 3:** Adobe CMYK and YCCK (`APP14`), converted to RGB. `JpegMeta` keeps JFIF density, the raw EXIF block with its orientation read, and the ICC profile's bytes.
 - **Out:** arithmetic coding, lossless JPEG, 12-bit and hierarchical modes are `Unsupported`.
-- **Encode ([[MYLA-937]]):** baseline, quality 1 to 100 with the IJG scaling of the Annex K tables, 4:4:4, 4:2:2 or 4:2:0, the islow forward DCT, and standard Huffman tables. Optimised tables come later.
+- **Encode ([[MYLA-963]]):** baseline, quality 1 to 100 with the IJG scaling of the Annex K tables, 4:4:4, 4:2:2 or 4:2:0, the islow forward DCT, and standard Huffman tables. Optimised tables come later.
 - **Measured against:** Pillow's decode of the same files, exactly (decision 7), and the encoder by Pillow decoding its output, at a PSNR within 0.5 dB of Pillow's own encoder at equal quality.
 
-### std.gif ([[MYLA-938]])
+### std.gif ([[MYLA-964]])
 
 ```myla fragment
 pub struct Frame { image: Image8, x: int, y: int, delay_ms: int, disposal: Disposal }   // the frame's own rectangle
@@ -196,9 +196,9 @@ pub fun encode(img: Image8, dither: bool = true) -> [uint8]
 pub fun encode_all(a: Animation, dither: bool = true) -> [uint8]
 ```
 
-GIF87a and GIF89a: global and local palettes, transparency, interlacing, the graphic control extension (delay and disposal), and the NETSCAPE2.0 loop count. LZW comes from std.compress ([[MYLA-932]]). The encoder quantises with `image.quantize`. `max_pixels` counts all frames together, because an animation of a million 1×1 frames is a bomb too.
+GIF87a and GIF89a: global and local palettes, transparency, interlacing, the graphic control extension (delay and disposal), and the NETSCAPE2.0 loop count. LZW comes from std.compress ([[MYLA-958]]). The encoder quantises with `image.quantize`. `max_pixels` counts all frames together, because an animation of a million 1×1 frames is a bomb too.
 
-### std.tiff ([[MYLA-939]])
+### std.tiff ([[MYLA-965]])
 
 ```myla fragment
 pub fun decode(b: [uint8], page: int = 0, max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError>
@@ -214,7 +214,7 @@ pub fun encode16(img: Image16, compression: Compression = Compression.Lzw) -> [u
 - **Out at first:** JPEG in TIFF (old style and new), CCITT G3 and G4, BigTIFF, YCbCr and CMYK. Each is `Unsupported(name)`, so a program can say what it can't read.
 - **Encode:** strips of about 8 KB, with no compression, LZW or Deflate, and the predictor for LZW and Deflate.
 
-### std.imageio ([[MYLA-940]])
+### std.imageio ([[MYLA-966]])
 
 ```myla fragment
 pub enum Format { Png, Jpeg, Gif, Tiff, Bmp, Pnm, Qoi }
@@ -229,7 +229,7 @@ pub fun encode(img: Image8, f: Format, quality: int = 90) -> [uint8]
 
 `load` applies a JPEG's EXIF orientation, as viewers do. `decode` returns the pixels as stored. A file error is `ImageError.Io(IoError)`. That variant lives in std.image (an enum can't gain variants in another module), which costs std.image an import of std.ioerror and keeps one error type (decision 4).
 
-### std.imgproc ([[MYLA-941]], [[MYLA-944]])
+### std.imgproc ([[MYLA-967]], [[MYLA-970]])
 
 Free functions, image first, so they chain with `|>`. Most of them work on any channel count: per channel, or a whole pixel where the algorithm needs it. Integer images go in, integer images come out, unless the result is signed or fractional (gradients, distances, responses), which come back as `ImageF`.
 
@@ -249,7 +249,7 @@ fun main() {
 }
 ```
 
-**Tier A ([[MYLA-941]]):** what most programs reach for.
+**Tier A ([[MYLA-967]]):** what most programs reach for.
 
 | Area | Functions |
 | --- | --- |
@@ -263,7 +263,7 @@ fun main() {
 
 `Border { Constant(float32), Replicate, Reflect, Reflect101, Wrap }` is OpenCV's set, `Reflect101` the default as in OpenCV.
 
-**Tier B ([[MYLA-944]]):** computer vision beyond filters.
+**Tier B ([[MYLA-970]]):** computer vision beyond filters.
 
 | Area | Functions |
 | --- | --- |
@@ -276,7 +276,7 @@ fun main() {
 
 Matrices and points are std.matrix32's `Mat3` and std.vector32's `Vec2` (float32, column-major, D201).
 
-### std.draw: 2D vector drawing ([[MYLA-942]])
+### std.draw: 2D vector drawing ([[MYLA-968]])
 
 A coverage rasteriser that the fonts share: outlines of lines and curves, filled with the exact area each pixel covers (as FreeType's "smooth" renderer and font-rs compute it), by the non-zero or the even-odd rule. On top of it go shapes, strokes and compositing on an RGBA canvas.
 
@@ -311,7 +311,7 @@ fun main() {
 
 Compositing is source-over in premultiplied 8-bit arithmetic, each product rounded exactly (`(a * b + 127) / 255`). Antialiasing uses 256 coverage levels per pixel.
 
-### std.font: TrueType and text ([[MYLA-943]])
+### std.font: TrueType and text ([[MYLA-969]])
 
 ```myla fragment
 pub fun parse(b: [uint8], index: int = 0) -> Result<Font, FontError>   // index: a face of a .ttc collection
@@ -335,12 +335,12 @@ pub fun glyph_cache(f: Font) -> GlyphCache
 - **Later:** `GPOS` pair kerning, `CFF` outlines (`.otf`), WOFF 1 (zlib, through std.compress), `GSUB` ligatures.
 - **Out:** complex shaping (Arabic, Indic: HarfBuzz territory), bidirectional text, hinting, colour and bitmap glyphs, subpixel (LCD) antialiasing, and WOFF 2 (it needs Brotli).
 
-### Groundwork ([[MYLA-931]], [[MYLA-932]])
+### Groundwork ([[MYLA-957]], [[MYLA-958]])
 
-- **std.bytes ([[MYLA-931]]):** every codec reads big- and little-endian integers and bit streams. `ByteReader { data, pos }` gives `u8`, `u16_be`, `u16_le`, `u32_be`, `u32_le`, `i16_be`, `f32_be` and so on, each an `Option`, plus `skip`, `take(n)` and `seek`. `BitReader` reads MSB-first (JPEG, with its `0xFF00` stuffing as an option; TIFF's LZW) and LSB-first (GIF's LZW, DEFLATE). `ByteWriter` and `BitWriter` are the encoders' side. std.compress keeps its bit reading inside `Inflate` and has a private `BitWriter`; those are the starting point, and std.compress moves onto the shared ones once they exist.
-- **std.compress ([[MYLA-932]]):** LZW decode and encode in its two flavours (GIF: LSB-first, a code size that grows, clear and end codes; TIFF: MSB-first with the "early change"), and PackBits (TIFF, also used by some PSD and ICNS files).
+- **std.bytes ([[MYLA-957]]):** every codec reads big- and little-endian integers and bit streams. `ByteReader { data, pos }` gives `u8`, `u16_be`, `u16_le`, `u32_be`, `u32_le`, `i16_be`, `f32_be` and so on, each an `Option`, plus `skip`, `take(n)` and `seek`. `BitReader` reads MSB-first (JPEG, with its `0xFF00` stuffing as an option; TIFF's LZW) and LSB-first (GIF's LZW, DEFLATE). `ByteWriter` and `BitWriter` are the encoders' side. std.compress keeps its bit reading inside `Inflate` and has a private `BitWriter`; those are the starting point, and std.compress moves onto the shared ones once they exist.
+- **std.compress ([[MYLA-958]]):** LZW decode and encode in its two flavours (GIF: LSB-first, a code size that grows, clear and end codes; TIFF: MSB-first with the "early change"), and PackBits (TIFF, also used by some PSD and ICNS files).
 
-### Tests and benchmarks ([[MYLA-945]])
+### Tests and benchmarks ([[MYLA-971]])
 
 - The corpus in `tests/burn/data/images/` with its licences, and `tests/burn/test_images.py`. Each codec's files are decoded natively, compared with the expected PAM or a hash of it, and the same is checked interpreted for the smallest files. Encoders round-trip through our decoder and through Pillow when it is installed (skipped otherwise).
 - **Fuzzing:** for each decoder, the corpus files truncated at every length up to 512 bytes, plus 10,000 seeded random mutations (bit flips, bytes overwritten, chunks repeated), each run natively plain and `--checked`. The pass condition is that each run returns `Ok` or `Err` and doesn't end in a runtime error.
@@ -348,17 +348,17 @@ pub fun glyph_cache(f: Font) -> GlyphCache
 
 ## The plan
 
-The tasks are in `tasks/Standard library/6 Images, vision and fonts/`, decided by D311 ([[MYLA-930]]). Sizes are on the scale of [[Project/Standard-library-roadmap#Reading the table]].
+The tasks are in `tasks/Standard library/6 Images, vision and fonts/`, decided by D313 ([[MYLA-956]]). Sizes are on the scale of [[Project/Standard-library-roadmap#Reading the table]].
 
 | Step | Tasks, in parallel within a step | Size | Needs |
 | --- | --- | --- | --- |
-| 0 Decisions | [[MYLA-930]] (the questions above) | 1 | |
-| 1 Groundwork | [[MYLA-931]] byte and bit readers, [[MYLA-932]] LZW and PackBits, [[MYLA-945]] corpus and fuzz harness | 2, 2, 3 | MYLA-930 |
-| 2 Core | [[MYLA-933]] std.image, then [[MYLA-934]] pnm, bmp, qoi | 3, 2 | MYLA-931 |
-| 3 Codecs | [[MYLA-935]] png; [[MYLA-936]] jpeg decode; [[MYLA-938]] gif; [[MYLA-939]] tiff | 4, 5, 3, 4 | MYLA-933, MYLA-932 (gif, tiff), MYLA-945 |
-| 4 Uses | [[MYLA-940]] imageio; [[MYLA-937]] jpeg encode; [[MYLA-941]] imgproc tier A; [[MYLA-942]] draw | 1, 3, 5, 4 | the codecs (imageio), MYLA-936 (encode), MYLA-933 |
-| 5 Text | [[MYLA-943]] font | 4 | MYLA-942 |
-| 6 Vision | [[MYLA-944]] imgproc tier B | 5 | MYLA-941 |
+| 0 Decisions | [[MYLA-956]] (the questions above) | 1 | |
+| 1 Groundwork | [[MYLA-957]] byte and bit readers, [[MYLA-958]] LZW and PackBits, [[MYLA-971]] corpus and fuzz harness | 2, 2, 3 | MYLA-956 |
+| 2 Core | [[MYLA-959]] std.image, then [[MYLA-960]] pnm, bmp, qoi | 3, 2 | MYLA-957 |
+| 3 Codecs | [[MYLA-961]] png; [[MYLA-962]] jpeg decode; [[MYLA-964]] gif; [[MYLA-965]] tiff | 4, 5, 3, 4 | MYLA-959, MYLA-958 (gif, tiff), MYLA-971 |
+| 4 Uses | [[MYLA-966]] imageio; [[MYLA-963]] jpeg encode; [[MYLA-967]] imgproc tier A; [[MYLA-968]] draw | 1, 3, 5, 4 | the codecs (imageio), MYLA-962 (encode), MYLA-959 |
+| 5 Text | [[MYLA-969]] font | 4 | MYLA-968 |
+| 6 Vision | [[MYLA-970]] imgproc tier B | 5 | MYLA-967 |
 
 Step 3's four codec lanes share nothing but std.image, so four agents can take them at once, under the lane rules of [[Project/Standard-library-roadmap#Working in parallel]]. std.imgproc tier A and std.draw only need the core, so they can start in step 3 if an agent is free. Each task ends with its wiki page under [[Language/Standard-library]], the skill's `reference/stdlib.md`, and an example in `examples/`.
 
@@ -368,7 +368,7 @@ The first useful milestone is step 2 plus std.png: load a PNG, change it, save i
 
 - **Speed.** Bounds checks on every index, no SIMD, and a value per sample in the interpreter. The native numbers above suggest that decoding and filtering a photo take a fraction of a second up to a few seconds, which is fine for tools and tests, though not for video. If profiling shows bounds checks dominate, removing them inside `for i in 0..xs.len()` loops is compiler work that helps all of std, not this library alone. That would be a task of its own, measured here first.
 - **Interpreted runs.** `myla run` on a real photo takes minutes. The docs say to build first (`myla build`) for real images, and `#test` cases stay tiny.
-- **Embedded size.** Measured on 2026-11-25 with waves 1 and 2 merged ([[MYLA-930]]): `selfhost/embedded_std.my` grew 25 % (4.0 to 5.0 MB), `build/myla` 13 % (7.4 to 8.4 MB); checking, building and running a program that doesn't import these modules costs the same as before.
+- **Embedded size.** Measured on 2026-11-25 with waves 1 and 2 merged ([[MYLA-956]]): `selfhost/embedded_std.my` grew 25 % (4.0 to 5.0 MB), `build/myla` 13 % (7.4 to 8.4 MB); checking, building and running a program that doesn't import these modules costs the same as before.
 - **Scope creep.** OpenCV is millions of lines. Tier A is the target, tier B is optional, and anything not on this page needs a reason and a task.
 
 ## Left out

@@ -1,5 +1,5 @@
 ---
-id: MYLA-931
+id: MYLA-957
 title: "std.bytes: ByteReader, BitReader and their writers"
 type: feature
 status: review
@@ -9,7 +9,7 @@ labels: [stdlib, bytes, images]
 Step 1 of [[Project/Standard-library-roadmap/Images-vision-and-fonts]]. Every codec reads big- and little-endian integers and bit streams. One tested set beats five private ones.
 
 - **Owns:** the new parts of `lib/std/bytes.my`, [[Language/Standard-library/Bytes]]
-- **Needs:** [[MYLA-930]]
+- **Needs:** [[MYLA-956]]
 - Work by the lane rules of [[Project/Standard-library-roadmap#Working in parallel]]: touch only the files this task owns, plus one row of the index table on [[Language/Standard-library]]; don't commit seeds or `selfhost/embedded_std.my`.
 
 - [x] `ByteReader { data, pos }`: `u8`, `u16_be/le`, `u32_be/le`, `u64_be/le`, `i16`/`i32` both orders, `f32_be/le`, `f64_be/le`, each an `Option` (`None` past the end, the position unchanged); `skip`, `take(n)`, `seek`, `remaining`. Also `i8`, `u24_*`, `i64_*`, `has`, `at_end`, `take_rest`, `eat(sig)` and `peek_u8`

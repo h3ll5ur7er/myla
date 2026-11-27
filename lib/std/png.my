@@ -1,4 +1,4 @@
-// std.png: PNG images read and written (MYLA-935, D311).
+// std.png: PNG images read and written (MYLA-961, D313).
 //
 // Decoding reads every colour type (gray, RGB, palette, gray and alpha,
 // RGBA) at every bit depth PNG allows (1, 2, 4, 8, 16), `tRNS` as an alpha

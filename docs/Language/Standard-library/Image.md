@@ -1,6 +1,6 @@
 # std.image
 
-The image type the codecs, std.imgproc, std.draw and std.font share ([[MYLA-933]], D311, the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): `Image<S>` of `uint8`, `uint16` or `float32` samples in one of four layouts, colours and rectangles, the one error type of every codec, layout and sample conversions, the exact geometry, quantizing to a palette, and a preview in the terminal. It reads and writes no file format: the codecs do.
+The image type the codecs, std.imgproc, std.draw and std.font share ([[MYLA-959]], D313, the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): `Image<S>` of `uint8`, `uint16` or `float32` samples in one of four layouts, colours and rectangles, the one error type of every codec, layout and sample conversions, the exact geometry, quantizing to a palette, and a preview in the terminal. It reads and writes no file format: the codecs do.
 
 ```myla
 import std.image as image

@@ -1,6 +1,6 @@
 # std.tiff
 
-Baseline TIFF files, read and written ([[MYLA-939]], D311, the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): every page of a file, strips and tiles, both planar configurations, the compressions none, PackBits, LZW and Deflate with their predictors, 1 to 16-bit samples and 32-bit floats, bilevel, gray, RGB and palette images with an alpha sample; every tag of a page as stored. The pixels come as a [[Language/Standard-library/Image]] `Image8`, `Image16` or `ImageF`. The compression is [[Language/Standard-library/Compress]]'s.
+Baseline TIFF files, read and written ([[MYLA-965]], D313, the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): every page of a file, strips and tiles, both planar configurations, the compressions none, PackBits, LZW and Deflate with their predictors, 1 to 16-bit samples and 32-bit floats, bilevel, gray, RGB and palette images with an alpha sample; every tag of a page as stored. The pixels come as a [[Language/Standard-library/Image]] `Image8`, `Image16` or `ImageF`. The compression is [[Language/Standard-library/Compress]]'s.
 
 ```myla
 import std.tiff as tiff

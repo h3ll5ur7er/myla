@@ -1,4 +1,4 @@
-{"about": "MYLA-937: for each case of tests/burn/test_jpeg_encode.py, the size of the JPEG file Pillow writes (optimize off, not progressive), the first 16 hex digits of its SHA-256, and its PSNR for the photo-like ones. Made by `python3 -m tests.burn.test_jpeg_encode --vendor` with Pillow 13.0.0 (libjpeg-turbo 3.2.0).",
+{"about": "MYLA-963: for each case of tests/burn/test_jpeg_encode.py, the size of the JPEG file Pillow writes (optimize off, not progressive), the first 16 hex digits of its SHA-256, and its PSNR for the photo-like ones. Made by `python3 -m tests.burn.test_jpeg_encode --vendor` with Pillow 13.0.0 (libjpeg-turbo 3.2.0).",
 "cases": {
 "corpus png/pngsuite/basi0g01.png q75 420": [786, "7e45677f4c60ea23"],
 "corpus png/pngsuite/basi0g02.png q75 420": [758, "b373e3e8f7a1acd1"],

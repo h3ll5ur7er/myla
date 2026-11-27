@@ -1,6 +1,6 @@
 # std.png
 
-PNG images read and written ([[MYLA-935]], D311, the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): every colour type and bit depth, transparency, interlacing and the five filters on the way in, with every chunk's CRC checked; adaptive filtering, zlib at any level and the smallest lossless colour type on the way out. Its images are std.image's ([[Language/Standard-library/Image]]); the compression is std.compress's ([[Language/Standard-library/Compress]]).
+PNG images read and written ([[MYLA-961]], D313, the plan [[Project/Standard-library-roadmap/Images-vision-and-fonts]]): every colour type and bit depth, transparency, interlacing and the five filters on the way in, with every chunk's CRC checked; adaptive filtering, zlib at any level and the smallest lossless colour type on the way out. Its images are std.image's ([[Language/Standard-library/Image]]); the compression is std.compress's ([[Language/Standard-library/Compress]]).
 
 ```myla
 import std.png as png

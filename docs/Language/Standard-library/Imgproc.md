@@ -1,6 +1,6 @@
 # std.imgproc
 
-Image processing over std.image's `Image<S>` ([[Project/Standard-library-roadmap/Images-vision-and-fonts#std.imgproc (MYLA-941, MYLA-944)]]). Tier A ([[MYLA-941]]): colour and point operations, resizing and warps, filters and derivatives, morphology, Canny's edges, corners, template matching, connected components, the distance transform and quality measures. Tier B ([[MYLA-944]]): contours and shapes, Hough transforms, FAST and ORB features and their matching, robust homographies and affine maps (RANSAC), optical flow, and the bilateral filter, fast rectangle morphology, the watershed and CLAHE. The module imports std.image, std.vector32, std.matrix32, std.unionfind, std.random, std.float, std.list, std.option and std.math.
+Image processing over std.image's `Image<S>` ([[Project/Standard-library-roadmap/Images-vision-and-fonts#std.imgproc (MYLA-967, MYLA-970)]]). Tier A ([[MYLA-967]]): colour and point operations, resizing and warps, filters and derivatives, morphology, Canny's edges, corners, template matching, connected components, the distance transform and quality measures. Tier B ([[MYLA-970]]): contours and shapes, Hough transforms, FAST and ORB features and their matching, robust homographies and affine maps (RANSAC), optical flow, and the bilateral filter, fast rectangle morphology, the watershed and CLAHE. The module imports std.image, std.vector32, std.matrix32, std.unionfind, std.random, std.float, std.list, std.option and std.math.
 
 ```myla
 import std.image as image
