@@ -395,6 +395,16 @@ def path_of(entry: dict) -> str:
     return os.path.join(DATA, entry["path"])
 
 
+def relative(path: str, start: str = _REPO) -> str:
+    """`path` from `start` with `/`, as the manifest names its files; as it
+    is when it has no such name (on Windows a temporary directory can be on
+    another drive than the checkout, MYLA-926)."""
+    try:
+        return os.path.relpath(path, start).replace(os.sep, "/")
+    except ValueError:
+        return path
+
+
 def expected(entry: dict) -> Pixels | None:
     """The expected pixels of an `ok` entry, if it has a PAM file."""
     return read_pam_file(os.path.join(DATA, entry["pam"])) if entry.get("pam") else None
@@ -760,11 +770,11 @@ def fuzz(driver: Driver, files: list[str], tmp: str, seed: int = FUZZ_SEED, coun
             keep = os.path.join(FAILED_DIR, f"{os.path.basename(path)}-seed{seed}-case{stats.cases + i}")
             shutil.copyfile(name, keep)
             raise AssertionError(
-                f"fuzz case {stats.cases + i} (MYLA_FUZZ_SEED={seed}) of {os.path.relpath(path, _REPO)}, "
+                f"fuzz case {stats.cases + i} (MYLA_FUZZ_SEED={seed}) of {relative(path)}, "
                 f"{what}: {why}\n  the case: {keep}\n  run it: echo {keep} | {' '.join(driver.argv)}")
         for (path, _, _), r in zip(chunk, results):
             stats.cases += 1
-            key = os.path.relpath(path, DATA)
+            key = relative(path, DATA)
             stats.by_file[key] = stats.by_file.get(key, 0) + 1
             if r.kind == "ok":
                 stats.ok += 1

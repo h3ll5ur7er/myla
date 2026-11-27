@@ -51,10 +51,13 @@ class Encoders(unittest.TestCase):
 
     def run_driver(self, cases: list[tuple[str, str, str]], *flags: str) -> list[str]:
         text = "".join(f"{i}\t{o}\t{m}\n" for i, o, m in cases)
-        r = subprocess.run(self.argv + list(flags), input=text, capture_output=True, text=True, timeout=600)
-        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-        lines = r.stdout.splitlines()
-        self.assertEqual(len(lines), len(cases), r.stderr[-2000:])
+        # (as bytes: a text-mode pipe ends each line with CRLF on Windows, and
+        # the driver would read a mode of `16\r`, which isn't `16`, MYLA-926)
+        r = subprocess.run(self.argv + list(flags), input=text.encode(), capture_output=True, timeout=600)
+        stderr = r.stderr.decode(errors="replace")
+        self.assertEqual(r.returncode, 0, stderr[-2000:])
+        lines = r.stdout.decode().splitlines()
+        self.assertEqual(len(lines), len(cases), stderr[-2000:])
         return lines
 
     def round_trip(self, items: list[dict], mode_of, *flags: str) -> dict[str, bytes]:

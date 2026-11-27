@@ -303,10 +303,13 @@ class FontTest(unittest.TestCase):
 
     def commands(self, lines: list[str], argv: list[str] | None = None) -> list[str]:
         argv = list(argv or self.plain) + ["--commands"]
-        proc = subprocess.run(argv, input="\n".join(lines) + "\n", capture_output=True, text=True, timeout=900)
-        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
-        out = proc.stdout.split("\n")[:-1]
-        self.assertEqual(len(out), len(lines), proc.stderr[-2000:])
+        # (as bytes: a text-mode pipe ends each line with CRLF on Windows, and
+        # the driver would read the `\r` into a command's last word, MYLA-926)
+        proc = subprocess.run(argv, input=("\n".join(lines) + "\n").encode(), capture_output=True, timeout=900)
+        stderr = proc.stderr.decode(errors="replace")
+        self.assertEqual(proc.returncode, 0, stderr[-2000:])
+        out = proc.stdout.decode().replace("\r\n", "\n").replace("\r", "\n").split("\n")[:-1]
+        self.assertEqual(len(out), len(lines), stderr[-2000:])
         return out
 
     # -- parsing --------------------------------------------------------------

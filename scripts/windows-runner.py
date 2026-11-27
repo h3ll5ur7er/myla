@@ -53,6 +53,9 @@ STRESS_WORKERS = ["1", "4", "16"]
 LLVM_TOOLS = ["clang", "lld-link", "llvm-dlltool"]
 # what reads a -g program's DWARF (MYLA-757), each in a step of its own
 DEBUG_TOOLS = ["llvm-symbolizer"]
+# the repository's files an example reads, from the repository's root: a
+# case of it has each at the same path under its own directory (MYLA-956)
+EXAMPLE_DATA = {"font_text": ["tests/burn/data/images/fonts/MylaTestSans.ttf"]}
 
 # --- the console cases ---------------------------------------------------------
 # Each: (name, source, steps), a step a dict of `Step`'s fields (see `step`).
@@ -449,6 +452,13 @@ def build(out: str, myla: str, jobs: int) -> int:
             fh.write(text)
         return "files/" + name
 
+    def copied(rel: str) -> str:
+        """The repository's file `rel` kept as OUT/files/`rel`, as it is; its path under OUT."""
+        path = os.path.join(out, "files", *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        shutil.copyfile(os.path.join(_REPO, *rel.split("/")), path)
+        return "files/" + rel
+
     def case(name: str, steps: list[dict], files: dict | None = None, windows_only: str = "") -> None:
         cases.append({"name": name, "steps": steps, "files": files or {}, "windows_only": windows_only})
 
@@ -567,7 +577,9 @@ def build(out: str, myla: str, jobs: int) -> int:
         stem = rel[len("examples/"):-len(".my")].replace("/", "-")
         builds.append((f"bin/example-{stem}.exe", rel, _REPO))
         want = linux([myla, "run", rel, "--stdlib", stdlib], _REPO)
-        case(f"examples/{stem}", [step([f"bin/example-{stem}.exe"], want["stdout"], want["stderr"], want["code"])])
+        data = {p: copied(p) for p in EXAMPLE_DATA.get(stem, [])}
+        case(f"examples/{stem}", [step([f"bin/example-{stem}.exe"], want["stdout"], want["stderr"], want["code"])],
+             data)
         # the same through myla.exe's interpreter, the file where it was (an
         # example of a directory of its own with the directory's modules)
         paths = [rel]
@@ -575,7 +587,7 @@ def build(out: str, myla: str, jobs: int) -> int:
             tree = os.path.join(_REPO, os.path.dirname(rel))
             paths = sorted(os.path.relpath(os.path.join(root, n), _REPO).replace(os.sep, "/")
                            for root, _, names in os.walk(tree) for n in names if n.endswith(".my"))
-        files = {}
+        files = dict(data)
         for p in paths:
             with open(os.path.join(_REPO, p), encoding="utf-8") as fh:
                 files[p] = file(p, fh.read())

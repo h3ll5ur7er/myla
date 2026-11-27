@@ -139,7 +139,7 @@ def _corpus_files() -> set[str]:
     out = set()
     for root, _, files in os.walk(im.DATA):
         for f in files:
-            rel = os.path.relpath(os.path.join(root, f), im.DATA)
+            rel = im.relative(os.path.join(root, f), im.DATA)
             if not rel.startswith("expected/"):
                 out.add(rel)
     return out

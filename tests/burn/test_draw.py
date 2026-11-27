@@ -53,9 +53,8 @@ import sys
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble
 from ._tools import STDLIB_ROOT, selfhost_tool
-from ._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 DATA = os.path.join(os.path.dirname(__file__), "data", "draw")
@@ -636,13 +635,12 @@ class DrawTest(unittest.TestCase):
         if CAN_BUILD_NATIVE:
             asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,
                                  check=True)
-            exe = os.path.join(cls.tmp, "driver")
+            exe = os.path.join(cls.tmp, "driver" + EXE)
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm.stdout)
-            subprocess.run([*AS_CMD, "-o", exe + ".o", exe + ".s"], check=True)
-            subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
+            assemble(exe + ".s", exe)   # for the machine (MYLA-926: Windows' too)
             cls.native = exe
-            cls.checked = os.path.join(cls.tmp, "driver-checked")
+            cls.checked = os.path.join(cls.tmp, "driver-checked" + EXE)
             subprocess.run([selfhost_tool("main"), "build", path, "-o", cls.checked, "--stdlib", STDLIB_ROOT,
                             "--checked"], capture_output=True, check=True)
 
@@ -657,9 +655,11 @@ class DrawTest(unittest.TestCase):
             argv = [self.checked]
         else:
             argv = [selfhost_tool("main"), "run", self.path, "--stdlib", STDLIB_ROOT]
-        proc = subprocess.run(argv, input="\n".join(commands) + "\n", capture_output=True, text=True, timeout=900)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        out = proc.stdout.splitlines()
+        # (as bytes: a text-mode pipe ends each line with CRLF on Windows, and
+        # the driver would read the `\r` into a command's last word, MYLA-926)
+        proc = subprocess.run(argv, input=("\n".join(commands) + "\n").encode(), capture_output=True, timeout=900)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode(errors="replace"))
+        out = proc.stdout.decode().splitlines()
         self.assertEqual(len(out), len(commands))
         return out
 

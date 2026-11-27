@@ -92,9 +92,11 @@ class GifEncoder(unittest.TestCase):
         cls.inputs.update(SYNTH)
         cases = [(src, os.path.join(cls.tmp.name, name)) for name, src in cls.inputs.items()]
         lines = "".join(f"{src}\t{out}\n" for src, out in cases)
-        r = subprocess.run(argv, input=lines, capture_output=True, text=True, timeout=600)
-        assert r.returncode == 0, r.stderr
-        cls.results = dict(zip(cls.inputs, r.stdout.splitlines()))
+        # (as bytes: a text-mode pipe ends each line with CRLF on Windows, and
+        # the driver would write to an output path ending in `\r`, MYLA-926)
+        r = subprocess.run(argv, input=lines.encode(), capture_output=True, timeout=600)
+        assert r.returncode == 0, r.stderr.decode(errors="replace")
+        cls.results = dict(zip(cls.inputs, r.stdout.decode().splitlines()))
 
     @classmethod
     def tearDownClass(cls) -> None:

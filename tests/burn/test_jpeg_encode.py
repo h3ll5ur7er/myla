@@ -222,6 +222,14 @@ def parse(line: str) -> Answer:
     return Answer(int(f[1]), int(f[2]), int(f[3]), f[4], f[5], float(f[6]), f[7])
 
 
+def _requests(argv: list[str], lines: list[str], timeout: float) -> tuple[int, list[str], str]:
+    """The driver's exit code, answer lines and standard error for `lines`,
+    which it gets as bytes: a text-mode pipe would end each with CRLF on
+    Windows, and the driver would read the `\\r` into the last field (MYLA-926)."""
+    r = subprocess.run(argv, input="".join(lines).encode(), capture_output=True, timeout=timeout)
+    return r.returncode, r.stdout.decode().splitlines(), r.stderr.decode(errors="replace")
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class Encoder(unittest.TestCase):
     @classmethod
@@ -252,10 +260,9 @@ class Encoder(unittest.TestCase):
             out = os.path.join(self.tmp.name, f"out{n}.jpg")
             outs.append(out)
             lines.append(f"{self.input_of(c.source)}\t{out}\t{c.quality}\t{c.sub}\n")
-        r = subprocess.run(argv or self.argv, input="".join(lines), capture_output=True, text=True, timeout=1200)
-        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-        answers = r.stdout.splitlines()
-        self.assertEqual(len(answers), len(items), r.stderr[-2000:])
+        code, answers, stderr = _requests(argv or self.argv, lines, 1200)
+        self.assertEqual(code, 0, stderr[-2000:])
+        self.assertEqual(len(answers), len(items), stderr[-2000:])
         result = []
         for c, out, line in zip(items, outs, answers):
             with self.subTest(c.name):
@@ -359,9 +366,9 @@ class Encoder(unittest.TestCase):
         for n, c in enumerate(items):
             outs.append(os.path.join(self.tmp.name, f"rout{n}.jpg"))
             lines.append(f"{self.inputs[c.source]}\t{outs[-1]}\t{c.quality}\t{c.sub}\n")
-        r = subprocess.run(self.argv, input="".join(lines), capture_output=True, text=True, timeout=600)
-        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-        for c, out, line in zip(items, outs, r.stdout.splitlines()):
+        code, answers, stderr = _requests(self.argv, lines, 600)
+        self.assertEqual(code, 0, stderr[-2000:])
+        for c, out, line in zip(items, outs, answers):
             with self.subTest(c.name, quality=c.quality, sub=c.sub):
                 parse(line)
                 p = sources[c.source]
