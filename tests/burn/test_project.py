@@ -20,9 +20,8 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, ON_WINDOWS, SKIP_REASON, assemble
 from ._tools import STDLIB_ROOT, selfhost_tool
-from ._native import AS_CMD  # the machine's assembler (MYLA-926)
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -80,8 +79,12 @@ class ProjectModel(unittest.TestCase):
         command = argv if argv is not None else [self.tool]
         proc = subprocess.run([*command, *args], cwd=os.path.join(root, cwd),
                               capture_output=True, timeout=120)
-        return (proc.stdout.decode().replace(root, "{root}"),
-                proc.stderr.decode().replace(root, "{root}"), proc.returncode)
+        out, err = proc.stdout.decode(), proc.stderr.decode()
+        # (the tool writes a Windows path with `/`, as the loader writes one:
+        # `C:/t/app`, MYLA-930; on Linux the two spellings are one)
+        for spelling in dict.fromkeys([root, root.replace("\\", "/")]):
+            out, err = out.replace(spelling, "{root}"), err.replace(spelling, "{root}")
+        return out, err, proc.returncode
 
     def project(self, files: dict[str, str], dirs: tuple[str, ...] = (), cwd: str = "app",
                 args: tuple[str, ...] = ()) -> str:
@@ -136,8 +139,10 @@ class ProjectModel(unittest.TestCase):
 
     def test_absolute_path_and_a_program_without_library(self) -> None:
         root = self.make({**under("geo", library("geo")), "app/src/main.my": "fun main() {}\n"})
+        # (a literal string on Windows, where a basic string's `\` would start escapes)
+        path = f"'{root}/./geo/'" if ON_WINDOWS else f'"{root}/./geo/"'
         with open(os.path.join(root, "app", "myla.toml"), "w", encoding="utf-8") as fh:
-            fh.write(manifest("app", f'geo = {{ path = "{root}/./geo/" }}\n'))
+            fh.write(manifest("app", f"geo = {{ path = {path} }}\n"))
         out, err, code = self.run_tool(root)
         self.assertEqual((err, code), ("", 0))
         self.assertEqual(out.splitlines()[1:3], [
@@ -222,6 +227,21 @@ class ProjectModel(unittest.TestCase):
             "  |\n"
             '2 | name = "app\n'
             "  |        ^\n"))
+
+    def test_a_manifest_with_crlf_line_breaks(self) -> None:
+        # as a Windows editor writes one: "\r\n" ends a line, an unterminated
+        # string's too, and the line is shown without its "\r" (MYLA-934, MYLA-941)
+        cases = (('[package]\nname = "app\n', "manifest error: unterminated string\n"
+                  "  --> {root}/app/myla.toml:2:8\n  |\n2 | name = \"app\n  |        ^\n"),
+                 ('[package]\nname = "1app"\nversion = "1"\n', "manifest error: '1app' is not a valid package name:"
+                  " it must be an ASCII letter followed by ASCII letters, digits and '_'\n"
+                  "  --> {root}/app/myla.toml:2:8\n  |\n2 | name = \"1app\"\n  |        ^^^^^^\n"))
+        for text, want in cases:
+            with self.subTest(text=text):
+                root = self.make({"app/myla.toml": ""})
+                with open(os.path.join(root, "app", "myla.toml"), "w", encoding="utf-8", newline="") as fh:
+                    fh.write(text.replace("\n", "\r\n"))
+                self.assertEqual(self.run_tool(root), ("", want, 1))
 
     def test_missing_package_table(self) -> None:
         self.assert_error({"app/myla.toml": "[dependencies]\n"}, "myla: {root}/app/myla.toml: missing table [package]")
@@ -463,12 +483,11 @@ class ProjectModelParity(unittest.TestCase):
         gen = selfhost_tool("gen_main")
         source = os.path.join(_REPO, "selfhost", "project_main.my")
         with tempfile.TemporaryDirectory() as tmp:
-            sh_native = os.path.join(tmp, "sh_native")
+            sh_native = os.path.join(tmp, "sh_native" + EXE)
             asm = subprocess.run([gen, source, STDLIB_ROOT], capture_output=True, text=True, check=True)
             with open(sh_native + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm.stdout)
-            subprocess.run([*AS_CMD, "-o", sh_native + ".o", sh_native + ".s"], check=True)
-            subprocess.run(["ld", "-o", sh_native, sh_native + ".o"], check=True)
+            assemble(sh_native + ".s", sh_native)     # for the machine (on Windows its linker's, MYLA-926)
             drivers = {
                 "native": [selfhost_tool("project_main")],
                 "self-hosted interpreter": [selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, source],

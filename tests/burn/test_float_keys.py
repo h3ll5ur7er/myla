@@ -10,7 +10,8 @@ list or an enum, and `x.hash(h)` called by a program, at std.hash's `hash`."""
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run_full, run_source_both_now, selfhost_run, write_program
+from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run_full, run_source_both_now,
+                                selfhost_run, shown, write_program)
 
 PROGRAM = """#derive(Eq, Hash)
 struct Point {
@@ -134,8 +135,8 @@ class FloatKeys(unittest.TestCase):
                     # the line, and the column of the key or the call (a
                     # binary operation's is its operator's, two on)
                     row = source.split("\n").index(line) + 1
-                    self.assertIn(where, [f"  --> {path}:{row}:{line.index(at) + 1}",
-                                          f"  --> {path}:{row}:{line.index(at) + 3}"])
+                    self.assertIn(where, [f"  --> {shown(path)}:{row}:{line.index(at) + 1}",
+                                          f"  --> {shown(path)}:{row}:{line.index(at) + 3}"])
                 self.assertEqual(interp[1].split("\n")[:2], native[1].split("\n")[:2])
 
 if __name__ == "__main__":

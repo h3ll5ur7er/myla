@@ -269,6 +269,7 @@ A pull request's newer push cancels its older run; a master commit's run is neve
 | --- | --- |
 | `burn` | the whole burn suite with gdb, lldb, clang, lld, llvm, qemu-user, wine64, Node, Go and tree-sitter, `MYLA_REQUIRE_TARGETS=1` |
 | `burn-arm64` | the whole burn suite natively on `ubuntu-24.04-arm` (`scripts/test-target.py host`; gdb, clang, lld, llvm, Node, Go, tree-sitter; no qemu or Wine, D296, MYLA-926); the tests that read x86-64 code or need `-g` skip there (`_native.READS_X86`) |
+| `burn-windows` | the whole burn suite natively on `windows-latest` (`python scripts/test-target.py host`, `PYTHONUTF8=1`, the image's LLVM, Python and Node; the toolchain bootstrapped from `bootstrap/seed-windows.s`; no Wine, D296, MYLA-926); a test Windows can't run says so (`_native.linux_only(reason)`); an expected message's source path is `_native.shown(path)` (`/` on Windows) |
 | `generated` | master only (and a manual run): the five `test_generated_*` modules with `MYLA_GENERATED=full` and `MYLA_GENERATED_SEED` the run's number (D262); a pull request's `burn` runs their sample of seed 555 |
 | `targets` (aarch64-linux, wasm32-wasi, x86_64-windows) | `scripts/test-target.py <target>` (Wine for Windows) |
 | `wasm-page` | the playground page in Chromium (Playwright) |

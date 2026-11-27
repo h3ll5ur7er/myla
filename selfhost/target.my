@@ -113,10 +113,12 @@ pub fun targets() -> [Target] {
         // (MYLA-705). Under -g the DWARF that clang puts in the object's
         // COFF sections is kept in the image (`/debug:dwarf`, no PDB), and
         // what the program doesn't call is still left out as without it
-        // (`/opt:ref`, which `/debug` would turn off; MYLA-757)
+        // (`/opt:ref`, which `/debug` would turn off; MYLA-757). `/Brepro`: the
+        // image's time stamp a hash of its bytes, not the time it was linked,
+        // so a program builds to the same bytes each time as on Linux (MYLA-926)
         Target { name: "x86_64-windows", os: Os.Windows, arch: Arch.X86_64, format: ObjectFormat.Coff, exe_suffix: ".exe", platform_file: "platform_windows.my", copies: "_windows.my",
                  cross: Toolchain { assemble: ["clang", "--target=x86_64-pc-windows-msvc", "-c", "-o", "{obj}", "{asm}"], imports: ["llvm-dlltool", "-m", "i386:x86-64", "-d", "{def}", "-l", "{lib}"],
-                                    link: ["lld-link", "/nologo", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:{out}", "{obj}", "{libs}"],
+                                    link: ["lld-link", "/nologo", "/Brepro", "/subsystem:console", "/entry:_start", "/nodefaultlib", "/stack:125829120", "/out:{out}", "{obj}", "{libs}"],
                                     debug_link: ["/debug:dwarf", "/opt:ref"], needs: "clang, llvm-dlltool and lld-link" },
                  native: None, emulator: ["wine"], spawns: true, debug_info: true, supported: true },
     ]

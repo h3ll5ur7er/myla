@@ -151,7 +151,7 @@ windows_asm_to_bin() {  # <src.s> <out.exe>
         libs+=("$(native_path "${stem}.lib")")
     done < <(grep '^# import ' "$asm")
     MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-        "$LD" /nologo /subsystem:console /entry:_start /nodefaultlib /stack:125829120 \
+        "$LD" /nologo /Brepro /subsystem:console /entry:_start /nodefaultlib /stack:125829120 \
         "/out:$(native_path "$out")" "$(native_path "${out}.o")" "${libs[@]}"
 }
 

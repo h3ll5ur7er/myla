@@ -10,10 +10,13 @@ import unittest
 
 from ._native import (
     CAN_BUILD_NATIVE,
+    EXE,
     SKIP_REASON,
     build_and_run_checker,
     check_file,
     interpret_checker,
+    linux_only,
+    ON_WINDOWS,
     run_file_both_now,
     selfhost_run,
     write_program,
@@ -125,7 +128,8 @@ class TestModuleIdCollision(unittest.TestCase):
             write_program(os.path.join(tmp, "proj", "up"), "pub fun f() -> int {\n    return 2\n}\n", "a.my")
             write_program(os.path.join(tmp, "proj"),
                           "from .up.a import f\nfrom ..a import g\n\nfun main() {\n    print(f() + g())\n}\n")
-            proc = subprocess.run([selfhost_tool("main"), "check", os.path.join("proj", "main.my"),
+            # (the path as the error names it, so spelt with `/` on Windows too, MYLA-926)
+            proc = subprocess.run([selfhost_tool("main"), "check", "proj/main.my",
                                    "--stdlib", STDLIB_ROOT], capture_output=True, text=True, cwd=tmp)
             self.assertEqual(proc.returncode, 1)
             self.assertTrue(proc.stderr.startswith(
@@ -236,13 +240,14 @@ class TestARootStdFolderIsRefused(unittest.TestCase):
                 os.makedirs(os.path.join(tmp, "sub", "std"))
                 write_program(os.path.join(tmp, "sub", "std"), "pub fun rt_one() -> int {\n    return 1\n}\n", "rt.my")
                 write_program(tmp, "from .sub.std.rt import rt_one\nfun main() {\n    print(rt_one())\n}\n")
-                proc = subprocess.run([selfhost_tool("main"), "build", "main.my", "-o", "prog", "--stdlib", STDLIB_ROOT],
-                                      capture_output=True, text=True, cwd=tmp)
+                proc = subprocess.run([selfhost_tool("main"), "build", "main.my", "-o", "prog" + EXE, "--stdlib",
+                                       STDLIB_ROOT], capture_output=True, text=True, cwd=tmp)
                 self.assertEqual((proc.returncode, proc.stderr), (0, ""))
-                proc = subprocess.run([os.path.join(tmp, "prog")], capture_output=True, text=True)
+                proc = subprocess.run([os.path.join(tmp, "prog" + EXE)], capture_output=True, text=True)
                 self.assertEqual(proc.stdout, "1\n")
 
 
+@linux_only("'<' and '>' aren't allowed in Windows file names")
 class TestAProgramInADirectoryNamedAsTheCarriedLibrary(unittest.TestCase):
     def test_it_is_the_programs(self):
         # the review of 2026-11-17 (MYLA-793): `myla check '<myla>/main.my'`
@@ -275,7 +280,12 @@ class TestALibraryRootThroughASymlink(unittest.TestCase):
         from ._tools import STDLIB_ROOT, selfhost_tool
         with tempfile.TemporaryDirectory() as tmp:
             shutil.copytree(STDLIB_ROOT, os.path.join(tmp, "libcopy"))
-            os.symlink("libcopy", os.path.join(tmp, "liblink"))
+            try:
+                os.symlink("libcopy", os.path.join(tmp, "liblink"), target_is_directory=True)
+            except OSError as err:
+                if not ON_WINDOWS:
+                    raise
+                self.skipTest(f"Windows makes no symbolic link without the privilege: {err}")   # (MYLA-926)
             for entry, root in (("libcopy", "liblink"), ("liblink", "libcopy"), (os.path.join(tmp, "libcopy"), "liblink")):
                 with self.subTest(entry=entry, root=root):
                     proc = subprocess.run([selfhost_tool("main"), "test", f"{entry}/std/option.my", "--stdlib", root],

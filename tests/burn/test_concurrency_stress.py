@@ -17,7 +17,7 @@ import tempfile
 import unittest
 
 from tests.burn._hang import run_watched
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble, linux_only
 from tests.burn._tools import STDLIB_ROOT
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "concurrency_stress")
 _WATCHDOG = 60
@@ -181,17 +181,18 @@ class ConcurrencyStress(unittest.TestCase):
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
                 p = subprocess.run([interp, src, STDLIB_ROOT], capture_output=True, text=True, timeout=_WATCHDOG)
                 self.assertEqual(p.stderr, want, "interpreted")
-                exe = os.path.join(tmp, name)
+                exe = os.path.join(tmp, name + EXE)
                 asm = subprocess.run([gen, src, STDLIB_ROOT], capture_output=True, text=True, check=True).stdout
                 with open(exe + ".s", "w", encoding="utf-8") as fh:
                     fh.write(asm)
-                subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+                assemble(exe + ".s", exe)      # for the machine (on Windows with LLVM's tools, MYLA-926)
                 for workers in ["1", "4", "16"]:
                     p = subprocess.run([exe], capture_output=True, text=True, timeout=_WATCHDOG,
                                        env=dict(os.environ, MYLA_THREADS=workers))
                     self.assertEqual(p.stderr, want, f"{workers} workers")
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    @linux_only("a hang's stacks come from gdb, its core from SIGQUIT")
     def test_a_hang_leaves_its_stacks_and_a_core(self):
         # MYLA-418: the watchdog's timeout keeps where the program was
         from ._hang import Hung, cores_land_here
@@ -241,12 +242,12 @@ class ConcurrencyStress(unittest.TestCase):
         gen = selfhost_tool("gen_main")
         for name, want in EXPECTED.items():
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
-                exe = os.path.join(tmp, name)
+                exe = os.path.join(tmp, name + EXE)
                 asm = subprocess.run([gen, os.path.join(_DIR, name + ".my"), STDLIB_ROOT],
                                      capture_output=True, text=True, check=True).stdout
                 with open(exe + ".s", "w", encoding="utf-8") as fh:
                     fh.write(asm)
-                subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+                assemble(exe + ".s", exe)
                 for workers in ["1", "4", "16"]:
                     for _ in range(3):
                         got = _run([exe], dict(os.environ, MYLA_THREADS=workers))

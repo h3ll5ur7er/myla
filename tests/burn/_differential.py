@@ -32,7 +32,10 @@ import concurrent.futures
 import os
 import random
 import re
-import resource
+try:
+    import resource
+except ImportError:      # Windows (MYLA-926 step 2): no core or address-space limits there
+    resource = None
 import subprocess
 
 from ._native import TEST_TARGET, Program, native_build, run_argv
@@ -124,7 +127,7 @@ def run_cases(argv: list[str], exe: str | None, count: int, env: dict | None = N
         start = len(results)
         try:
             proc = subprocess.run(argv + [str(start)], executable=exe, capture_output=True, timeout=timeout,
-                                  env=env, preexec_fn=_limits)
+                                  env=env, preexec_fn=_limits if resource is not None else None)
             out, err, code = proc.stdout, proc.stderr, proc.returncode
         except subprocess.TimeoutExpired as e:
             out, err, code = e.stdout or b"", e.stderr or b"", None

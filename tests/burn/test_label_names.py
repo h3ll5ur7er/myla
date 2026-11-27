@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, HOST_TARGET
+from ._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET
 from ._tools import STDLIB_ROOT, selfhost_tool
+from .test_platform_interface import build_tools
 
 PROGRAM = """fun first(n: int) -> str {
     if n > 3 {
@@ -148,12 +150,18 @@ class LabelsPerFunction(unittest.TestCase):
             fh.write(src)
         for target in ("x86_64-linux", "aarch64-linux", "x86_64-windows"):
             with self.subTest(target=target):
-                exe = os.path.join(self._tmp.name, "segv-" + target)
+                # (one whose tools aren't on this machine is left out, said
+                # so: the host's GNU as and ld or clang's, MYLA-926)
+                missing = [t for t in build_tools(target) if shutil.which(t) is None]
+                if missing:
+                    self.skipTest(f"a build for {target} calls {', '.join(missing)}, not found")
+                exe = os.path.join(self._tmp.name, "segv-" + target + (".exe" if target == "x86_64-windows" else ""))
                 proc = subprocess.run([selfhost_tool("main"), "build", path, "-o", exe, "--stdlib", STDLIB_ROOT,
                                        "--target", target], capture_output=True, text=True, timeout=600)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
         if CAN_BUILD_NATIVE:
-            out = subprocess.run([os.path.join(self._tmp.name, "segv-" + HOST_TARGET)], capture_output=True, text=True)
+            out = subprocess.run([os.path.join(self._tmp.name, "segv-" + HOST_TARGET + EXE)], capture_output=True,
+                                 text=True)
             self.assertEqual((out.stdout, out.returncode), ("21\n2\n", 0))
 
 if __name__ == "__main__":

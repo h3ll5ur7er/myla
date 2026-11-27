@@ -35,7 +35,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, run_argv, target_flags, write_program
+from ._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, SKIP_REASON, run_argv, target_flags, write_program
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 STD = os.path.join(STDLIB_ROOT, "std")
@@ -50,9 +50,18 @@ PER_TARGET = {"TARGET", "RETURNS_MEMORY", "HUGE_PAGES", "HEAP_COMMIT", "PROCESSE
 # (`backend_std_functions`): wasm32's and Windows' starts, which lay out the
 # arguments
 OWN = {"wasm32-wasi": {"wasm_start"}, "x86_64-windows": {"windows_start"}}
-# the tools a build for a target needs besides the host's
-BUILD_TOOLS = {"aarch64-linux": ["clang", "ld.lld"], "wasm32-wasi": ["clang", "wasm-ld"],
-               "x86_64-windows": ["clang", "llvm-dlltool", "lld-link"]}
+# the tools a build for a target calls from another machine (target.my's
+# `cross`): a Linux target's from Windows too (MYLA-926), where an `as` or
+# `ld` on PATH is MinGW's, which makes Windows' programs
+BUILD_TOOLS = {"x86_64-linux": ["clang", "ld.lld"], "aarch64-linux": ["clang", "ld.lld"],
+               "wasm32-wasi": ["clang", "wasm-ld"], "x86_64-windows": ["clang", "llvm-dlltool", "lld-link"]}
+
+
+def build_tools(target: str) -> list[str]:
+    """The tools `myla build --target target` calls here: a Linux target's
+    own machine's GNU `as` and `ld` (target.my's `native`), else
+    BUILD_TOOLS'."""
+    return ["as", "ld"] if target == HOST_TARGET and target.endswith("-linux") else BUILD_TOOLS[target]
 
 _FUN = re.compile(r"^pub fun ([a-z_0-9]+)\((.*)\)(?: -> (.+?))? \{$")
 _CONST = re.compile(r"^pub const ([A-Z_0-9]+): ([a-z0-9]+) = (.+?)(?:\s*//.*)?$")
@@ -195,7 +204,7 @@ class Types(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, bindings_program())
             for target in MODULES:
-                if not all(shutil.which(t) for t in BUILD_TOOLS.get(target, [])):
+                if not all(shutil.which(t) for t in build_tools(target)):
                     continue
                 with self.subTest(target=target):
                     proc = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--stdlib", STDLIB_ROOT,
@@ -352,7 +361,7 @@ class Behaviour(unittest.TestCase):
             with open(os.path.join(lib, "std", "interface_probe.my"), "w") as fh:
                 fh.write(PROBE)
             path = write_program(src, BEHAVIOUR)
-            binary = os.path.join(src, "prog")
+            binary = os.path.join(src, "prog" + EXE)
             proc = subprocess.run([selfhost_tool("main"), "build", path, "-o", binary, "--stdlib", lib,
                                    *target_flags()], capture_output=True, text=True)
             self.assertEqual((proc.stderr, proc.returncode), ("", 0))

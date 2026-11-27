@@ -11,14 +11,17 @@ import tempfile
 import time
 import unittest
 
-from ._native import (
+from ._native import (BUILD_TARGET,
     CAN_BUILD_NATIVE,
+    EXE,
+    ON_WINDOWS,
     SKIP_REASON,
     TEST_TARGET,
     Program,
     build_and_run_full,
     check_file,
     interpret_full,
+    linux_only,
     native_build,
     run_argv,
     run_source_both,
@@ -65,10 +68,19 @@ class TestStdioParity(unittest.TestCase):
         self.assertEqual((out, err, code), ("", "", 7))
 
     def test_exit_truncates_to_low_byte(self):
-        out, err, code = run_source_both(
-            "from std.process import exit\n"
-            "fun main() { exit(258) }\n"   # 258 & 0xFF == 2
-        )
+        source = ("from std.process import exit\n"
+                  "fun main() { exit(258) }\n")   # 258 & 0xFF == 2
+        if ON_WINDOWS:
+            # Windows passes the code with its 32 bits (D216): 258 to a
+            # parent there, its low byte the 2 a POSIX parent reads (MYLA-926)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, source)
+                interp = interpret_full(check_file(path), argv=["prog"])
+                native = build_and_run_full(check_file(path), argv0="prog")
+            self.assertEqual(interp, ("", "", 2))
+            self.assertEqual(native, ("", "", 258))
+            return
+        out, err, code = run_source_both(source)
         self.assertEqual(code, 2)
 
     def test_exit_short_circuits_remaining_output(self):
@@ -202,7 +214,7 @@ fun main() {
 def _argvs(tmp: str, source: str) -> list[tuple[str, list[str], str | None]]:
     """The interpreter's and the native binary's command lines for `source`."""
     path = write_program(tmp, source)
-    binary = os.path.join(tmp, "prog")
+    binary = os.path.join(tmp, "prog" + EXE)
     native_build(Program(path), binary)
     argv, exe = run_argv(binary, binary)
     return [("interpreter", [selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None),
@@ -224,9 +236,10 @@ class BrokenPipe(unittest.TestCase):
                     self.assertEqual(first, b"line 0\n")
                     self.assertEqual(err, b"")
                     # SIGPIPE natively; 141, the code a shell shows for it, on
-                    # a target without signals
-                    self.assertIn(code, (-signal.SIGPIPE, 141))
+                    # a target without signals (Windows, which has no SIGPIPE)
+                    self.assertIn(code, (141,) if ON_WINDOWS else (-signal.SIGPIPE, 141))
 
+    @linux_only("a descriptor beyond 0 to 2 passed to a child (pass_fds) is Unix's")
     def test_a_write_to_another_descriptor_reports_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             for name, argv, exe in _argvs(tmp, WRITES_TO_FD_3):
@@ -242,13 +255,14 @@ class BrokenPipe(unittest.TestCase):
                     self.assertEqual((p.stdout, p.stderr, p.returncode), ("broken pipe\nstill running\n", "", 0))
 
 
+    @linux_only("no /dev/full")
     def test_a_write_to_a_full_disk_ends_with_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             for name, argv, exe in _argvs(tmp, WRITES_TO_A_FULL_DISK):
                 # the target's words for its code (MYLA-716): Windows' for
                 # ERROR_DISK_FULL, which Wine gives a write to /dev/full
                 said = "no space left on device"
-                if TEST_TARGET == "x86_64-windows" and name == "native":
+                if BUILD_TARGET == "x86_64-windows" and name == "native":
                     said = "there is not enough space on the disk"
                 with self.subTest(run=name, stream="stdout"):
                     with open("/dev/full", "w") as full:
@@ -259,7 +273,7 @@ class BrokenPipe(unittest.TestCase):
                     path = write_program(tmp, src, f"{name}2.my")
                     cmd = argv
                     if name == "native":
-                        binary = os.path.join(tmp, "prog2")
+                        binary = os.path.join(tmp, "prog2" + EXE)
                         native_build(Program(path), binary)
                         cmd, exe2 = run_argv(binary, binary)
                     else:
@@ -351,6 +365,7 @@ def _drained_slowly(argv: list[str], exe: str | None, pause: float = 0.02) -> tu
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@linux_only("a non-blocking pipe (O_NONBLOCK) and the child's CPU time from wait4 are Unix's")
 class NonBlockingOutput(unittest.TestCase):
     def test_a_full_output_is_waited_for_not_spun_on(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -419,16 +434,18 @@ class HugeReads(unittest.TestCase):
         room is capped (4 MiB): a read of 2,000,000,000 bytes of `abc` used
         to ask for 2 GB first, `out of memory` under a 400 MB limit. The
         program reports its own address space's growth; on wasm32 /proc is
-        Node's, and the linear memory's peak is the measure."""
+        Node's, and the linear memory's peak is the measure; on Windows
+        there is no /proc (the program says -1), only its read is checked."""
         with tempfile.TemporaryDirectory() as tmp:
             for name, argv, exe in _argvs(tmp, READS_A_HUGE_COUNT):
                 with self.subTest(run=name):
                     mem = os.path.join(tmp, "memory")
                     env = dict(os.environ, MYLA_WASM_MEMORY_OUT=mem)
-                    p = subprocess.run(argv, executable=exe, input="abc\n", capture_output=True, text=True,
+                    # (bytes: a text input's newline is CR LF on Windows)
+                    p = subprocess.run(argv, executable=exe, input=b"abc\n", capture_output=True,
                                        env=env, timeout=120)
-                    self.assertEqual((p.stderr, p.returncode), ("", 0))
-                    got, grown = p.stdout.split("\n")[:2]
+                    self.assertEqual((p.stderr, p.returncode), (b"", 0))
+                    got, grown = p.stdout.decode().split("\n")[:2]
                     self.assertEqual(got, "4 bytes")
                     if name == "native" and TEST_TARGET == "wasm32-wasi":
                         with open(mem, encoding="utf-8") as fh:

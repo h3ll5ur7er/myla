@@ -18,7 +18,7 @@ The process itself and the programs it runs.
 from std.process import command, ExitStatus
 
 fun main() {
-    match command("/bin/echo").arg("hello").output() {
+    match command("echo").arg("hello").output() {
         Ok(out) => {
             let code = match out.status {
                 Exited(c) => c

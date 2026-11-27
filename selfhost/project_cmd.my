@@ -12,7 +12,8 @@
 
 from std.io import write, eprintln
 from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir, remove_dir_all, read_to_string
-from std.process import args, command, ExitStatus
+from std.process import args, command
+from std.test import run_code
 from .loader import LoadOptions
 from .target import Target
 from .driver import cmd_build, cmd_interp, own_tests, native_tests, emulator, load_for_host, decode, scratch_dir, scratch_sep, test_in_own_job
@@ -260,10 +261,7 @@ fun run_test_program_natively(h: Here, path: str, opts: LoadOptions, target: Tar
         Ok(o) => o,
         Err(e) => { return [format("FAIL  {}: cannot run it with '{}'\n", file, argv[0])] },
     }
-    let code = match o.status {
-        ExitStatus.Exited(c) => c,
-        ExitStatus.Signaled(sig) => -sig,
-    }
+    let code = run_code(o.status)   // (an exit past 255 on Windows read as Linux reads it, MYLA-943)
     return test_program_report(file, tp, decode(o.stdout), decode(o.stderr), code)
 }
 
@@ -289,10 +287,7 @@ fun run_test_program(h: Here, path: str, opts: LoadOptions) -> [str] {
         Ok(o) => o,
         Err(e) => { return [format("FAIL  {}: could not run '{}' to interpret it\n", file, args()[0])] },
     }
-    let code = match out.status {
-        ExitStatus.Exited(c) => c,
-        ExitStatus.Signaled(sig) => -sig,
-    }
+    let code = run_code(out.status)   // (an exit past 255 on Windows read as Linux reads it, MYLA-943)
     return test_program_report(file, tp, decode(out.stdout), decode(out.stderr), code)
 }
 

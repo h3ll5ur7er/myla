@@ -20,7 +20,6 @@ socket programs are excused (`_targets.py`) and `NetOnWasm` checks that each
 operation is `Unsupported` instead. A program's call of a `__sock_*`
 primitive is the primitive warning (D100, D161)."""
 import os
-import resource
 import select
 import socket
 import struct
@@ -31,12 +30,14 @@ import time
 import unittest
 from unittest import mock
 
-from ._native import (
+from ._native import (BUILD_TARGET,
     CAN_BUILD_NATIVE,
+    ON_WINDOWS,
     SKIP_REASON,
     TEST_TARGET,
     Program,
     build_and_run_full,
+    linux_only,
     native_build,
     run_argv,
     selfhost_run,
@@ -589,7 +590,9 @@ ERRORS = PRELUDE + """fun main() {
         Ok(s) => print("connected")
         Err(e) => print(cause(e))
     }
-    match net.connect_timeout(net.addr(net.loopback(), port), 1000) {
+    // (refused well within its time: Windows tries a refused SYN again
+    // for about 2 s before it says so, Linux says so at once)
+    match net.connect_timeout(net.addr(net.loopback(), port), 10000) {
         Ok(s) => print("connected")
         Err(e) => print(cause(e))
     }
@@ -1012,10 +1015,13 @@ NET_WASM_OUT = "Unsupported\nUnsupported\nUnsupported\nUnsupported\nNotFound\n12
 # MYLA-548: a blocking read of a socket in a task (`io.buffered(s)` over a
 # TcpStream) holds its worker; on one worker the task that would send the
 # line never runs. The program still hangs, but says so on stderr after a
-# second of it.
+# second of it. The sender sleeps after its connect, so that the reader has
+# accepted and reads first wherever the accept comes after the connect
+# (MYLA-926: on Windows' loopback the sender woke first, wrote and ended).
 HELD = """import std.net as net
 import std.io as io
 import std.bytes as bytes
+import std.task as task
 from std.net import TcpListener
 
 async fun lines(l: TcpListener) -> int {
@@ -1037,6 +1043,7 @@ async fun main() {
     let at = l.local_addr().expect("address")
     async let served = lines(l)
     var s = (await net.connect_async(at)).expect("connect")
+    await task.sleep(200)
     let w = await s.write_async(bytes.from_str("ping\\n"))
     let sh = s.shutdown(net.Shutdown.Write)
     print(await served)
@@ -1106,7 +1113,14 @@ class Tcp(unittest.TestCase):
     def test_a_listeners_backlog(self):
         """MYLA-548: `listen` lets 128 connections wait to be accepted (the
         kernel queues one more); `listen_with(a, 300)` lets 200 connects at
-        once complete without an accept; a backlog below 1 is an error."""
+        once complete without an accept; a backlog below 1 is an error.
+
+        Windows takes a backlog as a hint (MYLA-926: 164 to 200 of the 200
+        connects came through `listen`'s 128 there, seen through WSL's
+        mirrored loopback), so there the default lets at least 128 wait, at
+        most the 200 tried, and the connects have longer to complete (a
+        refused one is tried again for a while: none comes through later
+        without an accept)."""
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, BACKLOG)
             binary = os.path.join(tmp, "prog")
@@ -1114,7 +1128,7 @@ class Tcp(unittest.TestCase):
             runs = {"interpreted": ([selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None),
                     "built": run_argv(binary, binary)}
             for name, (argv, exe) in runs.items():
-                for backlog, want in (("default", 129), ("300", 200)):
+                for backlog, want in (("default", range(128, 201) if ON_WINDOWS else 129), ("300", 200)):
                     with self.subTest(run=name, backlog=backlog):
                         proc = subprocess.Popen([*argv, backlog], executable=exe, stdin=subprocess.PIPE,
                                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -1126,7 +1140,7 @@ class Tcp(unittest.TestCase):
                                 c.setblocking(False)
                                 c.connect_ex(("127.0.0.1", port))
                                 socks.append(c)
-                            deadline = time.time() + 0.8
+                            deadline = time.time() + (2.0 if ON_WINDOWS else 0.8)
                             done = set()
                             while time.time() < deadline and len(done) < len(socks):
                                 _, ready, _ = select.select([], [c for c in socks if c not in done], [], 0.05)
@@ -1139,13 +1153,19 @@ class Tcp(unittest.TestCase):
                             for c in socks:
                                 c.close()
                         self.assertEqual((err, proc.returncode), ("", 0))
-                        self.assertEqual(len(done), want)
+                        if isinstance(want, range):
+                            self.assertIn(len(done), want)
+                        else:
+                            self.assertEqual(len(done), want)
                 with self.subTest(run=name, backlog=0):
                     p = subprocess.run([*argv, "0"], executable=exe, capture_output=True, text=True, timeout=60)
                     self.assertEqual((p.returncode, p.stderr.split("\n")[0]),
                                      (1, "runtime error: listen_with: backlog 0 is below 1"))
 
+    @linux_only("a limit of descriptors (RLIMIT_NOFILE) and /dev/null")
     def test_a_wait_after_the_descriptors_are_used_up(self):
+        import resource
+
         def limited():
             resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
         with tempfile.TemporaryDirectory() as tmp:
@@ -1162,8 +1182,11 @@ class Tcp(unittest.TestCase):
                         self.assertEqual((p.stdout, p.stderr, p.returncode),
                                          ("descriptors used up (true)\nread 1 byte\ndone\n", "", 0))
 
+    @linux_only("a limit of descriptors (RLIMIT_NOFILE)")
     @unittest.skipIf(TEST_TARGET != "", "the emulator needs descriptors of its own")
     def test_no_descriptor_for_the_poller_at_all(self):
+        import resource
+
         def limited():
             resource.setrlimit(resource.RLIMIT_NOFILE, (3, 3))
         with tempfile.TemporaryDirectory() as tmp:
@@ -1197,15 +1220,20 @@ class Tcp(unittest.TestCase):
                 with self.subTest(run=name):
                     proc = subprocess.Popen(argv, executable=exe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                             text=True, env=dict(os.environ, MYLA_THREADS="1"))
+                    # (the line read by a thread: Windows' `select` takes no pipe)
+                    got: list[str] = []
+                    reader = threading.Thread(target=lambda: got.append(proc.stderr.readline()), daemon=True)
                     try:
                         start = time.time()
-                        ready, _, _ = select.select([proc.stderr], [], [], 30)
-                        line = proc.stderr.readline() if ready else ""
+                        reader.start()
+                        reader.join(30)
+                        line = got[0] if got else ""
                         took = time.time() - start
                         time.sleep(0.5)
                         still = proc.poll() is None
                     finally:
                         proc.kill()
+                        reader.join()
                         proc.communicate()
                     self.assertTrue(line.startswith("warning: a blocking wait for a socket has held its worker "
                                                     "for a second while other tasks wait for one;"), line)
@@ -1333,6 +1361,9 @@ class FakeDns:
         while True:
             try:
                 msg, peer = self.sock.recvfrom(512)
+            except ConnectionResetError:
+                # (Windows: an earlier reply's port was closed, WSAECONNRESET)
+                continue
             except OSError:
                 return
             qid, flags, qd = struct.unpack(">HHH", msg[:6])
@@ -1466,7 +1497,11 @@ class Primitives(unittest.TestCase):
     """The primitives directly: what a port to another system must give
     (docs/Language/Standard-library/Net.md). `__io_errno` gives the cause
     codes of std.ioerror (D209): 32 would block, 33 a connect in progress, 11
-    invalid input, 9 unsupported, 34 a handle that isn't open."""
+    invalid input, 9 unsupported, 34 a handle that isn't open. What the
+    program reads it waits for first, its listener's connection and its
+    datagram: on Windows' loopback an accept just after the connect
+    completed would block, and a datagram sent to itself wasn't there yet
+    when read at once (MYLA-926)."""
 
     PROGRAM = """#allow(primitive)
 fun e(r: int) -> str {
@@ -1490,6 +1525,7 @@ fun main() {
     print(r == 0 || __io_errno() == 33)
     print(__sock_poll(c, 2, 1000))
     print(e(__sock_error(c)))
+    print(__sock_poll(l, 1, 1000))
     let s = __sock_accept(l)
     print(s >= 0)
     print(e(__sock_send(c, "hello", 1)))
@@ -1516,6 +1552,7 @@ fun main() {
     print(e(__sock_set_nonblocking(u, 1)))
     print(e(__sock_recv_from(u, 10).len()))
     print(e(__sock_send_to(u, "dgram", __sock_addr(u, 0))))
+    print(__sock_poll(u, 1, 1000))
     let d = __sock_recv_from(u, 3)
     print(f"{d.len()} {d[0]} {d[19:]}")
     print(e(__sock_close(u)))
@@ -1532,6 +1569,7 @@ fun main() {
 true
 2
 0 0
+1
 true
 4 0
 1
@@ -1556,6 +1594,7 @@ ello
 0 0
 0 32
 5 0
+1
 22 4 dgr
 0 0
 """
@@ -1565,12 +1604,16 @@ ello
 
     def test_the_configuration(self):
         src = "#allow(primitive)\nfun main() {\n    print(__net_config(0))\n    print(__net_config(7).len())\n}\n"
-        if TEST_TARGET == "x86_64-windows":
+        if BUILD_TARGET == "x86_64-windows":
             # MYLA-706: Windows keeps its hosts file under %SystemRoot%
-            # (the interpreter is Linux's)
-            with tempfile.TemporaryDirectory() as tmp:
-                path = write_program(tmp, src)
-                out, err, code = build_and_run_full(Program(path), argv0=path)
+            # (under Wine the interpreter is Linux's; on Windows itself a
+            # Windows program too, MYLA-926)
+            if ON_WINDOWS:
+                out, err, code = run_both(src)
+            else:
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = write_program(tmp, src)
+                    out, err, code = build_and_run_full(Program(path), argv0=path)
             self.assertEqual((err, code), ("", 0))
             self.assertRegex(out, r"(?i)^[a-z]:\\windows\\system32\\drivers\\etc\\hosts\n0\n$")
             return

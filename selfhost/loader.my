@@ -27,6 +27,7 @@
 
 from std.fs import read_to_string, exists, is_dir, current_dir
 from std.process import env
+import std.path_style as style   // `WINDOWS`: the machine the tools run on (MYLA-931)
 from .stdroot import is_embedded, embedded_text, embedded_parse, EMBEDDED_ROOT
 from .target import Target, host
 from .astcache import decode, body_part, cached_body, no_bodies, Cached, Bodies
@@ -471,8 +472,8 @@ pub fun for_host(entry: str, opts: LoadOptions) -> LoadOptions {
 fun same_file(a: str, b: str) -> bool {
     var x = normalize(a)
     var y = normalize(b)
-    let xa = x.len() > 0 && x[0] == '/'
-    let ya = y.len() > 0 && y[0] == '/'
+    let xa = is_absolute(x)
+    let ya = is_absolute(y)
     if xa != ya {
         let here = match current_dir() {
             Ok(d) => d,
@@ -590,7 +591,12 @@ pub fun std_tree_root(path: str) -> str {
                 k += 1
             }
             var root = join(parts, "/")
-            if p[0] == '/' { root = "/" + root } else if root == "" { root = "." }
+            if p[0] == '/' {
+                // (a Windows share keeps its two, MYLA-931)
+                root = (if p.len() > 1 && p[1] == '/' { "//" } else { "/" }) + root
+            } else if root == "" {
+                root = "."
+            }
             if exists(join_path(root, "std/rt.my")) { return root }
         }
         i -= 1
@@ -774,25 +780,66 @@ fun join(parts: [str], sep: str) -> str {
     return sb.build()
 }
 
-// `p` with `.` segments, empty segments and `x/..` pairs removed.
+// `p` with `/` for each `\` on Windows, where both separate a path's parts
+// (MYLA-931: a path Windows gives, `C:\w\main.my`, was one part, so its
+// directory was `.` and its relative imports weren't found); as it is
+// elsewhere. The loader compares and joins paths so: Windows reads `/` too.
+fun slashed(p: str) -> str {
+    if !style.WINDOWS { return p }
+    var sb = StringBuilder()
+    var i = 0
+    while i < p.len() {
+        if p[i] == '\\' { sb.append_byte('/') } else { sb.append_byte(p[i]) }
+        i += 1
+    }
+    return sb.build()
+}
+
+// Whether the slashed path `p` starts with a drive (`C:`), on Windows.
+fun has_drive(p: str) -> bool {
+    if !style.WINDOWS || p.len() < 2 || p[1] != ':' { return false }
+    return (p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')
+}
+
+// Whether `p` names a place from a root: `/`, and on Windows a drive (`C:/`)
+// or a share (`//server/share`) too, `\` as `/` (MYLA-931).
+#test("/w/main.my")[true]
+#test("w/main.my")[false]
+#test("")[false]
+pub fun is_absolute(p: str) -> bool {
+    let q = slashed(p)
+    return (q.len() > 0 && q[0] == '/') || has_drive(q)
+}
+
+// `p` with `.` segments, empty segments and `x/..` pairs removed (on
+// Windows its `\` read as `/`, a drive kept as its root, MYLA-931).
 #test("examples/maps.my/..")["examples"]
 #test("examples/errors/runtime_map_key_absent.my")["examples/errors/runtime_map_key_absent.my"]
 #test("examples/errors/type_literal_past_int8_max_annotated.my")["examples/errors/type_literal_past_int8_max_annotated.my"]
-pub fun normalize(p: str) -> str {
-    let absolute = p.len() > 0 && p[0] == '/'
+#test("/a/../..")["/"]
+pub fun normalize(path: str) -> str {
+    let p = slashed(path)
+    let drive = has_drive(p)
+    let rooted = p.len() > 0 && p[0] == '/'
+    let absolute = rooted || drive
     var out: [str] = []
     for seg in split_on(p, '/') {
         if seg == "" || seg == "." {
             continue
         }
-        if seg == ".." && out.len() > 0 && out[out.len() - 1] != ".." {
+        if seg == ".." && out.len() > 0 && out[out.len() - 1] != ".." && !(drive && out.len() == 1) {
             out.pop()
         } else if seg != ".." || !absolute {
             out.push(seg)
         }
     }
     let joined = join(out, "/")
-    if absolute { return "/" + joined }
+    if rooted {
+        // (a Windows share keeps its two)
+        if style.WINDOWS && p.len() > 1 && p[1] == '/' { return "//" + joined }
+        return "/" + joined
+    }
+    if drive && out.len() == 1 { return joined + "/" }
     if joined == "" { return "." }
     return joined
 }
@@ -813,8 +860,8 @@ pub fun in_stdlib(path: str, root: str) -> bool {
     if root == EMBEDDED_ROOT { return in_std_tree(path) }
     var p = normalize(path)
     var r = normalize(root)
-    let pa = p.len() > 0 && p[0] == '/'
-    let ra = r.len() > 0 && r[0] == '/'
+    let pa = is_absolute(p)
+    let ra = is_absolute(r)
     if pa != ra || climbs(p) || climbs(r) {
         let here = match current_dir() {
             Ok(d) => d,
@@ -853,7 +900,7 @@ pub fun is_std_module(path: str, root: str) -> bool {
 // would.
 fun in_std_tree(path: str) -> bool {
     var p = normalize(path)
-    if p.len() == 0 || p[0] != '/' {
+    if !is_absolute(p) {
         let here = match current_dir() {
             Ok(d) => d,
             Err(e) => { return false },
@@ -2368,7 +2415,8 @@ fun check_packages(packages: [(str, str)]) -> Result<[(str, str)], Report> {
         if !valid_package_name(name) { return Err(list_error(format("invalid package name '{}'", name))) }
         if has(names, name) { return Err(list_error(format("package '{}' is given twice", name))) }
         if dir == "" { return Err(list_error(format("package '{}' has no directory", name))) }
-        if !is_dir(dir) { return Err(list_error(format("package '{}': '{}' is not a directory", name, dir))) }
+        // (with `/` on Windows, as every path a message names, D311)
+        if !is_dir(dir) { return Err(list_error(format("package '{}': '{}' is not a directory", name, slashed(dir)))) }
         names.push(name)
         out.push((name, normalize(dir)))
     }
