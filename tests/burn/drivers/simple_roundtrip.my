@@ -1,0 +1,179 @@
+// The round trips of std.pnm, std.bmp and std.qoi (MYLA-960), for
+// tests/burn/test_simple_images.py. Each line of stdin is an input file and
+// an output prefix, apart by a tab, until an empty line or the end. The
+// input is decoded by its extension (.qoi, .bmp, anything else std.pnm), at
+// 8 bits and, for PNM, at 16; then every encoder writes it again to
+// `<prefix>.<name>`, the file is decoded again, compared with what that
+// encoder keeps of the image, and that decode is written as PAM to
+// `<prefix>.<name>.pam` (for Pillow to be compared with). One line an input:
+//
+//     ok <name> <name> ...
+//     diff <name>: <why>
+//     err <the input's decoding error>
+
+import std.image as image
+from std.image import Image, Image8, Image16, ImageError, Layout, Sample
+import std.pnm as pnm
+from std.pnm import Kind
+import std.bmp as bmp
+import std.qoi as qoi
+import std.fs as fs
+from std.io import stdin, println, Reader
+
+// What `kind` keeps of `img`: its gray (thresholded at half scale for
+// PBM), its RGB, or all of it.
+fun kept<S: Sample>(img: Image<S>, kind: Kind) -> Image<S> {
+    return match kind {
+        Pbm => {
+            var g = img.convert(Layout.Gray)
+            for i in 0..g.data.len() {
+                g.data[i] = if g.data[i].to_unorm8() < 128u8 { S.from_unorm8(0u8) } else { S.max_value() }
+            }
+            g
+        }
+        Pgm => img.convert(Layout.Gray)
+        Ppm => img.convert(Layout.Rgb)
+        Pam => img
+    }
+}
+
+// What BMP and QOI keep: the image in colour.
+fun in_colour(img: Image8) -> Image8 {
+    if img.layout.is_color() {
+        return img
+    }
+    return img.convert(if img.layout.has_alpha() { Layout.Rgba } else { Layout.Rgb })
+}
+
+// The PNM kinds and forms, and their files' names.
+fun kinds() -> [(Kind, bool, str)] {
+    return [(Kind.Pbm, true, "p1.pbm"), (Kind.Pbm, false, "p4.pbm"), (Kind.Pgm, true, "p2.pgm"), (Kind.Pgm, false, "p5.pgm"),
+        (Kind.Ppm, true, "p3.ppm"), (Kind.Ppm, false, "p6.ppm"), (Kind.Pam, false, "p7.pam")]
+}
+
+// The files of one input being written and checked.
+struct Run {
+    prefix: str,
+    names: [str],
+    problem: str,
+}
+
+impl Run {
+    fun save(var self, name: str, b: [uint8]) {
+        if let Err(e) = fs.write_bytes(self.prefix + "." + name, b) {
+            self.problem = f"diff {name}: cannot write: {e}"
+        }
+    }
+
+    // `b`, written as `name`, decoded to `got`, which must be `want`.
+    fun check8(var self, name: str, b: [uint8], got: Result<Image8, ImageError>, want: Image8) {
+        if self.problem.len() > 0 {
+            return
+        }
+        self.save(name, b)
+        match got {
+            Ok(img) => {
+                if img != want {
+                    self.problem = f"diff {name}: decoded as {img.width}x{img.height} {img.layout}, not as written"
+                }
+                self.save(name + ".pam", pnm.encode_as(img, Kind.Pam, false))
+            }
+            Err(e) => {
+                self.problem = f"diff {name}: {e}"
+            }
+        }
+        self.names.push(name)
+    }
+
+    fun check16(var self, name: str, b: [uint8], got: Result<Image16, ImageError>, want: Image16) {
+        if self.problem.len() > 0 {
+            return
+        }
+        self.save(name, b)
+        match got {
+            Ok(img) => {
+                if img != want {
+                    self.problem = f"diff {name}: decoded as {img.width}x{img.height} {img.layout}, not as written"
+                }
+                self.save(name + ".pam", pnm.encode16_as(img, Kind.Pam, false))
+            }
+            Err(e) => {
+                self.problem = f"diff {name}: {e}"
+            }
+        }
+        self.names.push(name)
+    }
+}
+
+// The round trips of the file `path`.
+fun round_trips(path: str, prefix: str) -> str {
+    let data = match fs.read_bytes(path) {
+        Ok(d) => d
+        Err(e) => {
+            return f"err cannot read {path}: {e}"
+        }
+    }
+    let decoded = if path.ends_with(".qoi") { qoi.decode(data) } else if path.ends_with(".bmp") { bmp.decode(data) } else { pnm.decode(data) }
+    let img = match decoded {
+        Ok(i) => i
+        Err(e) => {
+            return f"err {e}"
+        }
+    }
+    var run = Run { prefix: prefix, names: [], problem: "" }
+    let c = in_colour(img)
+    let b = bmp.encode(img)
+    run.check8("bmp", b, bmp.decode(b), c)
+    let q = qoi.encode(img)
+    run.check8("qoi", q, qoi.decode(q), c)
+    let n = pnm.encode(img)
+    run.check8("pnm", n, pnm.decode(n), img)
+    for (kind, ascii, name) in kinds() {
+        let e = pnm.encode_as(img, kind, ascii)
+        run.check8(name, e, pnm.decode(e), kept<uint8>(img, kind))
+    }
+    if !path.ends_with(".qoi") && !path.ends_with(".bmp") {
+        match pnm.decode16(data) {
+            Ok(img16) => {
+                let n16 = pnm.encode16(img16)
+                run.check16("16.pnm", n16, pnm.decode16(n16), img16)
+                for (kind, ascii, name) in kinds() {
+                    let e = pnm.encode16_as(img16, kind, ascii)
+                    run.check16("16." + name, e, pnm.decode16(e), kept<uint16>(img16, kind))
+                }
+            }
+            Err(e) => {
+                run.problem = f"diff 16: decode16 refuses what decode reads: {e}"
+            }
+        }
+    }
+    if run.problem.len() > 0 {
+        return run.problem
+    }
+    return "ok " + run.names.join(" ")
+}
+
+struct Lines {
+    r: Reader,
+}
+
+impl Lines {
+    fun next(var self) -> Option<(str, str)> {
+        let line = match self.r.read_line() {
+            Ok(Some(l)) => l
+            _ => ""
+        }
+        let parts = line.split("\t")
+        if parts.len() != 2 {
+            return None
+        }
+        return Some((parts[0], parts[1]))
+    }
+}
+
+fun main() {
+    var lines = Lines { r: stdin() }
+    while let Some((path, prefix)) = lines.next() {
+        println(round_trips(path, prefix))
+    }
+}

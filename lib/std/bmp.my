@@ -1,0 +1,612 @@
+// std.bmp: Windows bitmaps (MYLA-960). Reads 1, 4 and 8 bits a pixel with a
+// palette, 16, 24 and 32 bits, bottom-up and top-down, uncompressed
+// (BI_RGB), RLE8, RLE4 and BI_BITFIELDS (with an alpha mask, or
+// BI_ALPHABITFIELDS), in the core (OS/2 1.x), BITMAPINFOHEADER, V2, V3, V4
+// and V5 headers. Writes 24 bits, or 32 with an alpha mask (a V4 header)
+// when the image has alpha.
+//
+// A palette image decodes to Rgb; 16 and 32 bits to Rgba where an alpha mask
+// is given, else Rgb. A channel of fewer than 8 bits is scaled as Pillow
+// scales it, truncated: `v * 255 / (2^bits - 1)`. Every offset is checked: a
+// short or broken file is an `Err`, never a runtime error.
+
+import std.image as image
+from std.image import Image, Image8, ImageInfo, ImageError, Layout
+import std.bytes as bytes
+from std.bytes import ByteReader
+import std.list as list_m // `filled`
+import std.option as option_m // `expect` in the tests
+
+// The compressions this module reads.
+const BI_RGB: uint32 = 0
+const BI_RLE8: uint32 = 1
+const BI_RLE4: uint32 = 2
+const BI_BITFIELDS: uint32 = 3
+const BI_JPEG: uint32 = 4
+const BI_PNG: uint32 = 5
+const BI_ALPHABITFIELDS: uint32 = 6
+
+// A parsed header.
+struct Header {
+    width: int,
+    height: int,
+    top_down: bool,
+    bpp: int,
+    compression: uint32,
+    // red, green, blue, alpha: for 16 and 32 bits
+    masks: [uint32],
+    // 256 entries of red, green and blue, black past the file's own
+    palette: [uint8],
+    // where the pixels start
+    offset: int,
+    layout: Layout,
+}
+
+// The masks of 16 and 32 bits without BI_BITFIELDS: 5-5-5 and 8-8-8.
+#test(16)[[0x7C00u32, 0x3E0u32, 0x1Fu32, 0u32]]
+#test(32)[[0xFF0000u32, 0xFF00u32, 0xFFu32, 0u32]]
+fun default_masks(bpp: int) -> [uint32] {
+    if bpp == 16 {
+        return [0x7C00u32, 0x3E0u32, 0x1Fu32, 0u32]
+    }
+    return [0xFF0000u32, 0xFF00u32, 0xFFu32, 0u32]
+}
+
+// The parser: a reader of the file, little endian.
+struct Parser {
+    r: ByteReader,
+}
+
+impl Parser {
+    fun u16(var self) -> Result<int, ImageError> {
+        let Some(v) = self.r.u16_le() else {
+            return Err(ImageError.Truncated)
+        }
+        return Ok(v as int)
+    }
+
+    fun u32(var self) -> Result<uint32, ImageError> {
+        let Some(v) = self.r.u32_le() else {
+            return Err(ImageError.Truncated)
+        }
+        return Ok(v)
+    }
+
+    fun i32(var self) -> Result<int, ImageError> {
+        let Some(v) = self.r.i32_le() else {
+            return Err(ImageError.Truncated)
+        }
+        return Ok(v)
+    }
+
+    // The headers of the file.
+    fun header(var self) -> Result<Header, ImageError> {
+        let b = self.r.data
+        if b.len() == 0 || (b.len() == 1 && b[0] == 'B') {
+            return Err(ImageError.Truncated)
+        }
+        if !self.r.eat([66u8, 77u8]) {
+            return Err(ImageError.BadSignature)
+        }
+        self.u32()? // the file's size, which writers get wrong
+        self.u32()? // reserved
+        let offset = self.u32()?
+        let hsize = self.u32()?
+        var w = 0
+        var h = 0
+        var bpp = 0
+        var compression = BI_RGB
+        var colors = 0u32
+        var masks = [0u32, 0u32, 0u32, 0u32]
+        let core = hsize == 12u32
+        if core {
+            w = self.u16()?
+            h = self.u16()?
+            self.u16()? // planes
+            bpp = self.u16()?
+        } else if hsize >= 40u32 && hsize <= 124u32 {
+            w = self.i32()?
+            h = self.i32()?
+            self.u16()? // planes
+            bpp = self.u16()?
+            compression = self.u32()?
+            self.u32()? // the pixels' size
+            self.u32()? // resolution
+            self.u32()?
+            colors = self.u32()?
+            self.u32()? // the colours that matter
+            if hsize >= 52u32 {
+                for i in 0..3 {
+                    masks[i] = self.u32()?
+                }
+            }
+            if hsize >= 56u32 {
+                masks[3] = self.u32()?
+            }
+            if !self.r.seek(14 + (hsize as int)) {
+                return Err(ImageError.Truncated)
+            }
+        } else {
+            return Err(ImageError.Unsupported(f"a BMP header of {hsize} bytes"))
+        }
+        if w < 0 {
+            return Err(ImageError.Corrupt(f"width {w}"))
+        }
+        if h == -2147483648 {
+            return Err(ImageError.Corrupt(f"height {h}"))
+        }
+        let top_down = h < 0
+        if top_down {
+            h = -h
+        }
+        if compression == BI_JPEG || compression == BI_PNG {
+            return Err(ImageError.Unsupported(if compression == BI_JPEG { "BMP with JPEG" } else { "BMP with PNG" }))
+        }
+        let ok = match bpp {
+            1 | 4 | 8 => compression == BI_RGB || (compression == BI_RLE8 && bpp == 8) || (compression == BI_RLE4 && bpp == 4)
+            16 | 32 => compression == BI_RGB || compression == BI_BITFIELDS || compression == BI_ALPHABITFIELDS
+            24 => compression == BI_RGB
+            _ => false
+        }
+        if !ok {
+            return Err(ImageError.Unsupported(f"BMP of {bpp} bits a pixel, compression {compression}"))
+        }
+        if compression == BI_BITFIELDS || compression == BI_ALPHABITFIELDS {
+            if hsize < 52u32 {
+                // the masks follow a BITMAPINFOHEADER
+                for i in 0..3 {
+                    masks[i] = self.u32()?
+                }
+                if compression == BI_ALPHABITFIELDS {
+                    masks[3] = self.u32()?
+                }
+            }
+        } else if bpp == 16 || bpp == 32 {
+            masks = default_masks(bpp)
+        }
+        var palette = list_m.filled(768, 0u8)
+        if bpp <= 8 {
+            let most = 1u32 << (bpp as uint32)
+            let n = if colors == 0u32 || colors > most { most as int } else { colors as int }
+            let size = if core { 3 } else { 4 }
+            for i in 0..n {
+                let Some(e) = self.r.take(size) else {
+                    return Err(ImageError.Truncated)
+                }
+                palette[3 * i] = e[2]
+                palette[3 * i + 1] = e[1]
+                palette[3 * i + 2] = e[0]
+            }
+        }
+        if (offset as int64) > (b.len() as int64) {
+            return Err(ImageError.Corrupt(f"the pixels at {offset} are past the end"))
+        }
+        let alpha = (bpp == 16 || bpp == 32) && masks[3] != 0u32
+        let layout = if alpha { Layout.Rgba } else { Layout.Rgb }
+        return Ok(Header { width: w, height: h, top_down: top_down, bpp: bpp, compression: compression, masks: masks,
+            palette: palette, offset: offset as int, layout: layout })
+    }
+}
+
+// The bits a sample of `h` holds: the palette's index bits, a mask's widest
+// channel, or 8.
+fun bit_depth(h: Header) -> int {
+    if h.bpp <= 8 {
+        return h.bpp
+    }
+    if h.bpp == 24 {
+        return 8
+    }
+    var most = 0
+    for m in h.masks {
+        let (_, max) = mask_shape(m)
+        var n = 0
+        var v = max
+        while v > 0u32 {
+            n += 1
+            v >>= 1u32
+        }
+        most = if n > most { n } else { most }
+    }
+    return most
+}
+
+// A mask's shift and its largest value: 0x7E0 is (5, 63).
+#test(0x7E0u32)[(5u32, 63u32)]
+#test(0xFF000000u32)[(24u32, 255u32)]
+#test(0u32)[(0u32, 0u32)]
+fun mask_shape(m: uint32) -> (uint32, uint32) {
+    if m == 0u32 {
+        return (0u32, 0u32)
+    }
+    var s = 0u32
+    while (m >> s) & 1u32 == 0u32 {
+        s += 1u32
+    }
+    return (s, m >> s)
+}
+
+// What `b` holds, from its headers alone: size, layout (Rgb or Rgba), the
+// bits of a sample (a palette's index bits for 1 to 8 bits a pixel), one
+// frame.
+#test([66u8, 77u8, 62u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 54u8, 0u8, 0u8, 0u8, 40u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8, 255u8, 255u8, 255u8, 255u8, 1u8, 0u8, 24u8, 0u8, 0u8, 0u8, 0u8, 0u8, 8u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 0u8, 0u8])[Ok(ImageInfo { width: 2, height: 1, layout: Layout.Rgb, bit_depth: 8, frames: 1, format: "bmp" })]
+#test([77u8, 66u8, 0u8])[Err(ImageError.BadSignature)]
+#test([66u8, 77u8, 0u8])[Err(ImageError.Truncated)]
+pub fun info(b: [uint8]) -> Result<ImageInfo, ImageError> {
+    var p = Parser { r: bytes.reader(b) }
+    let h = p.header()?
+    return Ok(ImageInfo { width: h.width, height: h.height, layout: h.layout, bit_depth: bit_depth(h), frames: 1, format: "bmp" })
+}
+
+// The image in `b`, 8 bits a sample, Rgb or Rgba. More than `max_pixels`
+// pixels is `TooLarge`, before anything is allocated.
+#test([66u8, 77u8, 62u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 54u8, 0u8, 0u8, 0u8, 40u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8, 255u8, 255u8, 255u8, 255u8, 1u8, 0u8, 24u8, 0u8, 0u8, 0u8, 0u8, 0u8, 8u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 0u8, 0u8], 100i64)[Ok(Image { width: 2, height: 1, layout: Layout.Rgb, data: [3u8, 2u8, 1u8, 6u8, 5u8, 4u8] })]
+#test([66u8, 77u8, 62u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 54u8, 0u8, 0u8, 0u8, 40u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8, 255u8, 255u8, 255u8, 255u8, 1u8, 0u8, 24u8, 0u8, 0u8, 0u8, 0u8, 0u8, 8u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8, 3u8, 4u8, 5u8], 100i64)[Err(ImageError.Truncated)]
+#test([66u8, 77u8, 62u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 54u8, 0u8, 0u8, 0u8, 40u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8, 255u8, 255u8, 255u8, 255u8, 1u8, 0u8, 24u8, 0u8, 0u8, 0u8, 0u8, 0u8, 8u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 0u8, 0u8], 1i64)[Err(ImageError.TooLarge(2i64))]
+pub fun decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError> {
+    var p = Parser { r: bytes.reader(b) }
+    let h = p.header()?
+    image.check_size(h.width, h.height, h.layout.channels(), max_pixels)?
+    if h.width == 0 || h.height == 0 {
+        // no pixels: nothing to read, and no loop over a side of up to 2^31 - 1
+        return Ok(Image { width: h.width, height: h.height, layout: h.layout, data: [] })
+    }
+    if h.compression == BI_RLE8 || h.compression == BI_RLE4 {
+        return rle(b, h)
+    }
+    let stride = ((h.width as int64) * (h.bpp as int64) + 31i64) / 32i64 * 4i64
+    if (h.offset as int64) + stride * (h.height as int64) > (b.len() as int64) {
+        return Err(ImageError.Truncated)
+    }
+    let st = stride as int
+    let w = h.width
+    let (s0, m0) = mask_shape(h.masks[0])
+    let (s1, m1) = mask_shape(h.masks[1])
+    let (s2, m2) = mask_shape(h.masks[2])
+    let (s3, m3) = mask_shape(h.masks[3])
+    var out: [uint8] = []
+    for y in 0..h.height {
+        let row = if h.top_down { y } else { h.height - 1 - y }
+        let base = h.offset + row * st
+        if h.bpp == 24 {
+            var i = base
+            for x in 0..w {
+                out.push(b[i + 2])
+                out.push(b[i + 1])
+                out.push(b[i])
+                i += 3
+            }
+        } else if h.bpp <= 8 {
+            let pal = h.palette
+            let per = 8 / h.bpp
+            let mask = (1 << h.bpp) - 1
+            for x in 0..w {
+                let byte = b[base + x / per] as int
+                let k = if h.bpp == 8 { byte } else { (byte >> (8 - h.bpp * (x % per + 1))) & mask }
+                out.push(pal[3 * k])
+                out.push(pal[3 * k + 1])
+                out.push(pal[3 * k + 2])
+            }
+        } else {
+            let step = h.bpp / 8
+            let alpha = h.layout == Layout.Rgba
+            var i = base
+            for x in 0..w {
+                var v = (b[i] as uint32) | ((b[i + 1] as uint32) << 8u32)
+                if step == 4 {
+                    v = v | ((b[i + 2] as uint32) << 16u32) | ((b[i + 3] as uint32) << 24u32)
+                }
+                i += step
+                out.push(scaled(v, s0, m0))
+                out.push(scaled(v, s1, m1))
+                out.push(scaled(v, s2, m2))
+                if alpha {
+                    out.push(scaled(v, s3, m3))
+                }
+            }
+        }
+    }
+    return Ok(Image { width: w, height: h.height, layout: h.layout, data: out })
+}
+
+// The channel of `v` that the mask `m >> s` picks, scaled to 8 bits.
+#test(0x7E0u32, 5u32, 63u32)[255u8]
+#test(0x20u32, 5u32, 63u32)[4u8]
+#test(0x12345678u32, 8u32, 255u32)[0x56u8]
+#test(5u32, 0u32, 0u32)[0u8]
+fun scaled(v: uint32, s: uint32, m: uint32) -> uint8 {
+    if m == 0u32 {
+        return 0u8
+    }
+    let x = (v >> s) & m
+    if m == 255u32 {
+        return x as uint8
+    }
+    return (((x as uint64) * 255u64) / (m as uint64)) as uint8
+}
+
+// An RLE8 or RLE4 image: runs of an index, stretches of indices as they
+// are, ends of lines, a jump (delta) and the end of the bitmap. Pixels a
+// jump or an early end of line passes over are index 0, and a run past the
+// end of its row is cut there, as Pillow reads them. The data may stop
+// after the last row's end of line, without the end of the bitmap.
+fun rle(b: [uint8], h: Header) -> Result<Image8, ImageError> {
+    let w = h.width
+    let four = h.compression == BI_RLE4
+    var idx = list_m.filled(w * h.height, 0u8)
+    var x = 0
+    var y = 0
+    var p = h.offset
+    while y < h.height {
+        if p + 2 > b.len() {
+            return Err(ImageError.Truncated)
+        }
+        let n = b[p] as int
+        let c = b[p + 1]
+        p += 2
+        if n > 0 {
+            let hi = c >> 4u8
+            let lo = c & 15u8
+            for k in 0..n {
+                if x < w {
+                    idx[y * w + x] = if !four { c } else if k % 2 == 0 { hi } else { lo }
+                    x += 1
+                }
+            }
+        } else if c == 0u8 {
+            x = 0
+            y += 1
+        } else if c == 1u8 {
+            break
+        } else if c == 2u8 {
+            if p + 2 > b.len() {
+                return Err(ImageError.Truncated)
+            }
+            x += b[p] as int
+            y += b[p + 1] as int
+            x = if x > w { w } else { x }
+            p += 2
+        } else {
+            let count = c as int
+            let size = if four { (count + 1) / 2 } else { count }
+            let padded = size + size % 2
+            if p + padded > b.len() {
+                return Err(ImageError.Truncated)
+            }
+            for k in 0..count {
+                if x < w {
+                    let byte = b[p + (if four { k / 2 } else { k })]
+                    idx[y * w + x] = if !four { byte } else if k % 2 == 0 { byte >> 4u8 } else { byte & 15u8 }
+                    x += 1
+                }
+            }
+            p += padded
+        }
+    }
+    let pal = h.palette
+    var out: [uint8] = []
+    for y2 in 0..h.height {
+        let row = if h.top_down { y2 } else { h.height - 1 - y2 }
+        for x2 in 0..w {
+            let k = idx[row * w + x2] as int
+            out.push(pal[3 * k])
+            out.push(pal[3 * k + 1])
+            out.push(pal[3 * k + 2])
+        }
+    }
+    return Ok(Image { width: w, height: h.height, layout: h.layout, data: out })
+}
+
+// -- writing --------------------------------------------------------------------
+
+// `img` as a BMP file, bottom-up: 24 bits (BI_RGB, a BITMAPINFOHEADER) for
+// a layout without alpha, gray repeated; 32 bits (BI_BITFIELDS with an
+// alpha mask, a BITMAPV4HEADER, sRGB) for one with alpha.
+#test(image.from_data<uint8>(1, 1, Layout.Rgb, [1u8, 2u8, 3u8]).expect(""))[[66u8, 77u8, 58u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 54u8, 0u8, 0u8, 0u8, 40u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 1u8, 0u8, 24u8, 0u8, 0u8, 0u8, 0u8, 0u8, 4u8, 0u8, 0u8, 0u8, 19u8, 11u8, 0u8, 0u8, 19u8, 11u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 3u8, 2u8, 1u8, 0u8]]
+pub fun encode(img: Image8) -> [uint8] {
+    let alpha = img.layout.has_alpha()
+    let src = if img.layout.is_color() { img } else { img.convert(if alpha { Layout.Rgba } else { Layout.Rgb }) }
+    let w = src.width
+    let ch = src.layout.channels()
+    let bpp = if alpha { 32 } else { 24 }
+    let stride = (((w as int64) * (bpp as int64) + 31i64) / 32i64 * 4i64) as int
+    let hsize = if alpha { 108 } else { 40 }
+    let offset = 14 + hsize
+    let size = (stride as int64) * (src.height as int64)
+    var hw = bytes.writer()
+    hw.put_str("BM")
+    hw.put_u32_le(((offset as int64) + size) as uint32)
+    hw.put_u32_le(0u32)
+    hw.put_u32_le(offset as uint32)
+    hw.put_u32_le(hsize as uint32)
+    hw.put_i32_le(w)
+    hw.put_i32_le(src.height)
+    hw.put_u16_le(1u16)
+    hw.put_u16_le(bpp as uint16)
+    hw.put_u32_le(if alpha { BI_BITFIELDS } else { BI_RGB })
+    hw.put_u32_le(size as uint32)
+    hw.put_i32_le(2835) // 72 dpi
+    hw.put_i32_le(2835)
+    hw.put_u32_le(0u32)
+    hw.put_u32_le(0u32)
+    if alpha {
+        hw.put_u32_le(0x00FF0000u32)
+        hw.put_u32_le(0x0000FF00u32)
+        hw.put_u32_le(0x000000FFu32)
+        hw.put_u32_le(0xFF000000u32)
+        hw.put_u32_le(0x73524742u32) // LCS_sRGB
+        hw.put_zeros(48) // the endpoints and gammas, unused with sRGB
+    }
+    var out = hw.finish()
+    let pad = stride - w * (bpp / 8)
+    let d = src.data
+    // the rows, the last first; none without pixels (a side may be 2^31 - 1)
+    var y = if w == 0 { -1 } else { src.height - 1 }
+    while y >= 0 {
+        var i = y * w * ch
+        for x in 0..w {
+            out.push(d[i + 2])
+            out.push(d[i + 1])
+            out.push(d[i])
+            if alpha {
+                out.push(d[i + 3])
+            }
+            i += ch
+        }
+        for k in 0..pad {
+            out.push(0u8)
+        }
+        y -= 1
+    }
+    return out
+}
+
+// -- tests ----------------------------------------------------------------------
+
+// A BMP file with a BITMAPINFOHEADER: `w` by `h` (negative: top-down) at
+// `bpp`, `extra` (masks, a palette) after the header, then `pixels`.
+fun test_file(w: int, h: int, bpp: int, compression: uint32, colors: int, extra: [uint8], pixels: [uint8]) -> [uint8] {
+    var hw = bytes.writer()
+    hw.put_str("BM")
+    hw.put_u32_le(0u32)
+    hw.put_u32_le(0u32)
+    hw.put_u32_le((54 + extra.len()) as uint32)
+    hw.put_u32_le(40u32)
+    hw.put_i32_le(w)
+    hw.put_i32_le(h)
+    hw.put_u16_le(1u16)
+    hw.put_u16_le(bpp as uint16)
+    hw.put_u32_le(compression)
+    hw.put_u32_le(0u32)
+    hw.put_i32_le(0)
+    hw.put_i32_le(0)
+    hw.put_u32_le(colors as uint32)
+    hw.put_u32_le(0u32)
+    hw.put_bytes(extra)
+    hw.put_bytes(pixels)
+    return hw.finish()
+}
+
+fun rgb_image(w: int, h: int, data: [uint8]) -> Image8 {
+    return image.from_data<uint8>(w, h, Layout.Rgb, data).expect("an image")
+}
+
+// Blue, green and red as BMP palette entries (blue, green, red, 0).
+fun test_palette() -> [uint8] {
+    return [255u8, 0u8, 0u8, 0u8, 0u8, 255u8, 0u8, 0u8, 0u8, 0u8, 255u8, 0u8]
+}
+
+#test
+fun encodings_round_trip() {
+    let rgba = image.from_data<uint8>(3, 2, Layout.Rgba, [1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 0u8,
+        12u8, 13u8, 14u8, 255u8, 15u8, 16u8, 17u8, 128u8, 18u8, 19u8, 20u8, 21u8]).expect("3x2")
+    let b = encode(rgba)
+    assert(b[28] == 32u8 && b[14] == 108u8 && b[30] == 3u8)
+    assert(decode(b, image.MAX_PIXELS).expect("rgba") == rgba)
+    let rgb = rgba.convert(Layout.Rgb)
+    let c = encode(rgb)
+    assert(c[28] == 24u8 && c[14] == 40u8 && c.len() == 54 + 2 * 12)
+    assert(decode(c, image.MAX_PIXELS).expect("rgb") == rgb)
+    let gray = rgba.convert(Layout.Gray)
+    assert(decode(encode(gray), image.MAX_PIXELS).expect("gray") == gray.convert(Layout.Rgb))
+    let ga = rgba.convert(Layout.GrayAlpha)
+    assert(decode(encode(ga), image.MAX_PIXELS).expect("gray+alpha") == ga.convert(Layout.Rgba))
+    let i = info(b).expect("info")
+    assert(i.width == 3 && i.height == 2 && i.layout == Layout.Rgba && i.bit_depth == 8)
+}
+
+#test
+fun palettes() {
+    // 1 bit, bottom-up: the last row first, rows padded to 4 bytes
+    let one = test_file(3, 2, 1, BI_RGB, 2, test_palette()[:8], [0b10100000u8, 0u8, 0u8, 0u8, 0b01000000u8, 0u8, 0u8, 0u8])
+    assert(decode(one, image.MAX_PIXELS).expect("1 bit") == rgb_image(3, 2, [0u8, 0u8, 255u8, 0u8, 255u8, 0u8, 0u8, 0u8, 255u8,
+        0u8, 255u8, 0u8, 0u8, 0u8, 255u8, 0u8, 255u8, 0u8]))
+    assert(info(one).expect("info").bit_depth == 1)
+    // 4 bits, top-down, an index past the palette is black
+    let four = test_file(3, -1, 4, BI_RGB, 3, test_palette(), [0x21u8, 0x50u8, 0u8, 0u8])
+    assert(decode(four, image.MAX_PIXELS).expect("4 bits") == rgb_image(3, 1, [255u8, 0u8, 0u8, 0u8, 255u8, 0u8, 0u8, 0u8, 0u8]))
+    // 8 bits in a core header: three-byte palette entries
+    var hw = bytes.writer()
+    hw.put_str("BM")
+    hw.put_u32_le(0u32)
+    hw.put_u32_le(0u32)
+    hw.put_u32_le((26 + 3 * 256) as uint32)
+    hw.put_u32_le(12u32)
+    hw.put_u16_le(2u16)
+    hw.put_u16_le(1u16)
+    hw.put_u16_le(1u16)
+    hw.put_u16_le(8u16)
+    for k in 0..256 {
+        hw.put_bytes([k as uint8, 0u8, 255u8 - (k as uint8)])
+    }
+    hw.put_bytes([7u8, 200u8, 0u8, 0u8])
+    assert(decode(hw.finish(), image.MAX_PIXELS).expect("core") == rgb_image(2, 1, [248u8, 0u8, 7u8, 55u8, 0u8, 200u8]))
+}
+
+#test
+fun run_lengths() {
+    // RLE8, 4x3: a run, the end of a line, three indices as they are (padded
+    // to a word), the end of a line, a jump one to the right, a run, the end
+    let rle8 = test_file(4, 3, 8, BI_RLE8, 3, test_palette(), [2u8, 1u8, 0u8, 0u8, 0u8, 3u8, 2u8, 1u8, 2u8, 0u8, 0u8, 0u8,
+        0u8, 2u8, 1u8, 0u8, 1u8, 2u8, 0u8, 1u8])
+    let b = rgb_image(1, 1, [0u8, 0u8, 255u8]).data
+    let g = rgb_image(1, 1, [0u8, 255u8, 0u8]).data
+    let r = rgb_image(1, 1, [255u8, 0u8, 0u8]).data
+    let want = b.concat(r).concat(b).concat(b).concat(r).concat(g).concat(r).concat(b).concat(g).concat(g).concat(b).concat(b)
+    assert(decode(rle8, image.MAX_PIXELS).expect("rle8") == rgb_image(4, 3, want))
+    // RLE4, 5x1: a run alternating two indices, then three as they are
+    let rle4 = test_file(5, 1, 4, BI_RLE4, 3, test_palette(), [2u8, 0x12u8, 0u8, 3u8, 0x21u8, 0x00u8, 0u8, 1u8])
+    assert(decode(rle4, image.MAX_PIXELS).expect("rle4") == rgb_image(5, 1, g.concat(r).concat(r).concat(g).concat(b)))
+    // a run past the end of its row is cut there; data cut short is Truncated
+    let over = test_file(2, 1, 8, BI_RLE8, 3, test_palette(), [250u8, 1u8, 0u8, 1u8])
+    assert(decode(over, image.MAX_PIXELS).expect("over") == rgb_image(2, 1, g.concat(g)))
+    let cut = test_file(2, 2, 8, BI_RLE8, 3, test_palette(), [2u8, 1u8, 0u8])
+    assert(decode(cut, image.MAX_PIXELS) == Err(ImageError.Truncated))
+}
+
+#test
+fun bit_fields() {
+    // 16 bits 5-6-5: white, green, and the smallest step of each channel
+    let masks = [0x00u8, 0xF8u8, 0u8, 0u8, 0xE0u8, 0x07u8, 0u8, 0u8, 0x1Fu8, 0u8, 0u8, 0u8]
+    let f = test_file(3, 1, 16, BI_BITFIELDS, 0, masks, [0xFFu8, 0xFFu8, 0xE0u8, 0x07u8, 0x21u8, 0x08u8, 0u8, 0u8])
+    assert(decode(f, image.MAX_PIXELS).expect("565") == rgb_image(3, 1, [255u8, 255u8, 255u8, 0u8, 255u8, 0u8, 8u8, 4u8, 8u8]))
+    assert(info(f).expect("info").bit_depth == 6)
+    // 16 bits BI_RGB is 5-5-5
+    let f555 = test_file(1, 1, 16, BI_RGB, 0, [], [0x1Fu8, 0x7Cu8, 0u8, 0u8])
+    assert(decode(f555, image.MAX_PIXELS).expect("555") == rgb_image(1, 1, [255u8, 0u8, 255u8]))
+    // 32 bits with an alpha mask (BI_ALPHABITFIELDS after the header)
+    let am = [0u8, 0u8, 0xFFu8, 0u8, 0u8, 0xFFu8, 0u8, 0u8, 0xFFu8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0xFFu8]
+    let a = test_file(1, 1, 32, BI_ALPHABITFIELDS, 0, am, [1u8, 2u8, 3u8, 4u8])
+    assert(decode(a, image.MAX_PIXELS).expect("alpha") == image.from_data<uint8>(1, 1, Layout.Rgba, [3u8, 2u8, 1u8, 4u8]).expect("1x1"))
+    // 32 bits BI_RGB: the fourth byte isn't alpha
+    let x = test_file(1, 1, 32, BI_RGB, 0, [], [1u8, 2u8, 3u8, 4u8])
+    assert(decode(x, image.MAX_PIXELS).expect("x") == rgb_image(1, 1, [3u8, 2u8, 1u8]))
+}
+
+// A file of no pixels decodes at once, even with a side of 2^31 - 1.
+#test
+fun no_pixels() {
+    let none = rgb_image(0, 2147483647, [])
+    assert(decode(test_file(0, 2147483647, 24, BI_RGB, 0, [], []), image.MAX_PIXELS) == Ok(none), "24 bits")
+    assert(decode(test_file(0, -2147483647, 32, BI_RGB, 0, [], []), image.MAX_PIXELS) == Ok(none), "top-down, 32 bits")
+    assert(decode(test_file(0, 2147483647, 8, BI_RLE8, 3, test_palette(), [0u8, 1u8]), image.MAX_PIXELS) == Ok(none), "RLE8")
+    assert(decode(test_file(2147483647, 0, 24, BI_RGB, 0, [], []), image.MAX_PIXELS) == Ok(rgb_image(2147483647, 0, [])), "no rows")
+    // and such an image is written at once
+    assert(decode(encode(none), image.MAX_PIXELS) == Ok(none), "written")
+    let clear = image.from_data<uint8>(0, 2147483647, Layout.Rgba, []).expect("0 wide")
+    assert(decode(encode(clear), image.MAX_PIXELS) == Ok(clear), "written at 32 bits")
+}
+
+#test
+fun broken_files() {
+    assert(decode(test_file(1, 1, 7, BI_RGB, 0, [], [0u8, 0u8, 0u8, 0u8]), image.MAX_PIXELS) == Err(ImageError.Unsupported("BMP of 7 bits a pixel, compression 0")))
+    assert(decode(test_file(1, 1, 24, BI_RLE8, 0, [], [0u8, 0u8, 0u8, 0u8]), image.MAX_PIXELS) == Err(ImageError.Unsupported("BMP of 24 bits a pixel, compression 1")))
+    assert(decode(test_file(1, 1, 24, BI_PNG, 0, [], []), image.MAX_PIXELS) == Err(ImageError.Unsupported("BMP with PNG")))
+    assert(decode(test_file(-1, 1, 24, BI_RGB, 0, [], []), image.MAX_PIXELS) == Err(ImageError.Corrupt("width -1")))
+    assert(decode(test_file(1, 1, 24, BI_RGB, 0, [], [1u8, 2u8]), image.MAX_PIXELS) == Err(ImageError.Truncated))
+    assert(decode(test_file(4, 4, 24, BI_RGB, 0, [], []), 15i64) == Err(ImageError.TooLarge(16i64)))
+    var past = test_file(1, 1, 24, BI_RGB, 0, [], [1u8, 2u8, 3u8, 0u8])
+    past[10] = 200u8
+    assert(decode(past, image.MAX_PIXELS) == Err(ImageError.Corrupt("the pixels at 200 are past the end")))
+    assert(decode(past[:30], image.MAX_PIXELS) == Err(ImageError.Truncated))
+}

@@ -1,0 +1,2453 @@
+// std.draw: 2D vector drawing (D313, MYLA-968). Paths of lines and Bézier
+// curves, a rasteriser that gives each pixel the exact area of it a path
+// covers (as FreeType's "smooth" renderer and font-rs compute it), by the
+// non-zero or the even-odd rule, and an RGBA canvas that fills, strokes and
+// composites onto an `Image8`.
+//
+// Coordinates are float32 pixels, x to the right and y down; the pixel
+// `(x, y)` is the square from `(x, y)` to `(x + 1, y + 1)`, its centre at
+// `(x + 0.5, y + 0.5)`. Angles are radians; a positive angle turns from
+// the x axis towards the y axis, which is clockwise on the screen.
+//
+// The canvas keeps straight (not premultiplied) alpha in its image, as
+// `Color` does, and composites source-over with each result rounded once
+// from the exact value. std.font turns glyph outlines into a `Path` and
+// draws the `Mask` that `rasterize` gives with `c.fill_mask`.
+
+import std.image as image
+from std.image import Image, Image8, Color, Rect, Layout
+from std.vector32 import Vec2, vec2
+from std.matrix32 import Mat3, translation2d, rotation2d, scaling2d
+from std.algebra import Identity
+import std.float as fl // floor, ceil, sqrt, sin, cos, tan, acos, atan2, PI
+import std.list as list_m // filled, extend, reversed, truncate
+import std.option as option_m // unwrap_or
+
+// The default flattening tolerance: a curve's line segments stay within a
+// quarter of a pixel of it.
+pub const TOLERANCE: float32 = 0.25
+
+// --- paths -------------------------------------------------------------------
+
+// A path's command: the point it goes to, with a curve's control points first.
+#derive(Eq)
+pub enum Seg {
+    Move(Vec2)
+    Line(Vec2)
+    Quad(Vec2, Vec2)
+    Cubic(Vec2, Vec2, Vec2)
+    Close
+}
+
+// An outline: subpaths of lines and quadratic and cubic Bézier curves, each
+// begun by a move. Build one with `path()` and its `var self` methods, or a
+// shape function (`rect`, `circle`, …).
+#derive(Eq)
+pub struct Path {
+    segs: [Seg],
+    // the current subpath's first point, and the current point
+    start: Vec2,
+    current: Vec2,
+    // whether there is a current point: after a move, and after a close
+    // (at the subpath's first point, where the next line starts)
+    open: bool,
+}
+
+// An empty path.
+#test()[Path { segs: [], start: vec2(0.0, 0.0), current: vec2(0.0, 0.0), open: false }]
+#test()[polygon([])]
+pub fun path() -> Path {
+    return Path { segs: [], start: vec2(0.0, 0.0), current: vec2(0.0, 0.0), open: false }
+}
+
+// How a path's inside is decided: by a non-zero winding number, or by an
+// odd number of crossings.
+#derive(Eq, Hash)
+pub enum FillRule {
+    NonZero
+    EvenOdd
+}
+
+// A subpath flattened to points: a closed one's last edge goes back to its
+// first point, which isn't repeated.
+struct Poly {
+    pts: [Vec2],
+    closed: bool,
+}
+
+impl Path {
+    // Begins a subpath at `(x, y)`.
+    fun move_to(var self, x: float32, y: float32) {
+        let p = vec2(x, y)
+        self.segs.push(Seg.Move(p))
+        self.start = p
+        self.current = p
+        self.open = true
+    }
+
+    // A line from the current point to `(x, y)`. Without a current point it
+    // begins a subpath there, as a canvas's `lineTo` does.
+    fun line_to(var self, x: float32, y: float32) {
+        if !self.open {
+            self.move_to(x, y)
+            return
+        }
+        let p = vec2(x, y)
+        self.segs.push(Seg.Line(p))
+        self.current = p
+    }
+
+    // A quadratic Bézier curve to `(x, y)` with the control point `(cx, cy)`.
+    fun quad_to(var self, cx: float32, cy: float32, x: float32, y: float32) {
+        if !self.open {
+            self.move_to(cx, cy)
+        }
+        let p = vec2(x, y)
+        self.segs.push(Seg.Quad(vec2(cx, cy), p))
+        self.current = p
+    }
+
+    // A cubic Bézier curve to `(x, y)` with the control points `(c1x, c1y)`
+    // and `(c2x, c2y)`.
+    fun cubic_to(var self, c1x: float32, c1y: float32, c2x: float32, c2y: float32, x: float32, y: float32) {
+        if !self.open {
+            self.move_to(c1x, c1y)
+        }
+        let p = vec2(x, y)
+        self.segs.push(Seg.Cubic(vec2(c1x, c1y), vec2(c2x, c2y), p))
+        self.current = p
+    }
+
+    // An arc of the circle around `(cx, cy)` of radius `r`, from the angle
+    // `start` to `end` (radians; `end < start` goes the other way), as
+    // cubic curves. A line joins the current point to the arc's start; with
+    // no current point the arc begins a subpath.
+    fun arc(var self, cx: float32, cy: float32, r: float32, start: float32, end: float32) {
+        let sweep = end - start
+        let p0 = vec2(cx + r * start.cos(), cy + r * start.sin())
+        if self.open {
+            self.line_to(p0.x, p0.y)
+        } else {
+            self.move_to(p0.x, p0.y)
+        }
+        // pieces of at most a quarter turn: 4/3 tan(θ/4) is the control
+        // points' distance for a unit circle
+        let quarter = (fl.PI as float32) / 2.0
+        var n = ((sweep.abs() / quarter).ceil()) as int
+        if n < 1 {
+            n = 1
+        }
+        if n > 64 {
+            n = 64
+        }
+        let step = sweep / (n as float32)
+        let k = 4.0f32 / 3.0f32 * (step / 4.0).tan()
+        var a = start
+        for i in 0..n {
+            let b = a + step
+            let ca = a.cos()
+            let sa = a.sin()
+            let cb = b.cos()
+            let sb = b.sin()
+            self.cubic_to(cx + r * (ca - k * sa), cy + r * (sa + k * ca), cx + r * (cb + k * sb), cy + r * (sb - k * cb),
+                cx + r * cb, cy + r * sb)
+            a = b
+        }
+    }
+
+    // Closes the current subpath with a line back to its first point, which
+    // becomes the current point: a line after it starts a subpath there.
+    fun close(var self) {
+        if self.open && self.segs[^1] != Seg.Close {
+            self.segs.push(Seg.Close)
+            self.current = self.start
+        }
+    }
+
+    // Every subpath of `other` added to this path.
+    fun append(var self, other: Path) {
+        for s in other.segs {
+            self.segs.push(s)
+        }
+        if other.segs.len() > 0 {
+            self.start = other.start
+            self.current = other.current
+            self.open = other.open
+        }
+    }
+
+    // Whether the path has no commands.
+    #test(path())[true]
+    #test(line(0.0f32, 0.0f32, 1.0f32, 1.0f32))[false]
+    fun is_empty(self) -> bool {
+        return self.segs.len() == 0
+    }
+
+    // The path with every point transformed by the affine matrix `m`
+    // (std.matrix32's `translation2d`, `rotation2d`, `scaling2d` and their
+    // products).
+    #test(line(1.0f32, 2.0f32, 3.0f32, 4.0f32), translation2d(vec2(1.0, -1.0)))[line(2.0f32, 1.0f32, 4.0f32, 3.0f32)]
+    #test(rect(0.0f32, 0.0f32, 1.0f32, 2.0f32), scaling2d(vec2(2.0, 3.0)))[rect(0.0f32, 0.0f32, 2.0f32, 6.0f32)]
+    fun transformed(self, m: Mat3) -> Path {
+        var out: [Seg] = []
+        for s in self.segs {
+            out.push(match s {
+                Move(p) => Seg.Move(m.transform_point2(p))
+                Line(p) => Seg.Line(m.transform_point2(p))
+                Quad(c, p) => Seg.Quad(m.transform_point2(c), m.transform_point2(p))
+                Cubic(c1, c2, p) => Seg.Cubic(m.transform_point2(c1), m.transform_point2(c2), m.transform_point2(p))
+                Close => Seg.Close
+            })
+        }
+        return Path { segs: out, start: m.transform_point2(self.start), current: m.transform_point2(self.current),
+            open: self.open }
+    }
+
+    // The smallest box around every point of the path, control points
+    // included (so it holds the curves): `(min, max)`; None for a path
+    // without points.
+    #test(circle(1.0f32, 2.0f32, 3.0f32))[Some((vec2(-2.0, -1.0), vec2(4.0, 5.0)))]
+    #test(polyline([vec2(3.0, -1.0), vec2(-2.0, 4.0), vec2(0.0, 0.0)]))[Some((vec2(-2.0, -1.0), vec2(3.0, 4.0)))]
+    #test(path())[None]
+    fun bounds(self) -> Option<(Vec2, Vec2)> {
+        var any = false
+        var lo = vec2(0.0, 0.0)
+        var hi = vec2(0.0, 0.0)
+        for s in self.segs {
+            let pts = match s {
+                Move(p) => [p]
+                Line(p) => [p]
+                Quad(c, p) => [c, p]
+                Cubic(c1, c2, p) => [c1, c2, p]
+                Close => []
+            }
+            for p in pts {
+                if !any {
+                    lo = p
+                    hi = p
+                    any = true
+                } else {
+                    lo = lo.min(p)
+                    hi = hi.max(p)
+                }
+            }
+        }
+        if !any {
+            return None
+        }
+        return Some((lo, hi))
+    }
+
+    // Each subpath as a polyline whose points stay within `tolerance` of the
+    // curves: a closed subpath ends at its first point again. A subpath of
+    // a lone move is left out.
+    #test(rect(0.0f32, 0.0f32, 1.0f32, 2.0f32), 0.25f32)[[[vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 2.0), vec2(0.0, 2.0), vec2(0.0, 0.0)]]]
+    #test(line(0.0f32, 0.0f32, 2.0f32, 0.0f32), 0.25f32)[[[vec2(0.0, 0.0), vec2(2.0, 0.0)]]]
+    #test(quad_path(), 0.25f32)[[[vec2(0.0, 0.0), vec2(2.0, 1.0), vec2(4.0, 0.0)]]] // |p0 - 2c + p| / (4 × 0.25) is 4: 2 lines
+    #test(path(), 0.25f32)[[]]
+    #test(closed_twice(), 0.25f32)[[[vec2(0.0, 0.0), vec2(2.0, 0.0), vec2(2.0, 2.0), vec2(0.0, 0.0)], [vec2(0.0, 0.0), vec2(0.0, 2.0), vec2(1.0, 2.0), vec2(0.0, 0.0)]]] // the second subpath from the first's start
+    fun flatten(self, tolerance: float32 = TOLERANCE) -> [[Vec2]] {
+        var out: [[Vec2]] = []
+        for p in self.polys(tolerance) {
+            if p.closed {
+                var pts = p.pts
+                pts.push(p.pts[0])
+                out.push(pts)
+            } else {
+                out.push(p.pts)
+            }
+        }
+        return out
+    }
+
+    // The subpaths flattened: curves cut into lines of equal parameter
+    // steps, as many as keep the chord within `tolerance` of the curve (the
+    // second derivative bounds the error: |B''| h² / 8).
+    fun polys(self, tolerance: float32) -> [Poly] {
+        var tol = tolerance
+        if !(tol > 0.001f32) {
+            tol = 0.001f32
+        }
+        var out: [Poly] = []
+        var cur: [Vec2] = []
+        var start = vec2(0.0, 0.0)
+        var last = start
+        for s in self.segs {
+            match s {
+                Move(p) => {
+                    if cur.len() > 1 {
+                        out.push(Poly { pts: cur, closed: false })
+                    }
+                    cur = [p]
+                    start = p
+                    last = p
+                }
+                Line(p) => {
+                    if cur.len() == 0 {
+                        cur = [last]
+                    }
+                    cur.push(p)
+                    last = p
+                }
+                Quad(c, p) => {
+                    if cur.len() == 0 {
+                        cur = [last]
+                    }
+                    let dd = (last - c * 2.0 + p).length()
+                    let n = curve_steps(dd / (4.0 * tol))
+                    let step = 1.0f32 / (n as float32)
+                    for i in 1..n {
+                        let t = (i as float32) * step
+                        let u = 1.0f32 - t
+                        cur.push(last * (u * u) + c * (2.0 * u * t) + p * (t * t))
+                    }
+                    cur.push(p)
+                    last = p
+                }
+                Cubic(c1, c2, p) => {
+                    if cur.len() == 0 {
+                        cur = [last]
+                    }
+                    let d1 = (last - c1 * 2.0 + c2).length()
+                    let d2 = (c1 - c2 * 2.0 + p).length()
+                    let n = curve_steps(3.0 * d1.max(d2) / (4.0 * tol))
+                    let step = 1.0f32 / (n as float32)
+                    for i in 1..n {
+                        let t = (i as float32) * step
+                        let u = 1.0f32 - t
+                        cur.push(last * (u * u * u) + c1 * (3.0 * u * u * t) + c2 * (3.0 * u * t * t) + p * (t * t * t))
+                    }
+                    cur.push(p)
+                    last = p
+                }
+                Close => {
+                    if cur.len() > 1 {
+                        if cur[^1] == start {
+                            cur.truncate(cur.len() - 1)
+                        }
+                        out.push(Poly { pts: cur, closed: true })
+                    }
+                    cur = [start]
+                    last = start
+                }
+            }
+        }
+        if cur.len() > 1 {
+            out.push(Poly { pts: cur, closed: false })
+        }
+        return out
+    }
+}
+
+// A quadratic curve from (0, 0) to (4, 0) bulging to y = 1, for the tests.
+fun quad_path() -> Path {
+    var p = path()
+    p.move_to(0.0f32, 0.0f32)
+    p.quad_to(2.0f32, 2.0f32, 4.0f32, 0.0f32)
+    return p
+}
+
+// A triangle closed, then a line from its start and a close again.
+fun closed_twice() -> Path {
+    var p = path()
+    p.move_to(0.0f32, 0.0f32)
+    p.line_to(2.0f32, 0.0f32)
+    p.line_to(2.0f32, 2.0f32)
+    p.close()
+    p.close()
+    p.line_to(0.0f32, 2.0f32)
+    p.line_to(1.0f32, 2.0f32)
+    p.close()
+    return p
+}
+
+// The lines a curve is cut into: the square root of its error bound in
+// lines squared, at least 1 and at most 1000.
+#test(0.0f32)[1]
+#test(10.0f32)[4]
+#test(1.0e12f32)[1000]
+fun curve_steps(e: float32) -> int {
+    if !(e > 1.0f32) {
+        return 1
+    }
+    let r = e.sqrt()
+    if r > 999.0f32 {
+        return 1000
+    }
+    return (r.ceil()) as int
+}
+
+// --- shapes ------------------------------------------------------------------
+
+// The rectangle at `(x, y)` of `w` by `h`, clockwise on the screen.
+#test(1.0f32, 2.0f32, 3.0f32, 4.0f32)[polygon([vec2(1.0, 2.0), vec2(4.0, 2.0), vec2(4.0, 6.0), vec2(1.0, 6.0)])]
+pub fun rect(x: float32, y: float32, w: float32, h: float32) -> Path {
+    return polygon([vec2(x, y), vec2(x + w, y), vec2(x + w, y + h), vec2(x, y + h)])
+}
+
+// The closed polygon through `points`; empty for no points.
+#test([vec2(1.0, 1.0), vec2(2.0, 1.0), vec2(2.0, 2.0), vec2(1.0, 2.0)])[rect(0.0f32, 0.0f32, 1.0f32, 1.0f32).transformed(translation2d(vec2(1.0, 1.0)))]
+#test([])[path()]
+pub fun polygon(points: [Vec2]) -> Path {
+    var p = path()
+    if points.len() == 0 {
+        return p
+    }
+    p.move_to(points[0].x, points[0].y)
+    for i in 1..points.len() {
+        p.line_to(points[i].x, points[i].y)
+    }
+    p.close()
+    return p
+}
+
+// The ellipse around `(cx, cy)` with the radii `rx` and `ry`: four cubic
+// curves, each within 0.03 % of the radius of the true quarter.
+pub fun ellipse(cx: float32, cy: float32, rx: float32, ry: float32) -> Path {
+    // 4/3 (√2 − 1): the control points' distance for a quarter circle
+    let k: float32 = 0.5522847498
+    var p = path()
+    p.move_to(cx + rx, cy)
+    p.cubic_to(cx + rx, cy + k * ry, cx + k * rx, cy + ry, cx, cy + ry)
+    p.cubic_to(cx - k * rx, cy + ry, cx - rx, cy + k * ry, cx - rx, cy)
+    p.cubic_to(cx - rx, cy - k * ry, cx - k * rx, cy - ry, cx, cy - ry)
+    p.cubic_to(cx + k * rx, cy - ry, cx + rx, cy - k * ry, cx + rx, cy)
+    p.close()
+    return p
+}
+
+// The circle around `(cx, cy)` of radius `r`.
+pub fun circle(cx: float32, cy: float32, r: float32) -> Path {
+    return ellipse(cx, cy, r, r)
+}
+
+// The rectangle at `(x, y)` of `w` by `h` with corners rounded to the radius
+// `r` (at most half the shorter side).
+#test(1.0f32, 2.0f32, 4.0f32, 2.0f32, 0.0f32)[rect(1.0f32, 2.0f32, 4.0f32, 2.0f32)]
+pub fun rounded_rect(x: float32, y: float32, w: float32, h: float32, r: float32) -> Path {
+    var rr = r.min(w.abs() / 2.0).min(h.abs() / 2.0)
+    if !(rr > 0.0f32) {
+        return rect(x, y, w, h)
+    }
+    let k: float32 = 0.5522847498 * rr
+    let x1 = x + w
+    let y1 = y + h
+    var p = path()
+    p.move_to(x + rr, y)
+    p.line_to(x1 - rr, y)
+    p.cubic_to(x1 - rr + k, y, x1, y + rr - k, x1, y + rr)
+    p.line_to(x1, y1 - rr)
+    p.cubic_to(x1, y1 - rr + k, x1 - rr + k, y1, x1 - rr, y1)
+    p.line_to(x + rr, y1)
+    p.cubic_to(x + rr - k, y1, x, y1 - rr + k, x, y1 - rr)
+    p.line_to(x, y + rr)
+    p.cubic_to(x, y + rr - k, x + rr - k, y, x + rr, y)
+    p.close()
+    return p
+}
+
+// The open polyline through `points` (for stroking).
+pub fun polyline(points: [Vec2]) -> Path {
+    var p = path()
+    if points.len() == 0 {
+        return p
+    }
+    p.move_to(points[0].x, points[0].y)
+    for i in 1..points.len() {
+        p.line_to(points[i].x, points[i].y)
+    }
+    return p
+}
+
+// The line from `(x0, y0)` to `(x1, y1)` (for stroking).
+pub fun line(x0: float32, y0: float32, x1: float32, y1: float32) -> Path {
+    var p = path()
+    p.move_to(x0, y0)
+    p.line_to(x1, y1)
+    return p
+}
+
+// --- the rasteriser ----------------------------------------------------------
+
+// A coverage mask: a Gray image whose samples are how much of each pixel a
+// path covers (0 to 255), placed with its top left pixel at `(x, y)`.
+#derive(Eq)
+pub struct Mask {
+    image: Image8,
+    x: int,
+    y: int,
+}
+
+// The signed areas of a raster's cells, accumulated per row (the "cover"
+// and "area" of FreeType's smooth renderer folded into one list, as font-rs
+// keeps them): a row's running sum at a cell is the winding-weighted share
+// of that cell inside the outline. A row has `w + 2` cells, so an edge at
+// the right border has somewhere to put its remainder. `lo` and `hi` are
+// the first cell of each row an edge changed and the one past the last:
+// before them the sum is 0, and after them too, as the outline is closed.
+struct Raster {
+    w: int,
+    h: int,
+    acc: [float64],
+    lo: [int],
+    hi: [int],
+}
+
+fun raster(w: int, h: int) -> Raster {
+    return Raster { w: w, h: h, acc: list_m.filled((w + 2) * h, 0.0), lo: list_m.filled(h, w + 2),
+        hi: list_m.filled(h, 0) }
+}
+
+impl Raster {
+    // The edge from `(ax, ay)` to `(bx, by)`: clipped to the rows, and the
+    // parts left and right of the raster moved onto its borders (an edge
+    // covers the cells to its right alike there).
+    fun edge(var self, ax: float64, ay: float64, bx: float64, by: float64) {
+        if ay == by || !ax.is_finite() || !ay.is_finite() || !bx.is_finite() || !by.is_finite() {
+            return
+        }
+        var x0 = ax
+        var y0 = ay
+        var x1 = bx
+        var y1 = by
+        var dir: float64 = 1.0
+        if y0 > y1 {
+            x0 = bx
+            y0 = by
+            x1 = ax
+            y1 = ay
+            dir = -1.0
+        }
+        let hf = self.h as float64
+        if y1 <= 0.0 || y0 >= hf {
+            return
+        }
+        let dxdy = (x1 - x0) / (y1 - y0)
+        if y0 < 0.0 {
+            x0 = x0 - y0 * dxdy
+            y0 = 0.0
+        }
+        if y1 > hf {
+            x1 = x0 + (hf - y0) * dxdy
+            y1 = hf
+        }
+        let wf = self.w as float64
+        // where the edge crosses x = 0 and x = w, as parameters 0 to 1
+        var ta: float64 = 2.0
+        var tb: float64 = 2.0
+        if x0 != x1 {
+            let t0 = (0.0 - x0) / (x1 - x0)
+            let tw = (wf - x0) / (x1 - x0)
+            if t0 > 0.0 && t0 < 1.0 {
+                ta = t0
+            }
+            if tw > 0.0 && tw < 1.0 {
+                if ta == 2.0 {
+                    ta = tw
+                } else if tw < ta {
+                    tb = ta
+                    ta = tw
+                } else {
+                    tb = tw
+                }
+            }
+        }
+        if ta == 2.0 {
+            self.piece(x0, y0, x1, y1, dir)
+            return
+        }
+        let dx = x1 - x0
+        let dy = y1 - y0
+        let xa = x0 + dx * ta
+        let ya = y0 + dy * ta
+        self.piece(x0, y0, xa, ya, dir)
+        if tb == 2.0 {
+            self.piece(xa, ya, x1, y1, dir)
+            return
+        }
+        let xb = x0 + dx * tb
+        let yb = y0 + dy * tb
+        self.piece(xa, ya, xb, yb, dir)
+        self.piece(xb, yb, x1, y1, dir)
+    }
+
+    // A piece of an edge that lies on one side of each border, `y0 < y1`.
+    fun piece(var self, x0: float64, y0: float64, x1: float64, y1: float64, dir: float64) {
+        let wf = self.w as float64
+        let mid = (x0 + x1) * 0.5
+        if mid >= wf {
+            // nothing for the pixels, but the rows' sums go on to the border
+            self.cells(wf, y0, wf, y1, dir)
+            return
+        }
+        if mid <= 0.0 {
+            self.cells(0.0, y0, 0.0, y1, dir)
+            return
+        }
+        self.cells(x0.clamp(0.0, wf), y0, x1.clamp(0.0, wf), y1, dir)
+    }
+
+    // The cells an edge inside the raster crosses, row by row: in each row
+    // the trapezoid right of the edge (font-rs's `draw_line`).
+    fun cells(var self, ex0: float64, ey0: float64, ex1: float64, ey1: float64, dir: float64) {
+        let stride = self.w + 2
+        let wf = self.w as float64
+        let dxdy = (ex1 - ex0) / (ey1 - ey0)
+        let lo_x = ex0.min(ex1)
+        let hi_x = ex0.max(ex1)
+        let first = (ey0.floor()) as int
+        var last = (ey1.ceil()) as int
+        if last > self.h {
+            last = self.h
+        }
+        var x = ex0
+        for y in first..last {
+            let yf = y as float64
+            let top = yf.max(ey0)
+            let bottom = (yf + 1.0).min(ey1)
+            let dy = bottom - top
+            if dy <= 0.0 {
+                continue
+            }
+            var xnext = ex0 + (bottom - ey0) * dxdy
+            if xnext < lo_x {
+                xnext = lo_x
+            }
+            if xnext > hi_x {
+                xnext = hi_x
+            }
+            let d = dy * dir
+            let row = y * stride
+            var xa = x
+            var xb = xnext
+            if xb < xa {
+                xa = xnext
+                xb = x
+            }
+            let fa = xa.floor()
+            let ia = fa as int
+            let cb = xb.ceil()
+            let ib = cb as int
+            if ia < self.lo[y] {
+                self.lo[y] = ia
+            }
+            let past = if ib + 2 > stride { stride } else { ib + 2 }
+            if past > self.hi[y] {
+                self.hi[y] = past
+            }
+            if ib <= ia + 1 {
+                // within one cell: the share right of the edge's middle
+                let xmf = 0.5 * (x + xnext) - fa
+                self.acc[row + ia] += d - d * xmf
+                self.acc[row + ia + 1] += d * xmf
+            } else {
+                let s = 1.0 / (xb - xa)
+                let fa_frac = xa - fa
+                let a0 = 0.5 * s * (1.0 - fa_frac) * (1.0 - fa_frac)
+                let fb_frac = xb - cb + 1.0
+                let am = 0.5 * s * fb_frac * fb_frac
+                self.acc[row + ia] += d * a0
+                if ib == ia + 2 {
+                    self.acc[row + ia + 1] += d * (1.0 - a0 - am)
+                } else {
+                    let a1 = s * (1.5 - fa_frac)
+                    self.acc[row + ia + 1] += d * (a1 - a0)
+                    for xi in ia + 2..ib - 1 {
+                        self.acc[row + xi] += d * s
+                    }
+                    let a2 = a1 + ((ib - ia - 3) as float64) * s
+                    self.acc[row + ib - 1] += d * (1.0 - a2 - am)
+                }
+                self.acc[row + ib] += d * am
+            }
+            x = xnext
+        }
+    }
+
+    // Every edge of the polygons, moved by `(-ox, -oy)`.
+    fun polys(var self, polys: [Poly], ox: float64, oy: float64) {
+        for p in polys {
+            let n = p.pts.len()
+            for i in 0..n {
+                let a = p.pts[i]
+                let b = p.pts[(i + 1) % n]
+                self.edge((a.x as float64) - ox, (a.y as float64) - oy, (b.x as float64) - ox, (b.y as float64) - oy)
+            }
+        }
+    }
+
+    // The coverage: each row's running sum folded by `rule` and scaled to
+    // 0..255 (rounded).
+    fun to_image(self, rule: FillRule) -> Image8 {
+        let w = self.w
+        var out: [uint8] = list_m.filled(w * self.h, 0u8)
+        let stride = w + 2
+        let even_odd = rule == FillRule.EvenOdd
+        for y in 0..self.h {
+            var sum: float64 = 0.0
+            let row = y * stride
+            let orow = y * w
+            var hi = self.hi[y]
+            if hi > w {
+                hi = w
+            }
+            for x in self.lo[y]..hi {
+                sum += self.acc[row + x]
+                out[orow + x] = coverage8(sum, even_odd) as uint8
+            }
+        }
+        return Image { width: w, height: self.h, layout: Layout.Gray, data: out }
+    }
+}
+
+// A running sum of signed areas as a coverage of 0 to 255: its magnitude
+// clamped to 1 (non-zero), or folded so that 1 is inside and 2 outside
+// again (even-odd).
+#test(0.5, false)[128]
+#test(-1.5, false)[255]
+#test(1.5, true)[128]
+#test(-2.0, true)[0]
+#test(3.25, true)[191]
+fun coverage8(sum: float64, even_odd: bool) -> int {
+    var c = if sum < 0.0 { -sum } else { sum }
+    if even_odd {
+        if c > 1.0 {
+            c = c - 2.0 * ((c * 0.5).floor())
+            if c > 1.0 {
+                c = 2.0 - c
+            }
+        }
+    } else if c > 1.0 {
+        c = 1.0
+    }
+    return (c * 255.0 + 0.5) as int
+}
+
+// The pixels the polygons' points touch, as `(x0, y0, x1, y1)` (x1 and y1
+// past the last), intersected with `clip`; empty when there are none.
+fun poly_box(polys: [Poly], clip: Rect) -> (int, int, int, int) {
+    var lo = vec2(0.0, 0.0)
+    var hi = vec2(0.0, 0.0)
+    var any = false
+    for p in polys {
+        for q in p.pts {
+            if !q.x.is_finite() || !q.y.is_finite() {
+                continue
+            }
+            if !any {
+                lo = q
+                hi = q
+                any = true
+            } else {
+                lo = lo.min(q)
+                hi = hi.max(q)
+            }
+        }
+    }
+    if !any {
+        return (clip.x, clip.y, clip.x, clip.y)
+    }
+    let cx1 = clip.x + clip.w
+    let cy1 = clip.y + clip.h
+    let x0 = clamp_to(lo.x.floor(), clip.x, cx1)
+    let y0 = clamp_to(lo.y.floor(), clip.y, cy1)
+    let x1 = clamp_to(hi.x.ceil(), x0, cx1)
+    let y1 = clamp_to(hi.y.ceil(), y0, cy1)
+    return (x0, y0, x1, y1)
+}
+
+// `v` as an int within `lo` to `hi`.
+#test(-5.0f32, 0, 10)[0]
+#test(1.0e20f32, 0, 10)[10]
+#test(3.0f32, 0, 10)[3]
+fun clamp_to(v: float32, lo: int, hi: int) -> int {
+    if !(v > lo as float32) {
+        return lo
+    }
+    if v >= hi as float32 {
+        return hi
+    }
+    return v as int
+}
+
+// The coverage of `path` within `clip`, as a mask over the pixels the path
+// reaches there (an empty mask at the clip's corner if none).
+pub fun rasterize_clipped(path: Path, clip: Rect, rule: FillRule = FillRule.NonZero, tolerance: float32 = TOLERANCE) -> Mask {
+    let polys = path.polys(tolerance)
+    let (x0, y0, x1, y1) = poly_box(polys, clip)
+    return mask_of(polys, x0, y0, x1, y1, rule)
+}
+
+// The mask of the polygons over the pixels `x0` to `x1` (past the last) and
+// `y0` to `y1`: an empty one at the origin if that has no pixels.
+fun mask_of(polys: [Poly], x0: int, y0: int, x1: int, y1: int, rule: FillRule) -> Mask {
+    if x1 <= x0 || y1 <= y0 {
+        return Mask { image: Image { width: 0, height: 0, layout: Layout.Gray, data: [] }, x: 0, y: 0 }
+    }
+    var r = raster(x1 - x0, y1 - y0)
+    r.polys(polys, x0 as float64, y0 as float64)
+    return Mask { image: r.to_image(rule), x: x0, y: y0 }
+}
+
+// The coverage of `path` as a mask over the pixels it reaches, which may be
+// anywhere (a glyph's mask is cached and drawn at other places). A path
+// whose box is more than `image.MAX_PIXELS` pixels is a failure: give a clip
+// with `rasterize_clipped`.
+#test(rect(2.5f32, 3.0f32, 1.0f32, 1.0f32), FillRule.NonZero, 0.25f32)[Mask { image: Image { width: 2, height: 1, layout: Layout.Gray, data: [128u8, 128u8] }, x: 2, y: 3 }]
+#test(rect(-2.0f32, -1.0f32, 1.0f32, 1.0f32), FillRule.NonZero, 0.25f32)[Mask { image: Image { width: 1, height: 1, layout: Layout.Gray, data: [255u8] }, x: -2, y: -1 }] // negative coordinates
+#test(path(), FillRule.NonZero, 0.25f32)[Mask { image: Image { width: 0, height: 0, layout: Layout.Gray, data: [] }, x: 0, y: 0 }] // nothing
+pub fun rasterize(path: Path, rule: FillRule = FillRule.NonZero, tolerance: float32 = TOLERANCE) -> Mask {
+    let limit: int = 0x20000000
+    let polys = path.polys(tolerance)
+    let (x0, y0, x1, y1) = poly_box(polys, Rect { x: -limit, y: -limit, w: 2 * limit, h: 2 * limit })
+    if ((x1 - x0) as int64) * ((y1 - y0) as int64) > image.MAX_PIXELS {
+        panic(f"a mask of {x1 - x0} by {y1 - y0} pixels is too large")
+    }
+    return mask_of(polys, x0, y0, x1, y1, rule)
+}
+
+// The coverage of `path` over a `width` by `height` Gray image at the
+// origin: the path clipped to it.
+#test(rect(0.5f32, 0.5f32, 2.0f32, 1.0f32), 3, 2, FillRule.NonZero, 0.25f32)[Image { width: 3, height: 2, layout: Layout.Gray, data: [64u8, 128u8, 64u8, 64u8, 128u8, 64u8] }]
+#test(rect(-3.5f32, 0.0f32, 5.0f32, 1.0f32), 3, 1, FillRule.NonZero, 0.25f32)[Image { width: 3, height: 1, layout: Layout.Gray, data: [255u8, 128u8, 0u8] }] // clipped left
+#test(rect(1.5f32, -2.0f32, 10.0f32, 9.0f32), 3, 1, FillRule.NonZero, 0.25f32)[Image { width: 3, height: 1, layout: Layout.Gray, data: [0u8, 128u8, 255u8] }] // clipped right, above and below
+#test(polygon([vec2(0.0, 0.0), vec2(2.0, 0.0), vec2(0.0, 2.0)]), 2, 2, FillRule.NonZero, 0.25f32)[Image { width: 2, height: 2, layout: Layout.Gray, data: [255u8, 128u8, 128u8, 0u8] }] // a triangle: its edge through a corner
+pub fun coverage(path: Path, width: int, height: int, rule: FillRule = FillRule.NonZero, tolerance: float32 = TOLERANCE) -> Image8 {
+    let m = rasterize_clipped(path, Rect { x: 0, y: 0, w: width, h: height }, rule, tolerance)
+    var out: [uint8] = list_m.filled(width * height, 0u8)
+    let mw = m.image.width
+    for y in 0..m.image.height {
+        for x in 0..mw {
+            out[(m.y + y) * width + m.x + x] = m.image.data[y * mw + x]
+        }
+    }
+    return Image { width: width, height: height, layout: Layout.Gray, data: out }
+}
+
+// --- paints ------------------------------------------------------------------
+
+// A gradient's colour at `offset` (0 to 1).
+#derive(Eq)
+pub struct Stop {
+    offset: float32,
+    color: Color,
+}
+
+// The colour at `offset` of a gradient.
+#test(0.5f32, image.rgb(1u8, 2u8, 3u8))[Stop { offset: 0.5f32, color: image.rgb(1u8, 2u8, 3u8) }]
+pub fun stop(offset: float32, color: Color) -> Stop {
+    return Stop { offset: offset, color: color }
+}
+
+// A gradient in user space: linear from `start` (offset 0) to `end`
+// (offset 1), or radial around `start` out to `radius`. Before the first
+// stop and after the last, the end colours go on (the "pad" spread);
+// colours are interpolated premultiplied.
+#derive(Eq)
+pub struct Gradient {
+    start: Vec2,
+    end: Vec2,
+    radius: float32,
+    stops: [Stop],
+}
+
+// What a shape is filled with: one colour, a gradient, or an image repeated
+// in both directions from the user space's origin.
+#derive(Eq)
+pub enum Paint {
+    Solid(Color)
+    Linear(Gradient)
+    Radial(Gradient)
+    Pattern(Image8)
+}
+
+// The linear gradient from `(x0, y0)` to `(x1, y1)` through `stops`.
+#test(1.0f32, 2.0f32, 3.0f32, 4.0f32, [])[Paint.Linear(Gradient { start: vec2(1.0, 2.0), end: vec2(3.0, 4.0), radius: 0.0f32, stops: [] })]
+pub fun linear_gradient(x0: float32, y0: float32, x1: float32, y1: float32, stops: [Stop]) -> Paint {
+    return Paint.Linear(Gradient { start: vec2(x0, y0), end: vec2(x1, y1), radius: 0.0, stops: stops })
+}
+
+// The radial gradient around `(cx, cy)` out to `r` through `stops`.
+#test(1.0f32, 2.0f32, 3.0f32, [])[Paint.Radial(Gradient { start: vec2(1.0, 2.0), end: vec2(1.0, 2.0), radius: 3.0f32, stops: [] })]
+pub fun radial_gradient(cx: float32, cy: float32, r: float32, stops: [Stop]) -> Paint {
+    return Paint.Radial(Gradient { start: vec2(cx, cy), end: vec2(cx, cy), radius: r, stops: stops })
+}
+
+// `x / 255` rounded to the nearest, for `x` from 0 to 255²: exactly
+// `(x + 127) / 255`, without the division.
+#test(0)[0]
+#test(127)[0]
+#test(128)[1]
+#test(65025)[255]
+#test(32512)[127]
+#test(32513)[128]
+fun div255(x: int) -> int {
+    return ((x + 128) * 257) >> 16
+}
+
+// The gradient's colours at 256 offsets, straight alpha, interpolated
+// premultiplied between the stops.
+fun gradient_table(stops: [Stop]) -> [Color] {
+    var out: [Color] = []
+    if stops.len() == 0 {
+        return list_m.filled(256, Color { r: 0u8, g: 0u8, b: 0u8, a: 0u8 })
+    }
+    // offsets clamped to 0..1 and made non-decreasing
+    var offs: [float32] = []
+    var prev: float32 = 0.0
+    for s in stops {
+        var o = s.offset.clamp(0.0, 1.0)
+        if o < prev {
+            o = prev
+        }
+        offs.push(o)
+        prev = o
+    }
+    var k = 0
+    for i in 0..256 {
+        let t = (i as float32) / 255.0f32
+        while k < stops.len() && offs[k] < t {
+            k += 1
+        }
+        if k == 0 {
+            out.push(stops[0].color)
+        } else if k == stops.len() {
+            out.push(stops[^1].color)
+        } else {
+            let a = stops[k - 1].color
+            let b = stops[k].color
+            let span = offs[k] - offs[k - 1]
+            let f = if span > 0.0f32 { (t - offs[k - 1]) / span } else { 1.0f32 }
+            out.push(mix_premultiplied(a, b, f))
+        }
+    }
+    return out
+}
+
+// `a` to `b` by `f`, interpolated premultiplied, back to straight alpha.
+#test(image.rgba(255u8, 0u8, 0u8, 255u8), image.rgba(0u8, 0u8, 255u8, 0u8), 0.5f32)[image.rgba(255u8, 0u8, 0u8, 128u8)]
+#test(image.rgb(0u8, 0u8, 0u8), image.rgb(255u8, 255u8, 255u8), 0.25f32)[image.rgb(64u8, 64u8, 64u8)]
+fun mix_premultiplied(a: Color, b: Color, f: float32) -> Color {
+    let fa = (a.a as float32) * (1.0f32 - f)
+    let fb = (b.a as float32) * f
+    let alpha = fa + fb
+    if alpha <= 0.0f32 {
+        return Color { r: 0u8, g: 0u8, b: 0u8, a: 0u8 }
+    }
+    let r = ((a.r as float32) * fa + (b.r as float32) * fb) / alpha
+    let g = ((a.g as float32) * fa + (b.g as float32) * fb) / alpha
+    let bl = ((a.b as float32) * fa + (b.b as float32) * fb) / alpha
+    return Color { r: unorm(r), g: unorm(g), b: unorm(bl), a: unorm(alpha) }
+}
+
+// A float of 0 to 255 rounded to a uint8.
+#test(127.5f32)[128u8]
+#test(-3.0f32)[0u8]
+#test(300.0f32)[255u8]
+fun unorm(v: float32) -> uint8 {
+    if !(v > 0.0f32) {
+        return 0u8
+    }
+    if v >= 255.0f32 {
+        return 255u8
+    }
+    return (v + 0.5f32) as uint8
+}
+
+// A paint ready for pixels: the gradient's table, and the inverse of the
+// transform that takes user space to the canvas.
+struct Shader {
+    kind: int, // 0 solid, 1 linear, 2 radial, 3 pattern
+    solid: Color,
+    table: [Color],
+    // the inverse transform's rows: user x = m00 x + m01 y + m02, user y = m10 x + m11 y + m12
+    m00: float32,
+    m01: float32,
+    m02: float32,
+    m10: float32,
+    m11: float32,
+    m12: float32,
+    // linear: t = (p - start) · axis; radial: t = |p - start| / radius
+    sx: float32,
+    sy: float32,
+    ax: float32,
+    ay: float32,
+    inv_r: float32,
+    pattern: Image8,
+}
+
+fun shader(paint: Paint, m: Mat3) -> Shader {
+    let inv = m.inverse().unwrap_or(Mat3.identity())
+    let none: [uint8] = []
+    let empty = Image { width: 0, height: 0, layout: Layout.Rgba, data: none }
+    var s = Shader { kind: 0, solid: Color { r: 0u8, g: 0u8, b: 0u8, a: 0u8 }, table: [], m00: inv.x_axis.x,
+        m01: inv.y_axis.x, m02: inv.z_axis.x, m10: inv.x_axis.y, m11: inv.y_axis.y, m12: inv.z_axis.y, sx: 0.0,
+        sy: 0.0, ax: 0.0, ay: 0.0, inv_r: 0.0, pattern: empty }
+    match paint {
+        Solid(c) => {
+            s.solid = c
+        }
+        Linear(g) => {
+            s.kind = 1
+            s.table = gradient_table(g.stops)
+            s.sx = g.start.x
+            s.sy = g.start.y
+            let d = g.end - g.start
+            let l2 = d.length_squared()
+            if l2 > 0.0f32 {
+                s.ax = d.x / l2
+                s.ay = d.y / l2
+            }
+        }
+        Radial(g) => {
+            s.kind = 2
+            s.table = gradient_table(g.stops)
+            s.sx = g.start.x
+            s.sy = g.start.y
+            if g.radius > 0.0f32 {
+                s.inv_r = 1.0f32 / g.radius
+            }
+        }
+        Pattern(img) => {
+            s.kind = 3
+            s.pattern = img
+            if img.width == 0 || img.height == 0 {
+                s.kind = 0
+            }
+        }
+    }
+    return s
+}
+
+impl Shader {
+    // The paint's colour at the centre of the canvas pixel `(x, y)`.
+    fun at(self, x: int, y: int) -> Color {
+        let px = (x as float32) + 0.5f32
+        let py = (y as float32) + 0.5f32
+        let ux = self.m00 * px + self.m01 * py + self.m02
+        let uy = self.m10 * px + self.m11 * py + self.m12
+        if self.kind == 1 {
+            let t = (ux - self.sx) * self.ax + (uy - self.sy) * self.ay
+            return self.table[table_index(t)]
+        }
+        if self.kind == 2 {
+            let dx = ux - self.sx
+            let dy = uy - self.sy
+            return self.table[table_index((dx * dx + dy * dy).sqrt() * self.inv_r)]
+        }
+        let w = self.pattern.width
+        let h = self.pattern.height
+        var ix = (ux.floor()) as int64 % (w as int64)
+        var iy = (uy.floor()) as int64 % (h as int64)
+        if ix < 0 {
+            ix += w as int64
+        }
+        if iy < 0 {
+            iy += h as int64
+        }
+        return self.pattern.color_at(ix as int, iy as int)
+    }
+}
+
+// The entry of a 256-colour table for `t` of 0 to 1, clamped.
+#test(-1.0f32)[0]
+#test(0.5f32)[128]
+#test(2.0f32)[255]
+fun table_index(t: float32) -> int {
+    if !(t > 0.0f32) {
+        return 0
+    }
+    if t >= 1.0f32 {
+        return 255
+    }
+    return (t * 255.0f32 + 0.5f32) as int
+}
+
+// --- the canvas --------------------------------------------------------------
+
+// How an image is sampled when it is scaled.
+#derive(Eq, Hash)
+pub enum Filter {
+    Nearest
+    Bilinear
+}
+
+// A saved transform and clip.
+#derive(Eq)
+struct CanvasState {
+    transform: Mat3,
+    clip: Rect,
+}
+
+// An RGBA image to draw on: `transform` takes user space to the image's
+// pixels (paths, strokes and paints go through it), and `clip` is the
+// rectangle of pixels drawing may change. Pixel art, images and masks are
+// placed in pixels, without the transform, and clipped too. `scratch` is
+// the rasteriser's, kept between fills (all zeros).
+pub struct Canvas {
+    image: Image8,
+    transform: Mat3,
+    clip: Rect,
+    stack: [CanvasState],
+    scratch: [float64],
+}
+
+// A canvas over `img`, converted to RGBA.
+pub fun canvas(img: Image8) -> Canvas {
+    let rgba = img.convert(Layout.Rgba)
+    return Canvas { image: rgba, transform: Mat3.identity(), clip: Rect { x: 0, y: 0, w: rgba.width, h: rgba.height },
+        stack: [], scratch: [] }
+}
+
+// A `width` by `height` canvas of `background`.
+pub fun blank(width: int, height: int, background: Color) -> Canvas {
+    var img: Image8 = image.new(width, height, Layout.Rgba, 0u8)
+    var c = canvas(img)
+    c.clear(background)
+    return c
+}
+
+// The rectangle where `a` and `b` overlap (empty: `w` or `h` 0).
+#test(Rect { x: 0, y: 0, w: 4, h: 4 }, Rect { x: 2, y: -1, w: 5, h: 3 })[Rect { x: 2, y: 0, w: 2, h: 2 }]
+#test(Rect { x: 0, y: 0, w: 4, h: 4 }, Rect { x: 6, y: 0, w: 1, h: 1 })[Rect { x: 6, y: 0, w: 0, h: 0 }]
+fun intersect(a: Rect, b: Rect) -> Rect {
+    let x0 = if a.x > b.x { a.x } else { b.x }
+    let y0 = if a.y > b.y { a.y } else { b.y }
+    var x1 = if a.x + a.w < b.x + b.w { a.x + a.w } else { b.x + b.w }
+    var y1 = if a.y + a.h < b.y + b.h { a.y + a.h } else { b.y + b.h }
+    if x1 < x0 || y1 < y0 {
+        x1 = x0
+        y1 = y0
+    }
+    if x1 == x0 || y1 == y0 {
+        return Rect { x: x0, y: y0, w: 0, h: 0 }
+    }
+    return Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+}
+
+impl Canvas {
+    // The canvas's width in pixels.
+    #test(blank(3, 2, image.rgb(0u8, 0u8, 0u8)))[3]
+    fun width(self) -> int {
+        return self.image.width
+    }
+
+    // The canvas's height in pixels.
+    #test(blank(3, 2, image.rgb(0u8, 0u8, 0u8)))[2]
+    fun height(self) -> int {
+        return self.image.height
+    }
+
+    // Saves the transform and the clip, for `restore`.
+    fun save(var self) {
+        self.stack.push(CanvasState { transform: self.transform, clip: self.clip })
+    }
+
+    // The transform and the clip of the last `save`; nothing without one.
+    fun restore(var self) {
+        if self.stack.len() > 0 {
+            let s = self.stack.pop()
+            self.transform = s.transform
+            self.clip = s.clip
+        }
+    }
+
+    // Moves user space by `(dx, dy)`.
+    fun translate(var self, dx: float32, dy: float32) {
+        self.transform = self.transform * translation2d(vec2(dx, dy))
+    }
+
+    // Scales user space by `sx` and `sy`.
+    fun scale(var self, sx: float32, sy: float32) {
+        self.transform = self.transform * scaling2d(vec2(sx, sy))
+    }
+
+    // Rotates user space by `angle` radians (clockwise on the screen).
+    fun rotate(var self, angle: float32) {
+        self.transform = self.transform * rotation2d(angle)
+    }
+
+    // Applies `m` to user space, before the current transform.
+    fun concat(var self, m: Mat3) {
+        self.transform = self.transform * m
+    }
+
+    // Replaces the transform.
+    fun set_transform(var self, m: Mat3) {
+        self.transform = m
+    }
+
+    // Narrows the clip to its overlap with `r`, in pixels.
+    fun clip_to(var self, r: Rect) {
+        self.clip = intersect(self.clip, r)
+    }
+
+    // Sets every pixel of the clip to `color`, alpha included (no blending).
+    fun clear(var self, color: Color) {
+        let r = intersect(self.clip, Rect { x: 0, y: 0, w: self.image.width, h: self.image.height })
+        let w = self.image.width
+        for y in r.y..r.y + r.h {
+            for x in r.x..r.x + r.w {
+                let i = (y * w + x) * 4
+                self.image.data[i] = color.r
+                self.image.data[i + 1] = color.g
+                self.image.data[i + 2] = color.b
+                self.image.data[i + 3] = color.a
+            }
+        }
+    }
+
+    // The clip within the image.
+    #test(blank(3, 2, image.rgb(0u8, 0u8, 0u8)))[Rect { x: 0, y: 0, w: 3, h: 2 }]
+    fun clip_bounds(self) -> Rect {
+        return intersect(self.clip, Rect { x: 0, y: 0, w: self.image.width, h: self.image.height })
+    }
+
+    // Blends the colour `(r, g, b)` of alpha `sa` at coverage `cov` (0 to
+    // 255) onto the pixel at `i`: source-over, the alpha and each channel
+    // rounded once from the exact result.
+    fun blend(var self, i: int, r: int, g: int, b: int, sa: int, cov: int) {
+        let a = if cov == 255 { sa } else { div255(sa * cov) }
+        if a == 0 {
+            return
+        }
+        if a == 255 {
+            self.image.data[i] = r as uint8
+            self.image.data[i + 1] = g as uint8
+            self.image.data[i + 2] = b as uint8
+            self.image.data[i + 3] = 255u8
+            return
+        }
+        let da = self.image.data[i + 3] as int
+        let na = 255 - a
+        if da == 255 {
+            self.image.data[i] = div255(r * a + (self.image.data[i] as int) * na) as uint8
+            self.image.data[i + 1] = div255(g * a + (self.image.data[i + 1] as int) * na) as uint8
+            self.image.data[i + 2] = div255(b * a + (self.image.data[i + 2] as int) * na) as uint8
+            return
+        }
+        // out_a = a + da (1 - a), here times 255; each channel is the
+        // premultiplied sum over out_a
+        let oa = a * 255 + da * na
+        let half = oa / 2
+        let dw = da * na
+        self.image.data[i] = ((r * a * 255 + (self.image.data[i] as int) * dw + half) / oa) as uint8
+        self.image.data[i + 1] = ((g * a * 255 + (self.image.data[i + 1] as int) * dw + half) / oa) as uint8
+        self.image.data[i + 2] = ((b * a * 255 + (self.image.data[i + 2] as int) * dw + half) / oa) as uint8
+        self.image.data[i + 3] = ((oa + 127) / 255) as uint8
+    }
+
+    // Composites `paint` through the coverage mask `m`, placed in pixels at
+    // `(m.x, m.y)` (the transform doesn't move it; a gradient or pattern
+    // is still in user space).
+    fun fill_mask(var self, m: Mask, paint: Paint) {
+        let r = intersect(self.clip_bounds(), Rect { x: m.x, y: m.y, w: m.image.width, h: m.image.height })
+        if r.w == 0 {
+            return
+        }
+        let mw = m.image.width
+        let w = self.image.width
+        let sh = shader(paint, self.transform)
+        if sh.kind == 0 {
+            let c = sh.solid
+            let cr = c.r as int
+            let cg = c.g as int
+            let cb = c.b as int
+            let ca = c.a as int
+            for y in r.y..r.y + r.h {
+                let mrow = (y - m.y) * mw - m.x
+                for x in r.x..r.x + r.w {
+                    let cov = m.image.data[mrow + x] as int
+                    if cov != 0 {
+                        self.blend((y * w + x) * 4, cr, cg, cb, ca, cov)
+                    }
+                }
+            }
+            return
+        }
+        for y in r.y..r.y + r.h {
+            let mrow = (y - m.y) * mw - m.x
+            for x in r.x..r.x + r.w {
+                let cov = m.image.data[mrow + x] as int
+                if cov != 0 {
+                    let c = sh.at(x, y)
+                    self.blend((y * w + x) * 4, c.r as int, c.g as int, c.b as int, c.a as int, cov)
+                }
+            }
+        }
+    }
+
+    // Fills `path` (in user space) with `paint` by `rule`.
+    fun fill(var self, path: Path, paint: Paint, rule: FillRule = FillRule.NonZero) {
+        let p = if self.transform == Mat3.identity() { path } else { path.transformed(self.transform) }
+        let polys = p.polys(TOLERANCE)
+        let (x0, y0, x1, y1) = poly_box(polys, self.clip_bounds())
+        if x1 <= x0 || y1 <= y0 {
+            return
+        }
+        // the rasteriser's cells in the scratch list, which is all zeros
+        // and given back so (no list to fill a fill)
+        let w = x1 - x0
+        let h = y1 - y0
+        let stride = w + 2
+        var r = Raster { w: w, h: h, acc: self.scratch, lo: list_m.filled(h, stride), hi: list_m.filled(h, 0) }
+        self.scratch = []
+        while r.acc.len() < stride * h {
+            r.acc.push(0.0)
+        }
+        r.polys(polys, x0 as float64, y0 as float64)
+        let sh = shader(paint, self.transform)
+        let solid = sh.kind == 0
+        let cr = sh.solid.r as int
+        let cg = sh.solid.g as int
+        let cb = sh.solid.b as int
+        let ca = sh.solid.a as int
+        let even_odd = rule == FillRule.EvenOdd
+        let iw = self.image.width
+        for y in 0..h {
+            let row = y * stride
+            let out = ((y0 + y) * iw + x0) * 4
+            var sum: float64 = 0.0
+            var cov = 0
+            // a solid colour at this coverage: its alpha, the source's
+            // share of each channel and the destination's weight
+            var a = 0
+            var ra = 0
+            var ga = 0
+            var ba = 0
+            var na = 255
+            let lo = r.lo[y]
+            let hi = r.hi[y]
+            // past the image's width only the cells to clear
+            let end = if hi > w { w } else { hi }
+            for x in end..hi {
+                r.acc[row + x] = 0.0
+            }
+            for x in lo..end {
+                let d = r.acc[row + x]
+                if d != 0.0 {
+                    sum += d
+                    r.acc[row + x] = 0.0
+                    cov = coverage8(sum, even_odd)
+                    a = ((ca * cov + 128) * 257) >> 16
+                    ra = cr * a
+                    ga = cg * a
+                    ba = cb * a
+                    na = 255 - a
+                }
+                if cov == 0 {
+                    continue
+                }
+                let i = out + x * 4
+                if !solid {
+                    let k = sh.at(x0 + x, y0 + y)
+                    self.blend(i, k.r as int, k.g as int, k.b as int, k.a as int, cov)
+                } else if a == 255 {
+                    self.image.data[i] = cr as uint8
+                    self.image.data[i + 1] = cg as uint8
+                    self.image.data[i + 2] = cb as uint8
+                    self.image.data[i + 3] = 255u8
+                } else if a != 0 {
+                    if self.image.data[i + 3] == 255u8 {
+                        // over an opaque pixel: div255 written out
+                        self.image.data[i] = ((((self.image.data[i] as int) * na + ra + 128) * 257) >> 16) as uint8
+                        self.image.data[i + 1] = ((((self.image.data[i + 1] as int) * na + ga + 128) * 257) >> 16) as uint8
+                        self.image.data[i + 2] = ((((self.image.data[i + 2] as int) * na + ba + 128) * 257) >> 16) as uint8
+                    } else {
+                        self.blend(i, cr, cg, cb, ca, cov)
+                    }
+                }
+            }
+        }
+        self.scratch = r.acc
+    }
+
+    // Fills the rectangle at `(x, y)` of `w` by `h` (user space).
+    fun fill_rect(var self, x: float32, y: float32, w: float32, h: float32, paint: Paint) {
+        self.fill(rect(x, y, w, h), paint)
+    }
+
+    // Draws `src` (any layout) with its top left pixel at `(x, y)`, its
+    // alpha times `opacity` (0 to 1).
+    fun draw_image(var self, src: Image8, x: int, y: int, opacity: float32 = 1.0) {
+        let r = intersect(self.clip_bounds(), Rect { x: x, y: y, w: src.width, h: src.height })
+        let cov = table_index(opacity)
+        if r.w == 0 || cov == 0 {
+            return
+        }
+        let w = self.image.width
+        for py in r.y..r.y + r.h {
+            for px in r.x..r.x + r.w {
+                let c = src.color_at(px - x, py - y)
+                self.blend((py * w + px) * 4, c.r as int, c.g as int, c.b as int, c.a as int, cov)
+            }
+        }
+    }
+
+    // Draws `src` scaled into the rectangle `dst` (pixels), sampling the
+    // nearest pixel or interpolating between the four nearest (premultiplied,
+    // the edges repeated); each pixel of `dst` samples `src` at its centre.
+    fun draw_image_scaled(var self, src: Image8, dst: Rect, filter: Filter = Filter.Bilinear) {
+        let r = intersect(self.clip_bounds(), dst)
+        if r.w == 0 || src.width == 0 || src.height == 0 {
+            return
+        }
+        let w = self.image.width
+        let kx = (src.width as float32) / (dst.w as float32)
+        let ky = (src.height as float32) / (dst.h as float32)
+        for py in r.y..r.y + r.h {
+            let sy = ((py - dst.y) as float32 + 0.5f32) * ky
+            for px in r.x..r.x + r.w {
+                let sx = ((px - dst.x) as float32 + 0.5f32) * kx
+                let c = if filter == Filter.Nearest {
+                    src.color_at(clamp_to(sx.floor(), 0, src.width - 1), clamp_to(sy.floor(), 0, src.height - 1))
+                } else {
+                    bilinear(src, sx - 0.5f32, sy - 0.5f32)
+                }
+                self.blend((py * w + px) * 4, c.r as int, c.g as int, c.b as int, c.a as int, 255)
+            }
+        }
+    }
+}
+
+// The colour of `img` at `(x, y)` (pixel centres at whole numbers),
+// interpolated premultiplied between the four nearest pixels, the edges
+// repeated.
+fun bilinear(img: Image8, x: float32, y: float32) -> Color {
+    let fx0 = x.floor()
+    let fy0 = y.floor()
+    let tx = x - fx0
+    let ty = y - fy0
+    let x0 = clamp_to(fx0, 0, img.width - 1)
+    let y0 = clamp_to(fy0, 0, img.height - 1)
+    let x1 = clamp_to(fx0 + 1.0f32, 0, img.width - 1)
+    let y1 = clamp_to(fy0 + 1.0f32, 0, img.height - 1)
+    let c00 = img.color_at(x0, y0)
+    let c10 = img.color_at(x1, y0)
+    let c01 = img.color_at(x0, y1)
+    let c11 = img.color_at(x1, y1)
+    let w00 = (1.0f32 - tx) * (1.0f32 - ty) * (c00.a as float32)
+    let w10 = tx * (1.0f32 - ty) * (c10.a as float32)
+    let w01 = (1.0f32 - tx) * ty * (c01.a as float32)
+    let w11 = tx * ty * (c11.a as float32)
+    let a = w00 + w10 + w01 + w11
+    if a <= 0.0f32 {
+        return Color { r: 0u8, g: 0u8, b: 0u8, a: 0u8 }
+    }
+    let r = ((c00.r as float32) * w00 + (c10.r as float32) * w10 + (c01.r as float32) * w01 + (c11.r as float32) * w11) / a
+    let g = ((c00.g as float32) * w00 + (c10.g as float32) * w10 + (c01.g as float32) * w01 + (c11.g as float32) * w11) / a
+    let b = ((c00.b as float32) * w00 + (c10.b as float32) * w10 + (c01.b as float32) * w01 + (c11.b as float32) * w11) / a
+    return Color { r: unorm(r), g: unorm(g), b: unorm(b), a: unorm(a) }
+}
+
+// --- strokes -----------------------------------------------------------------
+
+// How two segments of a stroke meet.
+#derive(Eq, Hash)
+pub enum Join {
+    Miter
+    Round
+    Bevel
+}
+
+// How an open stroke ends.
+#derive(Eq, Hash)
+pub enum Cap {
+    Butt
+    Round
+    Square
+}
+
+// A stroke's style: `width` in user space; a miter longer than
+// `miter_limit` times the width becomes a bevel (SVG's rule); `dash`, if
+// not empty, alternates the lengths drawn and left out (a list of odd length
+// counts twice), starting `dash_offset` into it.
+#derive(Eq)
+pub struct Stroke {
+    width: float32,
+    join: Join,
+    cap: Cap,
+    miter_limit: float32,
+    dash: [float32],
+    dash_offset: float32,
+}
+
+// A stroke `width` wide with miter joins (limit 4), butt caps and no
+// dashes, as SVG's defaults.
+#test(2.0f32)[Stroke { width: 2.0f32, join: Join.Miter, cap: Cap.Butt, miter_limit: 4.0f32, dash: [], dash_offset: 0.0f32 }]
+pub fun stroke_style(width: float32) -> Stroke {
+    return Stroke { width: width, join: Join.Miter, cap: Cap.Butt, miter_limit: 4.0, dash: [], dash_offset: 0.0 }
+}
+
+impl Stroke {
+    // The style with `join`.
+    #test(stroke_style(1.0f32), Join.Round)[Stroke { width: 1.0f32, join: Join.Round, cap: Cap.Butt, miter_limit: 4.0f32, dash: [], dash_offset: 0.0f32 }]
+    fun with_join(self, join: Join) -> Stroke {
+        var s = self
+        s.join = join
+        return s
+    }
+
+    // The style with `cap`.
+    #test(stroke_style(1.0f32), Cap.Square)[Stroke { width: 1.0f32, join: Join.Miter, cap: Cap.Square, miter_limit: 4.0f32, dash: [], dash_offset: 0.0f32 }]
+    fun with_cap(self, cap: Cap) -> Stroke {
+        var s = self
+        s.cap = cap
+        return s
+    }
+
+    // The style with the dash pattern `dash`, begun `offset` into it.
+    #test(stroke_style(1.0f32), [2.0f32, 1.0f32], 0.5f32)[Stroke { width: 1.0f32, join: Join.Miter, cap: Cap.Butt, miter_limit: 4.0f32, dash: [2.0f32, 1.0f32], dash_offset: 0.5f32 }]
+    fun with_dash(self, dash: [float32], offset: float32 = 0.0) -> Stroke {
+        var s = self
+        s.dash = dash
+        s.dash_offset = offset
+        return s
+    }
+}
+
+// The points of an arc around `c` from `c + v` turning by `sweep` radians,
+// the first left out, the last at `c + v` turned by `sweep`: steps small
+// enough that the chords stay within `tol` of a radius of `|v|`.
+fun arc_points(c: Vec2, v: Vec2, sweep: float32, tol: float32) -> [Vec2] {
+    let r = v.length()
+    var step: float32 = 1.5707964
+    if r > tol {
+        step = 2.0f32 * (1.0f32 - tol / r).acos()
+    }
+    if !(step > 0.01f32) {
+        step = 0.01
+    }
+    var n = ((sweep.abs() / step).ceil()) as int
+    if n < 1 {
+        n = 1
+    }
+    if n > 1000 {
+        n = 1000
+    }
+    var out: [Vec2] = []
+    for i in 1..n + 1 {
+        let a = sweep * (i as float32) / (n as float32)
+        let ca = a.cos()
+        let sa = a.sin()
+        out.push(c + vec2(v.x * ca - v.y * sa, v.x * sa + v.y * ca))
+    }
+    return out
+}
+
+// The outer side of a join at `p`, from `p + a` to `p + b` (both offsets
+// `hw` long), turning by `sweep` (signed): the points after `p + a`, ending
+// at `p + b`.
+fun join_points(p: Vec2, a: Vec2, b: Vec2, sweep: float32, st: Stroke, hw: float32, tol: float32) -> [Vec2] {
+    if st.join == Join.Round {
+        return arc_points(p, a, sweep, tol)
+    }
+    if st.join == Join.Miter {
+        let m = a + b
+        let md = m.dot(b)
+        if md > 0.000001f32 * hw * hw {
+            let tip = m * (hw * hw / md)
+            if tip.length() <= st.miter_limit * hw {
+                return [p + tip, p + b]
+            }
+        }
+    }
+    return [p + b]
+}
+
+// A cap at `p`, from `p + n` round the end facing `d` (unit) to `p - n`:
+// the points after `p + n`, ending at `p - n`.
+fun cap_points(p: Vec2, n: Vec2, d: Vec2, st: Stroke, hw: float32, tol: float32) -> [Vec2] {
+    if st.cap == Cap.Round {
+        // n is d turned by a quarter towards +y: back to it is a negative turn
+        return arc_points(p, n, -3.14159265f32, tol)
+    }
+    if st.cap == Cap.Square {
+        let e = d * hw
+        return [p + n + e, p - n + e, p - n]
+    }
+    return [p - n]
+}
+
+// The points without repeats in a row (and, closed, the last one that is
+// the first again).
+fun dedup_points(pts: [Vec2], closed: bool) -> [Vec2] {
+    var out: [Vec2] = []
+    for p in pts {
+        if out.len() == 0 || out[^1].distance_squared(p) > 1.0e-12f32 {
+            out.push(p)
+        }
+    }
+    if closed && out.len() > 1 && out[^1].distance_squared(out[0]) <= 1.0e-12f32 {
+        out.truncate(out.len() - 1)
+    }
+    return out
+}
+
+// The inner side of a join at `p` between segments of directions `d0` and
+// `d1` and lengths `len0` and `len1`, whose offsets there are `a` and `b`:
+// the point where the two offset edges cross, if it lies along both
+// segments; else the outline goes through `p` itself, and the loop it makes
+// lies inside the stroke, where the non-zero rule fills it (as Skia's
+// stroker does).
+fun inner_join(p: Vec2, a: Vec2, b: Vec2, d0: Vec2, d1: Vec2, len0: float32, len1: float32, hw: float32) -> [Vec2] {
+    let m = a + b
+    let md = m.dot(b)
+    if md > 0.000001f32 * hw * hw {
+        let x = m * (hw * hw / md)
+        let back = x.dot(d0)
+        let on = x.dot(d1)
+        if back <= 0.0f32 && back >= -len0 && on >= 0.0f32 && on <= len1 {
+            return [p + x]
+        }
+    }
+    return [p + a, p, p + b]
+}
+
+// The outline of one stroked polyline, as the polygons to fill non-zero:
+// for an open one, its left side forward, the end cap, its right side back
+// and the start cap; for a closed one, the left side and the right side
+// reversed. On a turn's outer side the join's points go in; on its inner
+// side the offset edges meet (`inner_join`).
+fun stroke_poly(poly: Poly, st: Stroke, tol: float32) -> [[Vec2]] {
+    let hw = st.width * 0.5f32
+    let pts = dedup_points(poly.pts, poly.closed)
+    let n = pts.len()
+    if n == 0 {
+        return []
+    }
+    if n == 1 {
+        // a zero-length subpath: a dot for round and square caps
+        let p = pts[0]
+        if st.cap == Cap.Round {
+            var c = [p + vec2(hw, 0.0)]
+            c.extend(arc_points(p, vec2(hw, 0.0), 6.2831853f32, tol))
+            return [c]
+        }
+        if st.cap == Cap.Square {
+            return [[p + vec2(-hw, -hw), p + vec2(hw, -hw), p + vec2(hw, hw), p + vec2(-hw, hw)]]
+        }
+        return []
+    }
+    let closed = poly.closed && n > 2
+    let segs = if closed { n } else { n - 1 }
+    var dirs: [Vec2] = []
+    var lens: [float32] = []
+    for i in 0..segs {
+        let v = pts[(i + 1) % n] - pts[i]
+        lens.push(v.length())
+        dirs.push(v.normalized())
+    }
+    var left: [Vec2] = []
+    var right: [Vec2] = []
+    // the vertices with a join: every one of a closed polyline, the inner
+    // ones of an open one
+    let first = if closed { 0 } else { 1 }
+    let last = if closed { n } else { n - 1 }
+    if !closed {
+        let n0 = dirs[0].perp() * hw
+        left.push(pts[0] + n0)
+        right.push(pts[0] - n0)
+    }
+    for i in first..last {
+        let p = pts[i]
+        let d0 = dirs[(i + segs - 1) % segs]
+        let d1 = dirs[i % segs]
+        let n0 = d0.perp() * hw
+        let n1 = d1.perp() * hw
+        let cross = d0.perp_dot(d1)
+        let dot = d0.dot(d1)
+        let turn = cross.abs().atan2(dot)
+        if cross.abs() < 0.0001f32 && dot > 0.0f32 {
+            left.push(p + n1)
+            right.push(p - n1)
+        } else if cross > 0.0f32 {
+            // turning towards the left side: the right side is outer
+            left.extend(inner_join(p, n0, n1, d0, d1, lens[(i + segs - 1) % segs], lens[i % segs], hw))
+            right.push(p - n0)
+            right.extend(join_points(p, -n0, -n1, turn, st, hw, tol))
+        } else {
+            left.push(p + n0)
+            left.extend(join_points(p, n0, n1, -turn, st, hw, tol))
+            right.extend(inner_join(p, -n0, -n1, d0, d1, lens[(i + segs - 1) % segs], lens[i % segs], hw))
+        }
+    }
+    if closed {
+        return [left, right.reversed()]
+    }
+    let pe = pts[n - 1]
+    let de = dirs[segs - 1]
+    let ne = de.perp() * hw
+    left.push(pe + ne)
+    left.extend(cap_points(pe, ne, de, st, hw, tol))
+    // `cap_points` ended at pe - ne, where the right side goes back
+    var outline = left
+    var k = right.len() - 1
+    while k >= 0 {
+        outline.push(right[k])
+        k -= 1
+    }
+    let d0 = dirs[0]
+    let n0 = d0.perp() * hw
+    outline.extend(cap_points(pts[0], -n0, -d0, st, hw, tol))
+    return [outline]
+}
+
+// The polylines cut into the dashes of `dash`, begun `offset` into the
+// pattern; each dash an open polyline. A pattern that is empty, negative or
+// adds up to nothing leaves them whole.
+fun dash_polys(polys: [Poly], dash: [float32], offset: float32) -> [Poly] {
+    var pattern = dash
+    if dash.len() % 2 == 1 {
+        pattern.extend(dash)
+    }
+    var total: float32 = 0.0
+    for d in pattern {
+        if !(d >= 0.0f32) {
+            return polys
+        }
+        total += d
+    }
+    if !(total > 0.0f32) || pattern.len() == 0 {
+        return polys
+    }
+    var out: [Poly] = []
+    // a pattern of tiny dashes over a long path: past a million dashes the
+    // path is drawn whole, as SVG allows
+    var budget = 1000000
+    for poly in polys {
+        var pts = poly.pts
+        if poly.closed {
+            pts.push(poly.pts[0])
+        }
+        // where in the pattern the polyline starts; a remainder float32
+        // can't take (an offset far past the pattern's length, or not
+        // finite) starts it at its beginning
+        var pos = offset - total * ((offset / total).floor())
+        if !(pos >= 0.0f32 && pos < total) {
+            pos = 0.0
+        }
+        var k = 0
+        while pos >= pattern[k] {
+            pos -= pattern[k]
+            k = (k + 1) % pattern.len()
+        }
+        var left = pattern[k] - pos
+        var on = k % 2 == 0
+        var cur: [Vec2] = []
+        if on {
+            cur.push(pts[0])
+        }
+        for i in 0..pts.len() - 1 {
+            var a = pts[i]
+            let b = pts[i + 1]
+            var seg = a.distance(b)
+            while seg > left {
+                budget -= 1
+                if budget < 0 {
+                    return polys
+                }
+                let p = a.lerp(b, left / seg)
+                if on {
+                    cur.push(p)
+                    out.push(Poly { pts: cur, closed: false })
+                    cur = []
+                } else {
+                    cur = [p]
+                }
+                on = !on
+                seg -= left
+                a = p
+                k = (k + 1) % pattern.len()
+                left = pattern[k]
+            }
+            left -= seg
+            if on {
+                cur.push(b)
+            }
+        }
+        if on && cur.len() > 1 {
+            out.push(Poly { pts: cur, closed: false })
+        }
+    }
+    return out
+}
+
+impl Path {
+    // The outline of this path stroked with `style`, as a path to fill by
+    // the non-zero rule: each subpath flattened within `tolerance`, dashed,
+    // and widened with its joins and caps.
+    fun stroked(self, style: Stroke, tolerance: float32 = TOLERANCE) -> Path {
+        var out = path()
+        if !(style.width > 0.0f32) {
+            return out
+        }
+        var tol = tolerance
+        if !(tol > 0.001f32) {
+            tol = 0.001f32
+        }
+        var polys = self.polys(tol)
+        if style.dash.len() > 0 {
+            polys = dash_polys(polys, style.dash, style.dash_offset)
+        }
+        for p in polys {
+            for outline in stroke_poly(p, style, tol) {
+                if outline.len() > 0 {
+                    out.append(polygon(outline))
+                }
+            }
+        }
+        return out
+    }
+}
+
+impl Canvas {
+    // Strokes `path` (in user space) with `style` and `paint`: its outline,
+    // made within a quarter pixel after the transform, filled non-zero.
+    fun stroke(var self, path: Path, style: Stroke, paint: Paint) {
+        // the transform's largest scale (its matrix's larger singular
+        // value), so the flattening is fine enough on the canvas in every
+        // direction; a transform that flattens the plane draws nothing
+        let a = self.transform.x_axis.x as float64
+        let b = self.transform.x_axis.y as float64
+        let c = self.transform.y_axis.x as float64
+        let d = self.transform.y_axis.y as float64
+        let det = a * d - b * c
+        if !(det.abs().sqrt() > 0.000001) {
+            return
+        }
+        let f = a * a + b * b + c * c + d * d
+        let scale = ((f + (f * f - 4.0 * det * det).max(0.0).sqrt()) * 0.5).sqrt()
+        self.fill(path.stroked(style, ((TOLERANCE as float64) / scale) as float32), paint, FillRule.NonZero)
+    }
+}
+
+// --- pixel art and the bitmap font --------------------------------------------
+
+// The cell of a character of the built-in bitmap font: 6 by 10 pixels, the
+// glyph 5 wide with a column of space after it; capitals and digits on rows
+// 1 to 7, lower case from row 3, descenders on rows 8 and 9.
+pub const GLYPH_WIDTH: int = 6
+pub const GLYPH_HEIGHT: int = 10
+
+// The font's glyphs, ASCII 32 to 126 and then a box for every other
+// character: ten rows a glyph, each row's five pixels a digit of base 32
+// (0-9, A-V), the leftmost the highest bit. Drawn for std.draw; the
+// source is tests/burn/data/draw/font.txt, which test_draw.py checks this
+// against.
+const FONT: str = ("000000000004444404000AA00000000AAVAVAA0004FKE5U4000OP248J3000CIK8LID000448000000" +
+    "02488842000842224800004LEL40000044V4400000000066240000V000000000006600011248GG00" +
+    "0EHJLPHE0004C4444E000EH1248V000V2421HE00026AIV22000VGU11HE00068GUHHE000V12488800" +
+    "0EHHEHHE000EHHF12C00000660660000066066240124842100000V0V00000G84248G000EH1240400" +
+    "0EHNLNGF000EHHVHHH000UHHUHHU000EHGGGHE000SIHHHIS000VGGUGGV000VGGUGGG000EHGNHHF00" +
+    "0HHHVHHH000E44444E00072222IC000HIKOKIH000GGGGGGV000HRLLHHH000HHPLJHH000EHHHHHE00" +
+    "0UHHUGGG000EHHHLID000UHHUKIH000FGGE11U000V444444000HHHHHHE000HHHHHA4000HHHLLLA00" +
+    "0HHA4AHH000HHA4444000V1248GV000E88888E000GG84211000E22222E0004AH00000000000000V0" +
+    "0840000000000E1FHF000GGUHHHU00000EGGGE00011FHHHF00000EHVGE000698S88800000FHHHF1E" +
+    "0GGUHHHH00040C444E0002062222IC0GGIKOKI000C44444E00000QLLLL00000UHHHH00000EHHHE00" +
+    "000UHHHUGG000FHHHF11000MPGGG00000FGE1U00088U889600000HHHJD00000HHHA400000HHLLA00" +
+    "000HA4AH00000HHHHF1E000V248V00034484430004444444400O44244O000008L200000VHHHHHV00")
+
+// The pixels of row `row` of the glyph of `c`, as 5 bits, the leftmost
+// pixel the highest.
+#test('A', 1)[14]
+#test('A', 4)[31]
+#test('g', 9)[14]
+#test(' ', 4)[0]
+#test('é', 1)[31] // not ASCII: the box
+fun glyph_row(c: char, row: int) -> int {
+    var k = (c as int) - 32
+    if k < 0 || k > 94 {
+        k = 95
+    }
+    let d = FONT[k * 10 + row] as int
+    if d <= 57 {
+        return d - 48
+    }
+    return d - 55
+}
+
+// The size in pixels of `s` in the bitmap font at `scale`: the longest
+// line's characters by `GLYPH_WIDTH`, the lines by `GLYPH_HEIGHT`.
+#test("hello", 1)[(30, 10)]
+#test("ab\nlonger", 2)[(72, 40)]
+#test("", 1)[(0, 0)]
+pub fun text_size(s: str, scale: int = 1) -> (int, int) {
+    if s.len() == 0 {
+        return (0, 0)
+    }
+    var widest = 0
+    var n = 0
+    var lines = 1
+    for c in s {
+        if c == '\n' {
+            lines += 1
+            n = 0
+        } else {
+            n += 1
+            if n > widest {
+                widest = n
+            }
+        }
+    }
+    return (widest * GLYPH_WIDTH * scale, lines * GLYPH_HEIGHT * scale)
+}
+
+impl Canvas {
+    // Sets the pixel `(x, y)` to `color`, alpha included (no blending);
+    // nothing outside the clip.
+    fun set_pixel(var self, x: int, y: int, color: Color) {
+        let r = self.clip_bounds()
+        if x < r.x || y < r.y || x >= r.x + r.w || y >= r.y + r.h {
+            return
+        }
+        let i = (y * self.image.width + x) * 4
+        self.image.data[i] = color.r
+        self.image.data[i + 1] = color.g
+        self.image.data[i + 2] = color.b
+        self.image.data[i + 3] = color.a
+    }
+
+    // Blends `color` onto the pixel `(x, y)`, if it is in the clip.
+    fun put_pixel(var self, x: int, y: int, color: Color) {
+        let r = self.clip_bounds()
+        if x < r.x || y < r.y || x >= r.x + r.w || y >= r.y + r.h {
+            return
+        }
+        self.blend((y * self.image.width + x) * 4, color.r as int, color.g as int, color.b as int, color.a as int, 255)
+    }
+
+    // Blends `color` onto the pixels of `r` that are in the clip.
+    fun blend_block(var self, r: Rect, color: Color) {
+        let b = intersect(self.clip_bounds(), r)
+        for y in b.y..b.y + b.h {
+            for x in b.x..b.x + b.w {
+                self.blend((y * self.image.width + x) * 4, color.r as int, color.g as int, color.b as int,
+                    color.a as int, 255)
+            }
+        }
+    }
+
+    // A line of whole pixels from `(x0, y0)` to `(x1, y1)`, both ends
+    // included (Bresenham's), `color` blended onto each.
+    fun line_aliased(var self, x0: int, y0: int, x1: int, y1: int, color: Color) {
+        let dx = if x1 > x0 { x1 - x0 } else { x0 - x1 }
+        let dy = if y1 > y0 { y0 - y1 } else { y1 - y0 }
+        let sx = if x0 < x1 { 1 } else { -1 }
+        let sy = if y0 < y1 { 1 } else { -1 }
+        var err = dx + dy
+        var x = x0
+        var y = y0
+        while true {
+            self.put_pixel(x, y, color)
+            if x == x1 && y == y1 {
+                break
+            }
+            let e2 = 2 * err
+            if e2 >= dy {
+                err += dy
+                x += sx
+            }
+            if e2 <= dx {
+                err += dx
+                y += sy
+            }
+        }
+    }
+
+    // Writes `s` in the built-in bitmap font with its first cell's top left
+    // corner at `(x, y)`, each font pixel `scale` by `scale` pixels, `color`
+    // blended. A `\n` starts a line below; characters outside ASCII 32 to
+    // 126 are a box.
+    fun text_bitmap(var self, s: str, x: int, y: int, color: Color, scale: int = 1) {
+        var cx = x
+        var cy = y
+        let k = if scale < 1 { 1 } else { scale }
+        for c in s {
+            if c == '\n' {
+                cx = x
+                cy += GLYPH_HEIGHT * k
+                continue
+            }
+            if c != ' ' {
+                for row in 0..GLYPH_HEIGHT {
+                    let bits = glyph_row(c, row)
+                    if bits == 0 {
+                        continue
+                    }
+                    for col in 0..5 {
+                        if bits & (16 >> col) != 0 {
+                            self.blend_block(Rect { x: cx + col * k, y: cy + row * k, w: k, h: k }, color)
+                        }
+                    }
+                }
+            }
+            cx += GLYPH_WIDTH * k
+        }
+    }
+}
+
+// --- tests of the rasteriser -------------------------------------------------
+
+// A float in 0 to `scale` from a linear congruential step of `s` (the tests
+// need reproducible numbers without std.random).
+fun lcg(s: uint32) -> uint32 {
+    return s.wrapping_mul(1664525u32).wrapping_add(1013904223u32)
+}
+
+fun unit(s: uint32) -> float32 {
+    return ((s >> 8) as float32) / 16777216.0f32
+}
+
+// The sum of a Gray image's samples, over 255: the area it covers.
+fun covered(img: Image8) -> float32 {
+    var sum: int64 = 0
+    for v in img.data {
+        sum += v as int64
+    }
+    return (sum as float32) / 255.0f32
+}
+
+// The pixels of a Gray image that are neither 0 nor 255: each is rounded by
+// at most half a level.
+fun partial(img: Image8) -> int {
+    var n = 0
+    for v in img.data {
+        if v != 0u8 && v != 255u8 {
+            n += 1
+        }
+    }
+    return n
+}
+
+// The area of a polygon by the shoelace formula, unsigned.
+fun shoelace(pts: [Vec2]) -> float32 {
+    var a: float64 = 0.0
+    let n = pts.len()
+    for i in 0..n {
+        let p = pts[i]
+        let q = pts[(i + 1) % n]
+        a += (p.x as float64) * (q.y as float64) - (q.x as float64) * (p.y as float64)
+    }
+    return (a.abs() * 0.5) as float32
+}
+
+// Rectangles at fractional positions: each pixel is the product of the
+// overlaps in x and y, to a level, and the sum is the area.
+#test
+fun exact_rect_coverage() {
+    var s: uint32 = 12345
+    for k in 0..24 {
+        s = lcg(s)
+        let x = unit(s) * 10.0f32 - 1.0f32
+        s = lcg(s)
+        let y = unit(s) * 10.0f32 - 1.0f32
+        s = lcg(s)
+        let w = unit(s) * 8.0f32
+        s = lcg(s)
+        let h = unit(s) * 8.0f32
+        let img = coverage(rect(x, y, w, h), 12, 12)
+        for py in 0..12 {
+            for px in 0..12 {
+                let ox = ((px as float32) + 1.0f32).min(x + w) - (px as float32).max(x)
+                let oy = ((py as float32) + 1.0f32).min(y + h) - (py as float32).max(y)
+                let exact = ox.max(0.0).min(1.0) * oy.max(0.0).min(1.0)
+                let want = (exact * 255.0f32 + 0.5f32) as int
+                let got = img.data[py * 12 + px] as int
+                assert(got - want <= 1 && want - got <= 1)
+            }
+        }
+    }
+}
+
+// Convex polygons in random orientations, clipped by nothing: the coverage
+// adds up to the shoelace area, to half a level a partial pixel; reversing
+// the polygon changes nothing, and so does the even-odd rule.
+#test
+fun polygon_areas() {
+    var s: uint32 = 777
+    for k in 0..16 {
+        s = lcg(s)
+        let cx = 4.0f32 + unit(s) * 8.0f32
+        s = lcg(s)
+        let cy = 4.0f32 + unit(s) * 8.0f32
+        s = lcg(s)
+        let n = 3 + ((unit(s) * 5.0f32) as int)
+        var pts: [Vec2] = []
+        for i in 0..n {
+            // angles in order around the centre, each gap less than half a
+            // turn, so the polygon is simple
+            s = lcg(s)
+            let a = ((i as float32) + 0.4f32 * unit(s)) * 6.2831853f32 / (n as float32)
+            s = lcg(s)
+            let r = 1.0f32 + unit(s) * 2.9f32
+            pts.push(vec2(cx + r * a.cos(), cy + r * a.sin()))
+        }
+        let img = coverage(polygon(pts), 16, 16)
+        let want = shoelace(pts)
+        let slack = (partial(img) as float32) * 0.5f32 / 255.0f32 + 0.001f32
+        assert((covered(img) - want).abs() <= slack)
+        assert(coverage(polygon(pts.reversed()), 16, 16) == img)
+        assert(coverage(polygon(pts), 16, 16, FillRule.EvenOdd) == img)
+    }
+}
+
+// A circle: the coverage is the area of its flattened polygon, and that is
+// πr² to within the flattening tolerance along the circumference.
+#test
+fun circle_area() {
+    let c = circle(7.3f32, 6.6f32, 5.2f32)
+    let img = coverage(c, 15, 14)
+    let polys = c.flatten()
+    assert(polys.len() == 1)
+    let flat = shoelace(polys[0])
+    let slack = (partial(img) as float32) * 0.5f32 / 255.0f32 + 0.001f32
+    assert((covered(img) - flat).abs() <= slack)
+    let exact = 3.14159265f32 * 5.2f32 * 5.2f32
+    assert((flat - exact).abs() <= 2.0f32 * 3.14159265f32 * 5.2f32 * TOLERANCE)
+    assert(flat < exact + 0.05f32)
+}
+
+// Two overlapping squares: non-zero fills their union, even-odd leaves the
+// overlap out; a square inside another in the other direction is a hole.
+#test
+fun fill_rules() {
+    var p = rect(1.0f32, 1.0f32, 4.0f32, 4.0f32)
+    p.append(rect(3.0f32, 3.0f32, 4.0f32, 4.0f32))
+    let nz = coverage(p, 8, 8)
+    let eo = coverage(p, 8, 8, FillRule.EvenOdd)
+    assert(covered(nz) == 28.0f32)
+    assert(covered(eo) == 24.0f32)
+    assert(nz.data[3 * 8 + 3] == 255u8)
+    assert(eo.data[3 * 8 + 3] == 0u8)
+    var holed = rect(0.0f32, 0.0f32, 6.0f32, 6.0f32)
+    holed.append(polygon([vec2(2.0, 2.0), vec2(2.0, 4.0), vec2(4.0, 4.0), vec2(4.0, 2.0)]))
+    let h = coverage(holed, 6, 6)
+    assert(covered(h) == 32.0f32)
+    assert(h.data[2 * 6 + 2] == 0u8)
+}
+
+// A mask is the same wherever the path is moved by whole pixels.
+#test
+fun mask_translation() {
+    let a = rasterize(circle(3.3f32, 2.7f32, 2.1f32))
+    let b = rasterize(circle(-96.7f32, 52.7f32, 2.1f32))
+    // the same to a level: float32 rounds the points differently out there
+    assert(a.image.width == b.image.width && a.image.height == b.image.height)
+    for i in 0..a.image.data.len() {
+        let d = (a.image.data[i] as int) - (b.image.data[i] as int)
+        assert(d <= 1 && d >= -1)
+    }
+    assert(a.x - b.x == 100)
+    assert(b.y - a.y == 50)
+    let c = rasterize_clipped(circle(3.3f32, 2.7f32, 2.1f32), Rect { x: 0, y: 0, w: 3, h: 100 })
+    assert(c.image.width == 3 - a.x)
+    assert(c.image.data[0] == a.image.data[0])
+}
+
+// --- tests of the canvas -----------------------------------------------------
+
+// The RGBA of the canvas pixel `(x, y)`.
+fun px(c: Canvas, x: int, y: int) -> Color {
+    return c.image.color_at(x, y)
+}
+
+// Source-over against the exact result, computed in float64: alpha and
+// every channel within half a level, over transparent, translucent and
+// opaque destinations.
+#test
+fun blend_is_exact() {
+    var s: uint32 = 99
+    for k in 0..3000 {
+        s = lcg(s)
+        let sr = ((s >> 8) & 255u32) as int
+        let sa = ((s >> 16) & 255u32) as int
+        s = lcg(s)
+        let cov = if k % 3 == 0 { 255 } else { ((s >> 8) & 255u32) as int }
+        let dr = ((s >> 16) & 255u32) as int
+        s = lcg(s)
+        let da = if k % 4 == 0 { 255 } else if k % 4 == 1 { 0 } else { ((s >> 8) & 255u32) as int }
+        var c = canvas(Image { width: 1, height: 1, layout: Layout.Rgba, data: [dr as uint8, 0u8, 0u8, da as uint8] })
+        c.blend(0, sr, 0, 0, sa, cov)
+        // the coverage scales the alpha first, rounded: 256 levels
+        let a = (((sa * cov) as float64) / 255.0 + 0.5).floor() / 255.0
+        let dav = (da as float64) / 255.0
+        let oa = a + dav * (1.0 - a)
+        let got_a = c.image.data[3] as float64
+        assert((got_a - oa * 255.0).abs() <= 0.5)
+        if oa > 0.0 && c.image.data[3] != 0u8 {
+            let exact = ((sr as float64) * a + (dr as float64) * dav * (1.0 - a)) / oa
+            assert(((c.image.data[0] as float64) - exact).abs() <= 0.5 + 0.000001)
+        }
+    }
+}
+
+// Rectangles on a white canvas: whole pixels replaced, partly covered ones
+// blended by their area; the transform moves user space, `restore` brings
+// it back, the clip keeps pixels out.
+#test
+fun canvas_fills() {
+    let white = image.rgb(255u8, 255u8, 255u8)
+    let red = image.rgb(255u8, 0u8, 0u8)
+    var c = blank(4, 3, white)
+    c.fill_rect(1.0f32, 0.0f32, 2.0f32, 3.0f32, Paint.Solid(red))
+    assert(px(c, 0, 1) == white)
+    assert(px(c, 1, 1) == red && px(c, 2, 2) == red)
+    var d = blank(2, 2, white)
+    d.fill_rect(0.5f32, 0.5f32, 1.0f32, 1.0f32, Paint.Solid(image.rgb(0u8, 0u8, 0u8)))
+    // a quarter of each pixel: coverage 64, so 255 * 191 / 255
+    assert(px(d, 0, 0) == image.rgb(191u8, 191u8, 191u8))
+    assert(px(d, 1, 1) == image.rgb(191u8, 191u8, 191u8))
+    var e = blank(4, 4, white)
+    e.save()
+    e.translate(2.0f32, 1.0f32)
+    e.fill_rect(0.0f32, 0.0f32, 1.0f32, 1.0f32, Paint.Solid(red))
+    e.restore()
+    e.fill_rect(0.0f32, 0.0f32, 1.0f32, 1.0f32, Paint.Solid(red))
+    assert(px(e, 2, 1) == red && px(e, 0, 0) == red && px(e, 1, 0) == white)
+    e.save()
+    e.clip_to(Rect { x: 0, y: 3, w: 2, h: 1 })
+    e.fill_rect(0.0f32, 0.0f32, 4.0f32, 4.0f32, Paint.Solid(image.rgb(0u8, 0u8, 255u8)))
+    e.restore()
+    assert(px(e, 1, 3) == image.rgb(0u8, 0u8, 255u8) && px(e, 2, 3) == white && px(e, 3, 0) == white)
+    // a half-transparent colour over a transparent canvas keeps its colour
+    var t = blank(1, 1, image.rgba(0u8, 0u8, 0u8, 0u8))
+    t.fill_rect(0.0f32, 0.0f32, 1.0f32, 1.0f32, Paint.Solid(image.rgba(10u8, 200u8, 30u8, 128u8)))
+    assert(px(t, 0, 0) == image.rgba(10u8, 200u8, 30u8, 128u8))
+}
+
+// Fills one after the other, of every size, clipped and not, by both rules
+// and with a transform: the canvas's own rasterising (with its scratch list
+// used again and again) gives what the mask of each path gives.
+#test
+fun fill_matches_masks() {
+    let white = image.rgb(255u8, 255u8, 255u8)
+    var a = blank(12, 10, white)
+    var b = blank(12, 10, white)
+    a.translate(0.5f32, -1.0f32)
+    b.translate(0.5f32, -1.0f32)
+    var s: uint32 = 4242
+    for k in 0..40 {
+        var pts: [Vec2] = []
+        for i in 0..3 + k % 4 {
+            s = lcg(s)
+            let x = unit(s) * 16.0f32 - 2.0f32
+            s = lcg(s)
+            pts.push(vec2(x, unit(s) * 14.0f32 - 2.0f32))
+        }
+        s = lcg(s)
+        let color = image.rgba((s >> 8) as uint8, (s >> 16) as uint8, (s >> 24) as uint8, 64u8 + ((s >> 4) & 127u32) as uint8)
+        let rule = if k % 3 == 0 { FillRule.EvenOdd } else { FillRule.NonZero }
+        let paint = if k % 5 == 4 { linear_gradient(0.0f32, 0.0f32, 12.0f32, 3.0f32, [stop(0.0f32, color), stop(1.0f32, white)]) } else { Paint.Solid(color) }
+        a.fill(polygon(pts), paint, rule)
+        b.fill_mask(rasterize_clipped(polygon(pts).transformed(b.transform), b.clip_bounds(), rule), paint)
+        assert(a.image == b.image)
+    }
+    for v in a.scratch {
+        assert(v == 0.0)
+    }
+}
+
+// Gradients and patterns, sampled at the pixel centres.
+#test
+fun paints() {
+    let black = image.rgb(0u8, 0u8, 0u8)
+    let white = image.rgb(255u8, 255u8, 255u8)
+    var c = blank(4, 1, white)
+    c.fill_rect(0.0f32, 0.0f32, 4.0f32, 1.0f32, linear_gradient(0.0f32, 0.0f32, 4.0f32, 0.0f32, [stop(0.0f32, black), stop(1.0f32, white)]))
+    assert(px(c, 0, 0) == image.rgb(32u8, 32u8, 32u8))
+    assert(px(c, 1, 0) == image.rgb(96u8, 96u8, 96u8))
+    assert(px(c, 3, 0) == image.rgb(223u8, 223u8, 223u8))
+    var r = blank(5, 5, white)
+    r.fill_rect(0.0f32, 0.0f32, 5.0f32, 5.0f32, radial_gradient(2.5f32, 2.5f32, 2.0f32, [stop(0.0f32, black), stop(1.0f32, white)]))
+    assert(px(r, 2, 2) == black)
+    assert(px(r, 0, 0) == white)
+    assert(px(r, 3, 2) == image.rgb(128u8, 128u8, 128u8))
+    let tile = Image { width: 2, height: 1, layout: Layout.Rgb, data: [255u8, 0u8, 0u8, 0u8, 0u8, 255u8] }
+    var p = blank(5, 1, white)
+    p.translate(1.0f32, 0.0f32)
+    p.fill_rect(-1.0f32, 0.0f32, 5.0f32, 1.0f32, Paint.Pattern(tile))
+    assert(px(p, 0, 0) == image.rgb(0u8, 0u8, 255u8))
+    assert(px(p, 1, 0) == image.rgb(255u8, 0u8, 0u8))
+    assert(px(p, 4, 0) == image.rgb(0u8, 0u8, 255u8))
+}
+
+// Images drawn as they are, at half opacity, and scaled up.
+#test
+fun images() {
+    let white = image.rgb(255u8, 255u8, 255u8)
+    let src = Image { width: 2, height: 1, layout: Layout.Gray, data: [0u8, 100u8] }
+    var c = blank(3, 2, white)
+    c.draw_image(src, 1, 1)
+    assert(px(c, 1, 1) == image.rgb(0u8, 0u8, 0u8) && px(c, 2, 1) == image.rgb(100u8, 100u8, 100u8))
+    assert(px(c, 0, 1) == white && px(c, 1, 0) == white)
+    c.draw_image(src, -1, 0, 0.5f32)
+    // coverage 128: (0 * 128 + 255 * 127) / 255 is 127, then 100 and 255
+    assert(px(c, 0, 0) == image.rgb(177u8, 177u8, 177u8))
+    var s = blank(4, 2, white)
+    s.draw_image_scaled(src, Rect { x: 0, y: 0, w: 4, h: 2 }, Filter.Nearest)
+    assert(px(s, 0, 1) == image.rgb(0u8, 0u8, 0u8) && px(s, 1, 0) == image.rgb(0u8, 0u8, 0u8))
+    assert(px(s, 2, 0) == image.rgb(100u8, 100u8, 100u8) && px(s, 3, 1) == image.rgb(100u8, 100u8, 100u8))
+    s.draw_image_scaled(src, Rect { x: 0, y: 0, w: 4, h: 2 })
+    // centres at 0.25 and 0.75 of the gap between the samples' centres
+    assert(px(s, 0, 0) == image.rgb(0u8, 0u8, 0u8) && px(s, 1, 0) == image.rgb(25u8, 25u8, 25u8))
+    assert(px(s, 2, 0) == image.rgb(75u8, 75u8, 75u8) && px(s, 3, 0) == image.rgb(100u8, 100u8, 100u8))
+}
+
+// A line of whole pixels, set pixels, and a glyph of the bitmap font.
+#test
+fun pixel_art() {
+    let black = image.rgb(0u8, 0u8, 0u8)
+    let white = image.rgb(255u8, 255u8, 255u8)
+    var c = blank(8, 4, black)
+    c.line_aliased(0, 0, 7, 3, white)
+    var lit: [(int, int)] = []
+    for y in 0..4 {
+        for x in 0..8 {
+            if px(c, x, y) == white {
+                lit.push((x, y))
+            }
+        }
+    }
+    assert(lit == [(0, 0), (1, 0), (2, 1), (3, 1), (4, 2), (5, 2), (6, 3), (7, 3)])
+    c.set_pixel(-1, 0, white)
+    c.set_pixel(1, 3, image.rgba(1u8, 2u8, 3u8, 4u8))
+    assert(px(c, 1, 3) == image.rgba(1u8, 2u8, 3u8, 4u8))
+    var t = blank(8, 10, black)
+    t.text_bitmap("A", 1, 0, white)
+    assert(px(t, 2, 1) == white && px(t, 1, 1) == black && px(t, 1, 4) == white && px(t, 5, 4) == white)
+    var n = 0
+    for v in t.image.data {
+        if v == 255u8 {
+            n += 1
+        }
+    }
+    // 18 pixels lit, each 3 channels at 255 beside the 80 alphas
+    assert(n == 18 * 3 + 80)
+    var big = blank(12, 20, black)
+    big.text_bitmap("A", 0, 0, white, 2)
+    assert(px(big, 2, 2) == white && px(big, 3, 3) == white && px(big, 0, 2) == black)
+}
+
+// Points that are not finite, huge or far outside: drawing them ends
+// nothing, and the pixels inside are still right.
+#test
+fun hostile_points() {
+    let nan = 0.0f32 / 0.0f32
+    let inf = 1.0f32 / 0.0f32
+    var p = path()
+    p.move_to(nan, 1.0f32)
+    p.line_to(5.0f32, inf)
+    p.cubic_to(1.0e30f32, -1.0e30f32, nan, nan, 3.0f32, 3.0f32)
+    p.quad_to(-1.0e38f32, 2.0f32, 1.0f32, 1.0f32)
+    p.close()
+    var c = blank(6, 6, image.rgb(255u8, 255u8, 255u8))
+    c.fill(p, Paint.Solid(image.rgb(0u8, 0u8, 0u8)))
+    c.stroke(p, stroke_style(3.0f32).with_join(Join.Round).with_cap(Cap.Round), Paint.Solid(image.rgb(0u8, 0u8, 0u8)))
+    c.stroke(p, stroke_style(nan), Paint.Solid(image.rgb(0u8, 0u8, 0u8)))
+    c.stroke(line(0.0f32, 0.0f32, 4.0f32, 4.0f32), stroke_style(1.0f32).with_dash([nan, 1.0f32]), Paint.Solid(image.rgb(0u8, 0u8, 0u8)))
+    c.stroke(line(0.0f32, 0.0f32, 4.0f32, 4.0f32), stroke_style(1.0f32).with_dash([0.0f32, 0.0f32]), Paint.Solid(image.rgb(0u8, 0u8, 0u8)))
+    // a square a billion pixels wide, clipped to the canvas: every pixel
+    c.fill_rect(-1.0e9f32, -1.0e9f32, 2.0e9f32, 2.0e9f32, Paint.Solid(image.rgb(9u8, 9u8, 9u8)))
+    assert(px(c, 0, 0) == image.rgb(9u8, 9u8, 9u8) && px(c, 5, 5) == image.rgb(9u8, 9u8, 9u8))
+    let m = rasterize(rect(nan, nan, 2.0f32, 2.0f32))
+    assert(m.image.width == 0)
+    c.fill_mask(m, Paint.Solid(image.rgb(0u8, 0u8, 0u8)))
+    c.draw_image_scaled(c.image, Rect { x: 0, y: 0, w: 0, h: 0 })
+    c.draw_image_scaled(c.image, Rect { x: 3, y: 3, w: -4, h: 5 })
+    c.text_bitmap("x", -3, 4, image.rgb(0u8, 0u8, 0u8), -2)
+    c.line_aliased(-100, -50, 100, 70, image.rgb(0u8, 0u8, 0u8))
+}
+
+// --- tests of strokes --------------------------------------------------------
+
+// The area a path's stroke covers on a 12 by 12 raster, to half a level a
+// partial pixel.
+fun stroke_area(p: Path, st: Stroke, tolerance: float32 = TOLERANCE) -> (float32, float32) {
+    let img = coverage(p.stroked(st, tolerance), 12, 12, FillRule.NonZero, tolerance)
+    return (covered(img), (partial(img) as float32) * 0.5f32 / 255.0f32 + 0.002f32)
+}
+
+fun near(got: (float32, float32), want: float32) -> bool {
+    let (area, slack) = got
+    return (area - want).abs() <= slack
+}
+
+// Lines and an L with each cap and join: the areas they must cover.
+#test
+fun stroke_areas() {
+    let st = stroke_style(2.0f32)
+    let l = line(1.0f32, 2.0f32, 7.0f32, 2.0f32)
+    assert(coverage(l.stroked(st), 12, 12) == coverage(rect(1.0f32, 1.0f32, 6.0f32, 2.0f32), 12, 12))
+    assert(near(stroke_area(l, st.with_cap(Cap.Square)), 16.0f32))
+    // a round cap's half circles: π r², less the chords of the flattening
+    // (at 0.01 px, 12 a half circle)
+    let (round, _) = stroke_area(l, st.with_cap(Cap.Round), 0.01f32)
+    assert(round <= 12.0f32 + 3.14159265f32 && round >= 12.0f32 + 3.14159265f32 - 0.05f32)
+    let ell = polyline([vec2(1.0, 1.0), vec2(6.0, 1.0), vec2(6.0, 6.0)])
+    assert(near(stroke_area(ell, st), 20.0f32))
+    assert(near(stroke_area(ell, st.with_join(Join.Bevel)), 19.5f32))
+    let (rj, _) = stroke_area(ell, st.with_join(Join.Round), 0.01f32)
+    assert(rj <= 20.0f32 - 1.0f32 + 3.14159265f32 / 4.0f32 + 0.002f32 && rj >= 19.77f32)
+    // at the default tolerance, a quarter turn of radius 1 is two chords
+    let (coarse, _) = stroke_area(ell, st.with_join(Join.Round))
+    assert((coarse - (19.0f32 + 0.70710678f32)).abs() < 0.01f32)
+    // the other way round the corner: the same
+    let back = polyline([vec2(6.0, 6.0), vec2(6.0, 1.0), vec2(1.0, 1.0)])
+    assert(near(stroke_area(back, st), 20.0f32))
+    // a square, closed: 6 by 6 less 2 by 2
+    assert(near(stroke_area(rect(3.0f32, 3.0f32, 4.0f32, 4.0f32), st), 32.0f32))
+    assert(near(stroke_area(polygon([vec2(3.0, 3.0), vec2(3.0, 7.0), vec2(7.0, 7.0), vec2(7.0, 3.0)]), st), 32.0f32))
+    // dashes of 2 on, 1 off along 10: 2 + 2 + 2 + 1 long
+    let dashed = st.with_dash([2.0f32, 1.0f32])
+    assert(near(stroke_area(line(0.0f32, 1.0f32, 10.0f32, 1.0f32), dashed), 14.0f32))
+    assert(near(stroke_area(line(0.0f32, 1.0f32, 10.0f32, 1.0f32), st.with_dash([2.0f32, 1.0f32], 1.5f32)), 13.0f32))
+    // a dot: a zero-length line with round caps is a circle
+    let (dot, _) = stroke_area(line(5.0f32, 5.0f32, 5.0f32, 5.0f32), st.with_cap(Cap.Round), 0.01f32)
+    assert(dot <= 3.14159265f32 && dot >= 3.1f32)
+    assert(stroke_area(line(5.0f32, 5.0f32, 5.0f32, 5.0f32), st) == (0.0f32, 0.002f32))
+}
+
+// A sharp angle: its miter is cut to a bevel past the limit.
+#test
+fun miter_limit() {
+    let v = polyline([vec2(1.0, 2.0), vec2(10.0, 4.0), vec2(1.0, 6.0)])
+    let st = stroke_style(1.0f32)
+    let (bevel, _) = stroke_area(v, st.with_join(Join.Bevel))
+    let (limited, _) = stroke_area(v, st)
+    let (miter, _) = stroke_area(v, Stroke { width: 1.0f32, join: Join.Miter, cap: Cap.Butt, miter_limit: 20.0f32, dash: [], dash_offset: 0.0f32 })
+    assert(limited == bevel)
+    assert(miter > bevel + 1.0f32)
+}
+
+// A dash offset far past the pattern's length, where float32 can't take
+// the remainder exactly (7e28 by 3 leaves 4.7e21): it starts the pattern
+// at some phase and ends, rather than counting the dashes off one by one.
+#test
+fun huge_dash_offsets() {
+    let l = line(0.0f32, 1.0f32, 10.0f32, 1.0f32)
+    let inf = 1.0f32 / 0.0f32
+    for off in [7.0e28f32, -7.0e28f32, 1.0e30f32, 3.0e38f32, inf, -inf] {
+        // 1 on, 2 off along 10: 3 or 4 dashes 2 wide
+        let (area, _) = stroke_area(l, stroke_style(2.0f32).with_dash([1.0f32, 2.0f32], off))
+        assert(area >= 6.0f32 && area <= 8.01f32)
+    }
+}
+
+// Under a transform that stretches one way more than the other, a stroke
+// is flattened to a quarter pixel along the larger scale (40 here, where
+// the square root of the determinant is 12.6): the same pixels as its
+// outline made at that tolerance and filled.
+#test
+fun stroke_under_a_stretch() {
+    let black = Paint.Solid(image.rgb(0u8, 0u8, 0u8))
+    var c = blank(100, 20, image.rgb(255u8, 255u8, 255u8))
+    c.translate(50.0f32, 10.0f32)
+    c.scale(40.0f32, 4.0f32)
+    var d = c
+    let ring = circle(0.0f32, 0.0f32, 1.0f32)
+    let st = stroke_style(0.25f32)
+    c.stroke(ring, st, black)
+    d.fill(ring.stroked(st, TOLERANCE / 40.0f32), black)
+    assert(c.image == d.image)
+}

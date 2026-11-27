@@ -54,6 +54,7 @@ SUITES = [
     # std.toml against tomllib and the toml-test suite, its drivers built for
     # the target (MYLA-424)
     "tests.burn.test_toml",
+    "tests.burn.test_images",
     # the review's generators: deep copies between tasks, reads beside a
     # mutation, writes into containers, generic code per width, the
     # library at extreme arguments, the parsers built --checked (MYLA-555)

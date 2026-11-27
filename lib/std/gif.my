@@ -1,0 +1,1209 @@
+// std.gif: GIF images and animations (D313, MYLA-964). GIF87a and GIF89a:
+// global and local palettes, transparency, interlacing, the graphic control
+// extension (a frame's delay and disposal) and the NETSCAPE2.0 loop count.
+// The pixel data is LZW (std.compress's `lzw_decode_gif` and
+// `lzw_encode_gif`); the encoder reduces colours with std.image's
+// `quantize`.
+//
+// A decoded frame keeps its own rectangle (`Frame`); `composite` gives each
+// frame as it is shown, on the whole canvas, its predecessors' disposal
+// applied, as Pillow shows them. Every pixel is `Rgba`: a palette's
+// transparent entry has alpha 0 (keeping its colour), the others 255.
+//
+// Inputs are untrusted: every offset is checked, a file that ends early is
+// `Truncated`, and `max_pixels` bounds what decoding and compositing make
+// together, frame after frame, since an animation of a million 1x1 frames on
+// a large canvas is a bomb too.
+
+import std.image as image
+from std.image import Image, Image8, Color, Layout, Rect, ImageError, ImageInfo
+import std.compress as compress
+from std.compress import CompressError
+import std.list as list_m // filled, extend
+import std.option as option_m // expect and unwrap_or, in the tests
+
+// What happens to a frame's rectangle once it has been shown, before the
+// next frame is drawn (the graphic control extension's disposal method).
+#derive(Eq)
+pub enum Disposal {
+    // 0: none given; shown as `Keep`
+    Unspecified
+    // 1: the frame stays
+    Keep
+    // 2: the rectangle goes back to the animation's background
+    Background
+    // 3: the rectangle goes back to what it was before the frame
+    Previous
+}
+
+impl Disposal {
+    // The disposal method as GIF numbers it: 0 to 3.
+    #test(Disposal.Unspecified)[0]
+    #test(Disposal.Previous)[3]
+    fun code(self) -> int {
+        return match self {
+            Unspecified => 0
+            Keep => 1
+            Background => 2
+            Previous => 3
+        }
+    }
+}
+
+// The disposal of the method `code`; the reserved 4 to 7 are `Unspecified`.
+#test(2)[Disposal.Background]
+#test(1)[Disposal.Keep]
+#test(7)[Disposal.Unspecified]
+pub fun disposal_of(code: int) -> Disposal {
+    return match code {
+        1 => Disposal.Keep
+        2 => Disposal.Background
+        3 => Disposal.Previous
+        _ => Disposal.Unspecified
+    }
+}
+
+impl Format for Disposal {
+    // The variant's name; the spec is ignored.
+    #test(Disposal.Keep, "")["Keep"]
+    fun format(self, spec: str) -> str {
+        return match self {
+            Unspecified => "Unspecified"
+            Keep => "Keep"
+            Background => "Background"
+            Previous => "Previous"
+        }
+    }
+}
+
+// A frame: its image (`Rgba` when decoded) drawn with its top left corner
+// at `(x, y)` of the canvas, shown for `delay_ms` milliseconds (GIF stores
+// hundredths of a second), then disposed of by `disposal`.
+#derive(Eq)
+pub struct Frame {
+    image: Image8,
+    x: int,
+    y: int,
+    delay_ms: int,
+    disposal: Disposal,
+}
+
+// An animation: a `width` by `height` canvas, its frames in order, and
+// `loops`, the NETSCAPE2.0 loop count: 0 to loop forever, -1 if the file has
+// no loop extension (shown once). `background` is the canvas before the
+// first frame, and what `Disposal.Background` clears a rectangle to; the
+// decoder sets it as Pillow does: the first frame's transparent colour with
+// alpha 0 if it has one, else the global palette's background colour,
+// opaque. (Browsers clear to transparent: `image.rgba(0, 0, 0, 0)`.)
+#derive(Eq)
+pub struct Animation {
+    width: int,
+    height: int,
+    loops: int,
+    background: Color,
+    frames: [Frame],
+}
+
+// --- decoding ----------------------------------------------------------------
+
+// The logical screen descriptor.
+struct Screen {
+    width: int,
+    height: int,
+    // the global palette's colour of the background index, opaque, if any
+    background: Option<Color>,
+    // the global palette as RGB triples, [] if none
+    palette: [uint8],
+}
+
+// A frame as the file holds it, before its pixels are made.
+struct RawFrame {
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    interlaced: bool,
+    // RGB triples
+    palette: [uint8],
+    // the transparent index, -1 for none
+    transparent: int,
+    delay_ms: int,
+    disposal: Disposal,
+}
+
+// A reader of a GIF file: the position, and what the extensions before the
+// next image said.
+struct Reader {
+    b: [uint8],
+    pos: int,
+    delay_ms: int,
+    disposal: Disposal,
+    transparent: int,
+    loops: int,
+}
+
+fun reader(b: [uint8]) -> Reader {
+    return Reader { b: b, pos: 0, delay_ms: 0, disposal: Disposal.Unspecified, transparent: -1, loops: -1 }
+}
+
+impl Reader {
+    fun u8(var self) -> Result<int, ImageError> {
+        if self.pos >= self.b.len() {
+            return Err(ImageError.Truncated)
+        }
+        let v = self.b[self.pos] as int
+        self.pos += 1
+        return Ok(v)
+    }
+
+    fun u16(var self) -> Result<int, ImageError> {
+        let lo = self.u8()?
+        let hi = self.u8()?
+        return Ok(lo | (hi << 8))
+    }
+
+    // The next `n` bytes.
+    fun take(var self, n: int) -> Result<[uint8], ImageError> {
+        if n > self.b.len() - self.pos {
+            return Err(ImageError.Truncated)
+        }
+        let out = self.b[self.pos:self.pos + n]
+        self.pos += n
+        return Ok(out)
+    }
+
+    // A palette of `1 << (bits + 1)` colours, the low 3 bits of a flags byte.
+    fun palette(var self, flags: int) -> Result<[uint8], ImageError> {
+        return self.take(3 << ((flags & 7) + 1))
+    }
+
+    // A chain of sub-blocks, their bytes joined (`keep`) or skipped.
+    fun sub_blocks(var self, keep: bool) -> Result<[uint8], ImageError> {
+        var out: [uint8] = []
+        while true {
+            let n = self.u8()?
+            if n == 0 {
+                return Ok(out)
+            }
+            if n > self.b.len() - self.pos {
+                return Err(ImageError.Truncated)
+            }
+            if keep {
+                out.extend(self.b[self.pos:self.pos + n])
+            }
+            self.pos += n
+        }
+        unreachable()
+    }
+
+    // The header and the logical screen descriptor, with the global palette.
+    fun screen(var self) -> Result<Screen, ImageError> {
+        if self.b.len() < 6 {
+            return Err(ImageError.Truncated)
+        }
+        let sig = self.b[0:6]
+        if sig != [71u8, 73u8, 70u8, 56u8, 55u8, 97u8] && sig != [71u8, 73u8, 70u8, 56u8, 57u8, 97u8] {
+            return Err(ImageError.BadSignature)
+        }
+        self.pos = 6
+        let w = self.u16()?
+        let h = self.u16()?
+        let flags = self.u8()?
+        let bg = self.u8()?
+        let _aspect = self.u8()?
+        var palette: [uint8] = []
+        var background: Option<Color> = None
+        if (flags & 0x80) != 0 {
+            palette = self.palette(flags)?
+            if bg * 3 + 2 < palette.len() {
+                background = Some(image.rgb(palette[bg * 3], palette[bg * 3 + 1], palette[bg * 3 + 2]))
+            }
+        }
+        return Ok(Screen { width: w, height: h, background: background, palette: palette })
+    }
+
+    // The next image's descriptor, after the extensions before it (the
+    // reader then stands at its LZW data), or None at the trailer, at the
+    // end of the input, or at a byte that starts no block once `seen`
+    // frames were read (as Pillow and browsers end there).
+    fun next_frame(var self, global: [uint8], seen: int) -> Result<Option<RawFrame>, ImageError> {
+        while true {
+            if self.pos >= self.b.len() {
+                if seen == 0 {
+                    return Err(ImageError.Truncated)
+                }
+                return Ok(None)
+            }
+            let at = self.pos
+            let kind = self.u8()?
+            if kind == 0x3B {
+                if seen == 0 {
+                    return Err(ImageError.Corrupt("no image before the trailer"))
+                }
+                return Ok(None)
+            }
+            if kind == 0x21 {
+                let label = self.u8()?
+                if label == 0xF9 {
+                    let data = self.sub_blocks(true)?
+                    if data.len() >= 4 {
+                        let flags = data[0] as int
+                        self.disposal = disposal_of((flags >> 2) & 7)
+                        self.delay_ms = ((data[1] as int) | ((data[2] as int) << 8)) * 10
+                        self.transparent = if (flags & 1) != 0 { data[3] as int } else { -1 }
+                    }
+                } else if label == 0xFF {
+                    // an application extension: NETSCAPE2.0's (or ANIMEXTS1.0's)
+                    // name, then a sub-block of 1 and the loop count
+                    let data = self.sub_blocks(true)?
+                    let id = data[:11]
+                    if (bytes_are(id, "NETSCAPE2.0") || bytes_are(id, "ANIMEXTS1.0")) && data.len() >= 14 && data[11] == 1u8 && seen == 0 {
+                        self.loops = (data[12] as int) | ((data[13] as int) << 8)
+                    }
+                } else {
+                    let _skipped = self.sub_blocks(false)?
+                    if label == 0x01 {
+                        // a plain text extension takes the control extension before it
+                        self.reset_control()
+                    }
+                }
+                continue
+            }
+            if kind != 0x2C {
+                if seen == 0 {
+                    return Err(ImageError.Corrupt(f"a block of type {kind} at {at}"))
+                }
+                return Ok(None)
+            }
+            let x = self.u16()?
+            let y = self.u16()?
+            let w = self.u16()?
+            let h = self.u16()?
+            let flags = self.u8()?
+            var palette = global
+            if (flags & 0x80) != 0 {
+                palette = self.palette(flags)?
+            }
+            if palette.len() == 0 {
+                // no palette at all: gray levels, as Pillow reads it
+                palette = gray_palette()
+            }
+            let f = RawFrame {
+                x: x, y: y, w: w, h: h, interlaced: (flags & 0x40) != 0, palette: palette,
+                transparent: self.transparent, delay_ms: self.delay_ms, disposal: self.disposal,
+            }
+            self.reset_control()
+            return Ok(Some(f))
+        }
+        unreachable()
+    }
+
+    fun reset_control(var self) {
+        self.delay_ms = 0
+        self.disposal = Disposal.Unspecified
+        self.transparent = -1
+    }
+
+    // The frame `f`'s pixels, its LZW data read: `Rgba`, the transparent
+    // index with alpha 0, an index past the palette opaque black, pixels the
+    // data doesn't reach transparent black.
+    fun pixels(var self, f: RawFrame) -> Result<Image8, ImageError> {
+        let code_size = self.u8()?
+        let data = self.sub_blocks(true)?
+        if code_size < 1 || code_size > 8 {
+            return Err(ImageError.Corrupt(f"LZW minimum code size {code_size}"))
+        }
+        let n = f.w * f.h
+        if n == 0 {
+            // no pixel (a frame may be 0 by 65535): nothing to fill, row by row
+            return Ok(Image { width: f.w, height: f.h, layout: Layout.Rgba, data: [] })
+        }
+        var idx: [uint8] = []
+        match compress.lzw_decode_gif(data, code_size, n) {
+            Ok(v) => { idx = v }
+            Err(e) => { return Err(lzw_error(e)) }
+        }
+        // the palette as RGBA, 256 entries
+        var pal = list_m.filled(1024, 0u8)
+        for i in 0..256 {
+            pal[i * 4 + 3] = 255u8
+        }
+        var k = 0
+        while k * 3 + 2 < f.palette.len() && k < 256 {
+            pal[k * 4] = f.palette[k * 3]
+            pal[k * 4 + 1] = f.palette[k * 3 + 1]
+            pal[k * 4 + 2] = f.palette[k * 3 + 2]
+            k += 1
+        }
+        if f.transparent >= 0 {
+            pal[f.transparent * 4 + 3] = 0u8
+        }
+        var out = list_m.filled(n * 4, 0u8)
+        let rows = row_order(f.h, f.interlaced)
+        let have = idx.len()
+        var i = 0
+        for r in 0..f.h {
+            var o = rows[r] * f.w * 4
+            for _ in 0..f.w {
+                if i >= have {
+                    break
+                }
+                let p = (idx[i] as int) * 4
+                out[o] = pal[p]
+                out[o + 1] = pal[p + 1]
+                out[o + 2] = pal[p + 2]
+                out[o + 3] = pal[p + 3]
+                o += 4
+                i += 1
+            }
+        }
+        return Ok(Image { width: f.w, height: f.h, layout: Layout.Rgba, data: out })
+    }
+}
+
+// The error of LZW data that `lzw_decode_gif` refused.
+#test(CompressError.TooLarge)[ImageError.Corrupt("more pixel data than the frame holds")]
+fun lzw_error(e: CompressError) -> ImageError {
+    if e == CompressError.TooLarge {
+        return ImageError.Corrupt("more pixel data than the frame holds")
+    }
+    return ImageError.Corrupt(f"LZW data: {e}")
+}
+
+// 256 gray levels as RGB triples: index `k` is `(k, k, k)`.
+fun gray_palette() -> [uint8] {
+    var p: [uint8] = []
+    for k in 0..256 {
+        p.push(k as uint8)
+        p.push(k as uint8)
+        p.push(k as uint8)
+    }
+    return p
+}
+
+// Whether the bytes `b` are the ASCII text `s`.
+fun bytes_are(b: [uint8], s: str) -> bool {
+    if b.len() != s.len() {
+        return false
+    }
+    for i in 0..b.len() {
+        if b[i] != s[i] {
+            return false
+        }
+    }
+    return true
+}
+
+// The row of the image each row of the data fills: in order, or GIF's four
+// interlaced passes (every 8th row from 0, every 8th from 4, every 4th from
+// 2, every 2nd from 1).
+#test(5, false)[[0, 1, 2, 3, 4]]
+#test(10, true)[[0, 8, 4, 2, 6, 1, 3, 5, 7, 9]]
+#test(1, true)[[0]]
+fun row_order(h: int, interlaced: bool) -> [int] {
+    var rows: [int] = []
+    if !interlaced {
+        for r in 0..h {
+            rows.push(r)
+        }
+        return rows
+    }
+    for pass in [(0, 8), (4, 8), (2, 4), (1, 2)] {
+        var r = pass.0
+        while r < h {
+            rows.push(r)
+            r += pass.1
+        }
+    }
+    return rows
+}
+
+// The canvas's colour before the first frame, from the screen and the first
+// frame (as Pillow chooses it, see `Animation`).
+fun background_of(s: Screen, first: RawFrame) -> Color {
+    let t = first.transparent
+    if t >= 0 {
+        if t * 3 + 2 < first.palette.len() {
+            return image.rgba(first.palette[t * 3], first.palette[t * 3 + 1], first.palette[t * 3 + 2], 0u8)
+        }
+        return image.rgba(0u8, 0u8, 0u8, 0u8)
+    }
+    return match s.background {
+        Some(c) => c
+        None => image.rgb(0u8, 0u8, 0u8)
+    }
+}
+
+// Pixels counted against `max_pixels`: so far, and what a frame of `w` by
+// `h` on a `cw` by `ch` canvas adds (its own pixels and the canvas
+// `composite` makes for it). `TooLarge` past the limit.
+fun count_pixels(so_far: int64, w: int, h: int, cw: int, ch: int, max_pixels: int64) -> Result<int64, ImageError> {
+    image.check_size(w, h, 4, max_pixels)?
+    image.check_size(cw, ch, 4, max_pixels)?
+    let total = so_far + (w as int64) * (h as int64) + (cw as int64) * (ch as int64)
+    if total > max_pixels {
+        return Err(ImageError.TooLarge(total))
+    }
+    return Ok(total)
+}
+
+// The frames of `b`, up to `limit` of them, with the canvas.
+fun read(b: [uint8], max_pixels: int64, limit: int) -> Result<Animation, ImageError> {
+    var r = reader(b)
+    let s = r.screen()?
+    image.check_size(s.width, s.height, 4, max_pixels)?
+    var w = s.width
+    var h = s.height
+    var background = image.rgba(0u8, 0u8, 0u8, 0u8)
+    var frames: [Frame] = []
+    var total: int64 = 0
+    while frames.len() < limit {
+        let Some(f) = r.next_frame(s.palette, frames.len())? else {
+            break
+        }
+        if frames.len() == 0 {
+            // the canvas grows to hold the first frame, as in Pillow and browsers
+            if f.x + f.w > w {
+                w = f.x + f.w
+            }
+            if f.y + f.h > h {
+                h = f.y + f.h
+            }
+            background = background_of(s, f)
+        }
+        total = count_pixels(total, f.w, f.h, w, h, max_pixels)?
+        let img = r.pixels(f)?
+        frames.push(Frame { image: img, x: f.x, y: f.y, delay_ms: f.delay_ms, disposal: f.disposal })
+    }
+    return Ok(Animation { width: w, height: h, loops: r.loops, background: background, frames: frames })
+}
+
+// The first frame of `b` as it is shown: the whole canvas, `Rgba`.
+// `TooLarge` if the canvas and the frame have more than `max_pixels`
+// pixels together.
+pub fun decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError> {
+    let a = read(b, max_pixels, 1)?
+    return Ok(composite(a)[0])
+}
+
+// Every frame of `b`, each its own rectangle, `Rgba`. `TooLarge` if the
+// frames and their canvases (what `composite` makes) have more than
+// `max_pixels` pixels together.
+pub fun decode_all(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Animation, ImageError> {
+    return read(b, max_pixels, 0x7FFFFFFF)
+}
+
+// What `b` holds, without decoding the pixels: the canvas (grown to the
+// first frame, as `decode` makes it), `Rgba`, 8 bits, and the number of
+// frames.
+pub fun info(b: [uint8]) -> Result<ImageInfo, ImageError> {
+    var r = reader(b)
+    let s = r.screen()?
+    var w = s.width
+    var h = s.height
+    var count = 0
+    while let Some(f) = r.next_frame(s.palette, count)? {
+        if count == 0 {
+            if f.x + f.w > w {
+                w = f.x + f.w
+            }
+            if f.y + f.h > h {
+                h = f.y + f.h
+            }
+        }
+        let _code_size = r.u8()?
+        let _data = r.sub_blocks(false)?
+        count += 1
+    }
+    return Ok(ImageInfo { width: w, height: h, layout: Layout.Rgba, bit_depth: 8, frames: count, format: "gif" })
+}
+
+// --- compositing -------------------------------------------------------------
+
+// Each frame of `a` as it is shown: the canvas, `Rgba`, `a.width` by
+// `a.height`. The canvas starts as `a.background`; a frame's pixels with
+// alpha 0 leave it as it is, the others replace it (GIF's transparency is
+// all or nothing), clipped to the canvas; then the frame's disposal
+// applies to its rectangle before the next frame: `Background` clears it to
+// `a.background`, `Previous` puts back what it was before the frame.
+pub fun composite(a: Animation) -> [Image8] {
+    var c = Canvas { w: a.width, h: a.height, data: list_m.filled(a.width * a.height * 4, 0u8) }
+    c.fill(0, 0, a.width, a.height, a.background)
+    var out: [Image8] = []
+    for f in a.frames {
+        let img = if f.image.layout == Layout.Rgba { f.image } else { f.image.convert(Layout.Rgba) }
+        // the frame's rectangle clipped to the canvas
+        let x0 = max_int(f.x, 0)
+        let y0 = max_int(f.y, 0)
+        let x1 = min_int(f.x + img.width, a.width)
+        let y1 = min_int(f.y + img.height, a.height)
+        if x0 >= x1 || y0 >= y1 {
+            // nothing of it on the canvas (or no pixel at all): shown as the
+            // canvas is, its disposal changes nothing
+            out.push(Image { width: a.width, height: a.height, layout: Layout.Rgba, data: c.data })
+            continue
+        }
+        let saved = if f.disposal == Disposal.Previous { c.data } else { no_bytes() }
+        c.draw(img, f.x, f.y, x0, y0, x1, y1)
+        out.push(Image { width: a.width, height: a.height, layout: Layout.Rgba, data: c.data })
+        if f.disposal == Disposal.Background {
+            c.fill(x0, y0, x1, y1, a.background)
+        } else if f.disposal == Disposal.Previous {
+            c.restore(saved, x0, y0, x1, y1)
+        }
+    }
+    return out
+}
+
+fun no_bytes() -> [uint8] {
+    return []
+}
+
+#test(1, 2)[2]
+#test(-1, -2)[-1]
+fun max_int(a: int, b: int) -> int {
+    return if a > b { a } else { b }
+}
+
+#test(1, 2)[1]
+fun min_int(a: int, b: int) -> int {
+    return if a < b { a } else { b }
+}
+
+// RGBA samples, `w` by `h` pixels.
+struct Canvas {
+    w: int,
+    h: int,
+    data: [uint8],
+}
+
+impl Canvas {
+    // The rectangle from `(x0, y0)` to `(x1, y1)` (not included) set to `col`.
+    fun fill(var self, x0: int, y0: int, x1: int, y1: int, col: Color) {
+        // the samples in a local, so the loop doesn't go through `self`
+        var c = self.data
+        self.data = []
+        for y in y0..y1 {
+            var o = (y * self.w + x0) * 4
+            for _ in x0..x1 {
+                c[o] = col.r
+                c[o + 1] = col.g
+                c[o + 2] = col.b
+                c[o + 3] = col.a
+                o += 4
+            }
+        }
+        self.data = c
+    }
+
+    // The RGBA image `img`, its corner at `(fx, fy)`, drawn over the part
+    // from `(x0, y0)` to `(x1, y1)`: a pixel of alpha 0 leaves the canvas.
+    fun draw(var self, img: Image8, fx: int, fy: int, x0: int, y0: int, x1: int, y1: int) {
+        let d = img.data
+        var c = self.data
+        self.data = []
+        for y in y0..y1 {
+            var o = (y * self.w + x0) * 4
+            var s = ((y - fy) * img.width + (x0 - fx)) * 4
+            for _ in x0..x1 {
+                if d[s + 3] != 0u8 {
+                    c[o] = d[s]
+                    c[o + 1] = d[s + 1]
+                    c[o + 2] = d[s + 2]
+                    c[o + 3] = d[s + 3]
+                }
+                o += 4
+                s += 4
+            }
+        }
+        self.data = c
+    }
+
+    // The rectangle from `(x0, y0)` to `(x1, y1)` copied back from `saved`.
+    fun restore(var self, saved: [uint8], x0: int, y0: int, x1: int, y1: int) {
+        var c = self.data
+        self.data = []
+        for y in y0..y1 {
+            let o = (y * self.w + x0) * 4
+            for i in o..o + (x1 - x0) * 4 {
+                c[i] = saved[i]
+            }
+        }
+        self.data = c
+    }
+}
+
+// --- encoding ----------------------------------------------------------------
+
+// The image `img` (any layout) as a GIF of one frame. A pixel of alpha
+// below 128 is transparent, the others opaque. An image of at most 256
+// colours (255 with transparent pixels) keeps them exactly; one of more is
+// reduced by `image.quantize`, dithered if `dither`. More than 65535 pixels
+// wide or high is a failure.
+pub fun encode(img: Image8, dither: bool = true) -> [uint8] {
+    let f = Frame { image: img, x: 0, y: 0, delay_ms: 0, disposal: Disposal.Unspecified }
+    let a = Animation { width: img.width, height: img.height, loops: -1, background: image.rgba(0u8, 0u8, 0u8, 0u8), frames: [f] }
+    return encode_all(a, dither)
+}
+
+// The animation `a` as a GIF: each frame as `composite` shows it, with its
+// delay (rounded to hundredths of a second) and `a.loops` (no loop
+// extension if it is negative). Colours as for `encode`, a palette for each
+// frame (the first one's global, the others local where they differ). Each
+// frame after the first is written as the rectangle of what changed since
+// the one before, with the disposal that makes it show right (`Keep`, or
+// `Background` where pixels become transparent), so a decoder's frames
+// differ from `a.frames` but `composite` shows the same. An animation
+// without frames or a canvas more than 65535 pixels wide or high is a
+// failure.
+pub fun encode_all(a: Animation, dither: bool = true) -> [uint8] {
+    let n = a.frames.len()
+    if n == 0 {
+        panic("gif.encode_all: an animation without frames")
+    }
+    let cw = a.width
+    let ch = a.height
+    if cw > 65535 || ch > 65535 {
+        panic(f"gif.encode_all: a {cw}x{ch} canvas, more than GIF's 65535")
+    }
+    var shown: [[uint8]] = []
+    var transparent = false
+    for img in composite(a) {
+        let t = threshold(img.data)
+        if !transparent && has_transparent(t) {
+            transparent = true
+        }
+        shown.push(t)
+    }
+    // the rectangle written of each frame, and its disposal
+    let empty = cw == 0 || ch == 0
+    let whole = image.rect(0, 0, cw, ch)
+    var rects = [whole]
+    var disposals = [if n > 1 { 1 } else { 0 }]
+    for i in 1..n {
+        var r = diff_box(shown[i - 1], shown[i], cw, whole)
+        if needs_clear(shown[i - 1], shown[i], cw, r) {
+            let u = union_rect(rects[i - 1], r)
+            rects[i - 1] = u
+            disposals[i - 1] = 2
+            var after = Canvas { w: cw, h: ch, data: shown[i - 1] }
+            after.fill(u.x, u.y, u.x + u.w, u.y + u.h, image.rgba(0u8, 0u8, 0u8, 0u8))
+            r = diff_box(after.data, shown[i], cw, whole)
+        }
+        if r.w == 0 {
+            r = if empty { image.rect(0, 0, 0, 0) } else { image.rect(0, 0, 1, 1) }
+        }
+        rects.push(r)
+        disposals.push(1)
+    }
+    var control = n > 1 || transparent
+    for f in a.frames {
+        if f.delay_ms != 0 {
+            control = true
+        }
+    }
+    var w = Writer { out: [] }
+    w.text(if control || a.loops >= 0 { "GIF89a" } else { "GIF87a" })
+    w.u16(cw)
+    w.u16(ch)
+    var global: [uint8] = []
+    for i in 0..n {
+        let r = rects[i]
+        let q = indexed(crop_rgba(shown[i], cw, r), r.w, r.h, transparent, dither)
+        let bits = palette_bits(q.palette.len() / 3)
+        if i == 0 {
+            global = q.palette
+            w.u8(0x80 | ((bits - 1) << 4) | (bits - 1))
+            w.u8(0) // the background index
+            w.u8(0) // the pixel aspect ratio
+            w.palette(global, bits)
+            if a.loops >= 0 {
+                w.u8(0x21)
+                w.u8(0xFF)
+                w.u8(11)
+                w.text("NETSCAPE2.0")
+                w.u8(3)
+                w.u8(1)
+                w.u16(min_int(a.loops, 65535))
+                w.u8(0)
+            }
+        }
+        if control {
+            w.u8(0x21)
+            w.u8(0xF9)
+            w.u8(4)
+            w.u8((disposals[i] << 2) | (if q.transparent >= 0 { 1 } else { 0 }))
+            w.u16(centiseconds(a.frames[i].delay_ms))
+            w.u8(if q.transparent >= 0 { q.transparent } else { 0 })
+            w.u8(0)
+        }
+        w.u8(0x2C)
+        w.u16(r.x)
+        w.u16(r.y)
+        w.u16(r.w)
+        w.u16(r.h)
+        if i > 0 && q.palette != global {
+            w.u8(0x80 | (bits - 1))
+            w.palette(q.palette, bits)
+        } else {
+            w.u8(0)
+        }
+        let code_size = max_int(bits, 2)
+        w.u8(code_size)
+        w.sub_blocks(compress.lzw_encode_gif(q.indices, code_size))
+    }
+    w.u8(0x3B)
+    return w.out
+}
+
+// A delay in hundredths of a second, rounded, 0 to 65535.
+#test(100)[10]
+#test(45)[5]
+#test(44)[4]
+#test(-5)[0]
+#test(1000000)[65535]
+fun centiseconds(ms: int) -> int {
+    if ms <= 0 {
+        return 0
+    }
+    return min_int((ms + 5) / 10, 65535)
+}
+
+// The bits of a palette's index that holds `n` colours: 1 to 8.
+#test(0)[1]
+#test(2)[1]
+#test(3)[2]
+#test(256)[8]
+fun palette_bits(n: int) -> int {
+    var bits = 1
+    while (1 << bits) < n {
+        bits += 1
+    }
+    return bits
+}
+
+// RGBA samples with alpha all or nothing: below 128 transparent black, the
+// rest opaque.
+#test([1u8, 2u8, 3u8, 127u8, 4u8, 5u8, 6u8, 128u8])[[0u8, 0u8, 0u8, 0u8, 4u8, 5u8, 6u8, 255u8]]
+fun threshold(d: [uint8]) -> [uint8] {
+    var out = d
+    var i = 0
+    while i + 3 < out.len() {
+        if out[i + 3] < 128u8 {
+            out[i] = 0u8
+            out[i + 1] = 0u8
+            out[i + 2] = 0u8
+            out[i + 3] = 0u8
+        } else {
+            out[i + 3] = 255u8
+        }
+        i += 4
+    }
+    return out
+}
+
+#test([1u8, 2u8, 3u8, 255u8])[false]
+#test([1u8, 2u8, 3u8, 255u8, 0u8, 0u8, 0u8, 0u8])[true]
+fun has_transparent(d: [uint8]) -> bool {
+    var i = 3
+    while i < d.len() {
+        if d[i] == 0u8 {
+            return true
+        }
+        i += 4
+    }
+    return false
+}
+
+// The smallest rectangle within `r` that holds every pixel where the RGBA
+// samples `a` and `b`, `w` pixels a row, differ; empty (all zero) if none.
+#test([1u8, 1u8, 1u8, 255u8, 2u8, 2u8, 2u8, 255u8], [1u8, 1u8, 1u8, 255u8, 3u8, 2u8, 2u8, 255u8], 2, image.rect(0, 0, 2, 1))[image.rect(1, 0, 1, 1)]
+#test([1u8, 1u8, 1u8, 255u8], [1u8, 1u8, 1u8, 255u8], 1, image.rect(0, 0, 1, 1))[image.rect(0, 0, 0, 0)]
+fun diff_box(a: [uint8], b: [uint8], w: int, r: Rect) -> Rect {
+    var x0 = r.x + r.w
+    var y0 = r.y + r.h
+    var x1 = r.x
+    var y1 = r.y
+    for y in r.y..r.y + r.h {
+        var o = (y * w + r.x) * 4
+        for x in r.x..r.x + r.w {
+            if a[o] != b[o] || a[o + 1] != b[o + 1] || a[o + 2] != b[o + 2] || a[o + 3] != b[o + 3] {
+                if x < x0 {
+                    x0 = x
+                }
+                if x >= x1 {
+                    x1 = x + 1
+                }
+                if y < y0 {
+                    y0 = y
+                }
+                y1 = y + 1
+            }
+            o += 4
+        }
+    }
+    if x1 <= x0 {
+        return image.rect(0, 0, 0, 0)
+    }
+    return image.rect(x0, y0, x1 - x0, y1 - y0)
+}
+
+// Whether a pixel of `r` is opaque in `prev` and transparent in `cur`
+// (thresholded RGBA, `w` pixels a row): a frame can't draw that, the
+// disposal before it must clear it.
+#test([1u8, 1u8, 1u8, 255u8], [0u8, 0u8, 0u8, 0u8], 1, image.rect(0, 0, 1, 1))[true]
+#test([0u8, 0u8, 0u8, 0u8], [1u8, 1u8, 1u8, 255u8], 1, image.rect(0, 0, 1, 1))[false]
+fun needs_clear(prev: [uint8], cur: [uint8], w: int, r: Rect) -> bool {
+    for y in r.y..r.y + r.h {
+        var o = (y * w + r.x) * 4 + 3
+        for _ in 0..r.w {
+            if cur[o] == 0u8 && prev[o] != 0u8 {
+                return true
+            }
+            o += 4
+        }
+    }
+    return false
+}
+
+// The smallest rectangle that holds `a` and `b`.
+#test(image.rect(0, 0, 2, 2), image.rect(3, 1, 1, 4))[image.rect(0, 0, 4, 5)]
+#test(image.rect(0, 0, 0, 0), image.rect(3, 1, 1, 4))[image.rect(3, 1, 1, 4)]
+fun union_rect(a: Rect, b: Rect) -> Rect {
+    if a.w == 0 || a.h == 0 {
+        return b
+    }
+    if b.w == 0 || b.h == 0 {
+        return a
+    }
+    let x0 = min_int(a.x, b.x)
+    let y0 = min_int(a.y, b.y)
+    let x1 = max_int(a.x + a.w, b.x + b.w)
+    let y1 = max_int(a.y + a.h, b.y + b.h)
+    return image.rect(x0, y0, x1 - x0, y1 - y0)
+}
+
+// The RGBA samples of the rectangle `r` of `d`, `w` pixels a row.
+#test([1u8, 1u8, 1u8, 1u8, 2u8, 2u8, 2u8, 2u8], 2, image.rect(1, 0, 1, 1))[[2u8, 2u8, 2u8, 2u8]]
+fun crop_rgba(d: [uint8], w: int, r: Rect) -> [uint8] {
+    var out = list_m.filled(r.w * r.h * 4, 0u8)
+    var j = 0
+    for y in r.y..r.y + r.h {
+        let o = (y * w + r.x) * 4
+        for i in o..o + r.w * 4 {
+            out[j] = d[i]
+            j += 1
+        }
+    }
+    return out
+}
+
+// A frame's pixels as palette indices: the palette as RGB triples, and the
+// transparent index (-1 for none).
+#derive(Eq)
+struct Paletted {
+    palette: [uint8],
+    indices: [uint8],
+    transparent: int,
+}
+
+// The thresholded RGBA pixels `px` of a `w` by `h` frame as palette
+// indices; with `reserve` the palette's last entry is the transparent one.
+// The transparent pixels take the colour of the opaque pixel before them
+// (or the first one) while the rest is quantised, so they add no colour.
+#test([9u8, 8u8, 7u8, 255u8, 0u8, 0u8, 0u8, 0u8, 9u8, 8u8, 7u8, 255u8], 3, 1, true, true)[Paletted { palette: [9u8, 8u8, 7u8, 0u8, 0u8, 0u8], indices: [0u8, 1u8, 0u8], transparent: 1 }]
+#test([9u8, 8u8, 7u8, 255u8, 1u8, 2u8, 3u8, 255u8], 2, 1, false, true)[Paletted { palette: [1u8, 2u8, 3u8, 9u8, 8u8, 7u8], indices: [1u8, 0u8], transparent: -1 }]
+fun indexed(px: [uint8], w: int, h: int, reserve: bool, dither: bool) -> Paletted {
+    let n = w * h
+    var rgb = list_m.filled(n * 3, 0u8)
+    var last = (0u8, 0u8, 0u8)
+    for i in 0..n {
+        if px[i * 4 + 3] != 0u8 {
+            last = (px[i * 4], px[i * 4 + 1], px[i * 4 + 2])
+            break
+        }
+    }
+    for i in 0..n {
+        if px[i * 4 + 3] != 0u8 {
+            last = (px[i * 4], px[i * 4 + 1], px[i * 4 + 2])
+        }
+        rgb[i * 3] = last.0
+        rgb[i * 3 + 1] = last.1
+        rgb[i * 3 + 2] = last.2
+    }
+    let q = image.quantize(Image { width: w, height: h, layout: Layout.Rgb, data: rgb }, if reserve { 255 } else { 256 }, dither)
+    var palette: [uint8] = []
+    for c in q.palette {
+        palette.push(c.r)
+        palette.push(c.g)
+        palette.push(c.b)
+    }
+    if !reserve {
+        return Paletted { palette: palette, indices: q.indices, transparent: -1 }
+    }
+    let t = q.palette.len()
+    var indices = q.indices
+    for i in 0..n {
+        if px[i * 4 + 3] == 0u8 {
+            indices[i] = t as uint8
+        }
+    }
+    palette.push(0u8)
+    palette.push(0u8)
+    palette.push(0u8)
+    return Paletted { palette: palette, indices: indices, transparent: t }
+}
+
+// The bytes of a file being written.
+struct Writer {
+    out: [uint8],
+}
+
+impl Writer {
+    fun u8(var self, v: int) {
+        self.out.push(v as uint8)
+    }
+
+    // Little endian, as GIF's numbers are.
+    fun u16(var self, v: int) {
+        self.out.push((v & 255) as uint8)
+        self.out.push((v >> 8) as uint8)
+    }
+
+    fun text(var self, s: str) {
+        for i in 0..s.len() {
+            self.out.push(s[i])
+        }
+    }
+
+    // RGB triples, padded with black to `1 << bits` colours.
+    fun palette(var self, p: [uint8], bits: int) {
+        self.out.extend(p)
+        for _ in p.len()..3 << bits {
+            self.out.push(0u8)
+        }
+    }
+
+    // `b` in sub-blocks of at most 255 bytes, and the empty block after them.
+    fun sub_blocks(var self, b: [uint8]) {
+        var i = 0
+        while i < b.len() {
+            let k = min_int(255, b.len() - i)
+            self.out.push(k as uint8)
+            self.out.extend(b[i:i + k])
+            i += k
+        }
+        self.out.push(0u8)
+    }
+}
+
+// --- tests -------------------------------------------------------------------
+
+// Pillow's GIFs of a few pixels (tests/burn/test_images.py has the corpus).
+// 2x2, GIF87a, red, green, blue, white
+const TWO_BY_TWO: str = "47494638376102000200810000ff000000ff000000ffffffff2c000000000200020000080700010410302020003b"
+// 3x2, index 2 (blue) transparent
+const TRANSPARENT: str = "47494638396103000200810000ff000000ff000000ffffffff21f90401000002002c0000000003000200000809000104102020008080003b"
+// 1x8, interlaced, red, green, blue, white twice
+const INTERLACED: str = "47494638376101000800810000ff000000ff000000ffffffff2c000000000100080000080900010410304020c180003b"
+// 3x3, three frames of 100, 50 and 70 ms, loop 3, disposal 1: red, then a
+// green centre (a 1x1 frame), then red there and blue right of it (2x1)
+const ANIMATION: str = "47494638396103000300810000ff000000000000000000000021ff0b4e45545343415045322e30030103000021f904040a0000002c00000000030003000008070001081c3830200021f90405050002002c010001000100010081ff000000ff000000000000000804000304040021f90405070002002c010001000200010081ff00000000ff00000000000008050001040808003b"
+
+fun unhex(s: str) -> [uint8] {
+    var out: [uint8] = []
+    var i = 0
+    while i + 1 < s.len() {
+        out.push((((s[i] as char).to_digit(16).unwrap_or(0) << 4) | (s[i + 1] as char).to_digit(16).unwrap_or(0)) as uint8)
+        i += 2
+    }
+    return out
+}
+
+// The RGBA samples of `n` copies of a colour.
+fun px(c: Color, n: int) -> [uint8] {
+    var out: [uint8] = []
+    for _ in 0..n {
+        out.push(c.r)
+        out.push(c.g)
+        out.push(c.b)
+        out.push(c.a)
+    }
+    return out
+}
+
+fun cat(parts: [[uint8]]) -> [uint8] {
+    var out: [uint8] = []
+    for p in parts {
+        out.extend(p)
+    }
+    return out
+}
+
+fun rgba_img(w: int, h: int, data: [uint8]) -> Image8 {
+    return Image { width: w, height: h, layout: Layout.Rgba, data: data }
+}
+
+#test
+fun decoding_pillow_s_files() {
+    let red = image.rgb(255u8, 0u8, 0u8)
+    let green = image.rgb(0u8, 255u8, 0u8)
+    let blue = image.rgb(0u8, 0u8, 255u8)
+    let white = image.rgb(255u8, 255u8, 255u8)
+    let four = cat([px(red, 1), px(green, 1), px(blue, 1), px(white, 1)])
+    assert(decode(unhex(TWO_BY_TWO), image.MAX_PIXELS) == Ok(rgba_img(2, 2, four)), "2x2")
+    // the transparent index keeps its colour, with alpha 0
+    let clear = blue.with_alpha(0u8)
+    let t = cat([px(red, 1), px(green, 1), px(clear, 2), px(green, 1), px(red, 1)])
+    assert(decode(unhex(TRANSPARENT), image.MAX_PIXELS) == Ok(rgba_img(3, 2, t)), "transparent")
+    assert(decode(unhex(INTERLACED), image.MAX_PIXELS) == Ok(rgba_img(1, 8, cat([four, four]))), "interlaced")
+    let a = decode_all(unhex(ANIMATION), image.MAX_PIXELS).expect("the animation")
+    assert(a.width == 3 && a.height == 3 && a.loops == 3, "the canvas and loops")
+    assert(a.frames.len() == 3, "three frames")
+    assert(a.frames[1].x == 1 && a.frames[1].y == 1 && a.frames[1].image.width == 1, "the second frame's rectangle")
+    assert(a.frames[1].delay_ms == 50 && a.frames[2].delay_ms == 70, "delays")
+    assert(a.frames[0].disposal == Disposal.Keep, "disposal")
+    let shown = composite(a)
+    assert(shown[0] == rgba_img(3, 3, px(red, 9)), "frame 0")
+    assert(shown[1] == rgba_img(3, 3, cat([px(red, 4), px(green, 1), px(red, 4)])), "frame 1")
+    assert(shown[2] == rgba_img(3, 3, cat([px(red, 5), px(blue, 1), px(red, 3)])), "frame 2")
+    assert(decode(unhex(ANIMATION), image.MAX_PIXELS) == Ok(shown[0]), "decode is the first frame")
+}
+
+#test(unhex(TWO_BY_TWO))[Ok(ImageInfo { width: 2, height: 2, layout: Layout.Rgba, bit_depth: 8, frames: 1, format: "gif" })]
+#test(unhex(ANIMATION))[Ok(ImageInfo { width: 3, height: 3, layout: Layout.Rgba, bit_depth: 8, frames: 3, format: "gif" })]
+#test(unhex("474946383961"))[Err(ImageError.Truncated)]
+#test(unhex("474946383861020002000000"))[Err(ImageError.BadSignature)]
+fun info_cases(b: [uint8]) -> Result<ImageInfo, ImageError> {
+    return info(b)
+}
+
+#test
+fun broken_files() {
+    let good = unhex(TWO_BY_TWO)
+    assert(decode(good[:10], image.MAX_PIXELS) == Err(ImageError.Truncated), "cut in the screen")
+    assert(decode(good[:20], image.MAX_PIXELS) == Err(ImageError.Truncated), "cut in the palette")
+    assert(decode(good[:30], image.MAX_PIXELS) == Err(ImageError.Truncated), "cut in the descriptor")
+    assert(decode(good[:40], image.MAX_PIXELS) == Err(ImageError.Truncated), "cut in the data")
+    // no trailer after a whole frame is fine
+    assert(decode(good[:good.len() - 1], image.MAX_PIXELS).is_ok(), "no trailer")
+    var big = good
+    big[35] = 12u8 // the LZW minimum code size
+    assert(decode(big, image.MAX_PIXELS) == Err(ImageError.Corrupt("LZW minimum code size 12")), "code size 12")
+    // without a palette the indices are gray levels
+    let bare = cat([good[0:10], [0u8], good[11:13], good[25:]])
+    let g = decode(bare, image.MAX_PIXELS).expect("no palette")
+    assert(g.color_at(0, 0) == image.rgb(0u8, 0u8, 0u8) && g.color_at(1, 1) == image.rgb(3u8, 3u8, 3u8), "gray levels")
+    var not_gif = good
+    not_gif[4] = 56u8
+    assert(decode(not_gif, image.MAX_PIXELS) == Err(ImageError.BadSignature), "GIF88a")
+    // the canvas and the frame: 4 + 4 pixels
+    assert(decode(good, 7i64) == Err(ImageError.TooLarge(8i64)), "max_pixels")
+    assert(decode(good, 8i64).is_ok(), "just enough")
+    // the animation's three frames and three canvases: 9 + 1 + 2 + 27
+    assert(decode_all(unhex(ANIMATION), 38i64) == Err(ImageError.TooLarge(39i64)), "max_pixels of all frames")
+    // a frame past the screen grows the canvas (the first one) or is clipped
+    var wide = good
+    wide[30] = 3u8 // the frame's width
+    let grown = decode(wide, image.MAX_PIXELS).expect("a frame wider than the screen")
+    assert(grown.width == 3 && grown.height == 2, "the canvas grows to the first frame")
+    // the data's 4 pixels fill the first row and one more; the rest is
+    // transparent, showing the background (the global palette's first colour)
+    assert(grown.color_at(0, 1) == image.rgb(255u8, 255u8, 255u8), "the data's last pixel")
+    assert(grown.color_at(1, 1) == image.rgb(255u8, 0u8, 0u8), "pixels the data doesn't reach")
+}
+
+#test
+fun encoding_round_trips() {
+    // a few colours: exact, any layout
+    let red = image.rgb(255u8, 0u8, 0u8)
+    let clear = image.rgba(0u8, 0u8, 0u8, 0u8)
+    let img = rgba_img(3, 2, cat([px(red, 2), px(image.rgb(1u8, 2u8, 3u8), 3), px(red, 1)]))
+    let b = encode(img, true)
+    assert(b[0:6] == unhex("474946383761"), "GIF87a without transparency")
+    assert(decode(b, image.MAX_PIXELS) == Ok(img), "RGBA, opaque")
+    let gray = Image { width: 2, height: 1, layout: Layout.Gray, data: [7u8, 200u8] }
+    assert(decode(encode(gray, false), image.MAX_PIXELS) == Ok(gray.convert(Layout.Rgba)), "gray")
+    // transparency: one entry, alpha below 128 transparent
+    let half = rgba_img(2, 2, cat([px(red, 1), px(image.rgba(9u8, 9u8, 9u8, 100u8), 1), px(clear, 1), px(image.rgba(5u8, 6u8, 7u8, 200u8), 1)]))
+    let t = decode(encode(half, true), image.MAX_PIXELS).expect("transparent")
+    assert(t.color_at(0, 0) == red && t.color_at(1, 0).a == 0u8 && t.color_at(0, 1).a == 0u8, "transparent pixels")
+    assert(t.color_at(1, 1) == image.rgb(5u8, 6u8, 7u8), "an opaque pixel")
+    // 300 colours: quantised to 256
+    var many: [uint8] = []
+    for i in 0..300 {
+        many.extend(px(image.rgb((i % 256) as uint8, (i / 256 * 100) as uint8, 50u8), 1))
+    }
+    let m = decode(encode(rgba_img(20, 15, many), false), image.MAX_PIXELS).expect("quantised")
+    assert(m.width == 20 && m.height == 15, "quantised size")
+}
+
+#test
+fun encoding_animations() {
+    let red = image.rgb(255u8, 0u8, 0u8)
+    let blue = image.rgb(0u8, 0u8, 255u8)
+    let clear = image.rgba(0u8, 0u8, 0u8, 0u8)
+    // whole frames: a blue pixel moving over red, then a hole
+    var frames: [Frame] = []
+    for i in 0..3 {
+        var d = px(red, 16)
+        let o = (5 + i) * 4
+        d[o] = 0u8
+        d[o + 2] = 255u8
+        frames.push(Frame { image: rgba_img(4, 4, d), x: 0, y: 0, delay_ms: 40 + i * 10, disposal: Disposal.Unspecified })
+    }
+    var hole = px(red, 16)
+    for c in 0..4 {
+        hole[12 * 4 + c] = 0u8
+    }
+    frames.push(Frame { image: rgba_img(4, 4, hole), x: 0, y: 0, delay_ms: 100, disposal: Disposal.Unspecified })
+    let a = Animation { width: 4, height: 4, loops: 0, background: clear, frames: frames }
+    let b = encode_all(a, true)
+    let back = decode_all(b, image.MAX_PIXELS).expect("decoded")
+    assert(back.loops == 0 && back.frames.len() == 4, "loops and frames")
+    assert(back.frames[1].image.width * back.frames[1].image.height < 16, "a changed rectangle, not the canvas")
+    assert(back.frames[1].delay_ms == 50 && back.frames[3].delay_ms == 100, "delays")
+    assert(composite(back) == composite(a), "shown the same")
+    // a frame with its own rectangle and Previous
+    let small = Frame { image: rgba_img(1, 1, px(blue, 1)), x: 2, y: 3, delay_ms: 0, disposal: Disposal.Previous }
+    let base = Frame { image: rgba_img(4, 4, px(red, 16)), x: 0, y: 0, delay_ms: 0, disposal: Disposal.Keep }
+    let p = Animation { width: 4, height: 4, loops: -1, background: clear, frames: [base, small, base] }
+    let pc = composite(p)
+    assert(pc[1].color_at(2, 3) == blue && pc[2] == pc[0], "Previous")
+    let q = decode_all(encode_all(p, false), image.MAX_PIXELS).expect("decoded")
+    assert(q.loops == -1, "no loop extension")
+    assert(composite(q) == pc, "Previous shown the same")
+}
+
+// A screen 0 pixels wide and frames of 0 by 65535 on it: they have no
+// pixel, so `max_pixels` counts none of them, and they must cost no time
+// either (a loop over each one's 65,535 empty rows, in decoding and in
+// compositing, took this case past its time limit interpreted).
+#test
+fun frames_without_pixels() {
+    var b = unhex("4749463839610000ffff000000")
+    let frame = unhex("2c000000000000ffff0002012c00")
+    for _ in 0..3000 {
+        b.extend(frame)
+    }
+    b.push(0x3Bu8)
+    let a = decode_all(b, image.MAX_PIXELS).expect("frames without pixels")
+    assert(a.width == 0 && a.height == 65535 && a.frames.len() == 3000, "the frames")
+    assert(a.frames[0].image.width == 0 && a.frames[0].image.height == 65535, "a frame's size")
+    let shown = composite(a)
+    assert(shown.len() == 3000 && shown[2999].data.len() == 0, "composited")
+}
+
+#test
+fun compositing_disposals() {
+    let red = image.rgb(255u8, 0u8, 0u8)
+    let green = image.rgb(0u8, 255u8, 0u8)
+    let bg = image.rgba(1u8, 2u8, 3u8, 0u8)
+    let hidden = image.rgba(9u8, 9u8, 9u8, 0u8)
+    let first = Frame { image: rgba_img(2, 1, cat([px(red, 1), px(hidden, 1)])), x: 0, y: 0, delay_ms: 0, disposal: Disposal.Background }
+    // a frame partly off the canvas is clipped
+    let second = Frame { image: rgba_img(2, 1, px(green, 2)), x: 1, y: 0, delay_ms: 0, disposal: Disposal.Keep }
+    let shown = composite(Animation { width: 2, height: 1, loops: -1, background: bg, frames: [first, second] })
+    assert(shown[0] == rgba_img(2, 1, cat([px(red, 1), px(bg, 1)])), "alpha 0 leaves the background")
+    assert(shown[1] == rgba_img(2, 1, cat([px(bg, 1), px(green, 1)])), "Background, then clipped")
+}

@@ -1,0 +1,76 @@
+// One picture in every image format through std.imageio (MYLA-966):
+// written in memory by `imageio.encode`, read back by `imageio.decode`,
+// which finds the format by the file's first bytes, and compared. Then the
+// formats file names ask for, and what goes wrong with a file that isn't an
+// image or isn't there.
+
+import std.image as image
+from std.image import Image, Image8, Layout, Color
+import std.imageio as imageio
+from std.imageio import Format
+
+// The colour of the pixel (x, y) of the picture: a gradient, a disc and a
+// half-transparent band along the bottom.
+#test(0, 0)[Color { r: 0u8, g: 0u8, b: 160u8, a: 255u8 }]
+#test(40, 20)[Color { r: 250u8, g: 200u8, b: 0u8, a: 255u8 }]
+#test(10, 40)[Color { r: 40u8, g: 200u8, b: 160u8, a: 128u8 }]
+fun pixel(x: int, y: int) -> Color {
+    let dx = x - 40
+    let dy = y - 20
+    var c = image.rgba((x * 4) as uint8, (y * 5) as uint8, 160u8, 255u8)
+    if dx * dx + dy * dy < 144 {
+        c = image.rgba(250u8, 200u8, 0u8, 255u8)
+    }
+    if y >= 36 {
+        c = c.with_alpha(128u8)
+    }
+    return c
+}
+
+// The picture at `w` by `h` (64 by 48 below).
+#test(2, 1)[Image { width: 2, height: 1, layout: Layout.Rgba, data: [0u8, 0u8, 160u8, 255u8, 4u8, 0u8, 160u8, 255u8] }]
+fun picture(w: int, h: int) -> Image8 {
+    var img: Image8 = image.new(w, h, Layout.Rgba, 0u8)
+    for y in 0..h {
+        for x in 0..w {
+            img.set_color(x, y, pixel(x, y))
+        }
+    }
+    return img
+}
+
+fun main() {
+    let img = picture(64, 48)
+    print(f"{img.width}x{img.height} {img.layout}: {img.data.len()} bytes of samples")
+    for f in imageio.formats() {
+        if f == Format.Jpeg {
+            continue    // lossy: its bytes don't give the same pixels back
+        }
+        let file = imageio.encode(img, f)
+        let found = match imageio.sniff(file) {
+            Some(g) => g.name()
+            None => "nothing"
+        }
+        let same = match imageio.decode(file) {
+            Ok(back) => if back.convert(Layout.Rgba) == img { "the same" } else { "not the same" }
+            Err(e) => f"an error: {e}"
+        }
+        let kept = if f.lossless() { "lossless" } else { "lossy" }
+        print(f"{f.name():<4} {file.len():>6} bytes ({kept}), read as {found}: {same}")
+    }
+    for name in ["holiday/IMG_0042.JPG", "scan.tiff", "icon.dib", "frame.pam", "notes.txt"] {
+        let f = match imageio.format_of(name) {
+            Some(g) => g.name()
+            None => "no image format"
+        }
+        print(f"{name}: {f}")
+    }
+    match imageio.decode([60u8, 104u8, 116u8, 109u8, 108u8, 62u8]) {
+        Ok(_) => print("decoded")
+        Err(e) => print(f"<html>: {e}")
+    }
+    match imageio.load("no/such/picture.png") {
+        Ok(_) => print("loaded")
+        Err(e) => print(f"no/such/picture.png: {e}")
+    }
+}

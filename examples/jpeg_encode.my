@@ -1,0 +1,87 @@
+// Encoding JPEG files with std.jpeg (MYLA-963): a picture drawn pixel by
+// pixel, encoded at several qualities and chroma subsamplings, decoded back,
+// and compared with the original: the file's size and the PSNR. The files
+// are the bytes Pillow (libjpeg) writes for the same pixels and settings.
+// Give the program a file name to write the picture at quality 85 there.
+
+import std.jpeg as jpeg
+from std.jpeg import Subsampling
+import std.image as image
+from std.image import Image, Image8, Layout
+import std.imgproc as imgproc
+import std.fs as fs
+import std.process as process
+
+// A 64x48 picture: a sky that darkens upwards, green ground, and an orange
+// sun with a soft edge.
+#test(0, 0)[(60, 110, 200)]
+#test(32, 40)[(40, 144, 60)]
+#test(44, 12)[(250, 150, 40)]
+fun pixel(x: int, y: int) -> (int, int, int) {
+    if y >= 34 {
+        return (40, 150 - (y - 34) * 2 + (x % 5) * 3, 60)
+    }
+    let d2 = (x - 44) * (x - 44) + (y - 12) * (y - 12)
+    if d2 < 64 {
+        return (250, 150, 40)
+    }
+    if d2 < 100 {
+        return (240, 170, 120)
+    }
+    return (60 + y * 3, 110 + y * 3, 200 + y)
+}
+
+// The picture at `w` by `h` (64 by 48 below).
+#test(2, 1)[Image { width: 2, height: 1, layout: Layout.Rgb, data: [60u8, 110u8, 200u8, 60u8, 110u8, 200u8] }]
+fun picture(w: int, h: int) -> Image8 {
+    var data: [uint8] = []
+    for y in 0..h {
+        for x in 0..w {
+            let (r, g, b) = pixel(x, y)
+            data.push(r as uint8)
+            data.push(g as uint8)
+            data.push(b as uint8)
+        }
+    }
+    return Image { width: w, height: h, layout: Layout.Rgb, data: data }
+}
+
+#test(Subsampling.S444)["4:4:4"]
+#test(Subsampling.S420)["4:2:0"]
+fun name(s: Subsampling) -> str {
+    return match s {
+        S444 => "4:4:4"
+        S422 => "4:2:2"
+        S420 => "4:2:0"
+    }
+}
+
+// The picture encoded and decoded again: a line about it.
+#test(Image { width: 1, height: 1, layout: Layout.Rgb, data: [60u8, 110u8, 200u8] }, 90, Subsampling.S444)["quality  90, 4:4:4:   631 bytes, PSNR 52.9 dB"]
+fun trial(img: Image8, quality: int, s: Subsampling) -> str {
+    let b = jpeg.encode(img, quality, s)
+    let Ok(back) = jpeg.decode(b, image.MAX_PIXELS) else { return "can't read it back" }
+    let Ok(p) = imgproc.psnr(img, back) else { return "a different size" }
+    return f"quality {quality:>3}, {name(s)}: {b.len():>5} bytes, PSNR {p:.1} dB"
+}
+
+fun main() {
+    let img = picture(64, 48)
+    print(f"the picture: {img.width}x{img.height} {img.layout}, {img.data.len()} bytes of samples")
+    for q in [50, 75, 90] {
+        print(trial(img, q, Subsampling.S420))
+    }
+    print(trial(img, 90, Subsampling.S422))
+    print(trial(img, 90, Subsampling.S444))
+    // a gray image is one component; alpha is dropped
+    let gray = img.convert(Layout.Gray)
+    let g = jpeg.encode(gray, 75, Subsampling.S420)
+    print(f"gray at quality 75: {g.len()} bytes, read back as {jpeg.info(g).map((i) => f"{i.layout}").unwrap_or("?")}")
+    let argv = process.args()
+    if argv.len() > 1 {
+        match fs.write_bytes(argv[1], jpeg.encode(img, 85, Subsampling.S420)) {
+            Ok(()) => print(f"wrote {argv[1]}")
+            Err(e) => print(f"{argv[1]}: {e}")
+        }
+    }
+}

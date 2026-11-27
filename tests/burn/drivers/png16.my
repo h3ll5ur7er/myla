@@ -1,0 +1,10 @@
+// std.png's `decode16` under the image corpus's harness
+// (tests/burn/test_images.py, MYLA-961): the 16-bit files, and every
+// broken one.
+
+import std.png as png
+import image_driver as driver
+
+fun main() {
+    driver.serve16((b: [uint8], max: int64) => png.decode16(b, max))
+}
