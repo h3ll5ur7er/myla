@@ -1,0 +1,194 @@
+// Benchmark (MYLA-545): the FFT of fft_split.my over one list of complex
+// numbers, a struct with the operator traits: the same operations in the same
+// order, so the same line `name checksum error rounds seconds`.
+
+import std.time as time
+from std.num import parse_int
+from std.process import args
+from std.math import abs, sqrt
+
+const SEED: int = 42
+const IM: int = 139968
+const IA: int = 3877
+const IC: int = 29573
+
+struct Complex {
+    re: float,
+    im: float,
+}
+
+impl Add for Complex {
+    fun add(self, other: Complex) -> Complex {
+        return Complex { re: self.re + other.re, im: self.im + other.im }
+    }
+}
+
+impl Sub for Complex {
+    fun sub(self, other: Complex) -> Complex {
+        return Complex { re: self.re - other.re, im: self.im - other.im }
+    }
+}
+
+impl Mul for Complex {
+    fun mul(self, other: Complex) -> Complex {
+        return Complex {
+            re: self.re * other.re - self.im * other.im,
+            im: self.re * other.im + self.im * other.re,
+        }
+    }
+}
+
+impl Complex {
+    // The number with its imaginary part times `sign`: itself or its conjugate.
+    fun turned(self, sign: float) -> Complex {
+        return Complex { re: self.re, im: sign * self.im }
+    }
+
+    fun scaled(self, by: float) -> Complex {
+        return Complex { re: self.re * by, im: self.im * by }
+    }
+
+    // The sum of the parts' magnitudes.
+    #test(Complex { re: -1.5, im: 2.0 })[3.5]
+    fun size(self) -> float {
+        return abs(self.re) + abs(self.im)
+    }
+}
+
+// The factors e^(-2πik/n) for k below n/2.
+fun plan(n: int) -> [Complex] {
+    // e^(-2πi/m) for m = 4, 8, … n, each from the one before
+    var roots = [Complex { re: 0.0, im: -1.0 }]
+    var m = 4
+    while m < n {
+        let last = roots[^1]
+        let half = sqrt((1.0 + last.re) / 2.0)
+        roots.push(Complex { re: half, im: last.im / (2.0 * half) })
+        m *= 2
+    }
+    // the factor for h + k is the one for k turned by h's angle, 2π/(n/h)
+    var w = [Complex { re: 1.0, im: 0.0 }]
+    var level = roots.len() - 1
+    var h = 1
+    while h < n / 2 {
+        let root = roots[level]
+        for k in 0..h {
+            w.push(Complex { re: w[k].re * root.re - w[k].im * root.im, im: w[k].im * root.re + w[k].re * root.im })
+        }
+        h *= 2
+        level -= 1
+    }
+    return w
+}
+
+fun noise(n: int) -> [Complex] {
+    var x: [Complex] = []
+    var seed = SEED
+    for _ in 0..n {
+        seed = (seed * IA + IC) % IM
+        let re = seed as float / IM as float - 0.5
+        seed = (seed * IA + IC) % IM
+        x.push(Complex { re: re, im: seed as float / IM as float - 0.5 })
+    }
+    return x
+}
+
+impl [Complex] {
+    // The transform in place; `inverse` also divides by the length.
+    fun transform(var self, w: [Complex], inverse: bool) {
+        let n = self.len()
+        var j = 0
+        for i in 1..n {
+            var bit = n >> 1
+            while j & bit != 0 {
+                j ^= bit
+                bit >>= 1
+            }
+            j ^= bit
+            if i < j { self.swap(i, j) }
+        }
+        let sign = if inverse { -1.0 } else { 1.0 }
+        var len = 2
+        while len <= n {
+            let half = len / 2
+            let step = n / len
+            var start = 0
+            while start < n {
+                for k in 0..half {
+                    let a = start + k
+                    let b = a + half
+                    let v = self[b] * w[k * step].turned(sign)
+                    let u = self[a]
+                    self[a] = u + v
+                    self[b] = u - v
+                }
+                start += len
+            }
+            len *= 2
+        }
+        if inverse {
+            let scale = 1.0 / n as float
+            for i in 0..n {
+                self[i] = self[i].scaled(scale)
+            }
+        }
+    }
+
+    fun weight(self) -> float {
+        var sum = 0.0
+        for z in self {
+            sum += z.size()
+        }
+        return sum
+    }
+
+    fun distance(self, other: [Complex]) -> float {
+        var worst = 0.0
+        for i in 0..self.len() {
+            let d = (self[i] - other[i]).size()
+            if d > worst { worst = d }
+        }
+        return worst
+    }
+}
+
+#test(plan(8), noise(8), 1)[(8452i64, 0i64)]   // the checksum is a naive DFT's
+#test(plan(1024), noise(1024), 3)[(14809252i64, 1i64)]   // the checksum is a naive DFT's, the error as fft.c prints
+fun round_trips(w: [Complex], input: [Complex], rounds: int) -> (int64, int64) {
+    var x = input
+    var checksum: int64 = 0
+    for r in 0..rounds {
+        x.transform(w, false)
+        if r == 0 { checksum = (x.weight() * 1000.0) as int64 }
+        x.transform(w, true)
+    }
+    return (checksum, (x.distance(input) * 1e15) as int64)
+}
+
+// Times `rounds` round trips of `n` points, without the table and the input.
+fun run(n: int, rounds: int) {
+    let w = plan(n)
+    let input = noise(n)
+    let start = time.now()
+    let (checksum, error) = round_trips(w, input, rounds)
+    let secs = start.elapsed().as_secs_f64()
+    print(f"fft-{n} {checksum} {error} {rounds} {secs:.6}")
+}
+
+fun number(text: str) -> int {
+    return match parse_int(text) {
+        Some(v) => v as int
+        None => { panic(f"not a number: {text}") }
+    }
+}
+
+//   fft [points rounds]
+fun main() {
+    let argv = args()
+    if argv.len() == 3 {
+        run(number(argv[1]), number(argv[2]))
+    } else {
+        run(4096, 10000)
+        run(1 << 20, 10)
+    }
+}
