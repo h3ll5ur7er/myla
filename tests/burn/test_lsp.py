@@ -987,6 +987,10 @@ class SemanticTokenScenarios:
             fh.write(text)
         c = _Client([self.binary, "--stdlib", STDLIB_ROOT])
         self.addCleanup(c.close)
+        # a second more per 100 KB: selfhost/embedded_std.my, 5 MB with the
+        # image modules, took over 10 s on aarch64 beside the other suites
+        # (1.3 s on x86-64, MYLA-929; MYLA-956)
+        c.TIMEOUT = _Client.TIMEOUT + len(text) // 100_000
         rid = c.send("initialize", {"processId": None, "rootUri": _uri(root), "capabilities": {}}, request=True)
         caps = c.response(rid)["result"]["capabilities"]
         self.assertEqual(caps["semanticTokensProvider"]["legend"]["tokenTypes"], LEGEND_TYPES)
