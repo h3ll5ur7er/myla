@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Times C (-O2) and Myla across sizes, to see the gap past the caches (MYLA-545).
+"""Times C (-O2) and Myla across sizes, to see the gap past the caches (MYLA-975).
 
     python3 benchmarks/fft/sweep.py [--runs N]
 

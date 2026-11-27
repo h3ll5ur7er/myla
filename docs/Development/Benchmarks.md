@@ -270,7 +270,7 @@ What is left:
 
 ## An FFT (2026-11-23)
 
-`benchmarks/fft/` holds an iterative radix-2 FFT ([[MYLA-545]]) in the two layouts a user would write, [[benchmarks/fft/fft_split.my]] (two lists of floats) and [[benchmarks/fft/fft_complex.my]] (a list of a `Complex` struct with `Add`, `Sub` and `Mul`), and the same, operation for operation, in C ([[benchmarks/fft/fft.c]], `-DCOMPLEX` for the structs), C# (`csharp/Program.cs`, the base library only) and plain Python (`fft.py`, no NumPy). The twiddle factors come from half-angle steps and multiplications, not from `sin` and `cos`, so every version's results are equal bit for bit.
+`benchmarks/fft/` holds an iterative radix-2 FFT ([[MYLA-975]]) in the two layouts a user would write, [[benchmarks/fft/fft_split.my]] (two lists of floats) and [[benchmarks/fft/fft_complex.my]] (a list of a `Complex` struct with `Add`, `Sub` and `Mul`), and the same, operation for operation, in C ([[benchmarks/fft/fft.c]], `-DCOMPLEX` for the structs), C# (`csharp/Program.cs`, the base library only) and plain Python (`fft.py`, no NumPy). The twiddle factors come from half-angle steps and multiplications, not from `sin` and `cos`, so every version's results are equal bit for bit.
 
     python3 benchmarks/fft/run.py [--runs N] [--json FILE]     # builds, checks the answers, times
     python3 benchmarks/fft/report.py benchmarks/fft/results-<date>.json   # fills report.html

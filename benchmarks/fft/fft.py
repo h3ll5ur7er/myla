@@ -1,4 +1,4 @@
-"""Benchmark (MYLA-545): the FFT of fft_split.my and fft_complex.my in plain
+"""Benchmark (MYLA-975): the FFT of fft_split.my and fft_complex.my in plain
 Python, operation for operation: no NumPy, only the built-in float, complex
 and list.
 

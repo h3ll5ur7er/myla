@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes a results file of run.py and the benchmark's sources into report.html (MYLA-545).
+"""Writes a results file of run.py and the benchmark's sources into report.html (MYLA-975).
 
     python3 benchmarks/fft/report.py benchmarks/fft/results-<date>.json
 

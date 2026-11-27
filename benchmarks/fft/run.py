@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds and times the FFT in every language (MYLA-545).
+"""Builds and times the FFT in every language (MYLA-975).
 
     python3 benchmarks/fft/run.py [--runs N] [--json FILE]
 

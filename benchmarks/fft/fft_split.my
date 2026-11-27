@@ -1,4 +1,4 @@
-// Benchmark (MYLA-545): an iterative radix-2 FFT over two lists of floats,
+// Benchmark (MYLA-975): an iterative radix-2 FFT over two lists of floats,
 // the real and the imaginary parts. Each size is transformed forward and back
 // `rounds` times; a line is `name checksum error rounds seconds`, the checksum
 // from the first spectrum, the error the largest difference to the input

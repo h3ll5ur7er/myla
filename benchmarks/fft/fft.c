@@ -1,4 +1,4 @@
-// Benchmark (MYLA-545): the FFT of fft_split.my and fft_complex.my in C,
+// Benchmark (MYLA-975): the FFT of fft_split.my and fft_complex.my in C,
 // operation for operation. Without -DCOMPLEX the signal is two arrays of
 // doubles, with it one array of structs. Compile with -ffp-contract=off:
 // a fused multiply-add would change the last bits.
