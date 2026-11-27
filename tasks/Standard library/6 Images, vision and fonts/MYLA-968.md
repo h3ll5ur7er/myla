@@ -34,3 +34,9 @@ Measured on 2026-11-25 in the lane's worktree (branch `stdlib/MYLA-968` over `0a
 - **Example** `examples/draw_chart.my` (a bar chart with a stroked trend, axes and a title, printed as text): its cases pass, registered in `test_examples_run.EXPECTED` and `test_examples_compile.EXAMPLES`; interpreted and native output identical; `tests.burn.test_examples_run`, `_compile` and `_tests` OK.
 - **Docs**: [[Language/Standard-library/Draw]]'s doc block checks, runs and prints the same interpreted and natively; the row on [[Language/Standard-library]]; the section `std.draw` in both copies of the skill's `reference/stdlib.md` (identical).
 - **Private helpers to be replaced** (std.image of [[MYLA-959]] wasn't there yet): `pixel_color(img, x, y)` by `img.color_at(x, y)`, and `to_rgba(img)` by `img.convert(Layout.Rgba)`. Replaced by the integrator after the merge (84/84 cases interpreted and native).
+
+## Review (2026-11-27)
+
+- A dash offset far past the pattern's length (`with_dash([1.0, 2.0], 7.0e28)`) hung `dash_polys`: float32's remainder left 4.7e21, which subtracting the dashes never changed. A remainder outside the pattern (or of an offset that isn't finite) now starts the pattern at its beginning; `huge_dash_offsets` timed out before.
+- `c.stroke` flattened to `TOLERANCE / √|det|`, too coarse along the larger scale of a transform that stretches one way more than another (`scale(40, 4)`: 0.79 px instead of a quarter). It now divides by the matrix's larger singular value; `stroke_under_a_stretch` failed before.
+- Module cases 86/86 interpreted and `--native`.

@@ -1720,8 +1720,13 @@ fun dash_polys(polys: [Poly], dash: [float32], offset: float32) -> [Poly] {
         if poly.closed {
             pts.push(poly.pts[0])
         }
-        // where in the pattern the polyline starts
+        // where in the pattern the polyline starts; a remainder float32
+        // can't take (an offset far past the pattern's length, or not
+        // finite) starts it at its beginning
         var pos = offset - total * ((offset / total).floor())
+        if !(pos >= 0.0f32 && pos < total) {
+            pos = 0.0
+        }
         var k = 0
         while pos >= pattern[k] {
             pos -= pattern[k]
@@ -1800,13 +1805,20 @@ impl Canvas {
     // Strokes `path` (in user space) with `style` and `paint`: its outline,
     // made within a quarter pixel after the transform, filled non-zero.
     fun stroke(var self, path: Path, style: Stroke, paint: Paint) {
-        // the transform's scale, so the flattening is fine enough on the canvas
-        let det = self.transform.x_axis.x * self.transform.y_axis.y - self.transform.x_axis.y * self.transform.y_axis.x
-        var scale = det.abs().sqrt()
-        if !(scale > 0.000001f32) {
+        // the transform's largest scale (its matrix's larger singular
+        // value), so the flattening is fine enough on the canvas in every
+        // direction; a transform that flattens the plane draws nothing
+        let a = self.transform.x_axis.x as float64
+        let b = self.transform.x_axis.y as float64
+        let c = self.transform.y_axis.x as float64
+        let d = self.transform.y_axis.y as float64
+        let det = a * d - b * c
+        if !(det.abs().sqrt() > 0.000001) {
             return
         }
-        self.fill(path.stroked(style, TOLERANCE / scale), paint, FillRule.NonZero)
+        let f = a * a + b * b + c * c + d * d
+        let scale = ((f + (f * f - 4.0 * det * det).max(0.0).sqrt()) * 0.5).sqrt()
+        self.fill(path.stroked(style, ((TOLERANCE as float64) / scale) as float32), paint, FillRule.NonZero)
     }
 }
 
@@ -2406,4 +2418,36 @@ fun miter_limit() {
     let (miter, _) = stroke_area(v, Stroke { width: 1.0f32, join: Join.Miter, cap: Cap.Butt, miter_limit: 20.0f32, dash: [], dash_offset: 0.0f32 })
     assert(limited == bevel)
     assert(miter > bevel + 1.0f32)
+}
+
+// A dash offset far past the pattern's length, where float32 can't take
+// the remainder exactly (7e28 by 3 leaves 4.7e21): it starts the pattern
+// at some phase and ends, rather than counting the dashes off one by one.
+#test
+fun huge_dash_offsets() {
+    let l = line(0.0f32, 1.0f32, 10.0f32, 1.0f32)
+    let inf = 1.0f32 / 0.0f32
+    for off in [7.0e28f32, -7.0e28f32, 1.0e30f32, 3.0e38f32, inf, -inf] {
+        // 1 on, 2 off along 10: 3 or 4 dashes 2 wide
+        let (area, _) = stroke_area(l, stroke_style(2.0f32).with_dash([1.0f32, 2.0f32], off))
+        assert(area >= 6.0f32 && area <= 8.01f32)
+    }
+}
+
+// Under a transform that stretches one way more than the other, a stroke
+// is flattened to a quarter pixel along the larger scale (40 here, where
+// the square root of the determinant is 12.6): the same pixels as its
+// outline made at that tolerance and filled.
+#test
+fun stroke_under_a_stretch() {
+    let black = Paint.Solid(image.rgb(0u8, 0u8, 0u8))
+    var c = blank(100, 20, image.rgb(255u8, 255u8, 255u8))
+    c.translate(50.0f32, 10.0f32)
+    c.scale(40.0f32, 4.0f32)
+    var d = c
+    let ring = circle(0.0f32, 0.0f32, 1.0f32)
+    let st = stroke_style(0.25f32)
+    c.stroke(ring, st, black)
+    d.fill(ring.stroked(st, TOLERANCE / 40.0f32), black)
+    assert(c.image == d.image)
 }
