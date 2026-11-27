@@ -247,6 +247,10 @@ pub fun decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image
     var p = Parser { r: bytes.reader(b) }
     let h = p.header()?
     image.check_size(h.width, h.height, h.layout.channels(), max_pixels)?
+    if h.width == 0 || h.height == 0 {
+        // no pixels: nothing to read, and no loop over a side of up to 2^31 - 1
+        return Ok(Image { width: h.width, height: h.height, layout: h.layout, data: [] })
+    }
     if h.compression == BI_RLE8 || h.compression == BI_RLE4 {
         return rle(b, h)
     }
@@ -436,7 +440,8 @@ pub fun encode(img: Image8) -> [uint8] {
     var out = hw.finish()
     let pad = stride - w * (bpp / 8)
     let d = src.data
-    var y = src.height - 1
+    // the rows, the last first; none without pixels (a side may be 2^31 - 1)
+    var y = if w == 0 { -1 } else { src.height - 1 }
     while y >= 0 {
         var i = y * w * ch
         for x in 0..w {
@@ -576,6 +581,20 @@ fun bit_fields() {
     // 32 bits BI_RGB: the fourth byte isn't alpha
     let x = test_file(1, 1, 32, BI_RGB, 0, [], [1u8, 2u8, 3u8, 4u8])
     assert(decode(x, image.MAX_PIXELS).expect("x") == rgb_image(1, 1, [3u8, 2u8, 1u8]))
+}
+
+// A file of no pixels decodes at once, even with a side of 2^31 - 1.
+#test
+fun no_pixels() {
+    let none = rgb_image(0, 2147483647, [])
+    assert(decode(test_file(0, 2147483647, 24, BI_RGB, 0, [], []), image.MAX_PIXELS) == Ok(none), "24 bits")
+    assert(decode(test_file(0, -2147483647, 32, BI_RGB, 0, [], []), image.MAX_PIXELS) == Ok(none), "top-down, 32 bits")
+    assert(decode(test_file(0, 2147483647, 8, BI_RLE8, 3, test_palette(), [0u8, 1u8]), image.MAX_PIXELS) == Ok(none), "RLE8")
+    assert(decode(test_file(2147483647, 0, 24, BI_RGB, 0, [], []), image.MAX_PIXELS) == Ok(rgb_image(2147483647, 0, [])), "no rows")
+    // and such an image is written at once
+    assert(decode(encode(none), image.MAX_PIXELS) == Ok(none), "written")
+    let clear = image.from_data<uint8>(0, 2147483647, Layout.Rgba, []).expect("0 wide")
+    assert(decode(encode(clear), image.MAX_PIXELS) == Ok(clear), "written at 32 bits")
 }
 
 #test

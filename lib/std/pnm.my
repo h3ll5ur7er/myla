@@ -291,6 +291,10 @@ fun table16(h: Header) -> [uint16] {
 fun raster<S: Sample>(b: [uint8], h: Header, table: [S]) -> Result<[S], ImageError> {
     let n = h.width * h.height * h.depth
     var out: [S] = []
+    if n == 0 {
+        // nothing to read, and no loop over a side of up to 2^31 - 1
+        return Ok(out)
+    }
     if h.magic == 4 {
         let row = (h.width + 7) / 8
         if (h.start as int64) + (row as int64) * (h.height as int64) > (b.len() as int64) {
@@ -391,6 +395,7 @@ fun checked_header(b: [uint8], max_pixels: int64) -> Result<Header, ImageError> 
 #test([80u8, 52u8, 10u8, 57u8, 32u8, 49u8, 10u8, 170u8, 128u8], 100i64)[Ok(Image { width: 9, height: 1, layout: Layout.Gray, data: [0u8, 255u8, 0u8, 255u8, 0u8, 255u8, 0u8, 255u8, 0u8] })]
 #test([80u8, 53u8, 10u8, 50u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 7u8], 100i64)[Err(ImageError.Truncated)]
 #test([80u8, 53u8, 10u8, 50u8, 48u8, 32u8, 49u8, 48u8, 10u8, 50u8, 53u8, 53u8, 10u8], 100i64)[Err(ImageError.TooLarge(200i64))]
+#test([80u8, 52u8, 10u8, 48u8, 32u8, 50u8, 49u8, 52u8, 55u8, 52u8, 56u8, 51u8, 54u8, 52u8, 55u8, 10u8], 100i64)[Ok(Image { width: 0, height: 2147483647, layout: Layout.Gray, data: [] })] // P4, no pixels in 2^31 - 1 rows: at once
 #test([80u8, 50u8, 32u8, 49u8, 32u8, 49u8, 32u8, 57u8, 32u8, 49u8, 48u8], 100i64)[Err(ImageError.Corrupt("a sample above maxval 9 at 9"))]
 pub fun decode(b: [uint8], max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError> {
     let h = checked_header(b, max_pixels)?
@@ -521,6 +526,10 @@ fun prepared<S: Sample>(img: Image<S>, kind: Kind) -> Image<S> {
 // A PBM file of the gray `img`: a sample below half scale is black.
 fun pbm_file<S: Sample>(img: Image<S>, ascii: bool) -> [uint8] {
     let head = bytes.from_str(header_text(Kind.Pbm, ascii, img.width, img.height, Layout.Gray, 1))
+    if img.width == 0 {
+        // no rows to write (and no loop over a height of up to 2^31 - 1)
+        return head
+    }
     if ascii {
         var p = Plain { out: head, col: 0 }
         var i = 0
@@ -677,6 +686,20 @@ fun sixteen_bits_round_trip() {
     // 8 bits of 16: rounded as std.image's to_unorm8 rounds
     assert(decode(encode16(img), image.MAX_PIXELS).expect("decoded") == img.to_u8())
     assert(info(encode16(img)).expect("info").bit_depth == 16)
+}
+
+// An image of no pixels is written and read at once, even with a side of
+// 2^31 - 1.
+#test
+fun no_pixels() {
+    let none = image.from_data<uint8>(0, 2147483647, Layout.Gray, []).expect("0 wide")
+    for kind in [Kind.Pbm, Kind.Pgm, Kind.Ppm, Kind.Pam] {
+        for ascii in [false, true] {
+            let back = decode(encode_as(none, kind, ascii), image.MAX_PIXELS).expect("decoded")
+            assert(back.width == 0 && back.height == 2147483647 && back.data.len() == 0)
+        }
+    }
+    assert(decode16(encode16_as(none.to_u16(), Kind.Pbm, true), image.MAX_PIXELS).expect("16 bits").data.len() == 0)
 }
 
 #test
