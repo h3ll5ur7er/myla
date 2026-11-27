@@ -3,6 +3,11 @@
 //
 // Mirrors src/myla/compiler/dwarf.py; the code generator (codegen.my) builds
 // the compile unit's DIEs with these. See docs/Development/Debugging.md.
+//
+// The same DWARF goes into an ELF object (Linux) and into a COFF one
+// (Windows, MYLA-757): only a section's directive (`debug_section`), an
+// offset into another debug section (`section_offset`) and the end of a
+// code range (`pc_range`) are written differently.
 
 from .stdroot import stdlib_file
 
@@ -145,6 +150,42 @@ pub fun dw_ref(label: str) -> str {
     return format("\t.long {} - .Ldebug_info0", label)
 }
 
+// The directive that starts the debug section `name` (`.debug_info`, …):
+// ELF's progbits, or on COFF (`coff`) its flags, discardable and readable,
+// as clang writes them for Windows. COFF puts the long name in the object's
+// string table, which lld-link keeps in the image under `/debug:dwarf`
+// (MYLA-757).
+#test(".debug_info", false)["\t.section .debug_info,\"\",@progbits"]
+#test(".debug_info", true)["\t.section .debug_info,\"dr\""]
+pub fun debug_section(name: str, coff: bool) -> str {
+    if coff { return "\t.section " + name + ",\"dr\"" }
+    return "\t.section " + name + ",\"\",@progbits"
+}
+
+// The offset of the label `label` in its debug section (DW_FORM_sec_offset:
+// where `.debug_abbrev` and `.debug_line` start): on ELF its address, as a
+// debug section starts at 0; on COFF, where it would be an address in the
+// image, a section-relative offset (MYLA-757).
+#test(".Ldebug_line0", false)["\t.long .Ldebug_line0"]
+#test(".Ldebug_line0", true)["\t.secrel32 .Ldebug_line0"]
+pub fun section_offset(label: str, coff: bool) -> str {
+    if coff { return "\t.secrel32 " + label }
+    return "\t.long " + label
+}
+
+// A DIE's code range, DW_AT_low_pc and DW_AT_high_pc, from the label `low`
+// to the label `high`: the high end as its distance from the low one
+// (DW_FORM_data8), or on COFF (`coff`) as its address (DW_FORM_addr, which
+// `abbrev_section` gives it there), a relocation the linker fills in: clang
+// works a distance out itself, and assembled the compiler's CLI with them
+// in about 10 times the time it takes with the addresses (MYLA-757).
+#test("f", ".Ldf1", false)[["\t.quad f", "\t.quad .Ldf1 - f"]]
+#test("f", ".Ldf1", true)[["\t.quad f", "\t.quad .Ldf1"]]
+pub fun pc_range(low: str, high: str, coff: bool) -> [str] {
+    if coff { return ["\t.quad " + low, "\t.quad " + high] }
+    return ["\t.quad " + low, "\t.quad " + high + " - " + low]
+}
+
 // One abbreviation: its code, tag, whether it has children, and its
 // (attribute, form) pairs.
 #test(8, 15, false, [11, 11])[["\t.uleb128 8, 15, 0", "\t.uleb128 11, 11, 0, 0"]]
@@ -160,26 +201,30 @@ fun abbrev(code: int32, tag: int32, children: bool, attrs: [int32]) -> [str] {
     return [format("\t.uleb128 {}, {}, {}", code, tag, ch), line.build()]
 }
 
-// The `.debug_abbrev` section: the same table as the Python backend's.
+// The `.debug_abbrev` section: the same table as the Python backend's, for
+// an ELF object; for a COFF one (`coff`) DW_AT_high_pc is an address
+// (`pc_range`).
 #test()[35]
 pub fun abbrev_count() -> int32 {
-    return abbrev_section().len() as int32
+    return abbrev_section(false).len() as int32
 }
 
-pub fun abbrev_section() -> [str] {
+pub fun abbrev_section(coff: bool) -> [str] {
     let str_ = 0x08
     let data1 = 0x0b
     let udata = 0x0f
     let ref4 = 0x13
     let exprl = 0x18
-    var out = ["\t.section .debug_abbrev,\"\",@progbits", ".Ldebug_abbrev0:"]
+    var high = 0x07
+    if coff { high = 0x01 }
+    var out = [debug_section(".debug_abbrev", coff), ".Ldebug_abbrev0:"]
     let tables = [
-        abbrev(AB_CU, 0x11, true, [0x25, str_, 0x13, 0x05, 0x03, str_, 0x1b, str_, 0x11, 0x01, 0x12, 0x07, 0x10, 0x17]),
+        abbrev(AB_CU, 0x11, true, [0x25, str_, 0x13, 0x05, 0x03, str_, 0x1b, str_, 0x11, 0x01, 0x12, high, 0x10, 0x17]),
         abbrev(AB_BASE, 0x24, false, [0x03, str_, 0x3e, data1, 0x0b, data1]),
-        abbrev(AB_SUBPROGRAM, 0x2e, true, [0x03, str_, 0x11, 0x01, 0x12, 0x07, 0x40, exprl]),
+        abbrev(AB_SUBPROGRAM, 0x2e, true, [0x03, str_, 0x11, 0x01, 0x12, high, 0x40, exprl]),
         abbrev(AB_PARAM, 0x05, false, [0x03, str_, 0x49, ref4, 0x02, exprl]),
         abbrev(AB_VAR, 0x34, false, [0x03, str_, 0x49, ref4, 0x02, exprl]),
-        abbrev(AB_BLOCK, 0x0b, true, [0x11, 0x01, 0x12, 0x07]),
+        abbrev(AB_BLOCK, 0x0b, true, [0x11, 0x01, 0x12, high]),
         abbrev(AB_PTR, 0x0f, false, [0x0b, data1, 0x49, ref4]),
         abbrev(AB_VOIDPTR, 0x0f, false, [0x0b, data1]),
         abbrev(AB_STRUCT, 0x13, true, [0x03, str_, 0x0b, udata]),
@@ -189,7 +234,7 @@ pub fun abbrev_section() -> [str] {
         abbrev(AB_VARIANT_PART, 0x33, true, [0x15, ref4]),
         abbrev(AB_VARIANT, 0x19, true, [0x16, udata]),
         abbrev(AB_TAG, 0x0d, false, [0x03, str_, 0x49, ref4, 0x38, udata, 0x34, 0x19]),
-        abbrev(AB_TYPED_SUBPROGRAM, 0x2e, true, [0x03, str_, 0x11, 0x01, 0x12, 0x07, 0x40, exprl, 0x49, ref4]),
+        abbrev(AB_TYPED_SUBPROGRAM, 0x2e, true, [0x03, str_, 0x11, 0x01, 0x12, high, 0x40, exprl, 0x49, ref4]),
     ]
     for t in tables { for l in t { out.push(l) } }
     out.push("\t.byte 0")
@@ -217,11 +262,16 @@ fun ascii_line(text: str, start: int32, stop: int32, end: str) -> str {
 // `.debug_gdb_scripts` holding the Python `script` inline (D82): kind 4, the
 // name gdb knows it by on the first line, then the text, NUL-terminated. gdb
 // runs it when it loads the binary, where `auto-load safe-path` allows. The
-// same bytes as the Python backend's.
-#test("a\nb")[["\t.section .debug_gdb_scripts,\"MS\",@progbits,1", "\t.byte 4", "\t.ascii \"myla-printers\\n\"", "\t.ascii \"a\\n\"", "\t.ascii \"b\"", "\t.byte 0"]]
-pub fun gdb_scripts_section(script: str) -> [str] {
+// same bytes as the Python backend's. On COFF (`coff`) a debug section like
+// the others, which gdb reads from a PE image as from an ELF file
+// (MYLA-757).
+#test("a\nb", false)[["\t.section .debug_gdb_scripts,\"MS\",@progbits,1", "\t.byte 4", "\t.ascii \"myla-printers\\n\"", "\t.ascii \"a\\n\"", "\t.ascii \"b\"", "\t.byte 0"]]
+#test("a", true)[["\t.section .debug_gdb_scripts,\"dr\"", "\t.byte 4", "\t.ascii \"myla-printers\\n\"", "\t.ascii \"a\"", "\t.byte 0"]]
+pub fun gdb_scripts_section(script: str, coff: bool) -> [str] {
     let name = "myla-printers"
-    var out = ["\t.section .debug_gdb_scripts,\"MS\",@progbits,1", "\t.byte 4", ascii_line(name, 0, name.len(), "\\n")]
+    var head = "\t.section .debug_gdb_scripts,\"MS\",@progbits,1"
+    if coff { head = debug_section(".debug_gdb_scripts", true) }
+    var out = [head, "\t.byte 4", ascii_line(name, 0, name.len(), "\\n")]
     var start = 0
     var i = 0
     while i < script.len() {

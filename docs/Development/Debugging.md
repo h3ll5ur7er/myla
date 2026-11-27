@@ -1,6 +1,6 @@
 # Debugging
 
-Debug information (`myla build -g`) is written for x86-64 Linux only so far; aarch64 and wasm32 are [[MYLA-259]].
+Debug information (`myla build -g`) is written for x86-64, Linux and Windows ([[MYLA-757]], below); aarch64 and wasm32 are [[MYLA-259]].
 
 [TOC]
 
@@ -234,15 +234,42 @@ $2 = ast$StmtKind::IfS(ast$Expr {id: 19, line: 4, col: 16, kind: 0x7ffef7e08228}
 $3 = 2
 ```
 
+## On Windows
+
+`myla build -g --target x86_64-windows` puts the same DWARF in the `.exe` ([[MYLA-757]]; how, on [[Architecture/Native-backend#debug-information]]): gdb and lldb read it, and LLVM's tools. The Microsoft debuggers (Visual Studio, WinDbg) read CodeView from a PDB instead, which Myla doesn't write, so they show neither lines nor variables ([[MYLA-757]]'s proposal). The pretty-printers are in the `.exe` too, and gdb loads them where `auto-load safe-path` allows, as on Linux. Here gdb on Linux on a program built there and run under Wine (`winedbg --gdb prog.exe` starts it under its gdb proxy and runs `gdb` attached; [[tests/burn/test_debug_info.py]]'s `TestWindowsDebugInfo` does it in batch mode):
+
+```
+(gdb) break main.my:7
+Breakpoint 1 at 0x140004784: file main.my, line 7.
+(gdb) continue
+Breakpoint 1, myla_add (a=2, b=3) at main.my:7
+7	    let c = a + b
+(gdb) bt
+#0  myla_add (a=2, b=3) at main.my:7
+#1  0x0000000140004712 in myla_main () at main.my:15
+#2  0x000000014000103b in _start () from …\prog.exe
+(gdb) up
+(gdb) info locals
+xs = [Point {x: 2, y: 3}, Point {x: 4, y: 5}]
+name = "two"
+p = Point {x: 2, y: 3}
+(gdb) down
+(gdb) finish
+Value returned is $1 = 5
+```
+
+Without running it: `gdb prog.exe` (`info line`, `break main.my:7`, `info scope`), `lldb prog.exe` (`image lookup -n myla_add -v`), `llvm-symbolizer --obj=prog.exe myla_add` (`…/main.my:6:1`), `llvm-dwarfdump --debug-line prog.exe`. CI's Windows job reads the line table with the runner's own LLVM ([[MYLA-708]]'s `scripts/windows-runner.py`, `debug/…` and `tools/myla-build-g`).
+
 ## What doesn't work yet
 
 - **Heap values inside aggregates** are values only with the pretty-printers, which gdb loads only where `auto-load safe-path` allows (above); otherwise they are pointers to their cells (`print *x`), and a `float32` inside one is a double.
 - **Float results**: `finish` prints nothing for a function returning a float (it is in `%rax`, gdb looks in `%xmm0`); `print/f $rax` right after `finish` shows it.
 - **Calling Myla functions from gdb** (`print myla_add(2, 3)`) isn't supported: Myla's integer arguments travel in System V's registers since D119, but floats travel in general-purpose registers and aggregates by address, so gdb's calls get those wrong ([[MYLA-272]]).
+- **On Windows** the code has no unwind tables (`.pdata`, `.xdata`, [[MYLA-776]]): gdb finds the frames by `%rbp` as on Linux, but Windows' own stack walkers want them for x64 code. A function whose name has a letter outside ASCII doesn't assemble with clang (on Windows, the other Linux target and wasm32, [[MYLA-775]]); `-g`, which inlines nothing, meets that more often.
 - Expressions use gdb's Rust syntax: `print xs[i]` works, Myla's `xs.len()` doesn't (`print xs` shows the elements, `print x.len` a cell's length).
 
 ## Other tools
 
 - `myla run` reports a runtime error with the values in the message and the source line; a native binary prints the message without the values and the position ([[MYLA-17]], [[MYLA-65]]).
 - `build/stage3 file.my lib > file.s` writes the generated assembly (`myla build` removes it), `build/stage3 file.my lib --emit-ir` the IR instead ([[Architecture/IR]]); `build/stage3` is `selfhost/gen_main.my` compiled. The drivers of the self-hosting gates dump the front end's view of a file once built with `build/myla build`: `selfhost/lex_main.my` the canonical tokens, `selfhost/parse_main.my` the canonical AST ([[Architecture/Self-hosted-compiler]]).
-- `readelf --debug-dump=decodedline ./binary` lists the line table that `-g` produced, `readelf --debug-dump=info ./binary` the functions, variables and types.
+- `readelf --debug-dump=decodedline ./binary` lists the line table that `-g` produced, `readelf --debug-dump=info ./binary` the functions, variables and types; `llvm-dwarfdump --debug-line` and `--debug-info` do on a Windows `.exe` too.

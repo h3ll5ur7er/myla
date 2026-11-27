@@ -184,6 +184,14 @@ impl<K: Eq + Hash, V> Lru<K, V> {
         return out
     }
 
+    // An iterator over the entries, the most recently used first (D171):
+    // `for (k, v) in c.iter()`, or a pipeline of `std.iter`, without the
+    // list `items()` makes. Visiting isn't using: the order stays. It holds
+    // the cache as it is now (MYLA-553).
+    fun iter(self) -> LruIter<K, V> {
+        return LruIter { c: self, at: self.head }
+    }
+
     // The cache's own step: takes the slot `i` out of the recency list.
     fun unlink(var self, i: int) {
         let p = self.prev[i]
@@ -200,6 +208,24 @@ impl<K: Eq + Hash, V> Lru<K, V> {
         self.next[i] = self.head
         if self.head >= 0 { self.prev[self.head] = i } else { self.tail = i }
         self.head = i
+    }
+}
+
+// What `Lru.iter` gives: the cache and the slot of the next entry, -1 past
+// the last. A copy keeps its own position.
+pub struct LruIter<K, V> {
+    c: Lru<K, V>,
+    at: int,
+}
+
+impl<K, V> Iterator<(K, V)> for LruIter<K, V> {
+    fun next(var self) -> Option<(K, V)> {
+        if self.at < 0 {
+            return None
+        }
+        let i = self.at
+        self.at = self.c.next[i]
+        return Some((self.c.slot_keys[i], self.c.slot_vals[i]))
     }
 }
 
@@ -376,6 +402,34 @@ fun agrees_with_a_model() {
         assert(c.items() == model, f"the entries at step {step}")
     }
     assert(c.slot_keys.len() <= 8, "never more slots than the capacity")
+}
+
+// `iter()` visits what `items()` lists, after evictions and removals too,
+// without changing the order; a copy keeps its own position (MYLA-553).
+#test
+fun iterating() {
+    var c: Lru<int, str> = new(3)
+    var seen: [(int, str)] = []
+    for e in c.iter() {
+        seen.push(e)
+    }
+    assert(seen == [], "an empty cache")
+    for k in 0..5 {
+        c.put(k, f"v{k}")
+    }
+    c.get(2)
+    c.remove(3)
+    c.put(7, "v7")
+    for (k, v) in c.iter() {
+        seen.push((k, v))
+    }
+    assert(seen == [(7, "v7"), (2, "v2"), (4, "v4")] && seen == c.items(), "the most recently used first")
+    assert(c.items() == seen, "visiting isn't using")
+    var it = c.iter()
+    it.next()
+    var copy = it
+    assert(it.next() == Some((2, "v2")) && it.next() == Some((4, "v4")) && it.next() == None, "in order, then none")
+    assert(copy.next() == Some((2, "v2")), "a copy keeps its own position")
 }
 
 #test

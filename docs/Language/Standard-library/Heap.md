@@ -97,7 +97,7 @@ A heap is a list in which each element comes before its children, at `2i + 1` an
 
 ## Speed
 
-Measured natively on x86-64, best of five runs, against the `Heap` of the Advent of Code solutions (a keyed heap that swaps):
+Measured natively on x86-64, best of five runs, against the `Heap` of the Advent of Code solutions (a keyed heap that swaps; 2026-11-07, `90177ad`):
 
 | Work | Time |
 | --- | --- |

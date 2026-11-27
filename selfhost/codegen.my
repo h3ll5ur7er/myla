@@ -15,8 +15,9 @@ from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
-from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, is_platform_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on, ImplArgs, impl_trait_args
+from .checker import CheckErr, Checker, Type, is_builtin_value, is_raw_memory_primitive, is_platform_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on, ImplArgs, impl_trait_args, builtin_method
 from .checker import is_notify_primitive
+from .checker import OpImpl, find_op_impl, arith_trait
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, may_inline, merge_blocks
@@ -31,8 +32,9 @@ import .ir_a64 as ir_a64
 import .runtime_a64 as runtime_a64
 import .ir_wasm as ir_wasm
 import .runtime_wasm as runtime_wasm
-from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
+from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, debug_section, section_offset, pc_range, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
+from .target import Target, Arch, Os
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
 // `capoff` is the byte offset within the closure env for a "capture" binding.
@@ -91,7 +93,15 @@ pub struct CodeGen {
     rodata: [str],
     strdata: [str],                 // static `str` cells (static_str)
     label_n: int32,
-    str_n: int32,
+    // MYLA-552: the labels of the function being emitted are its own,
+    // `.L<name>_<n>`, its positions' `.L<name>_p<n>` and its epilogue
+    // `.L<name>_ret`, under its mangled name (`begin_labels`; `label_fn` ""
+    // outside a function: `.L<n>`, `.Lpos<n>`), so that a change in one
+    // function renames no other's labels
+    label_fn: str,
+    label_fn_n: int32,
+    pos_fn_n: int32,
+    str_names: [str: bool],         // the string literals' labels taken (`str_name`)
     str_texts: [str],
     str_labels: [str],
     subst: [Subst],
@@ -103,6 +113,15 @@ pub struct CodeGen {
     fnval_set: [str],
     uses_float: bool,
     epilogue: str,
+    // the current function's out-of-line traps of a checked build's
+    // arithmetic (MYLA-551): their lines, each a label and the call,
+    // emitted after the function's return; one per `kind:line:col`, the
+    // key of its label
+    cold_traps: [str],
+    cold_keys: [str: str],
+    // aarch64: the line of `text` where the first of them was branched to
+    // (`a64_island`, M3)
+    cold_from: int32,
     ret_type: Option<Type>,
     // Reference-counting helper worklists: concrete owning types whose per-type
     // drop/clone routines must be emitted (deduped by mangled token).
@@ -200,7 +219,8 @@ pub struct CodeGen {
     // nothing more is emitted
     refused: [CheckErr],
     // the runtime errors with values native code reports through a routine
-    // of their own (`want_trap`, D183): "lindex", "sindex", "range"
+    // of their own (`want_trap`, D183): "lindex", "sindex", "range", and
+    // "luindex", "suindex" for a uint64 index (MYLA-546)
     trap_vals: [str],
     ir_texts: [str],
     ir_blocked: [str],
@@ -272,6 +292,11 @@ pub struct CodeGen {
     wasm: bool,
     wasm_arity: [str: int32],
     wasm_calls: [str: int32],
+    // MYLA-702: the target is x86-64 Windows (COFF, kernel32 through its
+    // import slots, `emit_windows_start`, `emit_windows_calls`); the functions of
+    // kernel32 the program calls (`__imp_<name>`), for its import library
+    windows: bool,
+    imports: [str: bool],
     env_records: [str],             // MYLA-263: the environments whose routines records the data holds (`env_record_of`)
     // D175: integer `+`, `-`, `*`, unary `-` and the signed minimum `/ -1`
     // trap on overflow, a shift on a count past the width (`--checked`, and
@@ -281,12 +306,54 @@ pub struct CodeGen {
     // called that nothing called (`Checker.unmarked_std`): asking for one is
     // an internal error, as its body may never have been read
     unmarked: [str: bool],
+    op_impls: [OpImpl],             // the operator impls by type arguments (D200)
 }
 
 // A code generator for `src` (checked alone, `checker_on`), the receiver of
 // `#test` cases of the code generator's methods (MYLA-184).
 pub fun codegen_on(src: str) -> CodeGen {
     return new_codegen(checker_on(src))
+}
+
+// A Windows code generator that has noted the import slots `syms`
+// (`note_import`), for `windows_imports`' cases.
+fun codegen_imports(syms: [str]) -> CodeGen {
+    var g = codegen_on("fun main() {}")
+    g.windows = true
+    for s in syms { g.note_import(s) }
+    return g
+}
+
+// The system DLLs other than kernel32 that a Windows program calls into
+// (D212), each with the functions of it std.platform calls: a function
+// listed here is imported from its DLL, any other from kernel32.dll
+// (`windows_dll`). A new DLL, or a new function of one, is a line here and
+// nothing else: the driver makes an import library of each DLL the program
+// calls (`windows_imports`, MYLA-722). The API set's DLL is the documented
+// home of WaitOnAddress and WakeByAddressSingle, which kernel32 doesn't
+// export (Windows 8 on).
+pub fun windows_dlls() -> [(str, [str])] {
+    return [
+        ("bcrypt.dll", ["BCryptGenRandom"]),
+        ("api-ms-win-core-synch-l1-2-0.dll", ["WaitOnAddress", "WakeByAddressSingle"]),
+        ("ws2_32.dll", ["WSAStartup", "WSAGetLastError", "WSASocketW", "WSAIoctl", "WSARecv", "WSARecvFrom", "WSASend", "WSAPoll",
+                        "bind", "listen", "accept", "connect", "closesocket", "ioctlsocket", "getsockopt", "setsockopt",
+                        "getsockname", "getpeername", "shutdown", "send", "recv", "sendto", "recvfrom",
+                        "GetAddrInfoW", "FreeAddrInfoW"]),
+        ("iphlpapi.dll", ["GetNetworkParams"]),
+    ]
+}
+
+// The DLL a Windows program imports the function `name` from.
+#test("WriteFile")["kernel32.dll"]
+#test("BCryptGenRandom")["bcrypt.dll"]
+#test("WaitOnAddress")["api-ms-win-core-synch-l1-2-0.dll"]
+#test("WSARecv")["ws2_32.dll"]
+pub fun windows_dll(name: str) -> str {
+    for (dll, names) in windows_dlls() {
+        for n in names { if n == name { return dll } }
+    }
+    return "kernel32.dll"
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -348,12 +415,12 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         impl_args: c.impl_args,
         static_calls: c.static_calls, static_selfs: c.static_selfs,
         text: [], rodata: [], strdata: [],
-        label_n: 0, str_n: 0,
+        label_n: 0, label_fn: "", label_fn_n: 0, pos_fn_n: 0, str_names: [:],
         str_texts: [], str_labels: [],
         subst: [], fn_worklist: [], fn_seen: [:],
         lam_jobs: [], lam_seen: [:], partial_jobs: [], fnval_set: [],
         uses_float: false,
-        epilogue: "", ret_type: None,
+        epilogue: "", cold_traps: [], cold_keys: [:], cold_from: 0, ret_type: None,
         need_drop: [], type_jobs: [], type_jobs_seen: [:], drop_emitted: [], drop_kinds: [], need_clone: [], clone_emitted: [],
         need_walk: [], need_deep: [], deep_inline: [], deep_clone: [], need_deepc: [], deepc_clone: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
@@ -364,11 +431,56 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), refused: [], trap_vals: [], ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, ext_at: -1, temp_uses: [], temp_remat: [], temp_fconst: [:], fconst_labels: [:], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], env_records: [], checked: false, unmarked: c.unmarked_std(),
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:], a64: false, wasm: false, wasm_arity: [:], wasm_calls: [:], windows: false, imports: [:], env_records: [], checked: false, unmarked: c.unmarked_std(), op_impls: c.op_impls,
     }
 }
 
 impl CodeGen {
+    // Generate for the target `t` (MYLA-700): its architecture chooses the
+    // backend. A target the compiler doesn't build for yet is refused
+    // before (`target.unsupported`).
+    fun set_target(var self, t: Target) {
+        self.a64 = t.arch == Arch.Aarch64
+        self.wasm = t.arch == Arch.Wasm32
+        self.windows = t.os == Os.Windows
+    }
+
+    // The functions of the system's DLLs the program calls through their
+    // import slots (`__imp_<name>`, MYLA-702), by DLL (`windows_dll`):
+    // kernel32's first, then the others in `windows_dlls`' order, each
+    // DLL's functions in the order the code first names them, a DLL none of
+    // whose functions is called left out. What the driver makes the import
+    // libraries of, one a DLL (D211, D212, MYLA-722); [] but on Windows.
+    #test(codegen_imports(["__imp_WriteFile", "__imp_BCryptGenRandom", "__imp_WakeByAddressSingle", "__imp_ExitProcess", "__imp_WaitOnAddress", "__imp_WriteFile"]))[[("kernel32.dll", ["WriteFile", "ExitProcess"]), ("bcrypt.dll", ["BCryptGenRandom"]), ("api-ms-win-core-synch-l1-2-0.dll", ["WakeByAddressSingle", "WaitOnAddress"])]]
+    #test(codegen_imports(["__imp_ExitProcess"]))[[("kernel32.dll", ["ExitProcess"])]]
+    #test(codegen_imports([]))[[]]
+    fun windows_imports(self) -> [(str, [str])] {
+        var dlls = ["kernel32.dll"]
+        for d in windows_dlls() { dlls.push(d.0) }
+        var out: [(str, [str])] = []
+        for dll in dlls {
+            var names: [str] = []
+            for k in self.imports.keys() { if windows_dll(k) == dll { names.push(k) } }
+            if names.len() > 0 { out.push((dll, names)) }
+        }
+        return out
+    }
+
+    // The import libraries as comments at the assembly's end, a line a DLL
+    // (`# import <dll> <function> …`), for a build of the text by another
+    // tool than the driver (tests/burn/_native.py's `windows_imports`).
+    fun windows_import_lines(self) -> [str] {
+        var out: [str] = []
+        for (dll, names) in self.windows_imports() { out.push("# import " + dll + " " + names.join(" ")) }
+        return out
+    }
+
+    // `sym` named by the code: a function's import slot (`__imp_<name>`) on
+    // Windows is recorded for its import library.
+    fun note_import(var self, sym: str) {
+        if self.windows && sym.len() > 6 && sym[0:6] == "__imp_" { self.imports[sym[6:sym.len()]] = true }
+    }
+
     // The files of the program: `spans` is the loader's `Loaded.spans`, node
     // ids from `next_id` on are the prelude's. Runtime errors name them.
     fun set_sources(var self, spans: [Span], next_id: int32) {
@@ -451,7 +563,12 @@ impl CodeGen {
         match self.pos_labels.get(key) {
             Some(l) => { lab = l },
             None => {
-                lab = format(".Lpos{}", self.pos_labels.len())
+                if self.label_fn != "" {
+                    self.pos_fn_n += 1
+                    lab = format(".L{}_p{}", self.label_fn, self.pos_fn_n)
+                } else {
+                    lab = format(".Lpos{}", self.pos_labels.len())
+                }
                 self.pos_labels[key] = lab
                 let file = self.string_label(self.cur_path)
                 self.posdata.push("\t.balign 8")
@@ -505,8 +622,7 @@ impl CodeGen {
             self.dbg_line(format("\t.uleb128 {}", AB_TYPED_SUBPROGRAM))
         }
         self.dbg_line(dw_string(symbol))
-        self.dbg_line(format("\t.quad {}", symbol))
-        self.dbg_line(format("\t.quad {} - {}", self.dbg_fn_end, symbol))
+        for l in pc_range(symbol, self.dbg_fn_end, self.windows) { self.dbg_line(l) }
         self.dbg_line("\t.uleb128 1")
         self.dbg_line(format("\t.byte {}", OP_REG6))
         if ty != "" { self.dbg_line(dw_ref(ty)) }
@@ -566,8 +682,7 @@ impl CodeGen {
                 let start = self.dbg_label("b")
                 self.emit(format("{}:", start))
                 self.dbg_line(format("\t.uleb128 {}", AB_BLOCK))
-                self.dbg_line(format("\t.quad {}", start))
-                self.dbg_line(format("\t.quad {} - {}", end, start))
+                for l in pc_range(start, end, self.windows) { self.dbg_line(l) }
                 self.dbg_scopes[si].blocks = self.dbg_scopes[si].blocks + 1
                 self.dbg_mark = format("{}:{}", end, self.text.len())
             }
@@ -936,7 +1051,9 @@ impl CodeGen {
     // `.debug_abbrev`, `.debug_info`, and the start of `.debug_line` (the
     // assembler appends the line table it builds from `.loc` there). The
     // compile directory is the working directory, as in the Python backend
-    // (`.` if it can't be read).
+    // (`.` if it can't be read). On Windows the same DWARF in the COFF
+    // object, with COFF's section directives, offsets and code ranges
+    // (MYLA-757).
     fun dbg_sections(var self) -> [str] {
         var types: [str] = []
         var i = 0
@@ -946,8 +1063,9 @@ impl CodeGen {
             for l in self.dbg_build(p) { types.push(l) }
             i = i + 1
         }
-        var out = abbrev_section()
-        for l in ["\t.section .debug_info,\"\",@progbits", ".Ldebug_info0:", "\t.long .Ldebug_info_end - .Ldebug_info_start", ".Ldebug_info_start:", "\t.value 4", "\t.long .Ldebug_abbrev0", "\t.byte 8"] { out.push(l) }
+        let coff = self.windows
+        var out = abbrev_section(coff)
+        for l in [debug_section(".debug_info", coff), ".Ldebug_info0:", "\t.long .Ldebug_info_end - .Ldebug_info_start", ".Ldebug_info_start:", "\t.value 4", section_offset(".Ldebug_abbrev0", coff), "\t.byte 8"] { out.push(l) }
         out.push(format("\t.uleb128 {}", AB_CU))
         out.push(dw_string("myla (self-hosted)"))
         out.push(format("\t.value {}", LANG_RUST))
@@ -957,12 +1075,13 @@ impl CodeGen {
             Err(e) => "."
         }
         out.push(dw_string(comp_dir))
-        for l in ["\t.quad .Ltext0", "\t.quad .Letext0 - .Ltext0", "\t.long .Ldebug_line0"] { out.push(l) }
+        for l in pc_range(".Ltext0", ".Letext0", coff) { out.push(l) }
+        out.push(section_offset(".Ldebug_line0", coff))
         for l in self.dbg_lines { out.push(l) }
         for l in types { out.push(l) }
         for l in ["\t.byte 0", ".Ldebug_info_end:"] { out.push(l) }
-        if self.dbg_script != "" { for l in gdb_scripts_section(self.dbg_script) { out.push(l) } }
-        for l in ["\t.section .debug_line,\"\",@progbits", ".Ldebug_line0:"] { out.push(l) }
+        if self.dbg_script != "" { for l in gdb_scripts_section(self.dbg_script, coff) { out.push(l) } }
+        for l in [debug_section(".debug_line", coff), ".Ldebug_line0:"] { out.push(l) }
         return out
     }
 
@@ -1053,8 +1172,51 @@ impl CodeGen {
 
     #test(codegen_on("[int]"))[".L1"]
     fun label(var self) -> str {
+        if self.label_fn != "" {
+            self.label_fn_n += 1
+            return format(".L{}_{}", self.label_fn, self.label_fn_n)
+        }
         self.label_n = self.label_n + 1
         return format(".L{}", self.label_n)
+    }
+
+    // The labels from here on the function `mangled`'s own (MYLA-552,
+    // D196): its name, `_` and a number from 1 (`.Lmain_3`), its positions'
+    // `_p` and one (`.Lmain_p1`), so that a reader of the assembly sees
+    // whose label it is; "" for none (outside a function). A mangled name
+    // is a symbol's (`myla_<name>`) and a suffix has no `_`, so a label
+    // reads back to one function, and to none of the runtime's named labels
+    // (`.Lsw_next`, `.Lstr_true`), none of which ends in `_ret` or a
+    // number (`.Lsegv_done`; test_label_names checks it, MYLA-810).
+    #test(codegen_on("[int]"), "")[()]
+    fun begin_labels(var self, mangled: str) {
+        self.label_fn = mangled
+        self.label_fn_n = 0
+        self.pos_fn_n = 0
+    }
+
+    // The label of the function `mangled`'s epilogue, under its name as its
+    // other labels are (`begin_labels`).
+    #test(codegen_on("[int]"), "main")[".Lmain_ret"]
+    #test(codegen_on("[int]"), "lexer$Lexer.peek")[".Llexer$Lexer.peek_ret"]
+    fun epilogue_label(self, mangled: str) -> str {
+        return format(".L{}_ret", mangled)
+    }
+
+    // The label of a new string literal `text`: `.Lstr` and the FNV-1a
+    // hash of its bytes in seven letters and digits (the hash's next where
+    // another text gave it first), so that a literal added renumbers no
+    // other (MYLA-552).
+    #test(codegen_on("[int]"), "héλ")[".Lstro0qlabq"]
+    fun str_name(var self, text: str) -> str {
+        var h = fnv1a(text)
+        var lab = ".Lstr" + base36(h, 7)
+        while self.str_names.contains(lab) {
+            h = (h ^ 255u64).wrapping_mul(FNV_PRIME)
+            lab = ".Lstr" + base36(h, 7)
+        }
+        self.str_names[lab] = true
+        return lab
     }
 
     #test(codegen_on("[int]"), "héλ")[-1]
@@ -1066,12 +1228,11 @@ impl CodeGen {
     }
 
     // Intern a string literal, emitting a static `str` cell (MYLA-18).
-    #test(codegen_on("[int]"), "héλ")[".Lstr0"]
+    #test(codegen_on("[int]"), "héλ")[".Lstro0qlabq"]
     fun string_label(var self, text: str) -> str {
         let existing = self.str_index(text)
         if existing >= 0 { return self.str_labels[existing] }
-        let lab = format(".Lstr{}", self.str_n)
-        self.str_n = self.str_n + 1
+        let lab = self.str_name(text)
         self.str_ix[text] = self.str_texts.len()
         self.str_texts.push(text)
         self.str_labels.push(lab)
@@ -1122,6 +1283,10 @@ impl CodeGen {
     fun find_kept_params(var self) {
         for sig in self.funcs {
             if !sig.has_decl { continue }
+            // a body of the standard library that nothing called neither
+            // votes nor keeps: it may not have been read (D179), and what
+            // is built mustn't depend on which were (MYLA-552)
+            if self.unmarked.contains(sig.name) { continue }
             self.scan_kept = []
             match sig.decl.body {
                 Some(b) => { self.scan_block(b) },
@@ -1480,6 +1645,19 @@ impl CodeGen {
         return out
     }
 
+    // The method of an operator impl by type arguments (D200) of the trait
+    // `tr` for a left operand (or indexed value) of the type `lt` and a right
+    // one (or index) of the type `rt` (`Neg` reads `lt` alone): its full name,
+    // "" for none, a number's own operator or a classic impl's.
+    #test(codegen_on("[int]"), "Mul", Type.TFloat(64), Type.TFloat(64))[""]
+    fun op_method(self, tr: str, lt: Type, rt: Type) -> str {
+        if self.op_impls.len() == 0 { return "" }
+        return match find_op_impl(self.op_impls, tr, self.type_key(lt), lt, rt) {
+            Some(oi) => oi.method,
+            None => "",
+        }
+    }
+
     // The method-table key for a receiver type (mirrors Checker.type_key).
     #test(codegen_on("[int]"), Type.TInt(32, true))["int32"]
     fun type_key(self, t: Type) -> str {
@@ -1522,6 +1700,25 @@ impl CodeGen {
             Some(i) => self.enums[i]
             None => self.enums[0]
         }
+    }
+
+    // Whether the method call `recv.m(…)` may write the variable `recv` is
+    // read from (`may_write_expr`): a method that takes `var self`, a builtin
+    // that changes its receiver (`push`, `pop`, `remove`, `append`, …), or a
+    // method this program has no declaration of; not a method taking `self`
+    // (MYLA-542), nor `len`, `contains`, `keys`, `chars` or `build`.
+    #test(codegen_on("[int]"), expr_of("xs"), "push")[true]
+    fun method_may_write(self, recv: Expr, m: str) -> bool {
+        let rt = self.type_of(recv.id)
+        match self.func_ix.get(format("{}.{}", self.type_key(rt), m)) {
+            Some(i) => {
+                if !self.funcs[i].has_decl { return true }
+                return match self.funcs[i].decl.receiver { Some(r) => r == "var self", None => true }
+            },
+            None => {},
+        }
+        if builtin_method(rt, m) { return is_mutating_builtin(m) }
+        return true
     }
 
     #test(codegen_on("[int]"), Type.TStr)[false]
@@ -1578,21 +1775,25 @@ impl CodeGen {
             Type.TAsync(f) => { return true },
             Type.TActor(n, a) => { return true },
             Type.TStruct(n, a) => {
-                if list_has_str(seen, n) { return false }
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
                 let info = self.struct_info(n)
                 let sub = self.type_subst(info.type_params, a)
                 for f in info.fields {
-                    if self.owns_heap_seen(subst_type(f.ty, sub), push_str_copy(seen, n)) { return true }
+                    if self.owns_heap_seen(subst_type(f.ty, sub), push_str_copy(seen, tok)) { return true }
                 }
                 return false
             },
             Type.TEnum(n, a) => {
-                if list_has_str(seen, n) { return false }
+                // (seen by the whole type: `Option<Option<Tree>>` holds an
+                // `Option` that owns a box, C10)
+                let tok = mono_token(t)
+                if list_has_str(seen, tok) { return false }
                 let info = self.enum_info(n)
                 let sub = self.type_subst(info.type_params, a)
                 for v in info.variants {
                     for ft in v.payload {
-                        if self.owns_heap_seen(subst_type(ft, sub), push_str_copy(seen, n)) { return true }
+                        if self.owns_heap_seen(subst_type(ft, sub), push_str_copy(seen, tok)) { return true }
                     }
                 }
                 return false
@@ -2023,8 +2224,10 @@ impl CodeGen {
     fun rt_exec(self) -> [(str, str)] {
         // every program's (`__map_lookup`: `remove`'s too)
         // (`__exit_program`: every end of the program, through the exit
-        // hook, D187)
-        var out = [("__exit_program", "std$rt$exit_program"), ("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_lookup", "std$rt$map_lookup"), ("__equal_bytes", "std$rt$equal_bytes"), ("__func_retain", "std$rt$func_retain"), ("__func_drop", "std$rt$func_drop")]
+        // hook, D187; `__on_raw_signal`: the handler of a signal that ends
+        // the program while the terminal is raw, D192, MYLA-548; named
+        // unqualified when std.platform is the entry, `platform_fn`)
+        var out = [("__exit_program", "std$rt$exit_program"), ("__on_raw_signal", self.platform_fn("raw_signal")), ("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_lookup", "std$rt$map_lookup"), ("__equal_bytes", "std$rt$equal_bytes"), ("__func_retain", "std$rt$func_retain"), ("__func_drop", "std$rt$func_drop")]
         if self.frames {
             for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__deep_env", "std$rt$deep_env"), ("__dclone_env", "std$rt$dclone_env"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd"), ("myla___wait_fd2", "std$rt$wait_fd2"), ("myla___wait_sock", "std$rt$wait_sock")] { out.push(p) }
         }
@@ -2225,7 +2428,8 @@ impl CodeGen {
         for line in self.text { out.push(line) }
         if self.line_files.len() > 0 { out.push(".Letext0:") }
         out.push("")
-        out.push("\t.section .rodata")
+        // COFF's read-only data on Windows (MYLA-702)
+        if self.windows { out.push("\t.section .rdata,\"dr\"") } else { out.push("\t.section .rodata") }
         out.push(".Lbool_true:\n\t.ascii \"true\"")
         out.push(".Lbool_false:\n\t.ascii \"false\"")
         let messages = trap_messages(self.checked)
@@ -2334,6 +2538,15 @@ impl CodeGen {
         // `write_err_num`)
         out.push("__panic_buf:")
         out.push("\t.skip 32")
+        // in a test child of `myla test --native`, the head of its records
+        // as a string's cell, which std.test sets (0 elsewhere): std.rt
+        // writes how the case ended as one (`test_record`, D191)
+        out.push("__test_report:")
+        out.push("\t.skip 8")
+        // 1 once the program asked for huge pages for its heap's chunks
+        // (std.rt's `heap_huge_pages`, the toolchain's opt-in, MYLA-608)
+        out.push("__heap_huge:")
+        out.push("\t.skip 8")
         // the poller's events and words (std.platform, D124)
         out.push("__poll_buf:")
         out.push("\t.skip 128")
@@ -2391,9 +2604,51 @@ impl CodeGen {
                 out.push(format("\t.skip {}", v.1))
             }
         }
+        if self.windows {
+            // the console's code pages before the program set them to
+            // UTF-8, put back at its end (std.platform's `windows_start`,
+            // D215), then the screen buffer whose output mode
+            // `term_enable_vt` changed and that mode (MYLA-707), then how
+            // many Ctrl-Cs and Ctrl-Breaks the console's control handler
+            // took (`__win_on_ctrl`; std.platform's `read`, MYLA-708)
+            out.push("__win_console_cp:")
+            out.push("\t.skip 40")
+            // what VirtualQuery answers `unmap_memory`, and how many bytes
+            // a read or a write moved: the platform's own words, as those
+            // run while the heap grows or report that it can't; with tasks
+            // each thread's own, in its block (`tls_offset`, MYLA-703)
+            if !self.frames {
+                out.push("__win_memory_info:")
+                out.push("\t.skip 48")
+                out.push("__win_io:")
+                out.push("\t.skip 8")
+            }
+            // how many worker threads `__start_workers` made, and how many
+            // of them started (`__win_worker`), which the exit waits for
+            // (std.platform's `workers_started`, MYLA-703)
+            out.push("__win_threads:")
+            out.push("\t.skip 16")
+            // std.platform's sockets and its I/O completion port: their
+            // lock, the port, the table of the handles it does overlapped
+            // I/O on, Winsock started, its extensions' addresses, the
+            // count naming its pipes, a wake-up posted, the handles closed
+            // later, those looked at each millisecond, Winsock's functions
+            // the poller calls (std.platform's `NET_…` words, MYLA-706)
+            out.push("__win_net:")
+            out.push("\t.skip 104")
+            // with tasks, the offset in the TEB (`%gs`) of the TLS slot
+            // holding each thread's block (`win_tls_block`)
+            if self.frames {
+                out.push("__win_tls_off:")
+                out.push("\t.skip 8")
+            }
+        }
         out.push("")
         if self.line_files.len() > 0 { for l in self.dbg_sections() { out.push(l) } }
-        out.push("\t.section .note.GNU-stack,\"\",@progbits")
+        // (an ELF note: COFF has no executable stack to mark)
+        if !self.windows { out.push("\t.section .note.GNU-stack,\"\",@progbits") }
+        // the import libraries' functions (MYLA-722)
+        if self.windows { for l in self.windows_import_lines() { out.push(l) } }
         out.push("")
         return join_lines(out)
     }
@@ -2505,13 +2760,25 @@ impl CodeGen {
 
     // The operand of the runtime variable `sym`, which is a thread's own in a
     // program with tasks: in the block `%fs` holds (`tls_offset`), else at
-    // its symbol.
+    // its symbol. On Windows a thread's block is reached through a register
+    // (`tv_at`).
     #test(codegen_on("[int]"), "__heap_end")["__heap_end(%rip)"]
     fun tv(self, sym: str) -> str {
         // (a process-wide one, like `__exec_workers`, next to %rip with tasks
         // too: MYLA-162)
         if !self.frames || tls_offset(sym) == 0 { return sym + "(%rip)" }
         return format("%fs:{}", tls_offset(sym))
+    }
+
+    // The lines that reach the runtime variable `sym`, then its operand: on
+    // Windows a thread's own, in a program with tasks, is in the block its
+    // TEB's TLS slot holds (`win_tls_block`, whose lines load its address
+    // into `reg` first: MYLA-703); anywhere else `tv`'s operand alone.
+    fun tv_at(self, sym: str, reg: str) -> ([str], str) {
+        if self.windows && self.frames && tls_offset(sym) != 0 {
+            return (win_tls_block(reg), format("{}(%{})", tls_offset(sym), reg))
+        }
+        return ([], self.tv(sym))
     }
 
     // -- the executor (D90, D92, MYLA-140: workers and their queues) --------
@@ -3105,7 +3372,7 @@ impl CodeGen {
     fun emit_elem_check(var self, line: int32, col: int32, is_str: bool, it: Type) {
         self.emit("movq (%rax), %rdx")
         self.emit("cmpq %rdx, %rcx")
-        let tr = self.want_trap(if is_str { "sindex" } else { "lindex" })
+        let tr = self.want_index_trap(is_str, it)
         if tr == "" {
             self.trap("jae", "__trap_index", line, col)
             return
@@ -3125,6 +3392,15 @@ impl CodeGen {
         if !self.has_func(trap_text_fn(kind)) { return "" }
         if !list_has_str(self.trap_vals, kind) { self.trap_vals.push(kind) }
         return "__trap_" + kind
+    }
+
+    // The routine an element's bounds check of a list or string (`is_str`)
+    // reports through, the index of type `it`: a `uint64`'s written
+    // unsigned (`luindex`, `suindex`; MYLA-546).
+    fun want_index_trap(var self, is_str: bool, it: Type) -> str {
+        let u = match it { Type.TInt(w, sg) => w == 64 && !sg, _ => false }
+        if is_str { return self.want_trap(if u { "suindex" } else { "sindex" }) }
+        return self.want_trap(if u { "luindex" } else { "lindex" })
     }
 
     // -- copy-on-write mutation addressing --------------------------------
@@ -4137,100 +4413,100 @@ pub fun is_mutating_builtin(n: str) -> bool {
 
 // Whether running an arm (guard and body) may write to variable `name`,
 // conservatively: an assignment to or into it, a mutating builtin on it, or a
-// method call on it (the method may take `var self`). Myla has no references
-// and closures capture by value, so nothing else can.
-#test([], "a")[false]
-#test([], "x")[false]
-#test([], "y")[false]
-pub fun arms_may_write(arms: [MatchArm], name: str) -> bool {
+// method call on it that takes `var self` (`CodeGen.method_may_write`). Myla
+// has no references and closures capture by value, so nothing else can.
+#test(codegen_on("[int]"), [], "a")[false]
+#test(codegen_on("[int]"), [], "x")[false]
+#test(codegen_on("[int]"), [], "y")[false]
+pub fun arms_may_write(cg: CodeGen, arms: [MatchArm], name: str) -> bool {
     for arm in arms {
-        match arm.guard { Some(g) => { if may_write_expr(g, name) { return true } }, None => {} }
-        if may_write_body(arm.body, name) { return true }
+        match arm.guard { Some(g) => { if may_write_expr(cg, g, name) { return true } }, None => {} }
+        if may_write_body(cg, arm.body, name) { return true }
     }
     return false
 }
 
-fun may_write_body(b: ExprOrBlock, name: str) -> bool {
+fun may_write_body(cg: CodeGen, b: ExprOrBlock, name: str) -> bool {
     return match b {
-        ExprOrBlock.EB_Expr(e) => may_write_expr(e, name),
-        ExprOrBlock.EB_Block(blk) => may_write_block(blk, name),
+        ExprOrBlock.EB_Expr(e) => may_write_expr(cg, e, name),
+        ExprOrBlock.EB_Block(blk) => may_write_block(cg, blk, name),
     }
 }
 
-#test(block_of("{ }"), "a")[false]
-fun may_write_block(b: Block, name: str) -> bool {
-    for st in b.stmts { if may_write_stmt(st, name) { return true } }
+#test(codegen_on("[int]"), block_of("{ }"), "a")[false]
+fun may_write_block(cg: CodeGen, b: Block, name: str) -> bool {
+    for st in b.stmts { if may_write_stmt(cg, st, name) { return true } }
     return false
 }
 
-#test(None, "let")[false]
-fun may_write_opt(oe: Option<Expr>, name: str) -> bool {
-    return match oe { Some(e) => may_write_expr(e, name), None => false }
+#test(codegen_on("[int]"), None, "let")[false]
+fun may_write_opt(cg: CodeGen, oe: Option<Expr>, name: str) -> bool {
+    return match oe { Some(e) => may_write_expr(cg, e, name), None => false }
 }
 
-#test([], "let")[false]
-fun may_write_exprs(es: [Expr], name: str) -> bool {
-    for e in es { if may_write_expr(e, name) { return true } }
+#test(codegen_on("[int]"), [], "let")[false]
+fun may_write_exprs(cg: CodeGen, es: [Expr], name: str) -> bool {
+    for e in es { if may_write_expr(cg, e, name) { return true } }
     return false
 }
 
-#test(stmt_of("print(1)"), "a")[false]
-fun may_write_stmt(st: Stmt, name: str) -> bool {
+#test(codegen_on("[int]"), stmt_of("print(1)"), "a")[false]
+fun may_write_stmt(cg: CodeGen, st: Stmt, name: str) -> bool {
     match st.kind {
-        StmtKind.VarDecl(k, n, ty, init) => { return may_write_expr(init, name) },
-        StmtKind.DestructDecl(k, bs, ty, init) => { return may_write_expr(init, name) },
+        StmtKind.VarDecl(k, n, ty, init) => { return may_write_expr(cg, init, name) },
+        StmtKind.DestructDecl(k, bs, ty, init) => { return may_write_expr(cg, init, name) },
         StmtKind.Assign(target, value) => {
-            return place_root(target) == name || may_write_expr(target, name) || may_write_expr(value, name)
+            return place_root(target) == name || may_write_expr(cg, target, name) || may_write_expr(cg, value, name)
         },
         StmtKind.IfS(c, then, otherwise) => {
-            if may_write_expr(c, name) || may_write_block(then, name) { return true }
+            if may_write_expr(cg, c, name) || may_write_block(cg, then, name) { return true }
             return match otherwise {
-                Some(ElseTail.ElseBlock(b)) => may_write_block(b, name),
-                Some(ElseTail.ElseIf(s)) => may_write_stmt(s, name),
+                Some(ElseTail.ElseBlock(b)) => may_write_block(cg, b, name),
+                Some(ElseTail.ElseIf(s)) => may_write_stmt(cg, s, name),
                 _ => false,
             }
         },
-        StmtKind.WhileS(c, body) => { return may_write_expr(c, name) || may_write_block(body, name) },
+        StmtKind.WhileS(c, body) => { return may_write_expr(cg, c, name) || may_write_block(cg, body, name) },
         StmtKind.ForS(v, start, end, body, iter) => {
-            return may_write_opt(start, name) || may_write_opt(end, name) || may_write_opt(iter, name) || may_write_block(body, name)
+            return may_write_opt(cg, start, name) || may_write_opt(cg, end, name) || may_write_opt(cg, iter, name) || may_write_block(cg, body, name)
         },
-        StmtKind.ReturnS(ov, tail) => { return may_write_opt(ov, name) },
-        StmtKind.ExprStmt(e) => { return may_write_expr(e, name) },
-        StmtKind.DeferS(body) => { return may_write_block(body, name) },
+        StmtKind.ReturnS(ov, tail) => { return may_write_opt(cg, ov, name) },
+        StmtKind.ExprStmt(e) => { return may_write_expr(cg, e, name) },
+        StmtKind.DeferS(body) => { return may_write_block(cg, body, name) },
         _ => {},
     }
     return false
 }
 
-#test(expr_of("-n * 2"), "r")[false]
-pub fun may_write_expr(e: Expr, name: str) -> bool {
+#test(codegen_on("[int]"), expr_of("-n * 2"), "r")[false]
+pub fun may_write_expr(cg: CodeGen, e: Expr, name: str) -> bool {
     match e.kind {
-        ExprKind.Unary(op, x) => { return may_write_expr(x, name) },
-        ExprKind.Await(x) => { return may_write_expr(x, name) },
-        ExprKind.Binary(op, l, r) => { return may_write_expr(l, name) || may_write_expr(r, name) },
+        ExprKind.Unary(op, x) => { return may_write_expr(cg, x, name) },
+        ExprKind.Await(x) => { return may_write_expr(cg, x, name) },
+        ExprKind.Binary(op, l, r) => { return may_write_expr(cg, l, name) || may_write_expr(cg, r, name) },
         ExprKind.Call(c, args, _) => {
             let writes = match c.kind {
-                ExprKind.GetField(recv, m) => place_root(recv) == name,
+                ExprKind.GetField(recv, m) => place_root(recv) == name && cg.method_may_write(recv, m),
                 ExprKind.Name(f) => is_mutating_builtin(f) && args.len() > 0 && place_root(args[0]) == name,
                 _ => false,
             }
-            return writes || may_write_expr(c, name) || may_write_exprs(args, name)
+            return writes || may_write_expr(cg, c, name) || may_write_exprs(cg, args, name)
         },
-        ExprKind.GetField(t, f) => { return may_write_expr(t, name) },
+        ExprKind.GetField(t, f) => { return may_write_expr(cg, t, name) },
         ExprKind.StructLit(n, fields) => {
-            for fi in fields { if may_write_expr(fi.value, name) { return true } }
+            for fi in fields { if may_write_expr(cg, fi.value, name) { return true } }
         },
-        ExprKind.TupleLit(es) => { return may_write_exprs(es, name) },
-        ExprKind.TupleIndex(t, i) => { return may_write_expr(t, name) },
-        ExprKind.ListLit(es) => { return may_write_exprs(es, name) },
+        ExprKind.TupleLit(es) => { return may_write_exprs(cg, es, name) },
+        ExprKind.TupleIndex(t, i) => { return may_write_expr(cg, t, name) },
+        ExprKind.ListLit(es) => { return may_write_exprs(cg, es, name) },
         ExprKind.MapLit(entries) => {
-            for en in entries { if may_write_expr(en.key, name) || may_write_expr(en.value, name) { return true } }
+            for en in entries { if may_write_expr(cg, en.key, name) || may_write_expr(cg, en.value, name) { return true } }
         },
-        ExprKind.Index(t, i) => { return may_write_expr(t, name) || may_write_expr(i, name) },
-        ExprKind.MatchE(s, arms) => { return may_write_expr(s, name) || arms_may_write(arms, name) },
-        ExprKind.Try(x) => { return may_write_expr(x, name) },
-        ExprKind.Cast(x, ty) => { return may_write_expr(x, name) },
-        ExprKind.Lambda(ps, rt, body, asy) => { return may_write_body(body, name) },
+        ExprKind.Index(t, i) => { return may_write_expr(cg, t, name) || may_write_expr(cg, i, name) },
+        ExprKind.MatchE(s, arms) => { return may_write_expr(cg, s, name) || arms_may_write(cg, arms, name) },
+        ExprKind.Try(x) => { return may_write_expr(cg, x, name) },
+        ExprKind.Cast(x, ty) => { return may_write_expr(cg, x, name) },
+        ExprKind.Lambda(ps, rt, body, asy) => { return may_write_body(cg, body, name) },
         _ => {},
     }
     return false
@@ -4276,6 +4552,33 @@ fun compiler_norm() -> Norm {
 // The ready-frame ring's size (D90): a power of two.
 pub const EXEC_CAP: int32 = 1048576
 
+// FNV-1a with 64 bits (as std.checksum's `fnv1a64`), which names the
+// label of a string literal (MYLA-552).
+const FNV_BASIS: uint64 = 0xcbf29ce484222325
+const FNV_PRIME: uint64 = 0x100000001b3
+
+#test("")[0xcbf29ce484222325u64]
+#test("foobar")[0x85944171f73967e8u64]
+fun fnv1a(s: str) -> uint64 {
+    var h = FNV_BASIS
+    for i in 0..s.len() { h = (h ^ (s[i] as uint64)).wrapping_mul(FNV_PRIME) }
+    return h
+}
+
+// The low `n` base-36 digits of `h` (`0`–`9`, `a`–`z`), the lowest first.
+#test(0u64, 3)["000"]
+#test(71u64, 2)["z1"]
+fun base36(h: uint64, n: int32) -> str {
+    let digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    var sb = StringBuilder()
+    var x = h
+    for i in 0..n {
+        sb.append_byte(digits[(x % 36u64) as int32])
+        x = x / 36u64
+    }
+    return sb.build()
+}
+
 // The generator of MYLA_SCHED=seed:N (D110): x * SCHED_MUL + SCHED_ADD,
 // wrapping (Knuth's MMIX constants), the same in the interpreter
 // (`Interp.ready`).
@@ -4284,11 +4587,14 @@ const SCHED_ADD: int64 = 1442695040888963407
 
 // A thread's block of runtime state in a program with tasks (D92), which
 // `%fs` points at: its own address first (for `tls_addr`), then each
-// variable's word, then the free lists (4616 bytes).
+// variable's word, then the free lists (4616 bytes), then on Windows the
+// platform's words a kernel32 call fills in (`VirtualQuery`'s answer, a
+// read's or a write's count: std.platform's, each thread's own, MYLA-703).
 #test("__exec_sp")[32]
 #test("__remote_free")[96]
 #test("__exec_task")[104]
 #test("__run_stderr_val")[48]
+#test("__win_io")[4792]
 pub fun tls_offset(sym: str) -> int32 {
     if sym == "__heap_ptr" { return 8 }
     if sym == "__heap_end" { return 16 }
@@ -4305,10 +4611,22 @@ pub fun tls_offset(sym: str) -> int32 {
     if sym == "__exec_task" { return 104 }
     if sym == "__drop_defer" { return 112 }
     if sym == "__free_buckets" { return 128 }
+    if sym == "__win_memory_info" { return 4744 }
+    if sym == "__win_io" { return 4792 }
     return 0
 }
 
 pub const TLS_SIZE: int32 = 4800
+
+// On Windows (MYLA-703) a thread's block is the value of its TLS slot, a
+// word of its TEB (`%gs`, the slots from 0x1480 on; the slot's offset is
+// `__win_tls_off`, which `_start` sets from `TlsAlloc`'s index), not
+// `%fs`'s, which Wine's own C library holds: the lines that load the
+// block's address into `reg`.
+#test("rax")[["\tmovq __win_tls_off(%rip), %rax", "\tmovq %gs:(%rax), %rax"]]
+pub fun win_tls_block(reg: str) -> [str] {
+    return [format("\tmovq __win_tls_off(%rip), %{}", reg), format("\tmovq %gs:(%{}), %{}", reg, reg)]
+}
 
 // The most workers a program runs (D92); each has a 4 GiB arena of the heap
 // region, so a cell's address tells whose heap it is.
@@ -4417,10 +4735,10 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" || nm == "__poll" { return true }
     if nm == "__run_signal" || nm == "__run_errno" { return true }
     if nm == "__list_dir" || nm == "__mkdir" || nm == "__stat" || nm == "__getcwd" || nm == "__getenv" { return true }
-    if nm == "__test_dir" || nm == "__test_program" { return true }
+    if nm == "__test_dir" || nm == "__test_program" || nm == "__test_tool" { return true }
     if nm == "__sqrt" || nm == "__f64_bits" || nm == "__f64_from_bits" { return true }
     if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
-    if nm == "__task_cancelled" || nm == "__clock_ns" || nm == "__sleep_ns" || nm == "__disarm" { return true }
+    if nm == "__task_cancelled" || nm == "__tasks_waiting" || nm == "__clock_ns" || nm == "__sleep_ns" || nm == "__disarm" { return true }
     if nm == "__spawn" || nm == "__reap" || nm == "__kill" || nm == "__close" { return true }
     if nm == "__run_with" || nm == "__spawn_with" { return true }
     if nm == "__str_to_bytes" || nm == "__bytes_to_str" || nm == "__read_bytes" || nm == "__write_bytes" { return true }

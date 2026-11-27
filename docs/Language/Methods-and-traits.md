@@ -228,15 +228,82 @@ fun main() {
 
 ## Operator overloading
 
-A fixed set of built-in traits backs the operators on structs and enums (D52):
+A fixed set of built-in traits backs the operators on structs and enums (D52, D200):
 
 | Trait | Method | Operators |
 | --- | --- | --- |
-| `Add` `Sub` `Mul` `Div` `Rem` | `add` `sub` `mul` `div` `rem` `(self, other: Self) -> Self` | `+ - * / %` |
+| `Add<R, O>` `Sub<R, O>` `Mul<R, O>` `Div<R, O>` `Rem<R, O>` | `add` `sub` `mul` `div` `rem` `(self, other: R) -> O` | `+ - * / %`, and `+=` … `%=` |
+| `Neg<O>` | `neg(self) -> O` | unary `-` |
+| `Index<I, O>` | `index(self, i: I) -> O` | `x[i]` |
+| `IndexSet<I, V>` | `set_index(var self, i: I, v: V)` | `x[i] = v` (and `x[i] += v`) |
 | `Eq` | `eq(self, other: Self) -> bool` | `==`, `!=` |
 | `Ord` | `cmp(self, other: Self) -> int` (negative, zero, positive) | `< <= > >=` |
 
-`a + b` on a struct becomes `a.add(b)`; `a < b` becomes `a.cmp(b) < 0`. Both operands must have the same type. Primitive types keep their built-in operators (a user `impl Add for int32` doesn't change `+`), and the bitwise operators can't be overloaded.
+The arithmetic traits take the right operand's type and the result's (D200, [[MYLA-612]]): a bare `Mul` is `Mul<Self, Self>`, the classic same-type operator, and `Mul<R>` is `Mul<R, Self>`; a bare `Neg` is `Neg<Self>`. A type may implement one trait for several right operands, `impl Mul<float> for Vec2` beside `impl Mul<Vec2, float> for Vec2` (a dot product) and `impl Mul for Mat2`: the operands' types pick the impl, and its result type is the expression's. A number may implement an arithmetic trait with a struct or enum on the right, for the scalar on the left: `impl Mul<Vec2, Vec2> for float64` gives `2.0 * v`. `Index` and `IndexSet` take the index's type and the element's, one impl per index type (`Index<int, float>` beside `Index<(int, int), float>`); `x[i] = v` needs `x` to be a `var` place, and `x[i] += v` is `x.set_index(i, x.index(i) + v)`.
+
+```myla
+struct Vec2 {
+    x: float,
+    y: float,
+}
+
+impl Add for Vec2 {
+    fun add(self, o: Vec2) -> Vec2 { return Vec2 { x: self.x + o.x, y: self.y + o.y } }
+}
+
+impl Mul<float> for Vec2 {
+    fun mul(self, k: float) -> Vec2 { return Vec2 { x: self.x * k, y: self.y * k } }
+}
+
+impl Mul<Vec2, Vec2> for float64 {
+    fun mul(self, v: Vec2) -> Vec2 { return v * self }
+}
+
+impl Neg for Vec2 {
+    fun neg(self) -> Vec2 { return Vec2 { x: -self.x, y: -self.y } }
+}
+
+impl Index<int, float> for Vec2 {
+    fun index(self, i: int) -> float { return if i == 0 { self.x } else { self.y } }
+}
+
+impl IndexSet<int, float> for Vec2 {
+    fun set_index(var self, i: int, v: float) {
+        if i == 0 { self.x = v } else { self.y = v }
+    }
+}
+
+fun lerp<T: Add + Mul<float>>(a: T, b: T, t: float) -> T {
+    return a * (1.0 - t) + b * t
+}
+
+fun main() {
+    var pos = Vec2 { x: 1.0, y: 2.0 }
+    let vel = Vec2 { x: 0.5, y: -1.0 }
+    pos += vel * 2.0
+    pos[1] += 10.0
+    let back = -(2.0 * pos)
+    print(f"{pos[0]} {pos[1]} {back.x}")
+    print(lerp(0.0, 10.0, 0.25))
+    print(lerp(pos, back, 0.5)[0])
+}
+// output:
+// 2 10 -4
+// 2.5
+// -1
+```
+
+- Generic code names what it needs: `T: Mul<float>` allows `a * 2.0` and gives a `T`, `T: Neg` allows `-a`, `C: Index<int, float>` allows `c[0]`. A number meets its own operators' bounds (`lerp(0.0, 10.0, 0.25)` above), and a list, map or string the `Index` (and, but a string, the `IndexSet`) of its own indexing. A type parameter only such a bound names is fixed by the impl the argument's type has ([[MYLA-802]], [[Language/Generics#type-arguments]]): `fun sum3<C: Index<int, T>, T: Add>(c: C) -> T` takes `T` from `c`'s indexing by an `int`, so `sum3([1, 2, 3])` is an `int32` and `sum3(B { v: 2.5 })` with `impl<T> Index<int, T> for B<T>` a `float64`.
+- **A literal operand** (D257, [[MYLA-790]]) takes the type of the only impl that takes a literal of its kind, integer or float, on its side: with `Mul<float32>` beside a classic `Mul`, `v * 2.0` is `v * 2.0f32`; with `impl Mul<Vec3, Vec3> for float32`, `2.0 * v` is `2.0f32 * v`, and with one for `int64`, `2 * v` is an `int64` times `v`. Where none or several of its kind are there, it keeps its own type, `int32` or `float64`, which must have an impl. An integer literal never becomes a float, beside an operator either: with only `Mul<float>`, `v * 2` is `operator '*' is not defined for 'Vec2' and 'int32'`; write `2.0`. A struct literal on the left (`B { v: 1 } * b`) is typed by the right operand where an impl for that type's right operand exists (`impl<T> Mul<B<T>, B<T>> for B<T>`), and by itself where the right operand's type picks an impl alone (`impl<T> Mul<B<str>, str> for B<T>`).
+- An impl's bounds hold where its operator picks it ([[MYLA-612]]): with `impl<C: Name> Mul<int, str> for W<C>`, `w * 2` on a `W<A>` is `operator '*' is not defined for 'W<A>' and 'int32': 'A' isn't Name`, and so are `-w`, `w[i]`, `w[i] = v` and a bound `T: Mul<int, str>` that `W<A>` would meet by that impl.
+- **Any module may implement any trait for any type** (D257; Rust's orphan rule doesn't hold): `impl Mul<int, Vec3> for vector.Vec3` in a program adds `v * 2` beside the library's `v * 2.0`. Two impls of one trait with the same type arguments for one type are an error wherever they are, in one file, two modules or a program and the library: `duplicate impl of trait 'Mul<float64, …>' for type 'V'`, at the program's impl of the two, with a note naming the other (`the other impl is here`, `the other impl is at geo.my:5:1`, `the other impl is std.vector32's, at …`).
+- A trait's method is called without `await` (by its operator, by `==` or `<`, by a format hole, through a bound), so an impl can't make it `async` (D256, until [[MYLA-434]] designs async trait methods): `method 'add' in impl of trait 'Add' for 'V' can't be 'async': the trait's method isn't, and it is called without 'await'`.
+- The right operand of an impl beside others of its trait can't use the impl's type parameters (`impl<T> Mul<T, B<T>> for B<T>` is refused; `impl<T> Mul<int, [T]> for B<T>` is fine): the impl is picked where the operands' types are known.
+- An impl on a number needs a struct or enum on the right: the operators between numbers are the language's (no implicit conversion, D4). `Neg`, `Index` and `IndexSet` are implemented by structs and enums.
+- The method of an impl beside others of its trait carries the right operand's type in its name (`mul$float64`, `index$int32`), so it is reached through its operator, not as `v.mul(2.0)`; the classic same-type one keeps its name.
+- An element reached through `IndexSet` is assigned as a whole: `x[i] = v`, not `x[i].field = v` or a `var self` method on `x[i]` (`an element of 'G' is not a place: its 'Index' impl gives a value, which can't be changed in place`).
+
+`a + b` on a struct becomes `a.add(b)` (the impl the right operand picks); `a < b` becomes `a.cmp(b) < 0`. `Eq` and `Ord` compare two values of one type. Primitive types keep their built-in operators (a user `impl Add for int32` doesn't change `+`), and the bitwise operators can't be overloaded.
 
 ## #derive(Eq), #derive(Hash), #derive(Json) and #derive(Toml)
 
@@ -255,7 +322,7 @@ fun main() {
 
 On a generic type ([[MYLA-379]]) the impl is bounded by the trait on every type parameter, `impl<A: Eq, B: Eq> Eq for Pair<A, B>`, so `Pair<int, str>` has `==` and `Pair<int, Pos>` hasn't while `Pos` isn't `Eq` (`operator '==' is not defined for 'Pair<int32, Pos>': 'Pos' isn't Eq (…)`). A field of a type parameter is `Eq` by that bound; any other field is checked as a concrete type's is (`[str: T]` is a map, never `Eq`). `#derive(Hash)` bounds it by `T: Hash`, `#derive(Json)` by `T: ToJson` and `T: FromJson`. The prelude's `Option` and `Result` derive `Eq` and `Hash` this way (D182).
 
-A derive adds only its own trait as a bound. A field whose type has the trait only under another bound, such as a `W<T>` with `impl<T: Ord> Eq for W<T>`, refuses the derive at the struct (`cannot derive Eq for struct 'P': field 'w' has type 'W<T>', which is Eq only where 'T: Ord'`). The help then gives the impl to write by hand, `impl<T: Eq + Ord> Eq for P<T>` ([[MYLA-507]]). A concrete argument that misses its impl's bound is refused the same way, with or without type parameters: a field `W<S>` where `S` isn't `Ord` gives `which isn't Eq: 'S' isn't Ord`. The prelude and the standard library derive for their own types too, so a program's `impl Eq for Option<T>` (or for std.json's `JsonErrorKind`) is an error at that impl: `type 'Option' derives Eq in the prelude (D182): it can't have an explicit 'impl Eq for Option'`.
+A derive adds only its own trait as a bound. A field whose type has the trait only under another bound, such as a `W<T>` with `impl<T: Ord> Eq for W<T>`, refuses the derive at the struct (`cannot derive Eq for struct 'P': field 'w' has type 'W<T>', which is Eq only where 'T: Ord'`). The help then gives the impl to write by hand, `impl<T: Eq + Ord> Eq for P<T>` ([[MYLA-507]]). A concrete argument that misses its impl's bound is refused the same way, with or without type parameters: a field `W<S>` where `S` isn't `Ord` gives `which isn't Eq: 'S' isn't Ord`. A bound that names a generic trait holds with its arguments, wherever its impl is used (an operator, a map key, another bound's argument, a derive's field, a `for` loop): under `impl<I: Iterator<str>> Eq for W<I>`, `W<list.ListIter<int32>>` isn't `Eq` (`'list.ListIter<int32>' isn't Iterator<str> (it implements 'Iterator<int32>')`, [[MYLA-538]]). The prelude and the standard library derive for their own types too, so a program's `impl Eq for Option<T>` (or for std.json's `JsonErrorKind`) is an error at that impl: `type 'Option' derives Eq in the prelude (D182): it can't have an explicit 'impl Eq for Option'`.
 
 ```myla
 #derive(Eq, Hash)
@@ -361,7 +428,7 @@ fun main() {
 
 `trait Hash { fun hash(self, h: Hasher) -> Hasher }` is in the prelude with the `Hasher` it passes through, by value since Myla has no `var` parameters (D163). The hasher's methods and its algorithm are [[Language/Standard-library/Hash]]'s: `h.add(x)` adds any `Hash` value (it is `x.hash(h)`), `add_u64`, `add_str` and the others add one of a built-in type, `finish()` gives the hash. A map's key type is any type that is `Eq` and `Hash` ([[Language/Collections-and-strings]]).
 
-- The integers, `char`, `bool` and `str` are `Hash`, and a tuple and a list are when their elements are (a list adds its length, then its elements). Floats aren't: NaN is unequal to itself. A hand-written impl may add `math.to_bits(x)` of a float field, as long as its `Eq` agrees.
+- The integers, the floats, `char`, `bool` and `str` are `Hash`, and a tuple and a list are when their elements are (a list adds its length, then its elements). A float adds its bits, `-0.0` as `0.0`; hashing a NaN is the runtime error `cannot hash NaN`, as NaN is unequal to itself (D198, superseding D163's "floats aren't"); a map operation reports it at its key ([[MYLA-850]]).
 - That `a == b` gives `a.hash(h) == b.hash(h)` is the promise of a written impl: a map finds a key only among those of the same hash. A derived `Hash` with a derived `Eq` keeps it.
 - A tuple's `hash` is the language's, as no impl can name a tuple of every length: `(1, "a").hash(h)` adds `1`, then `"a"`.
 - A generic function that hashes takes `T: Hash` (`h.add(x)` and `x.hash(h)` on a `T: Hash`), and one with a map keyed by a type parameter `K` needs `K: Eq + Hash` written (D167, [[Language/Collections-and-strings]]).
@@ -384,7 +451,7 @@ fun main() {
 // 6
 ```
 
-A type parameter may carry bounds `T: Add + Eq` (built-in or user traits, D53; `Hash` is the prelude's). The bound is checked where the function is called, against the concrete type (primitives count as implementing their built-in operator traits, and the printable ones `Format`, D162). Inside the body, a bound permits that trait's **operators** on `T` (`Add`, `Eq`, `Ord`, …: their methods are their operators) and the **methods** of a user trait or of `Format`, with `Self` the type parameter; a `T: Format` goes in a format hole as its type does ([[MYLA-291]]). The interpreter calls the method of the value's type, native code the method of the type the copy is made for ([[Architecture/Monomorphization]]).
+A type parameter may carry bounds `T: Add + Eq` (built-in or user traits, D53; `Hash` is the prelude's). The bound is checked where the function is called, against the concrete type (primitives count as implementing their built-in operator traits, and the printable ones `Format`, D162). Inside the body, a bound permits that trait's **operators** on `T` (`Add`, `Eq`, `Ord`, …: their methods are their operators; an operator trait's arguments say what the right operand and the result are, `T: Mul<float>` allowing `a * 2.0` and giving a `T`, D200) and the **methods** of a user trait or of `Format`, with `Self` the type parameter; a `T: Format` goes in a format hole as its type does ([[MYLA-291]]), and its `x.format(spec)` is, for a primitive `T`, its print form by the spec, as `f"{x:>8}"` gives it ([[MYLA-544]]). The interpreter calls the method of the value's type, native code the method of the type the copy is made for ([[Architecture/Monomorphization]]).
 
 ```myla
 trait Shape {

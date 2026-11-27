@@ -1,0 +1,7 @@
+// std.bmp's `decode` through image_driver's protocol (MYLA-960).
+import std.bmp as bmp
+import image_driver as driver
+
+fun main() {
+    driver.serve8((b: [uint8], max: int64) => bmp.decode(b, max))
+}

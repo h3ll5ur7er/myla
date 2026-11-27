@@ -6,7 +6,7 @@ status: done
 priority: low
 labels: [lexer, selfhost, spec]
 ---
-The Python lexer accepts any Unicode letter in an identifier (`str.isalpha`/`isalnum` in [[src/myla/lexer.py#L90-L95]]); the self-hosted lexer accepts only ASCII letters ([[selfhost/util.my#L57-L63]]), and so do [[grammar/myla.ebnf]] and the tree-sitter grammar generated from it ([[MYLA-77]]). [[Language/Lexical-structure]] only says "a letter".
+The Python lexer accepts any Unicode letter in an identifier (`str.isalpha`/`isalnum` in `src/myla/lexer.py#L90-L95`); the self-hosted lexer accepts only ASCII letters ([[selfhost/util.my#L57-L63]]), and so do [[grammar/myla.ebnf]] and the tree-sitter grammar generated from it ([[MYLA-77]]). [[Language/Lexical-structure]] only says "a letter".
 
 ```myla
 fun main() {
@@ -43,3 +43,5 @@ Decided with the user: Unicode identifiers everywhere (D72 on [[Project/Decision
 - Parity program `const_string_concatenation_in_functions` (both backends, the self-hosted gates): it crashed the self-hosted build before the const fix.
 - A language-server scenario: definition and hover for `größe` and `日本`, with UTF-16 ranges after `😀`.
 - Full run: 479 unit, 2 integration and 544 burn tests pass; the bootstrap reaches a new fixed point at 7,876,416 bytes (the tables and the escape code).
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

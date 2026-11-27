@@ -1,0 +1,5 @@
+type error: integer literal -97 (the char literal negated) does not fit in 'uint8'
+  --> examples/errors/type_negative_char_literal_unsigned.my:7:20
+  |
+7 |     let v: uint8 = -'a'
+  |                    ^^^^

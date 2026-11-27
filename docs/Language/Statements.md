@@ -208,7 +208,32 @@ fun main() {
 - Iterating a list visits its elements; iterating a map visits its keys in the order they were first inserted (D105); iterating a string visits its characters, each a `char`, as `s.chars()` gives them (U+FFFD for a byte that isn't part of a well-formed UTF-8 sequence), without making that list (D165, [[MYLA-318]]). A string's bytes are `s[i]` for `i` in `0..s.len()`.
 - Iterating a value whose type implements the prelude's `Iterator<T>` calls its `next` until it gives `None`: `for x in e` is `var it = e; while let Some(x) = it.next() { … }`, so it loops over a copy of `e`, and the loop variable is a `T` (D171, [[Language/Methods-and-traits#iterators]]). A type parameter loops so with the bound `I: Iterator<T>`. Any other type is an error (`` `for ... in` requires a list, a map, a string, a range or an Iterator ``).
 - In place of the loop variable, a tuple of names binds the parts of each element, as `let` destructures (`for (k, v) in m.items()`, nested tuples, `_` for a part it drops; [[MYLA-390]]): `for (k, v) in e { … }` is `for kv in e { let (k, v) = kv; … }`, so the elements must be tuples of that shape (`cannot destructure non-tuple value`). Other patterns, which can fail (`Some(x)`), don't go in a `for` head: write `while let` or a `match` in the body.
-- The loop variable is immutable. The loop works on a snapshot: changing the list inside the loop doesn't change what is visited.
+- The loop variable is immutable. The loop works on a snapshot: the body may change the list, map or string it walks, and the loop still walks what it began with (values are values, D3; a change copies what the loop holds, [[MYLA-496]]). A `push` in `for x in xs` adds no step, and `xs[0] = 99` doesn't change a later `x`. A `for k in m` visits the keys the map had when the loop began, in their order: a key the body inserts isn't visited, and one it removes still is, so in the body `m.get(k)` is the safe read of a key's value (`m[k]` of a key the body removed is the missing-key error). A range's bounds are evaluated once, so `for i in 0..n` takes `n` as it was. Both runners do the same:
+
+```myla
+fun main() {
+    var xs = [1, 2, 3]
+    for x in xs {
+        xs.push(x * 10)
+        print(x)
+    }
+    print(xs.len())
+    var m = ["a": 1, "b": 2, "c": 3]
+    for k in m {
+        m.remove("c")
+        m["d"] = 4
+        print(k)
+    }
+}
+// output:
+// 1
+// 2
+// 3
+// 6
+// a
+// b
+// c
+```
 - `break` and `continue` apply to the innermost loop; outside a loop they are a type error.
 
 ## return

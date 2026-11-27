@@ -8,7 +8,7 @@ labels: [grammar, tree-sitter, editor, selfhost]
 ---
 Part of the "everything in Myla" direction ([[Project/Roadmap]]). Supersedes [[MYLA-47]].
 
-The compilers' parsers are hand-written ([[src/myla/parser.py]], [[selfhost/parser.my]]), so a tree-sitter grammar can't be derived from their code. Instead, one machine-readable grammar description is the single source for the editor grammar, and tests tie it to the compiler, so it can't drift the way the current hand-written `editor/tree-sitter-myla/grammar.js` did (it still follows the removed Rust dialect).
+The compilers' parsers are hand-written (`src/myla/parser.py`, [[selfhost/parser.my]]), so a tree-sitter grammar can't be derived from their code. Instead, one machine-readable grammar description is the single source for the editor grammar, and tests tie it to the compiler, so it can't drift the way the current hand-written `editor/tree-sitter-myla/grammar.js` did (it still follows the removed Rust dialect).
 
 - [x] Turn the EBNF in [[Language/Grammar]] into a machine-readable file (in the repository, the wiki page generated from it or checked against it), including the newline/`;` separators (D61) and where line breaks are skipped
 - [x] A generator written in Myla emits `grammar.js` and the highlight queries; tokens (keywords, operators, type names, literal forms) come from [[selfhost/tokens.my]] / [[selfhost/lexer.my]]
@@ -35,3 +35,5 @@ Decision D63 on [[Project/Decisions]]; the design is on [[Architecture/Editor-to
 - Mutation sweep: each of the 184 required terminals in syntactic rules made optional, one at a time, with 5,000 samples from one seed. 146 mutants produce a sample the parser rejects, 29 fail the grammar checks, and the 9 others don't change the language (for example `"[" ":"? "]"` only adds the empty list, which already exists). Before the coverage rule was strengthened, `f(a; b)` and `P { x 1 }` mutants went unnoticed.
 - `tests/burn/test_grammar.py`: 10 tests, about 7 s; the keyword-list test fails when a keyword is dropped from `keywords()`; the tree-sitter ones were red with a stale cached parser of another `myla` grammar and green once the test builds its own.
 - Full run: 466 unit, 4 integration and 401 burn tests pass; the bootstrap reaches its fixed point at 7,536,102 bytes (7,527,421 before; `keywords()` is new).
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

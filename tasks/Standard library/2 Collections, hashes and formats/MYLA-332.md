@@ -2,7 +2,7 @@
 id: MYLA-332
 title: "Small formats: CSV, INI, more JSON"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, formats, wave-2]
 ---
@@ -48,3 +48,7 @@ Built on 7b328dd.
 Not ready ([[Project/Review-2026-11-09]]): `ini.parse("[é")` ends the program (H9); the CSV stream reader is quadratic on short reads (M17). The fix is in [[MYLA-420]].
 
 - [x] The review's blocker, fixed with [[MYLA-420]]
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

@@ -1,0 +1,28 @@
+// title: Diamonds!
+// xp: 30
+// hidden: safe_diamonds #test(["D", "L", "D"])[0]
+// hidden: safe_diamonds #test(["SSS", "SDS", "SSS"])[1]
+// hint: A diamond is lost if lava is right above, below, left or right of it. Diagonals are fine.
+// hint: For each diamond, look at its four neighbours, checking first that each one is inside the map: the first and last rows and columns have fewer.
+//
+// You've dug down to level −58 and found a cave map: each string is a row,
+// `D` a diamond, `L` lava, `S` stone. A diamond that touches lava (above,
+// below, left or right) falls in the moment you mine it, and every
+// Minecraft player knows the sound of that.
+//
+// `safe_diamonds` counts every diamond, the doomed ones too. Count only the
+// safe ones. (Never dig straight down.)
+#test(["SDS", "SLS", "DSD"])[2]
+#test(["DDD"])[3]
+#test(["LDL", "SSS"])[0]
+fun safe_diamonds(rows: [str]) -> int {
+    var n = 0
+    for y in 0..rows.len() {
+        for x in 0..rows[y].len() {
+            if rows[y][x] == 'D' {
+                n += 1
+            }
+        }
+    }
+    return n
+}

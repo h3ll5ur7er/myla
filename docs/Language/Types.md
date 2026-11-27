@@ -77,7 +77,7 @@ User-defined named types: `struct Point { x: int, y: int }` and `enum Shape { Ci
 ## Lists and maps
 
 - `[T]`: a list of `T`.
-- `[K: V]`: a hash map. The key type is any type that is `Eq` and `Hash`: an integer type, `char`, `bool`, `str`, a tuple or list of such, or a struct or enum deriving or implementing both (D163; D37 had the primitives only).
+- `[K: V]`: a hash map. The key type is any type that is `Eq` and `Hash`: an integer type, `char`, `bool`, `str`, a tuple or list of such, or a struct or enum deriving or implementing both, a recursive one too (D163, D194; D37 had the primitives only).
 
 Both are reference-counted, copy-on-write values: a copy is cheap, and writing through one copy never changes another. See [[Language/Collections-and-strings]].
 

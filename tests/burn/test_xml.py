@@ -28,7 +28,8 @@ fed in pieces of 1 to 7 bytes, and answers `mismatch` when they disagree.
   its SHA-256 and extracts it into `build/xmlts/`; without either it is
   skipped.
 
-The corpora run on the self-hosted native build, a small one on the
+The corpora run on the self-hosted native build, plain and `--checked` (where
+an integer overflow is an error, D184, MYLA-550), a small one on the
 self-hosted interpreter.
 """
 from __future__ import annotations
@@ -44,7 +45,7 @@ import tempfile
 import unittest
 import xml.parsers.expat
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -450,12 +451,16 @@ class XmlAgainstReferences(unittest.TestCase):
             fh.write(DRIVER)
         gen = selfhost_tool("gen_main")
         asm = subprocess.run([gen, path, STDLIB_ROOT], capture_output=True, text=True, check=True)
-        native = os.path.join(cls.tmp.name, "native")
+        native = os.path.join(cls.tmp.name, "native" + EXE)
         with open(native + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
-        subprocess.run(["as", "--64", "-o", native + ".o", native + ".s"], check=True)
-        subprocess.run(["ld", "-o", native, native + ".o"], check=True)
+        assemble(native + ".s", native)   # for the machine (MYLA-926: Windows' too)
         cls.native = [native]
+        # the same driver built checked, where an integer overflow is an error (D184, MYLA-550)
+        checked = os.path.join(cls.tmp.name, "checked" + EXE)
+        subprocess.run([selfhost_tool("main"), "build", path, "-o", checked, "--stdlib", STDLIB_ROOT, "--checked"],
+                       capture_output=True, check=True)
+        cls.checked = [checked]
         cls.interpreter = [selfhost_tool("interp_main"), path, STDLIB_ROOT]
 
     @classmethod
@@ -495,6 +500,7 @@ class XmlAgainstReferences(unittest.TestCase):
 
     def test_wellformed(self) -> None:
         read, refused = self.check_against_expat(self.native, _wellformed(1, 2000))
+        self.assertEqual(self.check_against_expat(self.checked, _wellformed(1, 2000)), (read, refused))
         self.assertEqual(refused, 0)
         print(f"\nstd.xml: {read} generated documents read as expat reads them", file=sys.stderr)
 
@@ -503,6 +509,7 @@ class XmlAgainstReferences(unittest.TestCase):
         self.assertGreater(refused, 2000)
         print(f"\nstd.xml: {refused} broken documents refused and {read} read, as expat does "
               f"({self.lax_versions} of the refused for a version number expat doesn't check)", file=sys.stderr)
+        self.assertEqual(self.check_against_expat(self.checked, _broken(2, 4000)), (read, refused))
 
     def test_interpreted(self) -> None:
         self.check_against_expat(self.interpreter, _wellformed(3, 40) + _broken(4, 60))

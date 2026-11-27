@@ -26,13 +26,16 @@
 // the project root and then the stdlib root.
 
 from std.fs import read_to_string, exists, is_dir, current_dir
+from std.process import env
+import std.path_style as style   // `WINDOWS`: the machine the tools run on (MYLA-931)
 from .stdroot import is_embedded, embedded_text, embedded_parse, EMBEDDED_ROOT
+from .target import Target, host
 from .astcache import decode, body_part, cached_body, no_bodies, Cached, Bodies
 from .parser import parse_source_with, parse_source_lazy, parse_body, BodySite, LazyParsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
-from .checker import CheckErr, DeclOrigin, LazyBodies, body_key, no_lazy_bodies
-from .tokens import SrcSpan, no_span, keywords, TokenKind, Diag
-from .lexer import lex_part
+from .checker import CheckErr, DeclOrigin, LazyBodies, body_key, no_lazy_bodies, unread_key, primitive_type_names
+from .tokens import SrcSpan, no_span, keywords, TokenKind, Diag, Token, Note
+from .lexer import lex_part, lex
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
 from .ast import MapEntry, Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock, Attribute
@@ -96,7 +99,243 @@ pub fun type_errors(prog: Loaded, errs: [CheckErr]) -> Report {
         r.notes = e.notes
         rs.push(r)
     }
-    return chain(rs)
+    return with_reading_notes(chain(rs), [:])
+}
+
+// `r` and the errors after it, each with a note where its place overlaps a
+// form D186 reads one way that may have been meant the other (MYLA-545):
+// in a call's arguments `a < b, c > (d)` is a call of `a` with the type
+// arguments `b, c`, and in a list, map or tuple literal `pair<A, B>(x)` is
+// two comparisons, so the error is about something else (`unknown module
+// 'p'` for `a < p.x, c > (d)`). Found in the tokens of the error's file,
+// read again: only on an error's way, so a program that checks pays nothing.
+pub fun with_reading_notes(r: Report, overrides: [str: str]) -> Report {
+    var all = [r]
+    for m in r.more { all.push(m) }
+    // each file read and lexed once, for all its errors
+    var files: [str: (str, [Token])] = [:]
+    var done: [Report] = []
+    for each in all {
+        var e = each
+        if e.line > 0 && e.path != "" {
+            if !files.contains(e.path) { files[e.path] = lexed_file(e.path, overrides) }
+            let (src, toks) = files[e.path]
+            match note_at(src, toks, e.line, e.col, e.sp) {
+                Some(n) => { e.notes.push(n) },
+                None => {},
+            }
+        }
+        done.push(e)
+    }
+    var out = done[0]
+    out.more = []
+    var i = 1
+    while i < done.len() {
+        out.more.push(done[i])
+        i += 1
+    }
+    return out
+}
+
+// The text of `path` (an editor's buffer, the carried library's or the
+// disk's) and its tokens; none where it doesn't read or lex.
+fun lexed_file(path: str, overrides: [str: str]) -> (str, [Token]) {
+    var src = ""
+    match source_text(path, overrides) {
+        Some(t) => { src = t },
+        None => {
+            match read_to_string(path) {
+                Ok(t) => { src = t },
+                Err(e) => { return ("", []) },
+            }
+        },
+    }
+    return match lex(src) {
+        Ok(toks) => (src, toks),
+        Err(d) => (src, []),
+    }
+}
+
+// The note on the first form of D186 in the text `src` that the place
+// `line`, `col`, `sp` overlaps: a name, `<`, type arguments with a comma
+// between two of them, `>` and a call's `(…)`, in a call's arguments or an
+// element of a literal.
+#test("fun main() {\n    print(both(a < p.x, c > (d)))\n}", 2, 20, SrcSpan { sline: 2, scol: 20, eline: 2, ecol: 23 })[Some(Note { label: "note", msg: "in a call's arguments `a < p.x, c > (d)` is a call of 'a' with the type arguments `p.x, c` (D186); for two comparisons, write `(a < p.x), c > (d)`", line: 2, col: 16, sp: SrcSpan { sline: 2, scol: 16, eline: 2, ecol: 32 } })]
+#test("fun main() {\n    let v = [pair<P, Q>(p, q)]\n}", 2, 14, SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 18 })[Some(Note { label: "note", msg: "in a list, map or tuple literal `pair<P, Q>(p, q)` is two comparisons, `pair < P` and `Q > (p, q)` (D186); for a call with type arguments, give it a `let` of its own: `let v = pair<P, Q>(p, q)`", line: 2, col: 14, sp: SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 30 } })]
+#test("fun main() {\n    let v = (idt<int, str>(7))\n}", 2, 23, SrcSpan { sline: 2, scol: 23, eline: 2, ecol: 26 })[Some(Note { label: "note", msg: "in a list, map or tuple literal `idt<int, str>(7)` is two comparisons, `idt < int` and `str > (7)` (D186); for a call with type arguments, give it a `let` of its own: `let v = idt<int, str>(7)`", line: 2, col: 14, sp: SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 30 } })]
+// a call's error in its arguments alone (a plain type error): none
+#test("fun main() {\n    print(first(pair<int, str>(1, 2)))\n}", 2, 35, SrcSpan { sline: 2, scol: 35, eline: 2, ecol: 36 })[None]
+#test("fun main() {\n    print(first(pair<int, str>(1, 2)))\n}", 2, 26, SrcSpan { sline: 2, scol: 26, eline: 2, ecol: 29 })[Some(Note { label: "note", msg: "in a call's arguments `pair<int, str>(1, 2)` is a call of 'pair' with the type arguments `int, str` (D186); for two comparisons, write `(pair < int), str > (1, 2)`", line: 2, col: 17, sp: SrcSpan { sline: 2, scol: 17, eline: 2, ecol: 37 } })]
+// one type argument, an index, a block, or elsewhere on the line: none
+#test("fun main() {\n    let v = [mk<int>(1)]\n}", 2, 14, SrcSpan { sline: 2, scol: 14, eline: 2, ecol: 16 })[None]
+#test("fun main() {\n    let v = xs[pair<P, Q>(p, q)]\n}", 2, 16, SrcSpan { sline: 2, scol: 16, eline: 2, ecol: 20 })[None]
+#test("fun main() {\n    pair<P, Q>(p, q)\n}", 2, 5, SrcSpan { sline: 2, scol: 5, eline: 2, ecol: 9 })[None]
+#test("fun main() {\n    let x = 1; print(both(a < b, c > (d)))\n}", 2, 9, SrcSpan { sline: 2, scol: 9, eline: 2, ecol: 10 })[None]
+fun reading_note(src: str, line: int32, col: int32, sp: SrcSpan) -> Option<Note> {
+    return match lex(src) {
+        Ok(toks) => note_at(src, toks, line, col, sp),
+        Err(d) => None,
+    }
+}
+
+// `reading_note` with the tokens `toks` of `src`.
+fun note_at(src: str, toks: [Token], line: int32, col: int32, sp: SrcSpan) -> Option<Note> {
+    // the place: its range, or its column
+    var sl = line
+    var sc = col
+    var el = line
+    var ec = col + 1
+    if sp.eline > 0 {
+        sl = sp.sline
+        sc = sp.scol
+        el = sp.eline
+        ec = sp.ecol
+    }
+    var k = 0
+    while k + 1 < toks.len() {
+        if toks[k].kind == TokenKind.IDENT && toks[k + 1].kind == TokenKind.LT {
+            match type_args_form(toks, k) {
+                Some(form) => {
+                    let (comma, close, end) = form
+                    let first = toks[k]
+                    let last = toks[end]
+                    let overlaps = place_before(first.line, first.column, el, ec) && place_before(sl, sc, last.eline, last.ecol)
+                    let how = if overlaps { reading_of(toks, k) } else { "" }
+                    // read as a call, its arguments are its own either way:
+                    // an error in them alone is no misreading (the review
+                    // of 2026-11-17)
+                    let read = how == "literal" || (how == "call" && place_before(sl, sc, toks[close].eline, toks[close].ecol))
+                    if read {
+                        let lines = src.split("\n")
+                        let whole = text_between(lines, toks, k, end)
+                        let callee = toks[k].lexeme
+                        let left = text_between(lines, toks, k + 2, comma - 1)
+                        let right = text_between(lines, toks, comma + 1, close - 1)
+                        let args = text_between(lines, toks, close + 1, end)
+                        var msg = ""
+                        if how == "call" {
+                            msg = format("in a call's arguments `{}` is a call of '{}' with the type arguments `{}` (D186); for two comparisons, write `({} < {}), {} > {}`", whole, callee, text_between(lines, toks, k + 2, close - 1), callee, left, right, args)
+                        } else {
+                            msg = format("in a list, map or tuple literal `{}` is two comparisons, `{} < {}` and `{} > {}` (D186); for a call with type arguments, give it a `let` of its own: `let v = {}`", whole, callee, left, right, args, whole)
+                        }
+                        return Some(Note { label: "note", msg: msg, line: first.line, col: first.column, sp: SrcSpan { sline: first.line, scol: first.column, eline: last.eline, ecol: last.ecol } })
+                    }
+                    k = close
+                },
+                None => {},
+            }
+        }
+        k += 1
+    }
+    return None
+}
+
+// Whether the place `al`, `ac` is before `bl`, `bc`.
+fun place_before(al: int32, ac: int32, bl: int32, bc: int32) -> bool {
+    return al < bl || (al == bl && ac < bc)
+}
+
+// At the name `toks[k]` before a `<`: the index of the comma between its
+// first two type arguments, of the `>` that closes them and of the `)` of
+// the call after it, when the tokens can be such type arguments (as the
+// parser's scan, `type_args_then`, takes them in a call's arguments) and
+// there are two or more.
+fun type_args_form(toks: [Token], k: int32) -> Option<(int32, int32, int32)> {
+    var angles = 0
+    var brackets = 0
+    var comma = -1
+    var i = k + 1
+    while i < toks.len() {
+        let kind = toks[i].kind
+        if kind == TokenKind.LT {
+            angles += 1
+            if angles > 256 { return None }
+        } else if kind == TokenKind.GT {
+            angles -= 1
+            if angles == 0 {
+                if brackets != 0 || comma < 0 || i + 1 >= toks.len() || toks[i + 1].kind != TokenKind.LPAREN { return None }
+                var depth = 0
+                var j = i + 1
+                while j < toks.len() {
+                    let kj = toks[j].kind
+                    if kj == TokenKind.LPAREN || kj == TokenKind.LBRACKET || kj == TokenKind.LBRACE {
+                        depth += 1
+                    } else if kj == TokenKind.RPAREN || kj == TokenKind.RBRACKET || kj == TokenKind.RBRACE {
+                        depth -= 1
+                        if depth == 0 { return Some((comma, i, j)) }
+                    }
+                    j += 1
+                }
+                return None
+            }
+        } else if kind == TokenKind.LPAREN || kind == TokenKind.LBRACKET {
+            brackets += 1
+        } else if kind == TokenKind.RPAREN || kind == TokenKind.RBRACKET {
+            brackets -= 1
+            if brackets < 0 { return None }
+        } else if kind == TokenKind.COMMA {
+            if toks[i].suffix == "hole" { return None }
+            if brackets == 0 && angles == 1 && comma < 0 { comma = i }
+        } else if !(kind == TokenKind.IDENT || kind == TokenKind.DOT || kind == TokenKind.COLON || kind == TokenKind.ARROW || kind == TokenKind.ASYNC || kind == TokenKind.BOOL || kind == TokenKind.STR || kind == TokenKind.INT8 || kind == TokenKind.INT16 || kind == TokenKind.INT32 || kind == TokenKind.INT64 || kind == TokenKind.UINT8 || kind == TokenKind.UINT16 || kind == TokenKind.UINT32 || kind == TokenKind.UINT64) {
+            return None
+        }
+        i += 1
+    }
+    return None
+}
+
+// How D186 reads the form at the name `toks[k]`, by the bracket it is
+// directly in: "call" in a call's arguments, "literal" in an element of a
+// list, map or tuple literal (or parentheses), "" elsewhere (an index, a
+// block, a struct literal's fields, a statement).
+fun reading_of(toks: [Token], k: int32) -> str {
+    var depth = 0
+    var i = k - 1
+    while i >= 0 {
+        let kind = toks[i].kind
+        if kind == TokenKind.RPAREN || kind == TokenKind.RBRACKET || kind == TokenKind.RBRACE {
+            depth += 1
+        } else if kind == TokenKind.LPAREN || kind == TokenKind.LBRACKET || kind == TokenKind.LBRACE {
+            if depth > 0 {
+                depth -= 1
+            } else {
+                if kind == TokenKind.LBRACE { return "" }
+                let p = if i > 0 { toks[i - 1].kind } else { TokenKind.NEWLINE }
+                let after_value = p == TokenKind.IDENT || p == TokenKind.RPAREN || p == TokenKind.RBRACKET || p == TokenKind.GT || p == TokenKind.QUESTION || p == TokenKind.SELF || p == TokenKind.STRING
+                if kind == TokenKind.LPAREN { return if after_value { "call" } else { "literal" } }
+                return if after_value { "" } else { "literal" }
+            }
+        }
+        i -= 1
+    }
+    return ""
+}
+
+// The text of `toks[a]` to `toks[b]` as written, from the lines of their
+// file; with the tokens on more than one line, their lexemes.
+fun text_between(lines: [str], toks: [Token], a: int32, b: int32) -> str {
+    if b < a { return "" }
+    let first = toks[a]
+    let last = toks[b]
+    if first.line == last.eline && first.line >= 1 && first.line <= lines.len() {
+        let cps = lines[first.line - 1].chars()
+        if last.ecol - 1 <= cps.len() {
+            var sb = StringBuilder()
+            var c = first.column - 1
+            while c < last.ecol - 1 {
+                sb.append_char(cps[c])
+                c += 1
+            }
+            return sb.build()
+        }
+    }
+    var words: [str] = []
+    var i = a
+    while i <= b {
+        words.push(toks[i].lexeme)
+        i += 1
+    }
+    return join(words, " ")
 }
 
 // The warnings `ws` of the linked program `prog` (D95), each in its
@@ -128,26 +367,42 @@ pub fun load_options(stdlib_root: str) -> LoadOptions {
     return LoadOptions { stdlib_root: stdlib_root, packages: [], root: "", overrides: [:], runtime: false }
 }
 
-// The file of `std/` that is `std/platform.my` for the target `target`, ""
-// for the host's own (x86-64), as `for_target` takes it.
-#test("aarch64-linux")["platform_aarch64.my"]
-#test("wasm32-wasi")["platform_wasm.my"]
-#test("x86_64-linux")[""]
-pub fun target_platform_file(target: str) -> str {
-    if target == "aarch64-linux" { return "platform_aarch64.my" }
-    if target == "wasm32-wasi" { return "platform_wasm.my" }
-    return ""
+// `opts` for the target `t`: wasm32 on WASI takes the standard library's
+// `std/platform_wasm.my` for its `std/platform.my` (MYLA-158), the file the
+// target's record names (`Target.platform_file`, "" for Linux's own on both
+// architectures, MYLA-700, MYLA-758): the smallest form of choosing a
+// module per target (MYLA-245). The copy the tools carry is chosen too, for
+// the runtime a library without its own takes from them (MYLA-268), and a
+// library without the target's file takes theirs. A module may have a copy
+// for a target too, its name ending as the record's `copies` says (D223):
+// x86-64 Windows takes `std/path_windows.my` for `std/path.my` and
+// `std/path_style_windows.my` for `std/path_style.my` (MYLA-704, Windows'
+// paths, D215), and `std/system_error_windows.my` for `std/system_error.my`
+// (MYLA-716, the words for Windows' error codes); aarch64 Linux
+// `std/linux_calls_aarch64.my` for `std/linux_calls.my` (MYLA-758, the
+// system calls' numbers std.platform makes).
+pub fun for_target(opts: LoadOptions, t: Target) -> LoadOptions {
+    var o = opts
+    if t.platform_file != "" { o = platform_copy(opts, t.platform_file) }
+    // the other modules a target may have a copy of its own of, each taken
+    // where there is one (`own_copy`)
+    if t.copies != "" {
+        for name in copied_modules() {
+            o = own_copy(o, opts, name, name + t.copies)
+        }
+    }
+    return o
 }
 
-// `opts` for the target `target`: aarch64 Linux takes the standard
-// library's `std/platform_aarch64.my` for its `std/platform.my` (MYLA-163),
-// wasm32 on WASI `std/platform_wasm.my` (MYLA-158), the smallest form of
-// choosing a module per target (MYLA-245). The copy the tools carry is chosen
-// too, for the runtime a library without its own takes from them (MYLA-268),
-// and a library without the target's file takes theirs.
-pub fun for_target(opts: LoadOptions, target: str) -> LoadOptions {
-    let file = target_platform_file(target)
-    if file == "" { return opts }
+// The modules besides std.platform a target may have a copy of its own of
+// (`for_target`): `std/<name><copies>` for `std/<name>.my`.
+pub fun copied_modules() -> [str] {
+    return ["path", "path_style", "system_error", "linux_calls"]
+}
+
+// `opts` with the target's platform module `file` read for
+// `std/platform.my` (`for_target`).
+fun platform_copy(opts: LoadOptions, file: str) -> LoadOptions {
     var o = opts
     var carried = ""
     match embedded_text(EMBEDDED_ROOT + "/std/" + file) {
@@ -170,6 +425,103 @@ pub fun for_target(opts: LoadOptions, target: str) -> LoadOptions {
     return o
 }
 
+// `opts` for the program `entry` run, tested or checked on the machine the
+// tools run on (`myla run`, `myla test` interpreted, `myla check`, the REPL,
+// the language server): the host's own modules, as `for_target` gives a
+// native build its target's, so that a `myla.exe` built for Windows reads
+// Windows' std.path and std.platform (MYLA-723), and a `myla` built for
+// aarch64 Linux aarch64's std.linux_calls (MYLA-758); as they are on x86-64
+// Linux. The modules a copy replaces (std.system_error's too, MYLA-716)
+// are themselves when one is `entry`: `myla test lib/std/path.my` runs
+// path.my's cases on every host. `opts` is rooted where the program is
+// loaded from (the driver's `own_library`).
+pub fun for_host(entry: str, opts: LoadOptions) -> LoadOptions {
+    var o = for_target(opts, host())
+    var names = ["platform"]
+    for n in copied_modules() { names.push(n) }
+    for name in names {
+        let key = opts.stdlib_root + "/std/" + name + ".my"
+        if o.overrides.contains(key) && same_file(entry, key) {
+            let text = match override_text(entry, opts.overrides) {
+                Some(t) => Some(t),
+                None => match read_to_string(entry) {
+                    Ok(t) => Some(t),
+                    Err(e) => None,
+                },
+            }
+            match text {
+                Some(t) => {
+                    // under both spellings: the loader reads a key spelled
+                    // as the path is before another spelling of it
+                    o.overrides[key] = t
+                    o.overrides[entry] = t
+                },
+                // (the loader reports the file it can't read)
+                None => { o.overrides.remove(key) },
+            }
+        }
+    }
+    return o
+}
+
+// Whether the paths `a` and `b` name the same file: normalized, from the
+// working directory where one is relative and the other isn't.
+#test("lib/std/path.my", "lib/./std/path.my")[true]
+#test("lib/std/path.my", "lib/std/path_windows.my")[false]
+#test("/w/lib/std/path.my", "/w/lib/std//path.my")[true]
+fun same_file(a: str, b: str) -> bool {
+    var x = normalize(a)
+    var y = normalize(b)
+    let xa = is_absolute(x)
+    let ya = is_absolute(y)
+    if xa != ya {
+        let here = match current_dir() {
+            Ok(d) => d,
+            Err(e) => { return false },
+        }
+        if !xa { x = normalize(here + "/" + x) }
+        if !ya { y = normalize(here + "/" + y) }
+    }
+    return x == y
+}
+
+// `o` with `std/<name>.my` read from the target's own copy `file` of it,
+// in the library the tools carry and in `opts`' (where a library without
+// one takes theirs); as it was where neither has one, or where `opts` gives
+// the module a text of its own (a test harness built of it: `myla test
+// lib/std/path.my --target x86_64-windows` runs that module's cases).
+fun own_copy(o: LoadOptions, opts: LoadOptions, name: str, file: str) -> LoadOptions {
+    let own = normalize(opts.stdlib_root + "/std/" + name + ".my")
+    for k in opts.overrides.keys() {
+        if normalize(k) == own {
+            return o
+        }
+    }
+    var out = o
+    var text = ""
+    match embedded_text(EMBEDDED_ROOT + "/std/" + file) {
+        Some(t) => {
+            text = t
+            out.overrides[EMBEDDED_ROOT + "/std/" + name + ".my"] = t
+        },
+        None => {},
+    }
+    let path = opts.stdlib_root + "/std/" + file
+    match override_text(path, opts.overrides) {
+        Some(t) => { text = t },
+        None => {
+            match read_to_string(path) {
+                Ok(t) => { text = t },
+                Err(e) => {},
+            }
+        },
+    }
+    if text != "" {
+        out.overrides[opts.stdlib_root + "/std/" + name + ".my"] = text
+    }
+    return out
+}
+
 // The text `overrides` (or the embedded library) gives `path`, under a key
 // spelled as `path` is or another spelling of it (`./lib/std/x.my`,
 // `lib//std/x.my`), as the loader reads the keys normalized (MYLA-397, S3).
@@ -186,6 +538,35 @@ fun override_text(path: str, overrides: [str: str]) -> Option<str> {
         if normalize(k) == want { return overrides.get(k) }
     }
     return None
+}
+
+// The normalized `path`, absolute where it is a file on disk that is
+// written as the library the tools carry names its own (`<myla>/…`, a
+// program in a directory of that name): else its modules were taken for
+// the library's, read lazily, and its own `std/` wasn't refused (D255; the
+// review of 2026-11-17, path identity).
+#test("<myla>/std/nowhere_at_all.my")["<myla>/std/nowhere_at_all.my"]
+#test("examples/hello.my")["examples/hello.my"]
+fun on_disk(path: str) -> str {
+    if !starts_with_text(path, EMBEDDED_ROOT + "/") || !exists(path) { return path }
+    return match current_dir() {
+        Ok(here) => normalize(here + "/" + path),
+        Err(e) => path,
+    }
+}
+
+// Whether the directories `a` and `b` are one, however they are written:
+// through a symbolic link, or relative and absolute (the review of
+// 2026-11-17, path identity). Their device and file number, as std.glob's
+// `dir_id` compares them; false where either is none.
+#test("lib", "./lib/")[true]
+#test("lib", "lib/std")[false]
+#test("lib", "nowhere/at/all")[false]
+#allow(primitive)
+pub fun same_dir(a: str, b: str) -> bool {
+    let x = __path_stat(a, true)
+    let y = __path_stat(b, true)
+    return x.len() == 6 && y.len() == 6 && x[4] == y[4] && x[5] == y[5]
 }
 
 // With the library the tools carry, the root of the copy of the standard
@@ -210,7 +591,12 @@ pub fun std_tree_root(path: str) -> str {
                 k += 1
             }
             var root = join(parts, "/")
-            if p[0] == '/' { root = "/" + root } else if root == "" { root = "." }
+            if p[0] == '/' {
+                // (a Windows share keeps its two, MYLA-931)
+                root = (if p.len() > 1 && p[1] == '/' { "//" } else { "/" }) + root
+            } else if root == "" {
+                root = "."
+            }
             if exists(join_path(root, "std/rt.my")) { return root }
         }
         i -= 1
@@ -230,15 +616,87 @@ struct Loader {
     lazy: [str: bool],         // the files whose functions' bodies are left unparsed: the implicit modules' (MYLA-359), besides `lazy_std`'s
 }
 
+// Whether `n` names a built-in type: `int`, `float` and the primitives
+// (which `int` and `float`, not being keywords, could also be an alias of).
+#test("float")[true]
+#test("vec")[false]
+fun is_builtin_type_word(n: str) -> bool {
+    return n == "int" || n == "float" || has(primitive_type_names(), n)
+}
+
 // The modules of the standard library every program sees without an import
 // (D164, MYLA-320), as `std.<name>`: the methods of their impls on the
 // built-in types, and std.hash's on the prelude's `Hasher` with the `Hash`
 // impls of the built-in types (D163, MYLA-313). They are loaded for a
 // program whose entry file isn't a module of `std` (whose modules import
 // what they use), and bind no name.
-#test()[["str", "char", "int", "list", "option", "map", "hash"]]
+#test()[["str", "char", "int", "float", "list", "option", "map", "hash"]]
 pub fun implicit_modules() -> [str] {
-    return ["str", "char", "int", "list", "option", "map", "hash"]
+    return ["str", "char", "int", "float", "list", "option", "map", "hash"]
+}
+
+// The names of std.float's methods (D199), the same at both widths
+// (`test_float_methods` holds the list to lib/std/float.my): a program that
+// calls none of them as a method, and has no impl on a float type, is
+// loaded without std.float and the std.math it imports, which would cost
+// its check 4.2 M instructions (D258, `Loader.without_unused_float`).
+pub fun float_method_names() -> [str] {
+    return ["abs", "acos", "approx_eq", "asin", "atan", "atan2", "cbrt", "ceil", "clamp", "copysign", "cos", "cosh", "exp", "floor", "fract", "hypot", "is_finite", "is_infinite", "is_nan", "lerp", "ln", "log", "log10", "log2", "max", "min", "pow", "powi", "round", "signum", "sin", "sinh", "sqrt", "tan", "tanh", "to_bits", "to_degrees", "to_radians", "total_cmp", "trunc"]
+}
+
+// Whether `b` may be in an identifier: an ASCII letter, a digit, `_`, or a
+// byte of a character past ASCII.
+#test('a')[true]
+#test('_')[true]
+#test('(')[false]
+fun ident_byte(b: uint8) -> bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b >= 0x80
+}
+
+// Whether the text `src` may call a method named in `names` (a set), `.name(` or
+// `.name<…>(` with any spaces between, or has an impl on a float type
+// (`impl float64`, whose methods' names a duplicate of std.float's needs
+// it for, D199). Read as bytes, comments and strings included (an f-string's
+// holes hold calls), so it errs on the side of loading (D258).
+#test("fun main() {\n    print(\"hello\")\n}\n", ["sqrt": true])[false]
+#test("let y = x.sqrt()", ["sqrt": true])[true]
+#test("let y = x . sqrt ()", ["sqrt": true])[true]
+#test("let y = x.sqrtx() + x.sqrt", ["sqrt": true])[false]
+#test("print(f\"{x.abs()}\")", ["abs": true])[true]
+#test("import std.float as float\nlet n = float.PI", ["float": true])[false]
+#test("impl float64 {", ["sqrt": true])[true]
+#test("impl   float {", ["sqrt": true])[true]
+#test("impl floaty {", ["sqrt": true])[false]
+#test("x.", ["sqrt": true])[false]
+fun may_call_method(src: str, names: [str: bool]) -> bool {
+    let n = src.len()
+    var i = 0
+    while i < n {
+        let b = src[i]
+        if b == '.' {
+            var j = i + 1
+            while j < n && (src[j] == ' ' || src[j] == '\t') { j += 1 }
+            let start = j
+            while j < n && ident_byte(src[j]) { j += 1 }
+            let end = j
+            while j < n && (src[j] == ' ' || src[j] == '\t') { j += 1 }
+            if end > start && j < n && (src[j] == '(' || src[j] == '<') && names.contains(src[start:end]) { return true }
+            i = if end > i + 1 { end } else { i + 1 }
+            continue
+        }
+        if b == 'i' && i + 4 <= n && src[i + 1] == 'm' && src[i + 2] == 'p' && src[i + 3] == 'l' && (i == 0 || !ident_byte(src[i - 1])) {
+            var j = i + 4
+            while j < n && (src[j] == ' ' || src[j] == '\t') { j += 1 }
+            let start = j
+            while j < n && ident_byte(src[j]) { j += 1 }
+            let w = src[start:j]
+            if w == "float" || w == "float64" || w == "float32" { return true }
+            i = if j > i + 4 { j } else { i + 4 }
+            continue
+        }
+        i += 1
+    }
+    return false
 }
 
 #test([0, 2], 2)[true]
@@ -322,25 +780,66 @@ fun join(parts: [str], sep: str) -> str {
     return sb.build()
 }
 
-// `p` with `.` segments, empty segments and `x/..` pairs removed.
+// `p` with `/` for each `\` on Windows, where both separate a path's parts
+// (MYLA-931: a path Windows gives, `C:\w\main.my`, was one part, so its
+// directory was `.` and its relative imports weren't found); as it is
+// elsewhere. The loader compares and joins paths so: Windows reads `/` too.
+fun slashed(p: str) -> str {
+    if !style.WINDOWS { return p }
+    var sb = StringBuilder()
+    var i = 0
+    while i < p.len() {
+        if p[i] == '\\' { sb.append_byte('/') } else { sb.append_byte(p[i]) }
+        i += 1
+    }
+    return sb.build()
+}
+
+// Whether the slashed path `p` starts with a drive (`C:`), on Windows.
+fun has_drive(p: str) -> bool {
+    if !style.WINDOWS || p.len() < 2 || p[1] != ':' { return false }
+    return (p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')
+}
+
+// Whether `p` names a place from a root: `/`, and on Windows a drive (`C:/`)
+// or a share (`//server/share`) too, `\` as `/` (MYLA-931).
+#test("/w/main.my")[true]
+#test("w/main.my")[false]
+#test("")[false]
+pub fun is_absolute(p: str) -> bool {
+    let q = slashed(p)
+    return (q.len() > 0 && q[0] == '/') || has_drive(q)
+}
+
+// `p` with `.` segments, empty segments and `x/..` pairs removed (on
+// Windows its `\` read as `/`, a drive kept as its root, MYLA-931).
 #test("examples/maps.my/..")["examples"]
 #test("examples/errors/runtime_map_key_absent.my")["examples/errors/runtime_map_key_absent.my"]
 #test("examples/errors/type_literal_past_int8_max_annotated.my")["examples/errors/type_literal_past_int8_max_annotated.my"]
-pub fun normalize(p: str) -> str {
-    let absolute = p.len() > 0 && p[0] == '/'
+#test("/a/../..")["/"]
+pub fun normalize(path: str) -> str {
+    let p = slashed(path)
+    let drive = has_drive(p)
+    let rooted = p.len() > 0 && p[0] == '/'
+    let absolute = rooted || drive
     var out: [str] = []
     for seg in split_on(p, '/') {
         if seg == "" || seg == "." {
             continue
         }
-        if seg == ".." && out.len() > 0 && out[out.len() - 1] != ".." {
+        if seg == ".." && out.len() > 0 && out[out.len() - 1] != ".." && !(drive && out.len() == 1) {
             out.pop()
         } else if seg != ".." || !absolute {
             out.push(seg)
         }
     }
     let joined = join(out, "/")
-    if absolute { return "/" + joined }
+    if rooted {
+        // (a Windows share keeps its two)
+        if style.WINDOWS && p.len() > 1 && p[1] == '/' { return "//" + joined }
+        return "/" + joined
+    }
+    if drive && out.len() == 1 { return joined + "/" }
     if joined == "" { return "." }
     return joined
 }
@@ -348,18 +847,22 @@ pub fun normalize(p: str) -> str {
 // Whether `path` is a file of the standard library at `root`: their raw
 // memory is the library's own (D152), so a check of one as the entry (`myla
 // test lib/std/rt.my`, an editor) allows it. Both relative to the working
-// directory when they aren't absolute.
+// directory when they aren't absolute; both made absolute when one is, or
+// climbs with a leading `..` (`option.my` under `..`, MYLA-545), which the
+// text alone can't compare.
 #test("lib/std/rt.my", "lib")[true]
 #test("./lib/std/rt.my", "lib/")[true]
 #test("lib2/std/rt.my", "lib")[false]
 #test("prog.my", "lib")[false]
+#test("../lib/std/rt.my", "../lib")[true]
+#test("../lib2/std/rt.my", "../lib")[false]
 pub fun in_stdlib(path: str, root: str) -> bool {
     if root == EMBEDDED_ROOT { return in_std_tree(path) }
     var p = normalize(path)
     var r = normalize(root)
-    let pa = p.len() > 0 && p[0] == '/'
-    let ra = r.len() > 0 && r[0] == '/'
-    if pa != ra {
+    let pa = is_absolute(p)
+    let ra = is_absolute(r)
+    if pa != ra || climbs(p) || climbs(r) {
         let here = match current_dir() {
             Ok(d) => d,
             Err(e) => { return false },
@@ -368,6 +871,16 @@ pub fun in_stdlib(path: str, root: str) -> bool {
         if !ra { r = normalize(here + "/" + r) }
     }
     return r != "." && p.len() > r.len() + 1 && starts_with_text(p, r + "/")
+}
+
+// Whether the normalized relative path `p` starts above the working
+// directory (`..`, `../x`): only `..` is left at its start by `normalize`.
+#test("..")[true]
+#test("../lib")[true]
+#test("..lib")[false]
+#test("lib/..x")[false]
+fun climbs(p: str) -> bool {
+    return p.len() >= 2 && p[0] == '.' && p[1] == '.' && (p.len() == 2 || p[2] == '/')
 }
 
 // Whether `path` is a module of the standard library rooted at `root`: a
@@ -387,7 +900,7 @@ pub fun is_std_module(path: str, root: str) -> bool {
 // would.
 fun in_std_tree(path: str) -> bool {
     var p = normalize(path)
-    if p.len() == 0 || p[0] != '/' {
+    if !is_absolute(p) {
         let here = match current_dir() {
             Ok(d) => d,
             Err(e) => { return false },
@@ -799,6 +1312,24 @@ impl Loader {
         return Ok(out)
     }
 
+    // `files`, the implicit modules', without std.float's where no module
+    // of the program may call one of its methods (`may_call_method`): its
+    // methods and the std.math it imports cost nothing until they are used
+    // (D258). The program's modules are loaded by now; the library's own
+    // import what they use.
+    fun without_unused_float(self, files: [str]) -> [str] {
+        var names: [str: bool] = [:]
+        for name in float_method_names() { names[name] = true }
+        for m in self.modules {
+            if !self.in_std_root(m.path) && may_call_method(m.src, names) { return files }
+        }
+        var out: [str] = []
+        for f in files {
+            if self.module_id(f) != "std$float" { out.push(f) }
+        }
+        return out
+    }
+
     // The files of the implicit modules the standard library in use has.
     fun implicit_files(self) -> Result<[str], Report> {
         var out: [str] = []
@@ -830,7 +1361,14 @@ impl Loader {
             }
             return match parse_source_lazy(src, self.next_id) {
                 Ok(lp) => Ok(Cached { parsed: lp, bytes: [], bodies: no_bodies() }),
-                Err(ds) => Err(reports(ds, path)),
+                // a body skipped short or long by a brace missing or one
+                // too many leaves text that reads as declarations: the
+                // errors are those of the module read whole, where `myla
+                // check` of it puts them (MYLA-413's follow-up)
+                Err(ds) => match parse_source_with(src, self.next_id, true) {
+                    Err(whole) => Err(reports(whole, path)),
+                    Ok(x) => Err(reports(ds, path)),
+                },
             }
         }
         return match parse_source_with(src, self.next_id, path != self.entry) {
@@ -873,15 +1411,56 @@ impl Loader {
     // Whether `path` is a module of the standard library whose functions'
     // bodies are read once called (D179): every one but the entry and
     // std.rt, whose functions the back ends call by the primitives they
-    // replace (MYLA-413). A program's own modules are read whole.
+    // replace (MYLA-413). A program's own modules are read whole, its own
+    // `std/` directory too (`in_std_root`).
     #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/fs.my")[true]
     #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/rt.my")[false]
     #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/b.my")[false]
     #test(Loader { stdlib_root: "/l", project_root: "/l", packages: [], entry: "/l/std/fs.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/fs.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std/helper.my")[false]
+    #test(Loader { stdlib_root: "", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std/helper.my")[false]
+    #test(Loader { stdlib_root: EMBEDDED_ROOT, project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "<myla>/std/fs.my")[true]
     fun lazy_std(self, path: str) -> bool {
-        if path == self.entry { return false }
+        if path == self.entry || !self.in_std_root(path) { return false }
+        return self.module_id(path) != "std$rt"
+    }
+
+    // Whether `path` is a file of the standard library's `std/`, under the
+    // stdlib root or in the library the tools carry: decided by the file's
+    // root, as `module_id` names it, not by its id, which a program's own
+    // `std/helper.my` shares (`std$helper`) and which is the program's
+    // (MYLA-413, D179 (3)).
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/fs.my")[true]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/geo.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std/fs.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/l/app", packages: [], entry: "/l/app/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/app/std/fs.my")[false]
+    fun in_std_root(self, path: str) -> bool {
+        var rest: [str] = []
+        match rel_under(path, EMBEDDED_ROOT) {
+            Some(r) => { rest = r },
+            None => {
+                if self.stdlib_root == "" { return false }
+                match rel_under(path, self.stdlib_root) {
+                    Some(r) => { rest = r },
+                    None => { return false },
+                }
+            },
+        }
+        return rest.len() > 1 && rest[0] == "std"
+    }
+
+    // Whether `path` is a module of the program that would be named as
+    // the standard library's are, `std` or `std$…`: its own `std/` folder
+    // or `std.my` at its root, which is refused (D255), as the library's
+    // names would give it the library's privileges (MYLA-584).
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std/process.my")[true]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/std.my")[true]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/p/sub/std/process.my")[false]
+    #test(Loader { stdlib_root: "/l", project_root: "/p", packages: [], entry: "/p/a.my", modules: [], next_id: 0, spans: [], overrides: [:], lazy: [:] }, "/l/std/process.my")[false]
+    fun own_std(self, path: str) -> bool {
         let id = self.module_id(path)
-        return starts_with_text(id, "std$") && id != "std$rt"
+        if id != "std" && !starts_with_text(id, "std$") { return false }
+        return !self.in_std_root(path)
     }
 
     // Load `path` and its imports (depth first) once each; its module index.
@@ -921,6 +1500,7 @@ impl Loader {
             match imp.kind {
                 DeclKind.ImportDecl(p, items, alias, isp) => {
                     let target = self.resolve(path, p)?
+                    if self.own_std(target) { return Err(at(path, p.line, p.col, p.sp, format("cannot import '{}': a folder or file named 'std' at the program's root is refused, as 'std' is the standard library (rename it)", dotted(p)))) }
                     targets.push(self.load(target)?)
                 },
                 _ => {},
@@ -1341,8 +1921,10 @@ impl Renamer {
         let k = match t.kind {
             TypeKind.TRef(n, args) => {
                 let q = if contains_byte(n, '.') { self.module_type(n, t, true) } else { self.type_name(n) }
-                // a module's name alone (MYLA-371's follow-up)
-                if q == n && !contains_byte(n, '.') && !has(self.tys, n) && !self.env.contains(n) && self.aliases.contains(n) {
+                // a module's name alone (MYLA-371's follow-up); a built-in
+                // type's name is the type where a type stands, whatever a
+                // module is imported as (`import std.float as float`, D199)
+                if q == n && !contains_byte(n, '.') && !has(self.tys, n) && !self.env.contains(n) && self.aliases.contains(n) && !is_builtin_type_word(n) {
                     self.fail(t.line, t.col, t.sp, format("'{}' is a module, not a type: name one of its types, '{}.T'", n, n))
                 }
                 // a name that stays, without arguments (`int`, `T`): the
@@ -1833,7 +2415,8 @@ fun check_packages(packages: [(str, str)]) -> Result<[(str, str)], Report> {
         if !valid_package_name(name) { return Err(list_error(format("invalid package name '{}'", name))) }
         if has(names, name) { return Err(list_error(format("package '{}' is given twice", name))) }
         if dir == "" { return Err(list_error(format("package '{}' has no directory", name))) }
-        if !is_dir(dir) { return Err(list_error(format("package '{}': '{}' is not a directory", name, dir))) }
+        // (with `/` on Windows, as every path a message names, D311)
+        if !is_dir(dir) { return Err(list_error(format("package '{}': '{}' is not a directory", name, slashed(dir)))) }
         names.push(name)
         out.push((name, normalize(dir)))
     }
@@ -1870,7 +2453,15 @@ pub fun load_program_packages(entry: str, stdlib_root: str, packages: [(str, str
 
 // The program rooted at `entry`, loaded as `opts` says.
 pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
-    let e = normalize(entry)
+    return match load_linked(entry, opts) {
+        Ok(p) => Ok(p),
+        // a parse or module error at a form of D186 says how it was read
+        Err(r) => Err(with_reading_notes(r, opts.overrides)),
+    }
+}
+
+fun load_linked(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
+    let e = on_disk(normalize(entry))
     var stdlib = ""
     if opts.stdlib_root != "" { stdlib = normalize(opts.stdlib_root) }
     var project_root = dirname(e)
@@ -1886,6 +2477,7 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     if stdlib != "" && !is_std_module(e, stdlib) { files = ld.implicit_files()? }
     for f in files { ld.lazy[f] = true }
     ld.load(e)?
+    files = ld.without_unused_float(files)
     let implicit = ld.load_implicit(files)?
     // the runtime's functions in Myla (MYLA-162), compiled where a program
     // uses them: the standard library's, else the copy the tools carry
@@ -1934,7 +2526,9 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
             }
             for id in lazy.add(k, m.sites, m.decls).keys() { lazy_ids[id] = true }
         }
-        let in_std = starts_with_text(m.id, "std$")
+        // by the file's root: a program's own `std/` is the program's
+        // (MYLA-413); the entry's names stay unqualified (`entry_std`)
+        let in_std = m.path != ld.entry && ld.in_std_root(m.path)
         let is_implicit = has_index(implicit, k)
         // only the entry's cases are the program's, the others' were left
         // unparsed (`load`): an imported module's methods on a built-in type
@@ -1948,8 +2542,10 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
         for d in m.decls {
             if in_std && is_impl(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit, lazy: may_wait } }
             // a module's functions too: the checker checks an implicit
-            // module's bodies only once called (MYLA-359)
-            if may_wait && is_fun(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit, lazy: true } }
+            // module's bodies only once called (MYLA-359), and gives the
+            // library's its privileges by them, not by a `std$` name, which
+            // a program's own `std/raw.my` has too (MYLA-584)
+            if in_std && is_fun(d) { std_impls[d.id] = DeclOrigin { module: dotted_id(m.id), path: m.path, implicit: is_implicit, lazy: may_wait } }
             if entry_std != "" && tested && is_fun(d) { std_impls[d.id] = DeclOrigin { module: entry_std, path: m.path, implicit: false, lazy: false } }
             decls.push(r.decl(d, m.id))
         }
@@ -1961,9 +2557,71 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
         // a native build has tasks where an `async let` is in any body
         // loaded, read or not, as when every body was read (D90, MYLA-413)
         let tasks = if opts.runtime { lazy.task_line() } else { 0 }
-        bodies = LazyBodies { ids: lazy_ids, keys: lazy.keys, parse: (key: int64) => table.read(key), task_line: tasks }
+        bodies = LazyBodies { ids: lazy_ids, keys: lazy.keys, parse: (key: int64) => table.read(key), task_line: tasks, files: [] }
+        // the oracle of the lazy load (MYLA-552): every body read now
+        if eager_bodies() { decls = read_every_body(decls, bodies) }
     }
+    // each declaration's file, which the checker's notes name (D257)
+    for sp in ld.spans { bodies.files.push((sp.first_id, sp.path)) }
     return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans, std_impls: std_impls, bodies: bodies })
+}
+
+// Whether every body the loader leaves for later is read at once, before
+// the program is checked (MYLA-552): MYLA_EAGER_BODIES set to anything but
+// "" or "0". The oracle of the lazy load: a program builds to the same code
+// with it as without (`tests/burn/test_lazy_std.py`), as which bodies were
+// read must not change what is built; they are still checked only once
+// called (D179), and an error in one is still reported only then.
+#test()[false]
+pub fun eager_bodies() -> bool {
+    return match env("MYLA_EAGER_BODIES") {
+        Some(v) => v != "" && v != "0",
+        None => false,
+    }
+}
+
+// `decls` with each body left for later (`bodies`) read into its
+// declaration, as the checker reads it (`Checker.with_body`); one that
+// doesn't read stays left, for the checker to report where it is called.
+#test([], no_lazy_bodies())[[]]
+fun read_every_body(decls: [Decl], bodies: LazyBodies) -> [Decl] {
+    var out: [Decl] = []
+    for d in decls {
+        if !bodies.ids.contains(d.id) {
+            out.push(d)
+            continue
+        }
+        let k = match d.kind {
+            DeclKind.FunDecl(fd) => DeclKind.FunDecl(read_now(d.id, fd, bodies)),
+            DeclKind.ImplDecl(t, ms, tps, tr, targs, attrs) => {
+                var read: [FunData] = []
+                for m in ms { read.push(read_now(d.id, m, bodies)) }
+                DeclKind.ImplDecl(t, read, tps, tr, targs, attrs)
+            },
+            _ => d.kind,
+        }
+        out.push(Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: k })
+    }
+    return out
+}
+
+// `fd`, a function of the declaration `id`, with its body read if it was
+// left for later and reads (`read_every_body`).
+fun read_now(id: int32, fd: FunData, bodies: LazyBodies) -> FunData {
+    let key = match unread_key(id, fd) {
+        Some(k) => k,
+        None => { return fd },
+    }
+    if !bodies.keys.contains(key) { return fd }
+    let parse = bodies.parse
+    return match parse(key) {
+        Ok(b) => {
+            var g = fd
+            g.body = Some(b)
+            g
+        },
+        Err(es) => fd,
+    }
 }
 
 // A function's body an implicit module's parse left for later

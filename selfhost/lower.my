@@ -30,7 +30,8 @@
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param, call_targs, is_unread_body, unread_fun
 from .checker import CheckErr, REG_ARG_WORDS, type_name, Type, is_unit, is_slice_expr, from_end_of, slice_parts, is_hole_part, is_raw_memory_primitive, is_platform_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method, is_wrapping_method, int_op_overflows, int_min
-from .checker import is_notify_primitive
+from .checker import is_notify_primitive, tracks_caller
+from .checker import arith_trait
 from .codegen import codegen_on, type_job_name, recv_by_address, may_write_expr, is_mutating_builtin, list_has_str, contains_int, is_actor_t, is_sb_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .util import format_specs, written_type_name
 from .tokens import Note, no_span
@@ -78,8 +79,9 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // method's result is copied deeply before it leaves the actor (D92).
 // `scope_ids`: the open scopes' indices in `f.scope_parent` (MYLA-183).
 // `checked`: integer overflow traps here (D175's checked build, but not in
-// the runtime, `checked_code`).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer], received: int32, refused: [CheckErr], fn_name: str, by_addr: int32, by_addr_t: Type, resized: [str], scanned: bool, below: [LenFact], len_lets: [LenFact], nonneg: [int32], checked: bool, fused: int32, fused_val: int32 }
+// the runtime, `checked_code`). `caller`: a `#track_caller` function's slot
+// of its caller's position (MYLA-435), or -1.
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool, narrow: [int32: int32], wants: [Want], defers: [LDefer], received: int32, refused: [CheckErr], fn_name: str, by_addr: int32, by_addr_t: Type, resized: [str], scanned: bool, below: [LenFact], len_lets: [LenFact], nonneg: [int32], checked: bool, fused: int32, fused_val: int32, caller: int32 }
 
 // A per-type routine a routine built as IR calls, for the code generator to
 // emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
@@ -194,7 +196,7 @@ struct LDefer { depth: int32, nscopes: int32, nnames: int32, body: Block, cg: Co
 // entry block, the receiver of `#test` cases of the lowering's methods
 // (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1 }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1, caller: -1 }
     lw.start(lw.new_block())
     return lw
 }
@@ -208,7 +210,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
     match fd.body { Some(b) => { if is_unread_body(b) { return Err("its body was never read") } }, None => {} }
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1 }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1, caller: -1 }
     lw.fn_name = fd.name
     lw.checked = cg.checked && checked_code(mangled)
     var first_word = 0
@@ -278,6 +280,12 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
         lw.add(Inst.Bind(fd.params[i].name, s))
         i = i + 1
     }
+    // a `#track_caller` function's caller's position, a hidden last
+    // argument word: the address of its record (MYLA-435)
+    if tracks_caller(fd) && !frame {
+        lw.caller = lw.new_slot("__caller", Type.TInt(64, true), 8, word, false)
+        word = word + 1
+    }
     // the argument words it received, which a `become` may pass on the
     // stack again (D131): known per instance (MYLA-272)
     if !frame { lw.received = word }
@@ -322,7 +330,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1 }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1, caller: -1 }
     lw.checked = cg.checked && checked_code(job.lifted)
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
@@ -623,9 +631,111 @@ fun settled_operand(e: Expr, root: str) -> bool {
     }
 }
 
+// Whether computing each index on the path of the place `e` after `v`
+// rather than before it can't be told (D193): each does nothing itself and
+// reads no variable `v` may write (`index_unaffected_by`).
+#test(codegen_on("[int]"), expr_of("c.g[0][i + 1]"), expr_of("c.v()"))[true]
+#test(codegen_on("[int]"), expr_of("c.g[c.n]"), expr_of("c.v()"))[false]
+#test(codegen_on("[int]"), expr_of("c.g[k()]"), expr_of("1"))[false]
+fun path_unaffected_by(cg: CodeGen, e: Expr, v: Expr) -> bool {
+    return match e.kind {
+        ExprKind.GetField(x, f) => path_unaffected_by(cg, x, v),
+        ExprKind.TupleIndex(x, k) => path_unaffected_by(cg, x, v),
+        ExprKind.Index(x, i) => path_unaffected_by(cg, x, v) && index_unaffected_by(cg, i, v),
+        _ => true,
+    }
+}
+
+// Whether the index `i` calls nothing and reads no variable `v` may write:
+// literals, and names, fields, elements and operators of them.
+fun index_unaffected_by(cg: CodeGen, i: Expr, v: Expr) -> bool {
+    return match i.kind {
+        ExprKind.IntLit(n, sfx, ch, big) => true,
+        ExprKind.BoolLit(b) => true,
+        ExprKind.StrLit(s) => true,
+        ExprKind.Name(n) => !may_write_expr(cg, v, n),
+        ExprKind.Unary(op, x) => index_unaffected_by(cg, x, v),
+        ExprKind.Cast(x, t) => index_unaffected_by(cg, x, v),
+        ExprKind.Binary(op, l, r) => index_unaffected_by(cg, l, v) && index_unaffected_by(cg, r, v),
+        ExprKind.GetField(x, f) => index_unaffected_by(cg, x, v),
+        ExprKind.TupleIndex(x, k) => index_unaffected_by(cg, x, v),
+        ExprKind.Index(x, j) => index_unaffected_by(cg, x, v) && index_unaffected_by(cg, j, v),
+        _ => false,
+    }
+}
+
+// Whether `e` is a variable or a field or tuple element of one, at any
+// depth: a read that runs nothing and can't fail.
+#test(expr_of("a.b.0"))[true]
+#test(expr_of("a[0].b"))[false]
+fun field_path(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Name(n) => true,
+        ExprKind.GetField(x, f) => field_path(x),
+        ExprKind.TupleIndex(x, i) => field_path(x),
+        _ => false,
+    }
+}
+
 fun settled_operands(es: [Expr], root: str) -> bool {
     for x in es { if !settled_operand(x, root) { return false } }
     return true
+}
+
+// Whether the arguments `args` of a method on the place `recv` (of the
+// variable `root`) are computed before the place is reached: one may change
+// or copy the variable (H4), or the place's last element may be missing and
+// an argument does something that a missing element's error would hide
+// (D193: the interpreter takes the place's indices, runs the arguments, then
+// finds that element, MYLA-791).
+#test(expr_of("g[5]"), [expr_of("val(7)")], "g")[true]
+#test(expr_of("g[5]"), [expr_of("n")], "g")[false]
+#test(expr_of("c.g"), [expr_of("val(7)")], "c")[false]
+fun args_before_place(recv: Expr, args: [Expr], root: str) -> bool {
+    if !settled_operands(args, root) { return true }
+    if !indexed_path(recv) { return false }
+    for a in args { if !quiet_operand(a) { return true } }
+    return false
+}
+
+// Whether the place `e` has an element on its path (which may be missing).
+#test(expr_of("a.b[i].c"))[true]
+#test(expr_of("a.b.0"))[false]
+fun indexed_path(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.GetField(x, f) => indexed_path(x),
+        ExprKind.TupleIndex(x, k) => indexed_path(x),
+        ExprKind.Index(x, i) => true,
+        _ => false,
+    }
+}
+
+// The place `e`'s last index's base: what the interpreter reaches when it
+// takes the place, before the arguments (`gg[5]` of `gg[5][0].xs`).
+#test(expr_of("gg[i][0].xs"))[expr_of("gg[i]")]
+fun last_index_base(e: Expr) -> Expr {
+    return match e.kind {
+        ExprKind.GetField(x, f) => last_index_base(x),
+        ExprKind.TupleIndex(x, k) => last_index_base(x),
+        ExprKind.Index(x, i) => x,
+        _ => e,
+    }
+}
+
+// Whether computing `e` does nothing that can be seen and can't fail: a
+// literal, a variable or a field of one, a lambda.
+#test(expr_of("a.b"))[true]
+#test(expr_of("f(1)"))[false]
+#test(expr_of("n + 1"))[false]
+fun quiet_operand(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.IntLit(v, sfx, ch, big) => true,
+        ExprKind.FloatLit(x, sfx) => true,
+        ExprKind.StrLit(x) => true,
+        ExprKind.BoolLit(b) => true,
+        ExprKind.Lambda(ps, rt, body, asy) => true,
+        _ => field_path(e),
+    }
 }
 
 // Whether one of `es` names the variable `root` (anything holding a block
@@ -693,14 +803,21 @@ fun settled_path(e: Expr) -> bool {
 // Whether an argument after `argv[i]` may write the variable `argv[i]` is
 // read from (through a method that may take `var self`, or a mutating
 // builtin): then `argv[i]` is copied when it is evaluated (MYLA-237).
-fun later_writes(argv: [Expr], i: int32) -> bool {
-    let root = place_root(argv[i])
+fun later_writes(cg: CodeGen, argv: [Expr], i: int32) -> bool {
+    return written_after(cg, argv[i], argv[i + 1:])
+}
+
+// Whether one of the operands `later`, evaluated after `x`, may write the
+// variable the place `x` is read from (`may_write_expr`): then what `x`
+// reads is taken with a reference of its own first (`Lower.operand`), or the
+// write may release it before it is used (B2; an argument's, MYLA-237).
+#test(codegen_on("[int]"), expr_of("h.xs[0]"), [expr_of("h.s()")])[true]
+#test(codegen_on("[int]"), expr_of("h.xs[0]"), [expr_of("g.s()"), expr_of("f(h)")])[false]
+#test(codegen_on("[int]"), expr_of("f(h)"), [expr_of("h.s()")])[false]
+fun written_after(cg: CodeGen, x: Expr, later: [Expr]) -> bool {
+    let root = place_root(x)
     if root == "" { return false }
-    var j = i + 1
-    while j < argv.len() {
-        if may_write_expr(argv[j], root) { return true }
-        j = j + 1
-    }
+    for y in later { if may_write_expr(cg, y, root) { return true } }
     return false
 }
 
@@ -1842,8 +1959,15 @@ impl Lower {
             ExprKind.Index(base, idx) => {
                 let b2 = self.fixed_receiver(cg, base, call)
                 let nm = format("%index{}_{}", call, idx.id)
-                let held = self.held_value(cg, idx, nm)
-                let i2 = Expr { id: idx.id, line: idx.line, col: idx.col, sp: idx.sp, kind: ExprKind.Name(nm) }
+                var n = idx
+                match from_end_of(idx) {
+                    Some(x) => { n = x },
+                    None => {},
+                }
+                let held = self.held_value(cg, n, nm)
+                var i2 = Expr { id: n.id, line: n.line, col: n.col, sp: n.sp, kind: ExprKind.Name(nm) }
+                // a `^n` keeps its `^` (MYLA-811)
+                if n.id != idx.id { i2 = Expr { id: idx.id, line: idx.line, col: idx.col, sp: idx.sp, kind: ExprKind.Unary("^", i2) } }
                 Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Index(b2, i2) }
             },
             _ => e,
@@ -1859,11 +1983,34 @@ impl Lower {
             ExprKind.TupleIndex(recv, k) => Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.TupleIndex(self.held_place(cg, recv, call), k) },
             ExprKind.Index(base, idx) => {
                 let b2 = self.held_place(cg, base, call)
-                let i2 = self.held_operand(cg, idx, format("%index{}_{}", call, idx.id))
+                let i2 = self.held_index(cg, idx, format("%index{}_{}", call, idx.id))
                 Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Index(b2, i2) }
             },
             _ => e,
         }
+    }
+
+    // A method's receiver `e` taken before its arguments, which are computed
+    // before the place is reached (`args_before_place`): its indices held
+    // (`held_place`), and the elements on its path before the last index
+    // read, so that a missing one is reported before the arguments run and
+    // the last one after them, as the interpreter does (D193).
+    fun held_receiver(var self, cg: CodeGen, e: Expr, call: int32) -> Expr {
+        let held = self.held_place(cg, e, call)
+        let inner = last_index_base(held)
+        if indexed_path(inner) { self.discard(cg, inner) }
+        return held
+    }
+
+    // The index `idx` held as `held_operand` holds a value: for a `^n`
+    // (D142), which is no value of its own, what it counts, the `^` kept
+    // (`g[^k()].push(v)` wrote `g[0]`, MYLA-811).
+    fun held_index(var self, cg: CodeGen, idx: Expr, nm: str) -> Expr {
+        match from_end_of(idx) {
+            Some(n) => { return Expr { id: idx.id, line: idx.line, col: idx.col, sp: idx.sp, kind: ExprKind.Unary("^", self.held_operand(cg, n, nm)) } },
+            None => {},
+        }
+        return self.held_operand(cg, idx, nm)
     }
 
     // The parameter `name` (of type `t`) of an actor's method as a deep copy
@@ -2124,11 +2271,11 @@ impl Lower {
                 let ft = self.place_type(cg, callee)
                 if !is_async_t(ft) || !lowerable(cg, ft) { return -1 }
                 let params = tfunc_params(ft)
-                let fv = self.addr(cg, callee)
+                let fv = self.operand_addr(cg, callee, args)
                 var vals: [int32] = []
                 var i = 0
                 while i < args.len() && i < params.len() {
-                    if is_aggregate(params[i]) { vals.push(self.addr(cg, args[i])) } else { vals.push(self.expr(cg, args[i])) }
+                    if is_aggregate(params[i]) { vals.push(self.operand_addr(cg, args[i], args[i + 1:])) } else { vals.push(self.operand(cg, args[i], args[i + 1:])) }
                     i = i + 1
                 }
                 let fr = self.temp(Type.TPtr)
@@ -2372,6 +2519,8 @@ impl Lower {
 
     // The instance of `callee` that the call `e` asks for, `too` large,
     // refused (H5): its function asks for a larger one in turn, without end.
+    // Only a call inside an instance at the limit is refused (MYLA-544), so
+    // a type the program writes, however deep, is never refused here.
     fun refuse_instance(var self, cg: CodeGen, e: Expr, callee: str, too: str) {
         let msg = format("the instances of '{}' nest without end: this call asks for one whose type arguments are {}", callee, too)
         let note = format("'{}' is called with a larger type at each step (polymorphic recursion), which native code can't be built for; the interpreter runs it", callee)
@@ -2440,6 +2589,20 @@ impl Lower {
     // (through a `var self` parameter's address too). The new value is taken
     // (retained) before the old one is released, which it may share.
     fun assign(var self, cg: CodeGen, target: Expr, value: Expr) {
+        // `x[i] = v` by an `IndexSet` (D200): `x.set_index(i, v)`, the place
+        // first, as a method call takes it (D193)
+        match target.kind {
+            ExprKind.Index(base, idx) => {
+                if !is_slice_expr(idx) {
+                    let om = cg.op_method("IndexSet", cg.type_of(base.id), cg.type_of(idx.id))
+                    if om != "" {
+                        let d = self.direct_call(cg, target, om, [base, idx, value], -1, false)
+                        return
+                    }
+                }
+            },
+            _ => {},
+        }
         let t = self.place_type(cg, target)
         if !lowerable(cg, t) {
             let d = self.unsupported("an assignment of that type")
@@ -2912,7 +3075,8 @@ impl Lower {
         self.add(Inst.Load(p, at))
         let off = cg.map_key_off(mt)
         if is_aggregate(kt) {
-            self.add(Inst.Copy(self.slot_addr(elem), self.offset(p, off), cg.size(kt)))
+            // (a recursive enum's from its box, D194)
+            self.add(Inst.Copy(self.slot_addr(elem), self.unbox(cg, kt, self.offset(p, off)), cg.size(kt)))
         } else {
             let x = self.temp(kt)
             self.add(Inst.LoadAt(x, p, off, 8))
@@ -3091,6 +3255,9 @@ impl Lower {
             },
             ExprKind.Name(n) => { return self.name(cg, n, t) },
             ExprKind.Unary(op, x) => {
+                // a struct's or enum's `-x` by its `Neg` (D200)
+                let om = if op == "-" { cg.op_method("Neg", cg.type_of(x.id), cg.type_of(x.id)) } else { "" }
+                if om != "" { return self.direct_call(cg, e, om, [x], -1, false) }
                 if !is_scalar(t) { return self.unsupported("a unary operator on a value that isn't a scalar") }
                 // a negative integer literal is a constant (an immediate
                 // operand where it fits, MYLA-125); the backend wraps it
@@ -3138,6 +3305,9 @@ impl Lower {
             ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
             ExprKind.Index(base, idx) => {
                 if is_slice_expr(idx) { return self.slice_expr(cg, e, base, idx) }
+                // a struct's or enum's `x[i]` by its `Index` (D200)
+                let om = cg.op_method("Index", cg.type_of(base.id), cg.type_of(idx.id))
+                if om != "" { return self.direct_call(cg, e, om, [base, idx], -1, false) }
                 let p = self.elem_read(cg, e, base, idx)
                 if is_aggregate(t) { return self.unsupported("an aggregate element used as a scalar") }
                 let d = self.temp(t)
@@ -3198,10 +3368,24 @@ impl Lower {
         return self.unsupported("a function used as a value")
     }
 
+    // The method of the operator impl by type arguments (D200) that `l op
+    // r` calls, by the operands' types here (an instance's, in generic
+    // code); "" for a number's own operator or a classic impl.
+    fun op_call(self, cg: CodeGen, op: str, l: Expr, r: Expr) -> str {
+        if cg.op_impls.len() == 0 { return "" }
+        return match arith_trait(op) {
+            Some(tr) => cg.op_method(tr, cg.type_of(l.id), cg.type_of(r.id)),
+            None => "",
+        }
+    }
+
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), "*", expr_of("(a, 'c')"), expr_of("(a, 'c')"))[1]
     fun binary(var self, cg: CodeGen, e: Expr, op: str, l: Expr, r: Expr) -> int32 {
         if op == "&&" || op == "||" { return self.logical(cg, op, l, r) }
         let lt = cg.type_of(l.id)
+        // an operator impl by type arguments (D200): its method called
+        let om = self.op_call(cg, op, l, r)
+        if om != "" { return self.direct_call(cg, e, om, [l, r], -1, false) }
         let rt = cg.type_of(e.id)
         if is_overloadable_op(op) && is_struct_or_enum_t(lt) && lowerable(cg, lt) {
             return self.overloaded_scalar(cg, op, l, r, lt)
@@ -3218,10 +3402,10 @@ impl Lower {
             var a = -1
             var b = -1
             if is_list_t(lt) {
-                a = self.expr(cg, l)
+                a = self.operand(cg, l, [r])
                 b = self.expr(cg, r)
             } else {
-                a = self.addr(cg, l)
+                a = self.operand_addr(cg, l, [r])
                 b = self.addr(cg, r)
             }
             let eq = self.temp(Type.TBool)
@@ -3233,7 +3417,7 @@ impl Lower {
         }
         if is_tstr(lt) {
             if op == "==" || op == "!=" {
-                let a = self.expr(cg, l)
+                let a = self.operand(cg, l, [r])
                 let b = self.expr(cg, r)
                 let eq = self.temp(Type.TBool)
                 self.rt_call(cg, eq, "__str_eq", [a, b])
@@ -3243,7 +3427,7 @@ impl Lower {
                 return d
             }
             if op == "+" {
-                let a = self.expr(cg, l)
+                let a = self.operand(cg, l, [r])
                 let b = self.expr(cg, r)
                 let d = self.temp(Type.TStr)
                 self.rt_call(cg, d, "__str_concat", [a, b])
@@ -3251,7 +3435,7 @@ impl Lower {
             }
             if is_cmp(op) {
                 // byte-wise, std.rt's `str_cmp` against 0 (MYLA-318)
-                let a = self.expr(cg, l)
+                let a = self.operand(cg, l, [r])
                 let b = self.expr(cg, r)
                 let i64 = Type.TInt(64, true)
                 let c = self.temp(i64)
@@ -3321,6 +3505,14 @@ impl Lower {
         let i64 = Type.TInt(64, true)
         let u64 = Type.TInt(64, false)
         if op == "<<" || op == ">>" {
+            // a constant count below the width checks nothing (MYLA-551)
+            let n = self.f.blocks[self.cur].insts.len()
+            if n > 0 {
+                match self.f.blocks[self.cur].insts[n - 1] {
+                    Inst.Const(d, t, k) => { if d == b && k >= 0 && k < (w as int64) { return -1 } },
+                    _ => {},
+                }
+            }
             // the count as unsigned: a negative one is as far out of range
             let ok = self.temp(Type.TBool)
             self.add(Inst.Cmp(ok, "<", u64, b, self.konst(u64, w as int64)))
@@ -3462,7 +3654,8 @@ impl Lower {
         var vals: [int32] = []
         var k = 0
         for side in [l, r] {
-            let p = self.addr(cg, side)
+            // (the left one held when the right one may write its variable, B2)
+            let p = if k == 0 { self.operand_addr(cg, side, [r]) } else { self.addr(cg, side) }
             if byval[k] { for w in self.value_words(cg, lt, p) { vals.push(w) } } else { vals.push(p) }
             k = k + 1
         }
@@ -3569,8 +3762,11 @@ impl Lower {
             ExprKind.Binary(op, l, r) => {
                 let lt = cg.type_of(l.id)
                 if op == ">>" && is_tfunc(lt) { return self.compose(cg, e, l, r) }
+                // an operator impl by type arguments (D200): its method called
+                let om = self.op_call(cg, op, l, r)
+                if om != "" { return self.direct_call(cg, e, om, [l, r], into, false) }
                 if !is_overloadable_op(op) || !is_struct_or_enum_t(lt) { return self.unsupported("that operator on aggregates") }
-                let pa = self.addr(cg, l)
+                let pa = self.operand_addr(cg, l, [r])
                 let pb = self.addr(cg, r)
                 let slot = self.value_slot(cg, "__result", t, true)
                 let res = self.slot_addr(slot)
@@ -3582,7 +3778,17 @@ impl Lower {
                 return res
             },
             ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
-            ExprKind.Index(base, idx) => { return self.unbox(cg, t, self.elem_read(cg, e, base, idx)) },
+            ExprKind.Index(base, idx) => {
+                // a struct's or enum's `x[i]` by its `Index` (D200)
+                let om = cg.op_method("Index", cg.type_of(base.id), cg.type_of(idx.id))
+                if om != "" { return self.direct_call(cg, e, om, [base, idx], into, false) }
+                return self.unbox(cg, t, self.elem_read(cg, e, base, idx))
+            },
+            ExprKind.Unary(op, x) => {
+                // a struct's or enum's `-x` by its `Neg` (D200)
+                let om = if op == "-" { cg.op_method("Neg", cg.type_of(x.id), cg.type_of(x.id)) } else { "" }
+                if om != "" { return self.direct_call(cg, e, om, [x], into, false) }
+            },
             ExprKind.Try(inner) => { return self.try_expr(cg, e, inner) },
             _ => {},
         }
@@ -3813,6 +4019,8 @@ impl Lower {
                 }
                 if !cg.has_func(mname) {
                     if field == "eq" && args.len() == 1 && cg.derived_eq_routine(key) { return self.derived_eq(cg, mname, recv, args[0], tail) }
+                    // `x.format(spec)` of a builtin `T: Format` (MYLA-544)
+                    if field == "format" && args.len() == 1 && !is_struct_or_enum_t(cg.type_of(recv.id)) { return self.builtin_format(cg, recv, args[0], Pos { line: e.line, col: e.col }) }
                     // a tuple's `hash` is the language's (D163)
                     let rt = cg.type_of(recv.id)
                     if field == "hash" && args.len() == 1 && (is_unit(rt) || is_compound_eq_t(rt)) && !is_list_t(rt) && !tail {
@@ -3854,13 +4062,13 @@ impl Lower {
         let ft = self.place_type(cg, callee)
         if !is_tfunc(ft) || !lowerable(cg, ft) { return self.unsupported("a call through a value of that type") }
         let params = tfunc_params(ft)
-        let fv = self.addr(cg, callee)
+        let fv = self.operand_addr(cg, callee, args)
         var vals: [int32] = []
         var i = 0
         while i < args.len() && i < params.len() {
             // a later argument may write the variable this one is read from:
             // a copy taken now (MYLA-237)
-            if later_writes(args, i) && (is_aggregate(params[i]) || cg.owns_heap(params[i])) { vals.push(self.stage(cg, params[i], args[i]).1) }
+            if later_writes(cg, args, i) && (is_aggregate(params[i]) || cg.owns_heap(params[i])) { vals.push(self.stage(cg, params[i], args[i]).1) }
             else if is_aggregate(params[i]) { vals.push(self.addr(cg, args[i])) } else { vals.push(self.expr(cg, args[i])) }
             i = i + 1
         }
@@ -4122,11 +4330,24 @@ impl Lower {
         // recursion) asks for instances without end: refused where it is
         // built, past a nesting no program needs (H5)
         var too = ""
+        // only an instance past the limit itself asks for one in a
+        // recursion: a deep type the program writes is no recursion
+        // (MYLA-544: a call of `mk<[[…int…]]>` 65 deep from `main`), and
+        // only for a deeper one than its own: a recursion over such a type
+        // that passes it on unchanged is none either (MYLA-543)
+        var cur_depth = 0
+        var cur_size = 0
+        for sb in cg.subst {
+            let d = type_depth(sb.ty)
+            if d > cur_depth { cur_depth = d }
+            let z = type_size(sb.ty, MAX_INSTANCE_SIZE)
+            if z > cur_size { cur_size = z }
+        }
         for ta in targs {
             // (a type that doubles at each step grows too large long before
             // it is too deep)
-            if too == "" && type_size(ta, MAX_INSTANCE_SIZE) > MAX_INSTANCE_SIZE { too = format("more than {} types in all", MAX_INSTANCE_SIZE) }
-            else if too == "" && type_depth(ta) > MAX_INSTANCE_DEPTH { too = format("{} types deep (the limit is {})", type_depth(ta), MAX_INSTANCE_DEPTH) }
+            if too == "" && cur_size > MAX_INSTANCE_SIZE / 2 && type_size(ta, MAX_INSTANCE_SIZE) > MAX_INSTANCE_SIZE { too = format("more than {} types in all", MAX_INSTANCE_SIZE) }
+            else if too == "" && cur_depth >= MAX_INSTANCE_DEPTH && type_depth(ta) > cur_depth { too = format("{} types deep (the limit is {})", type_depth(ta), MAX_INSTANCE_DEPTH) }
         }
         if too != "" { self.refuse_instance(cg, call, if sig.has_decl { sig.decl.name } else { sig.name }, too) }
         else { self.f.instances.push(Instance { orig: sig.name, targs: targs }) }
@@ -4171,11 +4392,17 @@ impl Lower {
         // indices of the receiver's place and every argument computed first,
         // in order, so that the place is reached after them (H4)
         var argv = argv0
-        if root != "" && !tail && argv0.len() > 1 && !settled_operands(argv0[1:], root) {
-            argv = [self.held_place(cg, argv0[0], e.id)]
+        if root != "" && !tail && argv0.len() > 1 && args_before_place(argv0[0], argv0[1:], root) {
+            argv = [self.held_receiver(cg, argv0[0], e.id)]
             var j = 1
             while j < argv0.len() {
-                argv.push(self.held_operand(cg, argv0[j], format("%arg{}_{}", e.id, j)))
+                // a variable, or a field of one, that no later argument
+                // writes reads the same where it is passed: not copied
+                // (`lw.entry_member(cg, lw.read_cell(sm), …)` copied the
+                // code generator, MYLA-542)
+                let a = argv0[j]
+                if field_path(a) && place_root(a) != root && !written_after(cg, a, argv0[j + 1:]) { argv.push(a) }
+                else { argv.push(self.held_operand(cg, a, format("%arg{}_{}", e.id, j))) }
                 j = j + 1
             }
         }
@@ -4222,7 +4449,7 @@ impl Lower {
             }
             // a later argument may write the variable this one is read from:
             // a copy taken now, so the call gets the value it had (MYLA-237)
-            else if !(i == 0 && root != "") && later_writes(argv, i) && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
+            else if !(i == 0 && root != "") && later_writes(cg, argv, i) && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
                 let staged = self.stage(cg, params[i], argv[i])
                 if owned { self.moved(staged.0) }
                 vals.push(staged.1)
@@ -4239,6 +4466,8 @@ impl Lower {
             }
             i = i + 1
         }
+        // a `#track_caller` function's hidden last argument (MYLA-435)
+        if sig.has_decl && tracks_caller(sig.decl) { vals.push(self.caller_position(Pos { line: e.line, col: e.col })) }
         if tail {
             // the checker counts a value of a type parameter as one word; an
             // instance passing more on the stack than it received is refused
@@ -4341,7 +4570,7 @@ impl Lower {
         let bt = cg.type_of(base.id)
         let i64 = Type.TInt(64, true)
         let p = slice_parts(idx)
-        let cell = self.expr(cg, base)
+        let cell = self.operand(cg, base, [p.start, p.stop, p.step])
         var vals: [int32] = [cell]
         for b in [p.start, p.stop] {
             if is_hole_part(b) {
@@ -4405,7 +4634,7 @@ impl Lower {
     fun elem_read(var self, cg: CodeGen, e: Expr, base: Expr, idx: Expr) -> int32 {
         let bt = self.place_type(cg, base)
         if !is_list_t(bt) && !is_tstr(bt) && !is_map_t(bt) { return self.unsupported("indexing that type") }
-        let cell = self.expr(cg, base)
+        let cell = self.operand(cg, base, [idx])
         if is_map_t(bt) { return self.map_value(cg, e, bt, cell, self.key_operand(cg, bt, idx)) }
         let i = self.index_of(cg, cell, idx)
         var stride = 1
@@ -4416,16 +4645,21 @@ impl Lower {
         return d
     }
 
-    // `push(holder, value)`: the value taken first (with its references), then
-    // the list made unique, grown when full, and the value moved in.
+    // `push(holder, value)`: the indices of the holder's place first, as
+    // every method call takes its receiver's place before its arguments
+    // (D193), where the order can be told; then the value taken (with its
+    // references), then the list made unique, grown when full, and the value
+    // moved in.
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[-1]
     fun push_elem(var self, cg: CodeGen, holder: Expr, value: Expr) -> int32 {
         let lt = self.place_type(cg, holder)
         if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
         let et = list_elem(lt)
         let stride = cg.elem_size(et)
+        var at = holder
+        if !path_unaffected_by(cg, holder, value) { at = self.held_place(cg, holder, holder.id) }
         let staged = self.stage(cg, et, value)
-        let h = self.place(cg, holder)
+        let h = self.place(cg, at)
         let cell = self.temp(lt)
         self.add(Inst.Cow(cell, lt, h))
         let slot_p = self.temp(Type.TPtr)
@@ -4511,12 +4745,72 @@ impl Lower {
     fun key_operand(var self, cg: CodeGen, mt: Type, k: Expr) -> int32 {
         if !cg.map_hashed(mt) { return self.expr(cg, k) }
         let kt = map_key(mt)
-        if cg.is_boxed(kt) { return self.unsupported("a map keyed by a recursive enum") }
-        if is_aggregate(kt) { return self.addr(cg, k) }
+        if cg.is_boxed(kt) {
+            // a recursive enum (D194), as its slot holds it: a word pointing
+            // at the value, borrowed, which the key's routines only read
+            // (`__mput_<K>` boxes a copy)
+            let w = self.new_slot("__key", Type.TPtr, 8, -1, false)
+            self.add(Inst.Store(w, self.addr(cg, k)))
+            return self.slot_addr(w)
+        }
+        if is_aggregate(kt) {
+            let a = self.addr(cg, k)
+            self.nan_key_check(cg, kt, a, 0, k)
+            return a
+        }
         let v = self.expr(cg, k)
         let slot = self.new_slot("__key", kt, 8, -1, false)
         self.add(Inst.Store(slot, v))
+        self.nan_key_check(cg, kt, self.slot_addr(slot), 0, k)
         return self.slot_addr(slot)
+    }
+
+    // The runtime error `cannot hash NaN` at the key `k` (in a
+    // `#track_caller` function at its caller's position) when the member of
+    // type `kt` at `off` from the key's address `p` is a NaN float, itself
+    // or in a tuple's or a derived struct's member: where the program's map
+    // operation is, not std.hash's `hash` (MYLA-850; the interpreter's
+    // `nan_key`). A NaN in a list or an enum is std.hash's to find.
+    fun nan_key_check(var self, cg: CodeGen, kt: Type, p: int32, off: int32, k: Expr) {
+        if is_tfloat_ir(kt) {
+            // as `hash_key_member` reads it: a float32 widened in its word
+            let f64 = Type.TFloat(64)
+            let x = self.temp(f64)
+            self.add(Inst.LoadAt(x, p, off, 8))
+            let nan = self.temp(Type.TBool)
+            self.add(Inst.Cmp(nan, "!=", f64, x, x))
+            let bad = self.new_block()
+            let ok = self.new_block()
+            self.finish(Term.Br(nan, bad, ok))
+            self.start(bad)
+            let m = self.temp(Type.TStr)
+            self.add(Inst.Str(m, "cannot hash NaN"))
+            self.finish(self.panic_term(m, Pos { line: k.line, col: k.col }))
+            self.start(ok)
+            return
+        }
+        match kt {
+            Type.TTuple(es) => {
+                var cur = off
+                for et in es {
+                    self.nan_key_check(cg, et, p, cur, k)
+                    cur = cur + cg.stored_size(et)
+                }
+            },
+            Type.TStruct(n, a) => {
+                if cg.derives_hash(n) {
+                    let info = cg.struct_info(n)
+                    let sub = cg.type_subst(info.type_params, a)
+                    var cur = off
+                    for f in info.fields {
+                        let fty = subst_type(f.ty, sub)
+                        self.nan_key_check(cg, fty, p, cur, k)
+                        cur = cur + cg.stored_size(fty)
+                    }
+                }
+            },
+            _ => {},
+        }
     }
 
     // The address of the value of `key` in the map `cell`, borrowed from it;
@@ -4612,7 +4906,13 @@ impl Lower {
                     x = self.temp(Type.TFloat(64))
                     self.add(Inst.Cast(x, t, Type.TFloat(64), v))
                 }
-                self.rt_call(cg, d, "__float_to_str", [x, self.int_const(17)])
+                // (written as the interpreter's `py_repr` writes it, `3.0`,
+                // `1e+300`, by std.rt where it has the routine)
+                if cg.has_func("std$rt$key_float_text") {
+                    let text = self.temp(Type.TStr)
+                    self.rt_call(cg, text, "__float_to_str", [x, self.int_const(17)])
+                    self.add(Inst.Call(d, "std$rt$key_float_text", [text]))
+                } else { self.rt_call(cg, d, "__float_to_str", [x, self.int_const(17)]) }
             },
             _ => { self.add(Inst.Str(d, "?")) },
         }
@@ -4683,6 +4983,28 @@ impl Lower {
         self.add(Inst.Store(slot, v))
         self.own_temp(slot)
         return (slot, v)
+    }
+
+    // The value of the operand `x` of an expression whose operands `later`
+    // are evaluated after it: what it reads taken with a reference of its
+    // own (`stage`, the statement's to release) when one of them may write
+    // the variable it is read from, which would otherwise release it before
+    // it is used (B2: an operator's operands, an index's or a slice's base, a
+    // format hole, a map literal's key, a called function value; an
+    // argument's is MYLA-237's); else borrowed, as `expr` gives it.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("1"), [])[0]
+    fun operand(var self, cg: CodeGen, x: Expr, later: [Expr]) -> int32 {
+        let t = self.place_type(cg, x)
+        if cg.owns_heap(t) && !is_aggregate(t) && written_after(cg, x, later) { return self.stage(cg, t, x).1 }
+        return self.expr(cg, x)
+    }
+
+    // `operand`'s address of an aggregate operand `x`, as `addr` gives it, or
+    // of a copy of it with references of its own.
+    fun operand_addr(var self, cg: CodeGen, x: Expr, later: [Expr]) -> int32 {
+        let t = self.place_type(cg, x)
+        if is_aggregate(t) && written_after(cg, x, later) { return self.stage(cg, t, x).1 }
+        return self.addr(cg, x)
     }
 
     // Set `key` in the (unique) map the 8 bytes at `holder` point at to the
@@ -4772,7 +5094,10 @@ impl Lower {
         self.own_temp(slot)
         let h = self.slot_addr(slot)
         for en in entries {
-            let k = self.key_operand(cg, mt, en.key)
+            var key = en.key
+            // held when its value may write the variable it is read from (B2)
+            if written_after(cg, en.key, [en.value]) { key = self.held_operand(cg, en.key, format("%key{}", en.key.id)) }
+            let k = self.key_operand(cg, mt, key)
             let staged = self.stage(cg, map_val(mt), en.value)
             self.map_put(cg, mt, h, k, staged)
         }
@@ -4804,7 +5129,8 @@ impl Lower {
     fun map_contains(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
         let mt = self.place_type(cg, m)
         if !is_map_t(mt) { return self.unsupported("contains on that type") }
-        let cell = self.expr(cg, m)
+        // the map kept while a key that may replace it is computed (H4)
+        let cell = self.operand(cg, m, [k])
         let key = self.key_operand(cg, mt, k)
         let slot = self.map_lookup(cg, mt, cell, key)
         let d = self.temp(Type.TBool)
@@ -4909,8 +5235,8 @@ impl Lower {
     // change or copy the builder computed before it, in order (H4).
     fun sb_append(var self, cg: CodeGen, e: Expr, nm: str, args0: [Expr]) -> int32 {
         var args = args0
-        if !settled_operands(args0[1:], place_root(args0[0])) {
-            args = [self.held_place(cg, args0[0], e.id)]
+        if args_before_place(args0[0], args0[1:], place_root(args0[0])) {
+            args = [self.held_receiver(cg, args0[0], e.id)]
             var i = 1
             while i < args0.len() {
                 args.push(self.held_operand(cg, args0[i], format("%arg{}_{}", e.id, i)))
@@ -4957,7 +5283,10 @@ impl Lower {
         if segs[0] != "" || args.len() == 1 { parts.push(self.str_const(segs[0])) }
         var k = 1
         while k < args.len() {
-            parts.push(self.render_spec(cg, args[k], specs[k - 1]))
+            // a string as it is, borrowed, but held when a later hole may
+            // write its variable (B2); every other hole's text is new
+            if specs[k - 1] == "" && is_tstr(cg.type_of(args[k].id)) { parts.push(self.operand(cg, args[k], args[k + 1:])) }
+            else { parts.push(self.render_spec(cg, args[k], specs[k - 1])) }
             if segs[k] != "" { parts.push(self.str_const(segs[k])) }
             k = k + 1
         }
@@ -5044,6 +5373,65 @@ impl Lower {
         let sv = self.temp(Type.TStr)
         self.add(Inst.Str(sv, spec))
         vals.push(sv)
+        return self.call_owning(cg, name, vals)
+    }
+
+    // `x.format(spec)` of a printable builtin value, `x: T` with `T: Format`
+    // at a builtin `T` (MYLA-544): its print form by the spec `sp`, a value,
+    // with std.fmt, as `render_spec` gives a hole's; a new string the
+    // statement owns. A spec that isn't one is a runtime error at `at`, the
+    // call's place.
+    fun builtin_format(var self, cg: CodeGen, arg: Expr, sp: Expr, at: Pos) -> int32 {
+        let t = cg.type_of(arg.id)
+        var name = "std$fmt$fmt_text"
+        var vals: [int32] = []
+        match t {
+            Type.TInt(w, sg) => {
+                name = "std$fmt$fmt_int"
+                let v = self.expr(cg, arg)
+                let v64 = self.temp(Type.TInt(64, true))
+                self.add(Inst.Cast(v64, t, Type.TInt(64, true), v))
+                vals = [v64, self.int_const(w), self.konst(Type.TBool, if sg { 1 } else { 0 })]
+            },
+            Type.TFloat(w) => {
+                name = "std$fmt$fmt_float"
+                let v = self.expr(cg, arg)
+                var extra = 17
+                if w == 32 { extra = 9 }
+                let text = self.temp(Type.TStr)
+                self.rt_call(cg, text, "__float_to_str", [v, self.int_const(extra)])
+                let owned_text = self.owned_value(cg, text, Type.TStr)
+                var v64 = v
+                if w == 32 {
+                    v64 = self.temp(Type.TFloat(64))
+                    self.add(Inst.Cast(v64, t, Type.TFloat(64), v))
+                }
+                vals = [v64, owned_text]
+            },
+            _ => { vals = [self.render(cg, arg)] },
+        }
+        if !cg.has_func(name) { return self.unsupported("a format spec without std.fmt") }
+        let spec = self.expr(cg, sp)
+        if cg.has_func("std$fmt$spec_misfit") {
+            // a spec that isn't one, or doesn't fit the type, is the
+            // caller's: reported here, as the interpreter does, not inside
+            // std.fmt (D183, MYLA-565)
+            let class = match t { Type.TInt(w, sg) => 0, Type.TFloat(w) => 1, _ => 2 }
+            let found = self.temp(Type.TStr)
+            self.add(Inst.Str(found, type_name(t)))
+            let why = self.call_owning(cg, "std$fmt$spec_misfit", [spec, self.int_const(class), found])
+            let n = self.temp(Type.TInt(32, true))
+            self.add_load(n, why, 0)
+            let fine = self.temp(Type.TBool)
+            self.add(Inst.Cmp(fine, "==", Type.TInt(32, true), n, self.int_const(0)))
+            let bad = self.new_block()
+            let ok = self.new_block()
+            self.finish(Term.Br(fine, ok, bad))
+            self.start(bad)
+            self.finish(Term.Panic(why, at))
+            self.start(ok)
+        }
+        vals.push(spec)
         return self.call_owning(cg, name, vals)
     }
 
@@ -5181,13 +5569,15 @@ impl Lower {
         let at = Pos { line: e.line, col: e.col }
         if nm == "panic" {
             let m = self.expr(cg, args[0])
-            self.leave(Term.Panic(m, at))
+            let t = self.panic_term(m, at)
+            self.leave(t)
             return -1
         }
         let fail = self.temp(Type.TStr)
         if nm == "unreachable" {
             self.add(Inst.Str(fail, "reached unreachable code"))
-            self.leave(Term.Panic(fail, at))
+            let t = self.panic_term(fail, at)
+            self.leave(t)
             return -1
         }
         let c = self.expr(cg, args[0])
@@ -5203,13 +5593,32 @@ impl Lower {
             self.begin_temps()
             let m = self.expr(cg, args[1])
             while self.temps.len() > tc { let ts = self.temps.pop() }
-            self.finish(Term.Panic(m, at))
+            let t = self.panic_term(m, at)
+            self.finish(t)
         } else {
             self.add(Inst.Str(fail, "assertion failed"))
-            self.finish(Term.Panic(fail, at))
+            let t = self.panic_term(fail, at)
+            self.finish(t)
         }
         self.start(ok)
         return -1
+    }
+
+    // The runtime error with the message %m at `at`, or in a `#track_caller`
+    // function at its caller's position (MYLA-435).
+    fun panic_term(var self, m: int32, at: Pos) -> Term {
+        if self.caller >= 0 { return Term.PanicAt(m, self.read_cell(self.caller)) }
+        return Term.Panic(m, at)
+    }
+
+    // The position a call at `at` passes to a `#track_caller` function: the
+    // address of its record, or in such a function its own caller's, which
+    // it passes on (MYLA-435).
+    fun caller_position(var self, at: Pos) -> int32 {
+        if self.caller >= 0 { return self.read_cell(self.caller) }
+        let d = self.temp(Type.TInt(64, true))
+        self.add(Inst.Position(d, at))
+        return d
     }
 
     // The I/O intrinsics (`__write`, `__read_file`, …): runtime helpers taking
@@ -5224,10 +5633,10 @@ impl Lower {
             return self.owned_value(cg, d, t)
         }
         // the test runner's environment, natively (D162): the harness of
-        // `myla test --native` sets MYLA_TEST_DIR and MYLA_TEST_PROGRAM for
-        // the case it runs
-        if nm == "__test_dir" || nm == "__test_program" {
-            let var_name = if nm == "__test_dir" { "MYLA_TEST_DIR" } else { "MYLA_TEST_PROGRAM" }
+        // `myla test --native` sets MYLA_TEST_DIR, MYLA_TEST_PROGRAM and
+        // MYLA_TEST_TOOL (itself, MYLA-727) for the case it runs
+        if nm == "__test_dir" || nm == "__test_program" || nm == "__test_tool" {
+            let var_name = if nm == "__test_dir" { "MYLA_TEST_DIR" } else if nm == "__test_program" { "MYLA_TEST_PROGRAM" } else { "MYLA_TEST_TOOL" }
             let sv = self.temp(Type.TStr)
             self.add(Inst.Str(sv, var_name))
             let d = self.temp(t)
@@ -5323,7 +5732,7 @@ impl Lower {
         }
         // helpers without a result, then those with one
         let effects = ["__exit", "__write", "__write_bytes", "__write_file", "__mkdir", "__unlink", "__rmdir", "__rename", "__sleep_ns", "__kill", "__close"]
-        let results = ["__clock_ns", "__disarm", "__spawn", "__run_with", "__spawn_with", "__reap", "__args", "__read_file", "__read", "__poll", "__getcwd", "__getenv", "__sqrt", "__f64_bits", "__f64_from_bits", "__list_dir", "__stat", "__run", "__task_cancelled", "__str_to_bytes", "__bytes_to_str", "__read_bytes"]
+        let results = ["__clock_ns", "__disarm", "__spawn", "__run_with", "__spawn_with", "__reap", "__args", "__read_file", "__read", "__poll", "__getcwd", "__getenv", "__sqrt", "__f64_bits", "__f64_from_bits", "__list_dir", "__stat", "__run", "__task_cancelled", "__tasks_waiting", "__str_to_bytes", "__bytes_to_str", "__read_bytes"]
         var has_result = false
         var known = false
         for r in effects { if r == nm { known = true } }
@@ -5358,6 +5767,8 @@ impl Lower {
         if !known { return self.unsupported(format("the builtin {}", nm)) }
         // without tasks nothing is ever asked to stop (MYLA-263: no routine)
         if nm == "__task_cancelled" && !cg.frames { return self.konst(Type.TBool, 0) }
+        // a program without tasks has no other task to wait (MYLA-548)
+        if nm == "__tasks_waiting" && !cg.frames { return self.konst(Type.TInt(32, true), -1) }
         var vals: [int32] = []
         for a in args { vals.push(self.expr(cg, a)) }
         if nm == "__exit" {
@@ -5424,7 +5835,7 @@ impl Lower {
         let root_var = place_root(scrut)
         // the copy owns references of its own when an arm may write the
         // variable, or when other calls of the actor may (MYLA-168's t13)
-        let owns_copy = root_var != "" && cg.owns_heap(sst) && (arms_may_write(arms, root_var) || self.shared_self(root_var))
+        let owns_copy = root_var != "" && cg.owns_heap(sst) && (arms_may_write(cg, arms, root_var) || self.shared_self(root_var))
         let root = self.value_slot(cg, "__scrutinee", sst, owns_copy)
         let base = self.slot_addr(root)
         if is_aggregate(sst) {
@@ -5718,6 +6129,11 @@ pub fun myla_runtime_function(name: str) -> str {
         sb.append(name, 2, name.len())
         return "std$rt$" + sb.build()
     }
+    // whether other tasks wait for a worker, with tasks (MYLA-548): called
+    // where it is used, so a library without it builds every other program
+    if name == "__tasks_waiting" {
+        return "std$rt$tasks_waiting"
+    }
     return ""
 }
 
@@ -5757,9 +6173,9 @@ fun wrap_ir(v: int64, t: Type) -> int64 {
 #test("main")[true]
 #test("std$list$sum")[true]
 #test("std$rt$map_lookup")[false]
-#test("std$platform_aarch64$write")[false]
+#test("std$platform_wasm$write")[false]
 fun checked_code(mangled: str) -> bool {
-    for prefix in ["std$rt$", "std$platform$", "std$platform_aarch64$", "std$platform_wasm$"] {
+    for prefix in ["std$rt$", "std$platform$", "std$platform_wasm$", "std$platform_windows$"] {
         if mangled.len() >= prefix.len() && mangled[:prefix.len()] == prefix { return false }
     }
     return true
@@ -5787,7 +6203,7 @@ fun calls_nothing(e: Expr) -> bool {
 // An empty lowering of the routine `name` with result type `ret`, its entry
 // block started.
 fun routine(name: str, ret: Option<Type>) -> Lower {
-    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1 }
+    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:], wants: [], defers: [], received: -1, refused: [], fn_name: "", by_addr: -1, by_addr_t: Type.TBool, resized: [], scanned: false, below: [], len_lets: [], nonneg: [], checked: false, fused: -1, fused_val: -1, caller: -1 }
     let entry = lw.new_block()
     lw.start(entry)
     return lw
@@ -6133,6 +6549,29 @@ impl Lower {
             self.mix_word(sh, h)
             return
         }
+        // a float by std.hash's own `hash` (D198), as a float64 (a float32 is
+        // one exactly): its NaN error and -0.0 folded into 0.0 in one place,
+        // the one the interpreter calls for a NaN too
+        if is_tfloat_ir(ft) {
+            let f64 = Type.TFloat(64)
+            let x = self.temp(f64)
+            if width < 8 {
+                let y = self.temp(ft)
+                self.add(Inst.LoadAt(y, p, off, width))
+                self.add(Inst.Cast(x, ft, f64, y))
+            } else {
+                self.add(Inst.LoadAt(x, p, off, 8))
+            }
+            let hasher = Type.TStruct("Hasher", [])
+            let hs = self.new_slot("__hasher", hasher, 8, -1, false)
+            self.add_store(self.slot_addr(hs), 0, self.int_const(0))
+            let rs = self.new_slot("__hashed", hasher, 8, -1, false)
+            self.add(Inst.CallSret(self.type_method(cg, f64, "hash"), self.slot_addr(rs), [x, self.slot_addr(hs)]))
+            let st = self.temp(i64)
+            self.add(Inst.LoadAt(st, self.slot_addr(rs), 0, 8))
+            self.mix_word(sh, st)
+            return
+        }
         match ft {
             Type.TTuple(es) => {
                 var cur = off
@@ -6323,7 +6762,17 @@ pub fun map_put_ir(cg: CodeGen, kt: Type, name: str) -> Routine {
     let sm = lw.new_slot("made", i64, 8, -1, false)
     lw.add(Inst.Store(sm, made))
     let ks = cg.stored_size(kt)
-    if ks > 0 {
+    if cg.is_boxed(kt) {
+        // a recursive enum's key (D194), given as a word pointing at it: a
+        // new box holding a copy, with references of its own
+        let b = lw.temp(Type.TPtr)
+        lw.add(Inst.Rt(b, "__alloc", [lw.int_const(cg.size(kt))]))
+        let src = lw.temp(Type.TPtr)
+        lw.add(Inst.LoadAt(src, lw.read_ptr(sk), 0, 8))
+        lw.add(Inst.Copy(b, src, cg.size(kt)))
+        lw.add(Inst.Retain(kt, b))
+        lw.add(Inst.StoreAt(lw.read_cell(sm), 16, b, 8))
+    } else if ks > 0 {
         let at = lw.temp(i64)
         lw.add(Inst.Bin(at, "+", i64, i64, lw.read_cell(sm), lw.int_const(16), Pos { line: 0, col: 0 }))
         let dst = lw.temp(Type.TPtr)
@@ -6821,9 +7270,13 @@ pub fun map_drop_slow_ir(cg: CodeGen, mt: Type, name: str, free: str, kind: int3
 
 // The std.rt function that words the runtime error `__trap_<kind>` (D183).
 #test("lindex")["std$rt$list_index_text"]
+#test("suindex")["std$rt$str_uindex_text"]
 pub fun trap_text_fn(kind: str) -> str {
     if kind == "lindex" { return "std$rt$list_index_text" }
     if kind == "sindex" { return "std$rt$str_index_text" }
+    // a uint64 index (MYLA-546)
+    if kind == "luindex" { return "std$rt$list_uindex_text" }
+    if kind == "suindex" { return "std$rt$str_uindex_text" }
     return "std$rt$range_text"
 }
 
@@ -7762,7 +8215,20 @@ pub fun env_deep_members_ir(cg: CodeGen, lifted: str, owned: [DropEntry], clone:
     let sc = lw.new_slot("env", Type.TInt(64, true), 8, 0, false)
     let guarded = lw.drop_guard(sc, kind)
     lw.add(Inst.StoreAt(lw.read_cell(sc), -8, lw.int_const(1), 8))
-    for d in owned { lw.deep_member(cg, sc, d.off, d.ty, clone) }
+    for d in owned {
+        if cg.is_boxed(d.ty) {
+            // a boxed enum captured is its cell's contents, inline, as
+            // `env_drop_ir` releases it: walked in place, not loaded as a box
+            // (B1)
+            let i64 = Type.TInt(64, true)
+            lw.wants.push(Want { kind: 2, t: d.ty, clone: clone })
+            let p = lw.temp(i64)
+            lw.add(Inst.Bin(p, "+", i64, i64, lw.read_cell(sc), lw.int_const(d.off), Pos { line: 0, col: 0 }))
+            lw.add(Inst.Rt(-1, cg.deep_walk_label(d.ty, clone, true), [p]))
+        } else {
+            lw.deep_member(cg, sc, d.off, d.ty, clone)
+        }
+    }
     if guarded { lw.guard_end() }
     lw.finish(Term.Ret(-1))
     return Routine { f: lw.f, wants: lw.wants }

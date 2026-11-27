@@ -4,8 +4,9 @@
 // written in Myla after fdlibm, the reference implementation most C math
 // libraries descend from (its range reductions and polynomial coefficients),
 // so the interpreter and native code give bit-identical results:
-// - `exp`, `ln`, `log2`, `log10`, `pow`, `hypot`, `sin`, `cos` and `atan`
-//   within about one unit in the last place of the exact result;
+// - `exp`, `expm1`, `ln`, `log2`, `log10`, `pow`, `hypot`, `cbrt`, `sin`,
+//   `cos` and `atan` within about one unit in the last place of the exact
+//   result, `sinh`, `cosh` and `tanh` within two (MYLA-796);
 // - `tan`, `asin`, `acos` and `atan2` within a few (tests/burn/test_math.py
 //   holds them to 4);
 // - `sin`, `cos` and `tan` reduce their argument exactly: by a three-part π/2
@@ -207,9 +208,16 @@ const INV_LN2: float64 = 1.44269504088896338700e+00
 
 // x · 2^k
 #test(1.5, 3)[12.0]
+#test(4.9406564584124654e-324, 2097)[8.98846567431158e307] // the least subnormal to 2^1023
+#test(1.7976931348623157e308, -2098)[4.9406564584124654e-324] // the greatest double to the least subnormal
+#test(4.9406564584124654e-324, 2147483647)[infinity()] // three steps, not two million
+#test(1.7976931348623157e308, -2147483647 - 1)[0.0]
 pub fun ldexp(x: float64, k: int32) -> float64 {
     var y = x
-    var n = k
+    // A finite non-zero `x` is at least 2^-1074 and less than 2^1024, so
+    // past ±2100 the result overflows or underflows whatever `x` is: at
+    // most three steps (fdlibm's scalbn, MYLA-580)
+    var n = if k > 2100 { 2100 } else if k < -2100 { -2100 } else { k }
     // in steps that keep the scale factor a normal number
     while n > 1023 {
         y = y * from_bits(0x7FE0000000000000)    // 2^1023
@@ -316,24 +324,264 @@ pub fun log2(x: float64) -> float64 {
     return (fk.1 as float64) + lnf * 1.44269504088896338700e+00
 }
 
-// The base-10 logarithm (fdlibm's e_log10.c): exact for powers of ten up
-// to 10^22.
+const IVLN10_HI: float64 = 4.34294481878168880939e-01    // 1/ln(10), its high 33 bits
+const IVLN10_LO: float64 = 2.50829467116452752298e-11    // and the rest
+const LOG10_2_HI: float64 = 3.01029995663611771306e-01   // log10(2), its high 33 bits
+const LOG10_2_LO: float64 = 3.69423907715893078616e-13   // and the rest
+
+// The base-10 logarithm (FreeBSD's e_log10.c, after fdlibm's): ln(1 + f)
+// of the reduced argument in two parts, multiplied by 1/ln(10) in two, so
+// it keeps its digits near 1 (`log10(0.999999)`, MYLA-796); exact for powers
+// of ten up to 10^22.
 #test(1000.0)[3.0]
 #test(0.01)[-2.0]
+#test(0.999999)[-4.34294699063126e-7]
+#test(0.9999999999999999)[-4.821637332766436e-17] // correctly rounded (glibc's is one unit above)
+#test(1.0)[0.0]
 pub fun log10(x: float64) -> float64 {
     if is_nan(x) || x < 0.0 || x == 0.0 || is_infinite(x) {
         return ln(x)
     }
-    var v = x
-    var k = 0
-    if exponent(v) == -1023 {
-        v = v * 18014398509481984.0
-        k = -54
+    let fk = reduce_log(x)
+    let f = fk.0 - 1.0
+    let y = fk.1 as float64
+    let kern = log_kernel(f)
+    let hfsq = kern.2
+    let r = kern.0 * (hfsq + kern.1)
+    // ln(1 + f) = f - hfsq + r, as hi + lo with hi's low 32 bits zero
+    let hi = clear_low(f - hfsq)
+    let lo = (f - hi) - hfsq + r
+    let y2 = y * LOG10_2_HI
+    let val_hi = hi * IVLN10_HI
+    var val_lo = y * LOG10_2_LO + (lo + hi) * IVLN10_LO + lo * IVLN10_HI
+    let w = y2 + val_hi
+    val_lo += (y2 - w) + val_hi
+    return val_lo + w
+}
+
+// --- hyperbolic functions and e^x - 1 -------------------------------------------
+
+// e^x - 1, its digits kept near 0 where `exp(x) - 1.0` loses them (fdlibm's
+// s_expm1.c), within one unit in the last place.
+#test(0.0)[0.0]
+#test(-0.0)[-0.0]
+#test(1e-10)[1.00000000005e-10]
+#test(1.0)[1.718281828459045]
+#test(-1.0)[-0.6321205588285577]
+#test(-40.0)[-1.0]
+#test(710.0)[infinity()]
+pub fun expm1(x: float64) -> float64 {
+    let hx = high(x) & 0x7FFFFFFF
+    let negative = high(x) < 0
+    if hx >= 0x4043687A {                    // |x| >= 56·ln2
+        if hx >= 0x7FF00000 {
+            if is_nan(x) { return x }
+            return if negative { -1.0 } else { x }
+        }
+        if x > 7.09782712893383973096e+02 { return infinity() }
+        if negative { return -1.0 }
     }
-    k += exponent(v)
-    let m = from_bits((raw_bits(v) & MANTISSA) | 0x3FF0000000000000)
-    let kf = k as float64
-    return kf * 3.01029995663611771306e-01 + (kf * 3.69423907715893078616e-13 + 4.34294481903251816668e-01 * ln(m))
+    // x = k·ln2 + r with |r| <= ln2/2: `y` is r, `c` the error of its hi - lo
+    var y = x
+    var c = 0.0
+    var k = 0
+    if hx > 0x3FD62E42 {                     // |x| > ln2/2
+        var hi = 0.0
+        var lo = 0.0
+        if hx < 0x3FF0A2B2 {                 // and |x| < 1.5·ln2
+            if negative {
+                hi = x + LN2_HI
+                lo = -LN2_LO
+                k = -1
+            } else {
+                hi = x - LN2_HI
+                lo = LN2_LO
+                k = 1
+            }
+        } else {
+            let t = trunc(INV_LN2 * x + (if negative { -0.5 } else { 0.5 }))
+            k = t as int32
+            hi = x - t * LN2_HI              // exact here
+            lo = t * LN2_LO
+        }
+        y = hi - lo
+        c = (hi - y) - lo
+    } else if hx < 0x3C900000 {              // |x| < 2^-54
+        return x
+    }
+    let hfx = 0.5 * y
+    let hxs = y * hfx
+    let r1 = 1.0 + hxs * (-3.33333333333331316428e-02 + hxs * (1.58730158725481460165e-03 + hxs * (-7.93650757867487942473e-05 +
+        hxs * (4.00821782732936239552e-06 + hxs * -2.01099218183624371326e-07))))
+    let t = 3.0 - r1 * hfx
+    var e = hxs * ((r1 - t) / (6.0 - y * t))
+    if k == 0 {
+        return y - (y * e - hxs)
+    }
+    e = y * (e - c) - c
+    e -= hxs
+    if k == -1 {
+        return 0.5 * (y - e) - 0.5
+    }
+    if k == 1 {
+        if y < -0.25 {
+            return -2.0 * (e - (y + 0.5))
+        }
+        return 1.0 + 2.0 * (y - e)
+    }
+    if k <= -2 || k > 56 {
+        // 2^k·(1 + r + …) - 1, the 1 lost or negligible
+        return ldexp(1.0 - (e - y), k) - 1.0
+    }
+    if k < 20 {
+        // 2^k·((1 - 2^-k) + r + …): 1 - 2^-k is exact
+        return ldexp((1.0 - from_bits(((1023 - k) as uint64) << 52)) - (e - y), k)
+    }
+    return ldexp((y - (e + from_bits(((1023 - k) as uint64) << 52))) + 1.0, k)
+}
+
+// The hyperbolic sine (fdlibm's e_sinh.c): from `expm1` below 22, so it
+// keeps its digits near 0, and in two halves near the overflow, so it is
+// finite up to 710.4758600739439; within two units in the last place.
+#test(0.0)[0.0]
+#test(-0.0)[-0.0]
+#test(1.0)[1.1752011936438014]
+#test(1.16e-05)[1.160000000026015e-05] // correctly rounded
+#test(0.001)[0.0010000001666666751]
+#test(710.0)[1.1169973830808557e308] // glibc's too; one unit above the exact 1.1169973830808555e308
+#test(-710.0)[-1.1169973830808557e308]
+#test(711.0)[infinity()]
+pub fun sinh(x: float64) -> float64 {
+    let jx = high(x)
+    let ix = jx & 0x7FFFFFFF
+    if ix >= 0x7FF00000 {                    // inf or NaN
+        return x + x
+    }
+    let h = if jx < 0 { -0.5 } else { 0.5 }
+    let a = abs(x)
+    if ix < 0x40360000 {                     // |x| < 22
+        if ix < 0x3E300000 {                 // |x| < 2^-28: sinh(x) is x
+            return x
+        }
+        let t = expm1(a)
+        if ix < 0x3FF00000 {
+            return h * (2.0 * t - t * t / (t + 1.0))
+        }
+        return h * (t + t / (t + 1.0))
+    }
+    if ix < 0x40862E42 {                     // |x| < ln(MAX)
+        return h * exp(a)
+    }
+    if raw_bits(a) <= 0x408633CE8FB9F87D {   // up to the overflow threshold
+        let w = exp(0.5 * a)
+        let t = h * w
+        return t * w
+    }
+    return x * 1.0e307
+}
+
+// The hyperbolic cosine (fdlibm's e_cosh.c): from `expm1` below ln2/2, and
+// in two halves near the overflow, so it is finite up to 710.4758600739439;
+// within two units in the last place.
+#test(0.0)[1.0]
+#test(1.0)[1.543080634815244] // one unit in the last place above 1.5430806348152437
+#test(710.0)[1.1169973830808557e308]
+#test(-711.0)[infinity()]
+pub fun cosh(x: float64) -> float64 {
+    let ix = high(x) & 0x7FFFFFFF
+    if ix >= 0x7FF00000 {                    // inf or NaN
+        return x * x
+    }
+    let a = abs(x)
+    if ix < 0x3FD62E43 {                     // |x| < ln2/2: 1 + expm1(|x|)²/(2·exp(|x|))
+        let t = expm1(a)
+        let w = 1.0 + t
+        if ix < 0x3C800000 {
+            return w
+        }
+        return 1.0 + (t * t) / (w + w)
+    }
+    if ix < 0x40360000 {                     // |x| < 22
+        let t = exp(a)
+        return 0.5 * t + 0.5 / t
+    }
+    if ix < 0x40862E42 {                     // |x| < ln(MAX)
+        return 0.5 * exp(a)
+    }
+    if raw_bits(a) <= 0x408633CE8FB9F87D {
+        let w = exp(0.5 * a)
+        let t = 0.5 * w
+        return t * w
+    }
+    return infinity()
+}
+
+// The hyperbolic tangent (fdlibm's s_tanh.c): from `expm1`, ±1 from 22 on,
+// the sign of a zero kept; within two units in the last place.
+#test(0.0)[0.0]
+#test(-0.0)[-0.0]
+#test(1.0035695199723702e-05)[1.0035695199386786e-05]
+#test(0.5)[0.46211715726000974]
+#test(-2.0)[-0.9640275800758169]
+#test(100.0)[1.0]
+pub fun tanh(x: float64) -> float64 {
+    let jx = high(x)
+    let ix = jx & 0x7FFFFFFF
+    if ix >= 0x7FF00000 {                    // ±1 for ±inf, NaN for NaN
+        if is_nan(x) { return x }
+        return if jx >= 0 { 1.0 } else { -1.0 }
+    }
+    var z = 1.0
+    if ix < 0x40360000 {                     // |x| < 22
+        if ix < 0x3C800000 {                 // |x| < 2^-55
+            return x * (1.0 + x)
+        }
+        if ix >= 0x3FF00000 {                // |x| >= 1
+            let t = expm1(2.0 * abs(x))
+            z = 1.0 - 2.0 / (t + 2.0)
+        } else {
+            let t = expm1(-2.0 * abs(x))
+            z = -t / (t + 2.0)
+        }
+    }
+    return if jx >= 0 { z } else { -z }
+}
+
+// The cube root (fdlibm's s_cbrt.c): a guess to 5 bits from the exponent,
+// a rational step to 23, one Newton step to 53, within 0.667 units in the
+// last place; a perfect cube's is exact.
+#test(27.0)[3.0]
+#test(-8.0)[-2.0]
+#test(2.0)[1.2599210498948732]
+#test(5e-324)[1.7031839360032603e-108] // correctly rounded (glibc's is one unit below)
+#test(-0.0)[-0.0]
+pub fun cbrt(x: float64) -> float64 {
+    let hx = high(x) & 0x7FFFFFFF
+    if hx >= 0x7FF00000 {                    // cbrt of NaN and ±inf is itself
+        return x + x
+    }
+    if x == 0.0 {
+        return x
+    }
+    let a = abs(x)
+    var t = 0.0
+    if hx < 0x00100000 {                     // subnormal: from a · 2^54
+        t = from_bits(0x4350000000000000) * a
+        t = with_high(t, high(t) / 3 + 696219795)
+    } else {
+        t = with_high(0.0, hx / 3 + 715094163)
+    }
+    var r = t * t / a
+    var s = 5.42857142857142815906e-01 + r * t
+    t = t * (3.57142857142857150787e-01 + 1.60714285714285720630e+00 / (s + 1.41428571428571436819e+00 + -7.05306122448979611050e-01 / s))
+    // chopped to 20 bits, and made larger than the cube root
+    t = from_bits((raw_bits(t) & 0xFFFFFFFF00000000) + 0x0000000100000000)
+    s = t * t                                // exact
+    r = a / s
+    let w = t + t
+    r = (r - t) / (w + r)
+    t = t + t * r
+    return with_sign(t, x)
 }
 
 // The high 32 bits of `x`, as fdlibm reads them.

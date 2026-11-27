@@ -2,7 +2,7 @@
 id: MYLA-506
 title: "Interpreter: `m[k] = v` and `m[k]` call a compound key's written `hash` twice, native code once"
 type: bug
-status: review
+status: done
 priority: low
 labels: [interpreter, maps, parity]
 ---
@@ -72,3 +72,7 @@ It also costs the interpreter a second lookup of every map index, a plain key's 
 - **Cost** (callgrind, instructions of `myla run`, the base interpreter (35b399e) against this one): an `[int: int]` written and read 20,000 times each 603.3 M → 598.8 M (−0.7%); `counts[w] += 1` on a `[str: int]`, 20,000 times, 460.1 M → 454.1 M (−1.3%); a `#derive(Eq, Hash)` struct key written and read 804.8 M → 765.2 M (−4.9%); a key with a written `hash` and `eq` set and `+=` 10,000 times each 7,040 M → 2,631 M (−62.6%); `adj[i % 100].push(i)` and nested reads 799.2 M → 789.6 M (−1.2%); a grid of lists, `g[a][b] += 1` and `g[a][b] = i` 966.6 M → 924.7 M (−4.3%). Native code of the same programs (callgrind of the binary): `counts[w] += 1` 5.12 M → 2.28 M, the written-hash one 8.96 M → 5.98 M, the grid 1.75 M → 1.55 M. A first version that kept every key's place, and looked the variable up for every plain assignment, cost up to +11% on the plain-key loops; an argument computed by a method call inside another call retained the whole interpreter around it (`self.deref(self.lookup_or_unit(…))`), so those are `let`s now.
 - `#test` cases: `fused_assignment` (6), `is_member_place` (3), `changes_no_place` (2), `still_at` (3), `key_at` (2), `settle`, `settled_value`; `build/myla test selfhost/interp.my` 439/439, `selfhost/parser.my` 207/207, `selfhost/lower.my` 140/140.
 - **Suites** (both tasks together, at the lane's tip): `scripts/test.sh fast` 855 tests OK (3 skipped); `tests.burn.test_compiler_parity`, `test_selfhost_interp`, `test_selfhost_cases`, `test_map_remove`, `test_overflow` 317 OK; on aarch64 and wasm32 (`scripts/test-target.py`) `test_compiler_parity`, `test_error_corpus`, `test_overflow`, `test_map_remove`, `test_selfhost_codegen` all pass; `scripts/test.sh` (all) 1,533 tests, one failure, `test_a_counting_loop_below_a_length_indexes_unchecked`, which counted three element addresses for `bs[i].x += bs[i].v` where [[MYLA-506]]'s single lookup leaves two (both still unchecked): its expectation updated, it passes. `scripts/bootstrap.sh`: byte-identical fixed point (23,758,785 bytes); `selfhost/embedded_std.my` unchanged (no `lib/` change).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-546]]: a map's order still differs from native code's when written hashes collide, and in a nested map literal.

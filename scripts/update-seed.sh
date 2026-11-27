@@ -10,16 +10,23 @@
 # embedded standard library (seed_compile in scripts/host.sh, MYLA-431), which
 # stage 0 never reads, since the bootstrap gives it lib/.
 #
-# When: with every change to the compiler's output (selfhost/, the standard
-# library it imports), committed with that change: CI fails a pull request
-# whose seed isn't the current compiler (scripts/check-seed.sh), and the
-# optional pre-push hook checks it before a push (scripts/install-hooks.sh).
+# When: only when the seed can no longer bootstrap the sources (D207, which
+# replaced D156's seed in every pull request): when the compiler or the
+# standard library it imports starts using something the seed doesn't know
+# (a primitive, a runtime variable, an attribute), in a `Stage:` commit
+# before that use. scripts/check-seed.sh and CI's bootstrap jobs fail then
+# and say so; a seed older than the sources that still bootstraps them is
+# kept.
 #
 # Checking a seed: run this at the commit its header names and compare; the
 # compiler is deterministic, so the assembly is the same byte for byte.
 #
 # Usage:
-#   scripts/update-seed.sh
+#   scripts/update-seed.sh            # rewrite bootstrap/seed*.s
+#   scripts/update-seed.sh --out DIR  # write the seeds to DIR, bootstrap/ untouched
+#                                     # (CI's artifacts of each master commit)
+#   scripts/update-seed.sh x86_64-windows   # only the seeds of the targets named
+#                                     # (a new target's, the others kept, D207)
 #
 # A seed that can no longer compile the sources is updated in steps: an older
 # compiler builds a newer one (git history), or, as for the first seed, the
@@ -28,18 +35,46 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEST=""
+ONLY=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out)
+            if [ $# -lt 2 ]; then
+                echo "usage: scripts/update-seed.sh [--out DIR] [TARGET...]" >&2
+                exit 2
+            fi
+            DEST="$(mkdir -p "$2" && cd "$2" && pwd)"
+            shift 2 ;;
+        -*)
+            echo "usage: scripts/update-seed.sh [--out DIR] [TARGET...]" >&2
+            exit 2 ;;
+        *)
+            ONLY="$ONLY $1"
+            shift ;;
+    esac
+done
 cd "$REPO_ROOT"
+
+. scripts/host.sh
+for target in $ONLY; do
+    if [ -z "$(seed_of "$target")" ]; then
+        echo "FAIL: no seed for '$target' (the seeds: $SEEDS)" >&2
+        exit 2
+    fi
+done
 
 OUT_DIR="build/seed-update"
 scripts/bootstrap.sh "$OUT_DIR"
-. scripts/host.sh
 
-# the seven implicit modules checked whole (D179, MYLA-416): a program reads
-# a body of theirs only once it calls it, and the compiler builds against a
-# library whose broken body nothing calls, so the seed would carry it
-for module in str char int list option map hash; do
-    if ! run_tool "$OUT_DIR/myla" check "lib/std/$module.my" --stdlib lib > /dev/null; then
-        echo "FAIL: lib/std/$module.my doesn't check as a whole (\`build/myla check lib/std/$module.my --stdlib lib\`)" >&2
+# every module of the standard library checked whole (D179, MYLA-416,
+# MYLA-552): a program reads a body of std's but std.rt's only once it calls
+# it, and the compiler builds against a library whose broken body nothing
+# calls, so the seed and the embedded library would carry it; a module's
+# own check reads every body
+for module in $(find lib/std -name '*.my' | LC_ALL=C sort); do
+    if ! run_tool "$OUT_DIR/myla$EXE" check "$module" --stdlib lib > /dev/null; then
+        echo "FAIL: $module doesn't check as a whole (\`build/myla check $module --stdlib lib\`)" >&2
         exit 1
     fi
 done
@@ -55,10 +90,17 @@ mkdir -p bootstrap
 for entry in $SEEDS; do
     target="${entry%%:*}"
     seed="${entry#*:}"
+    name="$seed"
+    if [ -n "$ONLY" ] && [[ " $ONLY " != *" $target "* ]]; then
+        continue
+    fi
+    if [ -n "$DEST" ]; then
+        seed="$DEST/$(basename "$seed")"
+    fi
     body="$OUT_DIR/seed-$target.s"
-    seed_compile "$OUT_DIR/stage3" "$target" "$body"
+    seed_compile "$OUT_DIR/stage3$EXE" "$target" "$body"
     {
-        echo "# $seed: stage 0 of the Myla bootstrap on $target (MYLA-218, D101, D127)."
+        echo "# $name: stage 0 of the Myla bootstrap on $target (MYLA-218, D101, D127)."
         echo "# The self-hosted compiler (selfhost/gen_main.my) compiled by itself at its"
         echo "# fixed point, from ${source}, without the embedded standard library"
         echo "# (MYLA-431: the bootstrap gives stage 0 lib/)."

@@ -1,0 +1,62 @@
+// A badge drawn with std.draw and kept as PNG with std.png (MYLA-961):
+// encoded with adaptive filtering, decoded back to the same pixels, then
+// written again as a palette image of its colours, and a file with a broken
+// byte refused. A program would write the bytes with `fs.write_bytes`.
+
+import std.draw as draw
+import std.image as image
+import std.png as png
+import std.checksum as checksum
+from std.draw import Paint
+from std.image import Image8
+
+// The kind of PNG `b` is, from its header.
+#test(png.encode(image.new(2, 2, image.Layout.Rgb, 7u8), 6, png.Filter.Adaptive))["2x2 gray, 8 bits"]
+fun describe(b: [uint8]) -> str {
+    return match png.info(b) {
+        Ok(i) => f"{i.width}x{i.height} {i.layout}, {i.bit_depth} bits"
+        Err(e) => f"not a PNG: {e}"
+    }
+}
+
+// The image's size, layout and the CRC-32 of its samples.
+#test(image.new(1, 1, image.Layout.Gray, 0u8))["1x1 gray, pixels d202ef8d"]
+fun fingerprint(img: Image8) -> str {
+    return f"{img.width}x{img.height} {img.layout}, pixels {checksum.crc32_bytes(img.data):08x}"
+}
+
+// What decoding `b` gives, in a line.
+#test([1u8, 2u8, 3u8])["error: not an image of this format"]
+fun outcome(b: [uint8]) -> str {
+    return match png.decode(b, image.MAX_PIXELS) {
+        Ok(img) => f"{img.width}x{img.height} {img.layout}"
+        Err(e) => f"error: {e}"
+    }
+}
+
+fun main() {
+    // a blue rounded rectangle with a white disc and "PNG" in the built-in
+    // font, on a transparent background
+    var c = draw.blank(48, 20, image.rgba(0u8, 0u8, 0u8, 0u8))
+    c.fill(draw.rounded_rect(0.0, 0.0, 48.0, 20.0, 6.0), Paint.Solid(image.rgb(30u8, 90u8, 200u8)))
+    c.fill(draw.circle(10.0, 10.0, 6.0), Paint.Solid(image.rgb(255u8, 255u8, 255u8)))
+    c.text_bitmap("PNG", 20, 6, image.rgb(255u8, 255u8, 255u8))
+    let img = c.image
+    print(f"drawn: {fingerprint(img)}")
+
+    let b = png.encode(img, 9, png.Filter.Adaptive)
+    print(f"PNG: {b.len()} bytes, {describe(b)}")
+    let back = png.decode(b, image.MAX_PIXELS)
+    print(f"decoded back the same: {back == Ok(img)}")
+
+    // its few colours as a palette image: smaller still
+    let ix = image.quantize(img, 256, false)
+    let small = png.encode_indexed(ix, 9)
+    print(f"palette PNG: {ix.palette.len()} colours, {small.len()} bytes, {describe(small)}")
+    print(f"the same pixels: {png.decode(small, image.MAX_PIXELS) == Ok(img)}")
+
+    // a byte changed inside the image data: its chunk's CRC no longer matches
+    var broken = b
+    broken[b.len() - 20] = broken[b.len() - 20] ^ 1u8
+    print(outcome(broken))
+}

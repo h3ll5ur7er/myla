@@ -1,0 +1,9 @@
+//~ type error: integer literal -1 does not fit in 'uint64'
+//~ span: -1
+// A literal left of a typed operand takes its type, as one on its right
+// does (MYLA-544): `-1 == u` is `u == -1`, and `-1` is no `uint64`. It said
+// `type mismatch: 'int32' vs 'uint64'`, as if the literal were an `int32`.
+fun main() {
+    let u: uint64 = 5
+    print(-1 == u)
+}

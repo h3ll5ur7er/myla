@@ -1,0 +1,6 @@
+type error: type 'net.TcpStream' does not satisfy the bound 'R: Pollable' required by 'Buffered.read_line_async'
+  --> examples/errors/type_buffered_tcp_stream_async.my:13:39
+   |
+13 |     let line = await b.read_line_async()
+   |                      ^^^^^^^^^^^^^^^^^^^
+help: in a task, read a TCP stream's lines with 'net.line_reader(s)' and 'await r.read_line_async()' (D180)

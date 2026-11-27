@@ -1,6 +1,6 @@
 # std.num
 
-Numbers from text and back ([[MYLA-79]], [[MYLA-331]]). Integers are read in any radix from 2 to 36 and for `int32`, `int64` and `uint64`, with a `ParseIntError` that says why a string isn't one; they are written in any radix, hex and binary with a width. The float conversions are exact, computed with big integers, so every implementation gives the same result; the self-hosted compiler converts its float literals with the same code.
+Numbers from text and back ([[MYLA-79]], [[MYLA-331]]). Integers are read in any radix from 2 to 36 and for `int32`, `int64` and `uint64`, with a `ParseIntError` that says why a string isn't one; they are written in any radix, hex and binary with a width. The float conversions are exact, computed in integers, so every implementation gives the same result; the self-hosted compiler converts its float literals with the same code. A decimal is read by its first 19 significant digits and a 128-bit approximation of its power of ten (the Eisel–Lemire algorithm, as Go's, Rust's and fast_float's), with one float64 multiplication or division when both factors are exact (Clinger's fast path, `parse_float` only), and in big integers only where those can't decide the rounding: within about 2^-64 of a halfway point between two floats ([[MYLA-843]]).
 
 ```myla
 import std.num as num
@@ -79,7 +79,7 @@ The first bad byte is the one reported, and a bad digit anywhere wins over an ov
 | `to_hex(n: uint64, width: int = 0) -> str` | `n` in hex, lower case, with leading zeros up to `width` digits: `to_hex(255, 4)` is `00ff` |
 | `to_binary(n: uint64, width: int = 0) -> str` | `n` in binary, with leading zeros up to `width` digits |
 
-A number with more digits than the width keeps them all; a negative width is a runtime error, `to_hex: width -3 is negative` (D184, [[MYLA-425]]). There is no prefix: write `"0x" + num.to_hex(n)`. Zero is `0`. A radix outside 2 to 36 is a runtime error. `format("{:x}", n)` and `format("{:08b}", n)` do the same for hex and binary ([[Language/Standard-library/Fmt]]), but write a negative number in two's complement (`ffffffffffffff01` for an `int64` -255), where `to_radix` writes `-ff`.
+A number with more digits than the width keeps them all; a long padding goes in 4,096 zeros at a time, into a string made for it ([[MYLA-546]]); a negative width is a runtime error, `to_hex: width -3 is negative` (D184, [[MYLA-425]]). There is no prefix: write `"0x" + num.to_hex(n)`. Zero is `0`. A radix outside 2 to 36 is a runtime error. `format("{:x}", n)` and `format("{:08b}", n)` do the same for hex and binary ([[Language/Standard-library/Fmt]]), but write a negative number in two's complement (`ffffffffffffff01` for an `int64` -255), where `to_radix` writes `-ff`.
 
 ## Floats
 
@@ -90,9 +90,24 @@ A number with more digits than the width keeps them all; a negative width is a r
 | `format_fixed(x: float64, prec: int32) -> str` | `x` with `prec` digits after the point, rounded on its exact binary value, ties to even: `2.67` for `(2.675, 2)` (D139). A negative `prec` is a runtime error |
 | `pow2(k: int32) -> float64` | 2^k, exactly for -1074 <= k <= 1023; 0 below, infinity above |
 | `f64_literal_bits(text) -> uint64`, `f32_round_bits(bits) -> uint64`, `float_from_bits(bits) -> float64` | The bit-level steps (for the compiler); a `text` that isn't a float literal's digits is a runtime error |
+| `decimal_bits(m: uint64, e: int32) -> uint64` | The bits of the float64 nearest `m` × 10^`e`: `f64_literal_bits` without the text, which std.rt's printing reads its candidate digits back by ([[MYLA-849]]) |
 
-`format("{}", x)` writes a float as `print` does, in its shortest round-trip form (`0.1`, `1e300`, D155); `format_float` is Python's `repr` of it (`1.0`, `1e+300`).
+`format("{}", x)` writes a float as `print` does, in its shortest round-trip form (`0.1`, `1e300`, D155); `format_float` is Python's `repr` of it (`1.0`, `1e+300`), with `print`'s digits ([[MYLA-849]]: it rounded the exact decimal to each count of digits and so wrote 17 where 16 read back, for a power of two whose nearest 16 digits are below it and read back as the float below).
 
 ## Speed
 
 `parse_int_radix(s, 10)` reads 10 million decimal strings of 1 to 19 digits in about 315 ms natively, about 32 ns each (best of 7 runs, on a machine shared with other work); `parse_int` takes about 510 ms for the same strings, as it scans each one three times.
+
+`json.parse` of 300 kB of one number repeated, natively, before and after [[MYLA-843]] (2026-11-18, over 3add216; a shared machine):
+
+| Item | Before | After |
+| --- | --- | --- |
+| `"abcdefghi"` (a string) | 3 ms | 4 ms |
+| `12345` | 10 ms | 9 ms |
+| `12345.678` | 259 ms | 7 ms |
+| `1.5` | 279 ms | 14 ms |
+| `0.30000000000000004` | 148 ms | 5 ms |
+| `1e-300` | 3,512 ms | 11 ms |
+| `2.5e-320` (subnormal) | 2,914 ms | 11 ms |
+
+Printing a float of random bits took 3.4 M instructions natively and takes 7,500 now (callgrind, 200 floats: 674.6 M before, 1.94 M after, 0.44 M of them the program's own, same date and commit; [[MYLA-849]]).

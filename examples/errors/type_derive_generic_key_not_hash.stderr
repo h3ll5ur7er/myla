@@ -1,5 +1,5 @@
-type error: map key type must be Eq and Hash, found 'Cell<float64>': 'float64' isn't Hash (NaN is unequal to itself)
-  --> examples/errors/type_derive_generic_key_not_hash.my:11:15
+type error: map key type must be Eq and Hash, found 'Cell<Tag>': 'Tag' isn't Hash (it needs 'impl Hash for Tag' or '#derive(Hash)')
+  --> examples/errors/type_derive_generic_key_not_hash.my:16:15
    |
-11 |     var seen: [Cell<float>: bool] = [:]
-   |               ^^^^^^^^^^^^^^^^^^^
+16 |     var seen: [Cell<Tag>: bool] = [:]
+   |               ^^^^^^^^^^^^^^^^^

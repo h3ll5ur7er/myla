@@ -1,5 +1,0 @@
-type error: cannot derive Hash for struct 'Sample': field 'value' has type 'float64', which isn't Hash (a float isn't: NaN is unequal to itself; a hand-written 'impl Hash' may add 'math.to_bits(x)')
-  --> examples/errors/type_derive_hash_float_field.my:5:1
-  |
-5 | struct Sample {
-  | ^^^^^^^^^^^^^^^

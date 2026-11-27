@@ -53,7 +53,7 @@ Until November 2026 a Python toolchain (`src/myla/`, `myla.py`) was the bootstra
 
 ```mermaid
 flowchart LR
-    seed["bootstrap/seed.s (x86-64)<br/>or seed-aarch64.s"] -->|"as + ld"| s0["stage 0"]
+    seed["bootstrap/seed.s (x86-64)<br/>or seed-aarch64.s, seed-windows.s"] -->|"as + ld<br/>(LLVM on Windows)"| s0["stage 0"]
     s0 -->|compiles selfhost/| s1["stage 1"]
     s1 -->|compiles itself| s2["stage 2"] -->|compiles itself| s3["stage 3<br/>= stage 2 byte for byte"]
     s3 -->|builds| cli["build/myla"]

@@ -37,8 +37,8 @@ import time
 import unittest
 
 from ._golden import NoGolden, answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE
-from ._tools import STDLIB_ROOT, selfhost_tool
+from ._native import CAN_BUILD_NATIVE, ON_WINDOWS, linux_only, shown
+from ._tools import STDLIB_ROOT, peak_memory, selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -46,6 +46,10 @@ _REPO = os.path.abspath(
 
 # Examples outside the v0.8 interpreter gate's scope (see module docstring).
 EXCLUDED: set[str] = set()
+
+# The module programs that run Linux's /bin/echo, with its output's line and
+# what the program prints when it can't run it, as on Windows.
+_NO_ECHO = {"io_through_the_ir": ("false\n3\n", "false\nnot run\n")}
 
 
 def _corpus() -> list[str]:
@@ -315,7 +319,7 @@ class SelfHostedInterpParity(unittest.TestCase):
                         # overflow, then the overflow at its operator
                         out, err, code = self._myla_run_full(path)
                         self.assertEqual((out, code), (OVERFLOWS[name], 1))
-                        self.assertTrue(err.startswith(f"runtime error: integer overflow\n  --> {path}:"), err)
+                        self.assertTrue(err.startswith(f"runtime error: integer overflow\n  --> {shown(path)}:"), err)
                         continue
                     try:
                         want = _cli_oracle(path, modules)
@@ -380,6 +384,10 @@ class SelfHostedInterpParity(unittest.TestCase):
                         expected = (MODULE_OUTPUTS_SINCE[name], 0)
                     else:
                         expected = _linked_oracle(entry, _modules(entry))
+                    if ON_WINDOWS and name in _NO_ECHO:
+                        # a Windows program finds no /bin/echo to run (MYLA-705):
+                        # `run` fails, the rest is the same (MYLA-926)
+                        expected = (expected[0].replace(*_NO_ECHO[name]), expected[1])
                     self.assertEqual(self._myla_run(entry), expected)
 
     def test_updates_are_amortised_constant(self) -> None:
@@ -425,6 +433,300 @@ class SelfHostedInterpParity(unittest.TestCase):
                 self.assertTrue(a.read() == b.read())
             self.assertLess(copy_ms, 10 * read_ms + 500, f"read {read_ms} ms, copy {copy_ms} ms")
 
+    def test_generic_recursion_binds_its_types_in_constant_memory(self) -> None:
+        """A generic function recursing through two call sites takes the
+        memory the same function on `int` takes: its type parameters' binding
+        is one environment, not one per call path (MYLA-414, the 2026-11-12
+        review's C3: `fib(27)` 163 MB against 13 MB)."""
+        if self._binary is None:
+            self.skipTest("measuring needs the natively built interpreter")
+        peaks = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, sig in (("int", "fib(n: int, one: int, two: int) -> int"),
+                              ("generic", "fib<T: Add + Sub + Ord>(n: T, one: T, two: T) -> T")):
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(GENERIC_FIB.replace("SIGNATURE", sig))
+                out, peaks[name] = _peak_mb([selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, path])
+                self.assertEqual(out, "75025\n")
+        self.assertLess(peaks["generic"], peaks["int"] + 8, peaks)
+
+    def test_a_builder_takes_its_size(self) -> None:
+        """A `StringBuilder` holds its bytes packed, as natively: building a
+        string of 20 MB takes about 20 MB for the string and at most twice
+        that for the builder (MYLA-600: a word a byte, 280 MB against
+        55 MB natively)."""
+        if self._binary is None:
+            self.skipTest("measuring needs the natively built interpreter")
+        with tempfile.TemporaryDirectory() as tmp:
+            peaks = {}
+            for name, program in (("empty", "fun main() {\n    print(20480000)\n}\n"), ("build", BUILD_20MB)):
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(program)
+                out, peaks[name] = _peak_mb([selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, path])
+                self.assertEqual(out, "20480000\n")
+        self.assertLess(peaks["build"], peaks["empty"] + 60, peaks)
+
+
+    def test_lines_and_extended_bytes_take_no_step_a_byte(self) -> None:
+        """`read_line` and `extend` of `[uint8]` cost what the lines or the
+        reads do, not their bytes: 6,000 lines of 500 bytes take about what
+        6,000 lines of 5 do (MYLA-546: 3 MB in 60,000 lines were slow, the
+        interpreter scanning for each line's end a byte at a time and
+        `extend` pushing each byte)."""
+        if self._binary is None:
+            self.skipTest("timing needs the natively built interpreter")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "bytes.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(LINES_AND_EXTENDS)
+            for mode in ("lines", "extend"):
+                times = {}
+                for width in (5, 500):
+                    data = os.path.join(tmp, f"{width}.txt")
+                    with open(data, "wb") as fh:
+                        fh.write((b"x" * width + b"\n") * 6000)
+                    with open(data, "rb") as stdin:
+                        start = time.perf_counter()
+                        proc = subprocess.run([selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, path, mode, str(width + 1)],
+                                              stdin=stdin, capture_output=True, text=True, timeout=120)
+                        times[width] = time.perf_counter() - start
+                    self.assertEqual((proc.stdout, proc.stderr, proc.returncode), (f"6000 {6000 * (width + 1)}\n", "", 0))
+                with self.subTest(mode=mode):
+                    self.assertLess(times[500], 3 * times[5] + 0.5, f"{mode}: 5 bytes {times[5]:.2f} s, 500 bytes {times[500]:.2f} s")
+
+    @linux_only("counts the wake-ups in /proc, under a raised RLIMIT_NOFILE")
+    def test_an_idle_server_sleeps(self) -> None:
+        """An interpreted server waiting for connections, and for requests
+        on 900 kept ones, wakes a few dozen times a second and uses a few
+        percent of a CPU (MYLA-546: a poll a parked socket every millisecond;
+        before, 894 wake-ups a second with none, 677 and 26.5 percent with
+        900; natively none)."""
+        if self._binary is None:
+            self.skipTest("the self-hosted interpreter could not be built natively")
+        import resource
+        import socket
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard != resource.RLIM_INFINITY and hard < 2048:
+            self.skipTest(f"900 connections need 2,048 descriptors, the limit is {hard}")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "idle.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(IDLE_SERVER)
+            # the server inherits the limit
+            resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 2048), hard))
+            try:
+                proc = subprocess.Popen([selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, path],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            finally:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+            kept = []
+            try:
+                port = int(proc.stdout.readline())
+                for n in (0, 900):
+                    while len(kept) < n:
+                        kept.append(socket.create_connection(("127.0.0.1", port), timeout=10))
+                    time.sleep(1.0)
+                    w0, c0 = _wake_ups(proc.pid), _cpu_seconds(proc.pid)
+                    time.sleep(2.0)
+                    wakes, cpu = (_wake_ups(proc.pid) - w0) / 2, 100 * (_cpu_seconds(proc.pid) - c0) / 2
+                    with self.subTest(connections=n):
+                        self.assertLess(wakes, 250, f"{wakes:.0f} wake-ups a second")
+                        self.assertLess(cpu, 12, f"{cpu:.1f} percent of a CPU")
+                # a kept connection is still served
+                kept[0].sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                kept[0].settimeout(10)
+                self.assertTrue(kept[0].recv(4096).startswith(b"HTTP/1.1 200 OK\r\n"))
+            finally:
+                for s in kept:
+                    s.close()
+                proc.kill()
+                proc.communicate()
+
+    def _run_waiting(self, path: str, *argv: str) -> tuple[str, str, int, float]:
+        """`myla run path argv`, its standard input a pipe that stays empty
+        and open: (stdout, stderr, status, seconds until it ended); killed
+        after 30 s."""
+        r, w = os.pipe()
+        start = time.perf_counter()
+        try:
+            proc = subprocess.Popen([selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, path, *argv],
+                                    stdin=r, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            os.close(r)
+            r = -1
+            try:
+                out, err = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
+            return out, err, proc.returncode, time.perf_counter() - start
+        finally:
+            if r >= 0:
+                os.close(r)
+            os.close(w)
+
+    def test_a_turn_costs_nothing_per_waiting_task(self) -> None:
+        """While tasks are ready, the tasks waiting for input are looked at
+        now and then, not at every turn: 20,000 turns take about as long
+        with 400 tasks waiting for the standard input as with none
+        (MYLA-604: a poll a waiting task a turn, 2,321 ms against 151 ms)."""
+        if self._binary is None:
+            self.skipTest("timing needs the natively built interpreter")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "waiters.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(WAITERS)
+            ms = {}
+            for n in (0, 400):
+                out, err, code, _ = self._run_waiting(path, str(n))
+                self.assertEqual((err, code), ("", 0))
+                ms[n] = int(out.split()[-2])
+        self.assertLess(ms[400], 2 * ms[0] + 100, ms)
+
+    def test_exit_ends_the_tasks_that_wait(self) -> None:
+        """The entry's `exit` ends the program at once while its children
+        sleep or wait for input, as natively (MYLA-620: it waited for the
+        sleep's time, and for input that never came)."""
+        if self._binary is None:
+            self.skipTest("timing needs the natively built interpreter")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "exit.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(EXIT_WHILE_WAITING)
+            for mode in ("sleep", "input", "notifier"):
+                with self.subTest(mode=mode):
+                    out, err, code, took = self._run_waiting(path, mode)
+                    self.assertEqual((out, err, code), ("exit\n", "", 3))
+                    self.assertLess(took, 5.0)
+
+
+def _cpu_seconds(pid: int) -> float:
+    """The CPU time the process `pid` has used (Linux's /proc)."""
+    with open(f"/proc/{pid}/stat") as fh:
+        fields = fh.read().rsplit(")", 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
+def _wake_ups(pid: int) -> int:
+    """How many times the threads of the process `pid` have given up the
+    CPU (their context switches, Linux's /proc)."""
+    n = 0
+    for t in os.listdir(f"/proc/{pid}/task"):
+        with open(f"/proc/{pid}/task/{t}/status") as fh:
+            for line in fh:
+                if line.startswith(("voluntary_ctxt_switches", "nonvoluntary_ctxt_switches")):
+                    n += int(line.split()[1])
+    return n
+
+
+def _peak_mb(cmd: list[str]) -> tuple[str, float]:
+    """(stdout, peak resident memory in MB) of running `cmd`, which must
+    succeed: the program's own peak, not this process's (MYLA-611)."""
+    out, kb = peak_memory(cmd)
+    return out, kb / 1024
+
+
+# A recursion through two call sites (test_generic_recursion_binds_its_types_in_constant_memory).
+GENERIC_FIB = """\
+fun SIGNATURE {
+    if n < two { return n }
+    return fib(n - one, one, two) + fib(n - two, one, two)
+}
+
+fun main() {
+    print(fib(25, 1, 2))
+}
+"""
+
+
+# N tasks wait for input on the standard input (a pipe that stays empty);
+# meanwhile one task takes 20,000 turns: how long they take
+# (test_a_turn_costs_nothing_per_waiting_task).
+WAITERS = """\
+import std.task as task
+import std.time as time
+from std.io import stdin
+from std.process import args, exit
+from std.num import parse_int
+
+async fun reader() -> int {
+    var r = stdin()
+    return match await r.read_line_async() {
+        Ok(Some(l)) => l.len()
+        _ => 0
+    }
+}
+
+async fun spin() -> int {
+    let t = time.now_ms()
+    var i = 0
+    while i < 20000 {
+        await task.yield()
+        i += 1
+    }
+    return (time.now_ms() - t) as int
+}
+
+#main
+async fun main() {
+    let n = match parse_int(args()[1]) { Some(v) => v as int, None => 0 }
+    var fs: [async () -> int] = []
+    for k in 0..n { fs.push(async () => await reader()) }
+    async let all = task.all(fs)
+    let ms = await spin()
+    print(f"{n} waiting: 20,000 turns in {ms} ms")
+    exit(0)
+}
+"""
+
+# The entry exits while a child sleeps, waits for input or waits on a
+# notifier (test_exit_ends_the_tasks_that_wait).
+EXIT_WHILE_WAITING = """\
+import std.task as task
+from std.io import stdin
+from std.process import args, exit
+
+async fun child(mode: str, n: task.Notifier) -> int {
+    if mode == "sleep" {
+        await task.sleep(60000)
+    } else if mode == "input" {
+        var r = stdin()
+        let l = await r.read_line_async()
+    } else {
+        let woken = await n.wait()
+    }
+    print("child")
+    return 1
+}
+
+#main
+async fun main() {
+    let n = task.notifier()
+    async let a = child(args()[1], n)
+    await task.yield()
+    print("exit")
+    exit(3)
+}
+"""
+
+
+# A string of 20 MB built by 5,000 appends (test_a_builder_takes_its_size).
+BUILD_20MB = """\
+fun main() {
+    var block = "0000000000000000"
+    while block.len() < 4096 {
+        block = block + block
+    }
+    var sb = StringBuilder()
+    for i in 0..5000 {
+        sb.append(block)
+    }
+    let s = sb.build()
+    print(s.len())
+}
+"""
+
 
 # A loop of in-place updates (test_updates_are_amortised_constant).
 UPDATE_N = 20000
@@ -455,6 +757,74 @@ fun main() {
     }
     print(xs.len() + bag.items.len() + grid[0].len() + xs.len())
     print(total)
+}
+"""
+
+# The standard input's lines read, or its bytes read `n` at a time and
+# gathered with `extend` (test_lines_and_extended_bytes_take_no_step_a_byte):
+# how many and their bytes (each line's "\n" counted).
+LINES_AND_EXTENDS = """\
+import std.io as io
+from std.io import Read, stdin
+from std.process import args
+from std.num import parse_int
+
+fun main() {
+    let a = args()
+    var count = 0
+    var bytes = 0
+    if a[1] == "lines" {
+        var r = stdin()
+        while let Ok(Some(l)) = r.read_line() {
+            count += 1
+            bytes += l.len() + 1
+        }
+    } else {
+        let n = match parse_int(a[2]) { Some(v) => v as int, None => 1 }
+        var f = io.fd_stream(0)
+        var all: [uint8] = []
+        while true {
+            let chunk = match f.read(n) { Ok(b) => b, Err(e) => { panic("read") } }
+            if chunk.len() == 0 { break }
+            all.extend(chunk)
+            count += 1
+        }
+        bytes = all.len()
+    }
+    print(f"{count} {bytes}")
+}
+"""
+
+# A server that keeps 1,000 connections a minute, its port on the first line
+# (test_an_idle_server_sleeps).
+IDLE_SERVER = """\
+import std.http as http
+from std.http import Request, Response
+import std.net as net
+from std.io import println
+
+async fun handle(r: Request) -> Response {
+    return http.response(200, "ok")
+}
+
+#main
+async fun main() {
+    var l = match net.listen(net.addr(net.loopback(), 0)) {
+        Ok(l) => l
+        Err(e) => { panic("can't listen") }
+    }
+    match l.local_addr() {
+        Ok(at) => println(f"{at.port}")
+        Err(e) => { panic("addr") }
+    }
+    var o = http.server_options()
+    o.max_connections = 1000
+    o.idle_ms = 60000
+    o.read_ms = 60000
+    match await http.serve_with(l, o, handle) {
+        Ok(n) => println(f"served {n}")
+        Err(e) => println(f"server: {e}")
+    }
 }
 """
 

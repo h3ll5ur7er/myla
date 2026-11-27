@@ -2,7 +2,7 @@
 id: MYLA-420
 title: "P6 Text and streams"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [std, str, io, csv, ini, round-5]
 ---
@@ -44,3 +44,7 @@ Built on 95785ab (wave A1 with its seed). The reproducers of both reviews were t
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-550]]: `Buffered.seek(SeekFrom.Current(int64 min))` overflows at `io.my:594`, and `read_exact(n)` allocates `n` up front.

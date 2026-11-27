@@ -8,7 +8,7 @@ labels: [testing, selfhost]
 ---
 Part of the "everything in Myla" direction ([[Project/Roadmap]]). [[selfhost/main.my]] already has `test`; make it a drop-in replacement for the Python `myla test`.
 
-- [x] Same output format, summary line and exit status as `myla test` ([[src/myla/cli.py]]), including tests in imported modules ([[MYLA-11]])
+- [x] Same output format, summary line and exit status as `myla test` (`src/myla/cli.py`), including tests in imported modules ([[MYLA-11]])
 - [x] A burn gate that runs every example's and every selfhost module's `#test`s through both and compares the output
 
 ## How
@@ -24,3 +24,5 @@ Part of the "everything in Myla" direction ([[Project/Roadmap]]). [[selfhost/mai
 - `tests/unit/test_loader.py`, `TestModuleIds` (failed before: 5 cases); `tests/unit/test_interpreter.py`, `test_exit_in_a_test_fails_it` (failed with the traceback).
 - Full run: 494 unit, 29 integration and 539 burn tests pass; the bootstrap fixed point stays at 7,794,199 bytes.
 - Left as is: neither loader resolves symlinks, so a standard-library module reached through a symlinked root is named as a project module (the gate gives both CLIs the same root); a `uint64` above 2^63 would print as negative in the self-hosted report, since its interpreter keeps integers as `int64` without their type.
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

@@ -1,15 +1,19 @@
 ---
 id: MYLA-296
-title: The interpreter's memory per sleeping task
+title: "Natively, every worker's loop top takes the timer lock while any timer is armed"
 type: improvement
-status: in-progress
+status: backlog
 priority: low
-labels: [interpreter, concurrency, performance]
+labels: [runtime, concurrency, performance]
 ---
+> [!NOTE]
+> Renamed on 2026-11-13 ([[MYLA-554]]): it was "The interpreter's memory per sleeping task", the half that is done (the first box). What is open is the native timer lock, the last box, so the title says that, and the task is back in `backlog`.
+
 Found by the review of 6 November 2026 ([[Project/Review-2026-11]]). 10,000 tasks sleeping at once take 2.5 s and 1.18 GB in the interpreter (about 115 KB per task) against 127 ms and 27 MB natively. Natively, with many workers, every loop top takes `__timer_lock` in `timers_fire` while any timer exists, a contention cost not yet measured.
 
 - [x] Find what a suspended task keeps in the interpreter (its evaluator's frames? copies of the environment?) and shrink it; a test with 10,000 sleepers under a memory bound
-- [ ] Measure `timers_fire` on 16 workers with many timers; a per-worker timer wheel or one timer owner if it shows
+- [x] Measure `timers_fire` on 16 workers with many timers (about 15 % slower with 1,000 sleepers armed, below)
+- [ ] The loop top takes `__timer_lock` only when a timer is due: a word holding the earliest deadline, written under the lock wherever the heap changes and read with acquire at the loop top (a new runtime variable: a commit staging it in the seed first, D156); or a per-worker timer wheel, or one timer owner. Measured again on 16 workers, and the time and concurrency stress suites on every target
 
 ## Evidence
 

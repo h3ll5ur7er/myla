@@ -1,0 +1,7 @@
+// std.qoi's `decode` through image_driver's protocol (MYLA-960).
+import std.qoi as qoi
+import image_driver as driver
+
+fun main() {
+    driver.serve8((b: [uint8], max: int64) => qoi.decode(b, max))
+}

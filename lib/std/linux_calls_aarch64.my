@@ -1,0 +1,85 @@
+// std.linux_calls — what Linux's platform layer, std.platform, differs in
+// between the architectures (MYLA-758, D223): aarch64's. The loader takes
+// this file for `std/linux_calls.my` on aarch64 Linux (`for_target`, the
+// target's own copy); x86-64's is that module, which says what the copies
+// hold. Not for programs.
+
+// The target std.platform is the layer of, as `--target` names it.
+pub const TARGET_NAME: str = "aarch64-linux"
+
+// The system calls' numbers: the generic table (asm-generic/unistd.h).
+pub const SYS_READ: int64 = 63
+pub const SYS_WRITE: int64 = 64
+pub const SYS_OPENAT: int64 = 56
+pub const SYS_CLOSE: int64 = 57
+pub const SYS_NEWFSTATAT: int64 = 79
+pub const SYS_FSTAT: int64 = 80
+pub const SYS_PPOLL: int64 = 73
+pub const SYS_MMAP: int64 = 222
+pub const SYS_MUNMAP: int64 = 215
+pub const SYS_MADVISE: int64 = 233
+pub const SYS_WRITEV: int64 = 66
+pub const SYS_PIPE2: int64 = 59
+pub const SYS_DUP3: int64 = 24
+pub const SYS_CLONE: int64 = 220
+pub const SYS_EXECVE: int64 = 221
+pub const SYS_EXIT: int64 = 93
+pub const SYS_WAIT4: int64 = 260
+pub const SYS_GETCWD: int64 = 17
+pub const SYS_RENAMEAT2: int64 = 276
+pub const SYS_MKDIRAT: int64 = 34
+pub const SYS_UNLINKAT: int64 = 35
+pub const SYS_FUTEX: int64 = 98
+pub const SYS_NANOSLEEP: int64 = 101
+pub const SYS_SCHED_YIELD: int64 = 124
+pub const SYS_CLOCK_GETTIME: int64 = 113
+pub const SYS_EPOLL_PWAIT: int64 = 22
+pub const SYS_EPOLL_CTL: int64 = 21
+pub const SYS_EVENTFD2: int64 = 19
+pub const SYS_EPOLL_CREATE1: int64 = 20
+pub const SYS_SCHED_GETAFFINITY: int64 = 123
+pub const SYS_GETDENTS64: int64 = 61
+pub const SYS_EXIT_GROUP: int64 = 94
+pub const SYS_CHDIR: int64 = 49
+pub const SYS_MEMFD_CREATE: int64 = 279
+pub const SYS_LSEEK: int64 = 62
+pub const SYS_RT_SIGACTION: int64 = 134
+pub const SYS_GETPID: int64 = 172
+pub const SYS_KILL: int64 = 129
+pub const SYS_PIDFD_OPEN: int64 = 434
+pub const SYS_GETRANDOM: int64 = 278
+pub const SYS_SOCKET: int64 = 198
+pub const SYS_BIND: int64 = 200
+pub const SYS_LISTEN: int64 = 201
+pub const SYS_CONNECT: int64 = 203
+pub const SYS_GETSOCKNAME: int64 = 204
+pub const SYS_GETPEERNAME: int64 = 205
+pub const SYS_SENDTO: int64 = 206
+pub const SYS_RECVFROM: int64 = 207
+pub const SYS_SETSOCKOPT: int64 = 208
+pub const SYS_GETSOCKOPT: int64 = 209
+pub const SYS_SHUTDOWN: int64 = 210
+pub const SYS_SENDMSG: int64 = 211
+pub const SYS_RECVMSG: int64 = 212
+pub const SYS_ACCEPT4: int64 = 242
+pub const SYS_IOCTL: int64 = 29
+pub const SYS_FCNTL: int64 = 25
+pub const SYS_READLINKAT: int64 = 78
+
+// A `struct stat`'s size and where its `st_mode` is.
+pub const STAT_SIZE: int64 = 128
+pub const STAT_MODE: int64 = 16
+// An `epoll_event`'s size and where its data begins (not packed on aarch64).
+pub const EVENT_SIZE: int64 = 16
+pub const EVENT_DATA: int64 = 8
+// `openat`'s O_DIRECTORY (0x4000 here), and its O_NOFOLLOW (0x8000).
+pub const O_DIRECTORY: int64 = 16384
+pub const O_NOFOLLOW: int64 = 32768
+// `rt_sigaction`'s SA_RESTORER: none, as aarch64's kernel returns from a
+// handler through a trampoline of its own (the vDSO's).
+pub const SA_RESTORER: int64 = 0
+
+// The code a signal's handler returns through, with SA_RESTORER: none.
+pub fun sig_restorer() -> int64 {
+    return 0
+}

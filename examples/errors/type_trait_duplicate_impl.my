@@ -1,5 +1,8 @@
 //~ type error: duplicate impl of trait 'Show' for type 'S'
-// At most one user `impl Trait for T` per (trait, type) pair — coherence (X1).
+//~ note: the other impl is here
+//~ note span: impl Show for S {
+// At most one user `impl Trait for T` per (trait, type) pair — coherence (X1);
+// the error names the other impl (D257).
 trait Show {
     fun show(self) -> int
 }

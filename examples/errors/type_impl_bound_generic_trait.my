@@ -1,0 +1,21 @@
+//~ type error: operator '==' is not defined for 'W<list.ListIter<int32>>': 'list.ListIter<int32>' isn't Iterator<str> (it implements 'Iterator<int32>')
+//~ span: W { v: [123456789].iter() } == W { v: [2].iter() }
+// A generic impl's bound that names a generic trait holds where the impl is
+// used, its arguments included (MYLA-538): `==` on `W<I>` needs
+// `I: Iterator<str>`, and an iterator of integers isn't one. It was taken
+// unchecked, and `eq` then read an integer as a string.
+struct W<I> {
+    v: I,
+}
+
+impl<I: Iterator<str>> Eq for W<I> {
+    fun eq(self, other: W<I>) -> bool {
+        var a = self.v
+        let s = a.next().unwrap_or("")
+        return s.len() > 0
+    }
+}
+
+fun main() {
+    print(W { v: [123456789].iter() } == W { v: [2].iter() })
+}

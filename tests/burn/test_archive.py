@@ -37,7 +37,7 @@ import unittest
 import zipfile
 import zlib
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, ON_WINDOWS, SKIP_REASON, assemble, linux_only
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -298,7 +298,8 @@ def _decompress(fmt: str, data: bytes) -> bytes:
 
 def _tree(root: str) -> None:
     """A tree of files for the archivers: long and non-ASCII names, sizes
-    around a block, an empty directory, links."""
+    around a block, an empty directory, links (on Linux: on Windows only the
+    zip files are made of it, which leave links out, MYLA-926)."""
     rng = random.Random(352)
     os.makedirs(os.path.join(root, "sub", "deeper"))
     os.makedirs(os.path.join(root, "empty dir"))
@@ -318,10 +319,11 @@ def _tree(root: str) -> None:
             fh.write(data)
     with open(os.path.join(root, "n" * 150), "wb") as fh:
         fh.write(b"a long name\n")
-    os.chmod(os.path.join(root, "a.txt"), 0o640)
-    os.symlink("a.txt", os.path.join(root, "link"))
-    os.symlink("t" * 150, os.path.join(root, "long link"))
-    os.link(os.path.join(root, "sub", "block"), os.path.join(root, "hard"))
+    if not ON_WINDOWS:
+        os.chmod(os.path.join(root, "a.txt"), 0o640)
+        os.symlink("a.txt", os.path.join(root, "link"))
+        os.symlink("t" * 150, os.path.join(root, "long link"))
+        os.link(os.path.join(root, "sub", "block"), os.path.join(root, "hard"))
     for dirpath, dirnames, filenames in os.walk(root):
         for n in dirnames + filenames:
             p = os.path.join(dirpath, n)
@@ -612,14 +614,13 @@ class ArchiveTest(unittest.TestCase):
         if CAN_BUILD_NATIVE:
             asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,
                                  check=True)
-            exe = os.path.join(cls.tmp, "driver")
+            exe = os.path.join(cls.tmp, "driver" + EXE)
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm.stdout)
-            subprocess.run(["as", "--64", "-o", exe + ".o", exe + ".s"], check=True)
-            subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
+            assemble(exe + ".s", exe)   # for the machine (MYLA-926: Windows' too)
             cls.native = exe
             # the same driver built checked: an integer overflow is an error (D175)
-            cls.checked = os.path.join(cls.tmp, "driver-checked")
+            cls.checked = os.path.join(cls.tmp, "driver-checked" + EXE)
             subprocess.run([selfhost_tool("main"), "build", path, "-o", cls.checked, "--stdlib", STDLIB_ROOT,
                             "--checked"], capture_output=True, check=True)
 
@@ -727,6 +728,7 @@ class ArchiveTest(unittest.TestCase):
         return cases
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    @linux_only("GNU tar's formats (Windows' tar is bsdtar)")
     def test_tar_read_natively(self) -> None:
         for name, data in self.tar_cases():
             with self.subTest(case=name):
@@ -808,6 +810,7 @@ class ArchiveTest(unittest.TestCase):
         return code
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    @linux_only("GNU tar's formats (Windows' tar is bsdtar)")
     def test_tar_corrupted_natively(self) -> None:
         rng = random.Random(2423)
         cases = [(name, data) for name, data in self.tar_cases() if data[:2] != b"\x1f\x8b"]
@@ -861,9 +864,13 @@ class ArchiveTest(unittest.TestCase):
                 self.run_both(["zip-list"], bytes(b))
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    @linux_only("RLIMIT_AS and preexec_fn")
     def test_decompression_bomb_natively(self) -> None:
         # 1 GiB of zeros in 1 MB of gzip: max_output stops it at 1 MiB, in a
-        # process that may not take 256 MiB
+        # process that may not take 256 MiB. Its workers are pinned to 4: each
+        # maps about 24 MiB of address space as it starts, an 8 MiB stack and
+        # a 16 MiB heap chunk (MYLA-928), so with 16 workers or more (one per
+        # CPU) the limit ran out before max_output did
         c = zlib.compressobj(9, zlib.DEFLATED, 31)
         zeros = bytes(1 << 20)
         bomb = b"".join(c.compress(zeros) for _ in range(1024)) + c.flush()
@@ -873,13 +880,14 @@ class ArchiveTest(unittest.TestCase):
             resource.setrlimit(resource.RLIMIT_AS, (256 << 20, 256 << 20))
         for exe in (self.native, self.checked):
             proc = subprocess.run([exe, "gunzip-limit", str(1 << 20)], input=bomb, capture_output=True, timeout=60,
-                                  preexec_fn=limited)
+                                  preexec_fn=limited, env=dict(os.environ, MYLA_THREADS="4"))
             self.assertEqual((proc.returncode, proc.stderr), (1, b"error: output longer than max_output\n"))
             small = gzip.compress(bytes(3 << 20))
             proc = subprocess.run([exe, "gunzip-limit", str(3 << 20)], input=small, capture_output=True, timeout=60)
             self.assertEqual((proc.returncode, proc.stdout), (0, b"3145728\n"), proc.stderr)
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    @linux_only("GNU tar extracts it (Windows' tar is bsdtar)")
     def test_tar_write_natively(self) -> None:
         entries = _manifest(random.Random(2352))
         want = _manifest_listing(entries)

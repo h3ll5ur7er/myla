@@ -30,7 +30,7 @@ import sys
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 DRIVER = """from std.io import stdin, println, Reader
@@ -228,11 +228,10 @@ class JsonAgainstPython(unittest.TestCase):
             fh.write(DRIVER)
         gen = selfhost_tool("gen_main")
         asm = subprocess.run([gen, path, STDLIB_ROOT], capture_output=True, text=True, check=True)
-        sh_native = os.path.join(cls.tmp.name, "sh_native")
+        sh_native = os.path.join(cls.tmp.name, "sh_native" + EXE)
         with open(sh_native + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
-        subprocess.run(["as", "--64", "-o", sh_native + ".o", sh_native + ".s"], check=True)
-        subprocess.run(["ld", "-o", sh_native, sh_native + ".o"], check=True)
+        assemble(sh_native + ".s", sh_native)   # for the machine (MYLA-926: Windows' too)
         cls.native = {"self-hosted native": [sh_native]}
         cls.interpreters = {
             "self-hosted interpreter": [selfhost_tool("interp_main"), path, STDLIB_ROOT],

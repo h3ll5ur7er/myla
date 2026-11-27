@@ -1,10 +1,12 @@
-// runtime_x86.my -- the runtime's x86-64 Linux assembly (MYLA-162, D108).
+// runtime_x86.my -- the runtime's x86-64 assembly, for Linux (MYLA-162,
+// D108) and Windows (MYLA-702).
 //
 // What of the runtime is still hand-written for this target, what is the
 // machine's own (MYLA-263): the program's start (`_start`: the stack limit,
 // the alternate signal stack and the stack-overflow handler, the main
 // thread's state block, the workers and their rings), the traps and the
-// panic, the system calls (`__syscall`, `__syscall5`), the bulk copy
+// panic, the system calls (`__syscall`, `__syscall5`; on Windows calls of
+// kernel32's functions, D212), the bulk copy
 // (`__copy_bytes`), the executor's control transfers (starting worker
 // threads, the jumps into frames, `__exec_run`) and the float remainder
 // (`__fmod`). The rest of the runtime is std.rt and std.platform, and the
@@ -16,7 +18,76 @@ from .codegen import CodeGen, DropEntry, ends_colon, EXEC_CAP, tls_offset, TLS_S
 from .lower import drop_entry_ir, compose_ir
 
 impl CodeGen {
+    // The program's start and the runtime's code that isn't IR, on Linux
+    // (`emit_linux_start`, `emit_linux_handlers`, `emit_linux_calls`) or
+    // Windows (`emit_windows_start`, `emit_windows_calls`; MYLA-702).
     fun emit_runtime_prelude(var self, entry_name: str) {
+        if self.windows { self.emit_windows_start(entry_name) } else { self.emit_linux_start(entry_name) }
+        if self.frames {
+            self.emit_executor()
+        }
+        // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
+        // (MYLA-17); the message is the interpreter's, without the values. The
+        // caller passes the position record in %rsi; out of memory has none.
+        for label in trap_labels(self.checked) {
+            self.raw(format("{}:", label))
+            if label == "__trap_oom" { self.raw("\txorl %esi, %esi") }
+            self.raw(format("\tleaq .Lmsg{}(%rip), %rdi", label))
+            self.raw("\tjmp __panic")
+        }
+        self.raw("")
+        if self.windows { self.emit_windows_handlers() } else { self.emit_linux_handlers() }
+        // __panic: %rdi -> the message, %rsi -> the position record or 0;
+        // reported by std.rt (`panic_report`: `runtime error: <message>`,
+        // then `  --> file:line:col`, MYLA-65)
+        self.raw("__panic:")
+        if self.frames {
+            // held for the parent when a task other than the entry's fails
+            // (`__task_fail` goes back to the executor then)
+            self.raw("\tpushq %rsi")
+            self.raw("\tpushq %rdi")
+            self.raw("\tmovq %rsi, %rdx")
+            self.raw("\tmovq %rdi, %rsi")
+            self.raw("\tmovq $2, %rdi")
+            self.raw("\tcall __task_fail")
+            self.raw("\tpopq %rdi")
+            self.raw("\tpopq %rsi")
+            self.raw("\tjmp __panic_report_tasks")
+        } else {
+            self.raw("\tjmp __panic_report")
+        }
+        self.raw("")
+        if self.windows { self.emit_windows_calls() } else { self.emit_linux_calls() }
+        // __copy_bytes(dst, src, n): a bulk copy for the runtime written in
+        // Myla (MYLA-162's prototype)
+        self.raw("__copy_bytes:")
+        self.raw("\tmovq %rdx, %rcx")
+        self.emit_byte_copy(true)
+        self.raw("\tret")
+        self.raw("")
+        // __str_drop: rdi = str cell. Decrement; free at zero (a str owns nothing
+        // else); static cells never reach zero. Built as IR with std.rt's
+        // allocator (MYLA-162).
+        self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
+        self.raw("\t.set __str_drop, myla___str_drop")
+        // the executor's routines and the allocator in std.rt (MYLA-162):
+        // the names the rest of the runtime calls stand for its functions
+        for p in self.rt_exec() {
+            self.raw(format("\t.set {}, myla_{}", p.0, p.1))
+        }
+        self.raw("\t.set __print_str, myla_std$rt$print_str")
+        let names = self.rt_alloc_names()
+        self.raw(format("\t.set __alloc, myla_{}", names.0))
+        self.raw(format("\t.set __free, myla_{}", names.1))
+        self.raw("")
+        self.emit_compose_runtime()
+        self.emit_derived_eq()
+    }
+
+    // Linux's `_start`: the stack's limit, the stack-overflow handler, SIGPIPE
+    // ignored, the main thread's state block, the arguments and the
+    // environment from the stack, the workers, then the entry and the exit.
+    fun emit_linux_start(var self, entry_name: str) {
         self.raw("\t.global _start")
         self.raw("_start:")
         // the main thread's stack may grow to 120 MiB (MYLA-182): Linux grows
@@ -157,25 +228,25 @@ impl CodeGen {
         self.raw("\txorl %edi, %edi")
         self.raw("\tcall __exit_program")
         self.raw("")
-        if self.frames {
-            self.emit_executor()
-        }
-        // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
-        // (MYLA-17); the message is the interpreter's, without the values. The
-        // caller passes the position record in %rsi; out of memory has none.
-        for label in trap_labels(self.checked) {
-            self.raw(format("{}:", label))
-            if label == "__trap_oom" { self.raw("\txorl %esi, %esi") }
-            self.raw(format("\tleaq .Lmsg{}(%rip), %rdi", label))
-            self.raw("\tjmp __panic")
-        }
-        self.raw("")
+    }
+
+    // The signal handlers of Linux's runtime: a stack overflow's report, the
+    // restorer, std.signal's self-pipe.
+    fun emit_linux_handlers(var self) {
         // __on_segv(sig, siginfo, ucontext), on the alternate stack: the fault
         // address (siginfo + 16) within 64 KiB below or 1 MiB above the interrupted
         // %rsp (ucontext + 160) is a stack overflow (MYLA-182), reported once:
         // a worker overflowing after another sleeps until its exit ends the
-        // process (MYLA-172)
+        // process (MYLA-172). Any other fault gets the default action back
+        // and happens again. A signal sent (`si_code`, siginfo + 8, at most
+        // 0: SI_USER, SI_QUEUE, SI_TKILL), which faults nothing again, gets
+        // it back and is sent again by `__on_raw_signal`, which puts a raw
+        // terminal's mode back first: the program ends by it once the
+        // handler returns (MYLA-592: the first was swallowed)
         self.raw("__on_segv:")
+        self.raw("	movl 8(%rsi), %r9d")
+        self.raw("	testl %r9d, %r9d")
+        self.raw("	jle .Lsegv_other")
         self.raw("	movq 16(%rsi), %rax")
         self.raw("	movq 160(%rdx), %rcx")
         self.raw("	movq %rcx, %r8")
@@ -215,6 +286,13 @@ impl CodeGen {
         self.raw("	movl $8, %r10d")
         self.raw("	syscall")
         self.raw("	addq $32, %rsp")
+        self.raw("	testl %r9d, %r9d")
+        self.raw("	jg .Lsegv_done")
+        self.raw("	subq $8, %rsp")
+        self.raw("	movl $11, %edi")
+        self.raw("	call __on_raw_signal")
+        self.raw("	addq $8, %rsp")
+        self.raw(".Lsegv_done:")
         self.raw("	ret")
         self.raw("__sig_restorer:")
         self.raw("	movq $15, %rax")
@@ -236,26 +314,10 @@ impl CodeGen {
         self.raw(".Lmsg_sov:")
         self.raw("	.ascii \"runtime error: stack overflow\\n\"")
         self.raw("")
-        // __panic: %rdi -> the message, %rsi -> the position record or 0;
-        // reported by std.rt (`panic_report`: `runtime error: <message>`,
-        // then `  --> file:line:col`, MYLA-65)
-        self.raw("__panic:")
-        if self.frames {
-            // held for the parent when a task other than the entry's fails
-            // (`__task_fail` goes back to the executor then)
-            self.raw("\tpushq %rsi")
-            self.raw("\tpushq %rdi")
-            self.raw("\tmovq %rsi, %rdx")
-            self.raw("\tmovq %rdi, %rsi")
-            self.raw("\tmovq $2, %rdi")
-            self.raw("\tcall __task_fail")
-            self.raw("\tpopq %rdi")
-            self.raw("\tpopq %rsi")
-            self.raw("\tjmp __panic_report_tasks")
-        } else {
-            self.raw("\tjmp __panic_report")
-        }
-        self.raw("")
+    }
+
+    // Linux's system calls for std.platform (`__syscall`, `__syscall5`).
+    fun emit_linux_calls(var self) {
         // __syscall(n, a, b, c): Linux's platform layer for the runtime written
         // in Myla (MYLA-162): the call's number and three arguments moved
         // into the kernel's registers; the result, a negative errno on a
@@ -282,30 +344,502 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("\tret")
         self.raw("")
-        // __copy_bytes(dst, src, n): a bulk copy for the runtime written in
-        // Myla (MYLA-162's prototype)
-        self.raw("__copy_bytes:")
-        self.raw("\tmovq %rdx, %rcx")
-        self.emit_byte_copy(true)
+    }
+
+    // Windows' `_start` (MYLA-702, D212): kernel32 calls it as a function
+    // and nothing calls back into a C runtime, so the stack is aligned as
+    // Linux's start finds it and the program never returns. A stack
+    // overflow's handler first (`emit_windows_guard`, D216); with tasks the
+    // main thread's state block, worker 0's, in a TLS slot of its TEB
+    // (MYLA-703). std.platform's `windows_start` sets the console to UTF-8
+    // (D215) and lays out the arguments and the environment from kernel32
+    // as `__argv` and `__environ` read them; then the workers, the entry,
+    // and the exit through the exit hook (`ExitProcess`). The main thread's
+    // stack is the linker's (`/stack`).
+    fun emit_windows_start(var self, entry_name: str) {
+        let start = self.request_fn(self.platform_fn("windows_start"), [])
+        self.raw("\t.global _start")
+        self.raw("_start:")
+        self.raw("\tandq $-16, %rsp")
+        self.emit_windows_guard()
+        if self.frames {
+            // a TLS slot (`TlsAlloc`) of the TEB's 64 (`%gs`, from 0x1480
+            // on) whose offset `win_tls_block` reads; worker 0's block its
+            // value, its first word its own address, before anything
+            // allocates. A slot past those 64 (others took them) can't be
+            // reached that way: the program ends saying so.
+            self.raw("\tsubq $32, %rsp")
+            self.win_call("TlsAlloc")
+            self.raw("\taddq $32, %rsp")
+            self.raw("\tcmpl $64, %eax")
+            self.raw("\tjae __win_no_slot")
+            self.raw("\tmovl %eax, %eax")
+            self.raw("\tleaq 5248(,%rax,8), %rax")
+            self.raw("\tmovq %rax, __win_tls_off(%rip)")
+            self.raw("\tleaq __tls_blocks(%rip), %rsi")
+            self.raw("\tmovq %rsi, (%rsi)")
+            self.raw("\tmovq %rsi, %gs:(%rax)")
+        }
+        // the arguments and the environment, which `__sched_init` and
+        // `__workers_count` read
+        self.raw(f"\tcall myla_{start}")
+        if self.frames {
+            // as many workers as `__workers_count` says (MYLA_THREADS, or
+            // the CPUs this process may run on); their rings of ready
+            // frames, EXEC_CAP frames each (D106), then the other workers.
+            // The rings are reserved, not committed (`VirtualAlloc`'s
+            // MEM_RESERVE; PAGE_READONLY marks memory committed as it is
+            // touched, `__win_on_fault`): Windows counts what is committed
+            // against the system's limit, and 8 MiB a worker, mostly never
+            // touched, made a program of 16 workers cost 128 MiB of it
+            // (MYLA-798, H12)
+            self.raw("\tcall __sched_init")
+            self.raw("\tcall __workers_count")
+            self.raw("\tmovl %eax, __exec_workers(%rip)")
+            self.raw("\tmovl %eax, %edx")
+            self.raw(format("\timulq ${}, %rdx", 8 * EXEC_CAP))
+            self.raw("\txorl %ecx, %ecx")
+            self.raw("\tmovl $0x2000, %r8d")
+            self.raw("\tmovl $2, %r9d")
+            self.raw("\tsubq $32, %rsp")
+            self.win_call("VirtualAlloc")
+            self.raw("\taddq $32, %rsp")
+            self.raw("\ttestq %rax, %rax")
+            self.raw("\tjz __trap_oom")
+            self.raw("\tmovq %rax, __wq_rings(%rip)")
+            self.raw("\tcall __start_workers")
+        }
+        if self.frames && self.sig_of(entry_name).decl.is_async {
+            // the entry's task: its frame queued, the executor run (D90)
+            self.raw(format("\tcall myla_{}__new", entry_name))
+            self.raw("\tmovq %rax, __exec_main(%rip)")
+            self.raw("\tmovq %rax, 40(%rax)")
+            self.raw("\tmovq %rax, %rdi")
+            self.raw("\tcall __exec_push")
+            self.raw("\tcall __exec_run")
+        } else {
+            self.raw(format("\tcall myla_{}", entry_name))
+        }
+        self.raw("\txorl %edi, %edi")
+        self.raw("\tcall __exit_program")
+        self.raw("")
+    }
+
+    // Windows' calls for std.platform (MYLA-702): `__syscall(f, a, b, c)`
+    // and `__syscall5(f, a, b, c, d, e)` call the function at `f`, a
+    // kernel32 function's address (its import slot's word,
+    // `__rt_get("__imp_<name>")`, which the code generator records for the
+    // import library), with Win64's convention, at this boundary only
+    // (D130): the arguments in %rcx, %rdx, %r8 and %r9 (0 for a fourth of
+    // `__syscall`), the fifth on the stack above 32 bytes of shadow space
+    // and a sixth 0 after it (`PeekNamedPipe`'s last), the stack aligned to
+    // 16 bytes. The result is %rax as the function
+    // leaves it: a BOOL's or a DWORD's upper half is undefined, which the
+    // platform module masks. Win64 keeps every register the callers keep
+    // and %rdi and %rsi too.
+    fun emit_windows_calls(var self) {
+        for line in ["__syscall:", "\tpushq %rbp", "\tmovq %rsp, %rbp", "\tandq $-16, %rsp", "\tsubq $32, %rsp",
+            "\tmovq %rdi, %rax", "\tmovq %rcx, %r8", "\tmovq %rsi, %rcx", "\txorl %r9d, %r9d", "\tcall *%rax",
+            "\tmovq %rbp, %rsp", "\tpopq %rbp", "\tret", "",
+            "__syscall5:", "\tpushq %rbp", "\tmovq %rsp, %rbp", "\tandq $-16, %rsp", "\tsubq $48, %rsp",
+            "\tmovq %r9, 32(%rsp)", "\tmovq $0, 40(%rsp)", "\tmovq %r8, %r9", "\tmovq %rcx, %r8", "\tmovq %rsi, %rcx", "\tmovq %rdi, %rax", "\tcall *%rax",
+            "\tmovq %rbp, %rsp", "\tpopq %rbp", "\tret", ""] {
+            self.raw(line)
+        }
+        // `__win_call` (MYLA-705), itself called as `__syscall(
+        // __rt_addr("__win_call"), block, 0, 0)`: the function at the
+        // block's first word called with the ten words after it as its
+        // arguments, for kernel32's functions of more than five
+        // (`CreateProcessW` has ten, `DuplicateHandle` seven); the fifth to
+        // the tenth above the shadow space, %rbx (which Win64 keeps) holding
+        // the block across the call, the stack aligned to 16 bytes (8 off it
+        // at the entry, then %rbx and 96 bytes).
+        self.raw("__win_call:")
+        self.raw("\tpushq %rbx")
+        self.raw("\tmovq %rcx, %rbx")
+        self.raw("\tsubq $96, %rsp")
+        var k = 5
+        while k <= 10 {
+            self.raw(format("\tmovq {}(%rbx), %rax", 8 * k))
+            self.raw(format("\tmovq %rax, {}(%rsp)", 32 + 8 * (k - 5)))
+            k += 1
+        }
+        for line in ["\tmovq 8(%rbx), %rcx", "\tmovq 16(%rbx), %rdx", "\tmovq 24(%rbx), %r8", "\tmovq 32(%rbx), %r9",
+            "\tcall *(%rbx)", "\taddq $96, %rsp", "\tpopq %rbx", "\tret", ""] {
+            self.raw(line)
+        }
+        // `__win_wait_posted` (MYLA-706): the callback a wait of the
+        // system's thread pool calls (`RegisterWaitForSingleObject`, its
+        // context in %rcx), on a thread of the pool's, which has no state
+        // block of the runtime's: so it is these lines and nothing of
+        // Myla's. Its context is `[function][port][key][overlapped]
+        // [posted]`: it reads the context, sets `posted` to 1, then calls
+        // the function (the address of `PostQueuedCompletionStatus`) with
+        // the port, no bytes, the key and the overlapped, which queues the
+        // packet that tells std.platform's poller the object was signalled
+        // (or `closesocket` or `CloseHandle` with the handle, for a close
+        // that waited for its send). Nothing of the context is read once
+        // `posted` is set: the watched handle that holds it may be freed
+        // from then on (MYLA-753: `ws_later` could free it as soon as `posted`
+        // was set, while this read the rest of it).
+        for line in ["__win_wait_posted:", "\tsubq $40, %rsp", "\tmovq %rcx, %r10", "\tmovq 16(%r10), %r8",
+            "\tmovq 24(%r10), %r9", "\txorl %edx, %edx", "\tmovq (%r10), %rax", "\tmovq 8(%r10), %rcx",
+            "\tmovq $1, 32(%r10)", "\tcall *%rax", "\taddq $40, %rsp", "\tret", ""] {
+            self.raw(line)
+        }
+    }
+
+    // A call of kernel32's `name` from the runtime's own assembly, through
+    // its import slot, which the import library gets (`note_import`): its
+    // arguments where Win64 has them, the stack aligned to 16 bytes below
+    // its 32 bytes of shadow space.
+    fun win_call(var self, name: str) {
+        self.note_import("__imp_" + name)
+        self.raw(f"\tcall *__imp_{name}(%rip)")
+    }
+
+    // A stack overflow's report on Windows (D216), set up first in `_start`:
+    // a vectored exception handler for every thread (`__win_on_fault`), and
+    // the thread's guarantee of stack for it (`emit_windows_guarantee`).
+    fun emit_windows_guard(var self) {
+        self.raw("\tsubq $48, %rsp")
+        self.emit_windows_guarantee()
+        self.raw("\tmovl $1, %ecx")
+        self.raw("\tleaq __win_on_fault(%rip), %rdx")
+        self.win_call("AddVectoredExceptionHandler")
+        self.raw("\taddq $48, %rsp")
+    }
+
+    // The stack a thread keeps for its handler once its own has run out:
+    // 64 KiB, as large as Linux's alternate signal stack, which the report
+    // and the exit hook it runs fit in (`SetThreadStackGuarantee`; the
+    // stack aligned, 48 bytes below it free).
+    fun emit_windows_guarantee(var self) {
+        self.raw("\tmovl $65536, 32(%rsp)")
+        self.raw("\tleaq 32(%rsp), %rcx")
+        self.win_call("SetThreadStackGuarantee")
+    }
+
+    // The handlers of Windows' runtime (MYLA-703, D216). `__win_on_fault`
+    // (the exception's pointers in %rcx, Win64's): a stack overflow
+    // (`EXCEPTION_STACK_OVERFLOW`, the guard page touched with none left
+    // below it), or an access violation within 64 KiB below or 1 MiB above
+    // the stack pointer (`ExceptionInformation[1]` and the context's %rsp,
+    // as Linux's `__on_segv` looks), is reported once as on Linux: on the
+    // standard error, then the exit hook and status 1; a thread
+    // overflowing after another sleeps until that one's exit ends the
+    // process (MYLA-172). Anything else goes on to the system's handling
+    // (EXCEPTION_CONTINUE_SEARCH). An access violation at memory reserved
+    // to be committed as it is touched (the workers' rings) commits it
+    // (`emit_windows_lazy_commit`, MYLA-798). `__win_no_slot`: `_start`
+    // found no TLS slot for the workers' blocks.
+    fun emit_windows_handlers(var self) {
+        self.raw("__win_on_fault:")
+        self.raw("\tmovq (%rcx), %rax")
+        self.raw("\tmovl (%rax), %edx")
+        self.raw("\tcmpl $0xC00000FD, %edx")
+        self.raw("\tje .Lwin_fault_stack")
+        self.raw("\tcmpl $0xC0000005, %edx")
+        self.raw("\tjne .Lwin_fault_other")
+        // memory committed as it is touched first: a worker's stack can
+        // lie right below the rings, within the window looked at next
+        self.raw("\tmovq 40(%rax), %rax")
+        self.raw("\tjmp .Lwin_fault_lazy")
+        self.raw(".Lwin_fault_near:")
+        self.raw("\tmovq (%rcx), %rax")
+        self.raw("\tmovq 40(%rax), %rax")
+        self.raw("\tmovq 8(%rcx), %rdx")
+        self.raw("\tmovq 152(%rdx), %rdx")
+        self.raw("\tleaq -65536(%rdx), %r8")
+        self.raw("\tcmpq %r8, %rax")
+        self.raw("\tjb .Lwin_fault_other")
+        self.raw("\tleaq 1048576(%rdx), %r8")
+        self.raw("\tcmpq %r8, %rax")
+        self.raw("\tja .Lwin_fault_other")
+        self.raw(".Lwin_fault_stack:")
+        self.raw("\tandq $-16, %rsp")
+        self.raw("\tsubq $48, %rsp")
+        self.raw("\tmovl $1, %eax")
+        self.raw("\txchgl %eax, __segv_once(%rip)")
+        self.raw("\ttestl %eax, %eax")
+        self.raw("\tjz .Lwin_fault_report")
+        self.raw(".Lwin_fault_sleep:")
+        self.raw("\tmovl $-1, %ecx")
+        self.win_call("Sleep")
+        self.raw("\tjmp .Lwin_fault_sleep")
+        self.raw(".Lwin_fault_report:")
+        self.emit_windows_stderr(".Lmsg_win_sov", 30)
+        self.raw("\tmovl $1, %edi")
+        self.raw("\tcall __exit_program")
+        self.emit_windows_lazy_commit()
+        self.raw(".Lwin_fault_other:")
+        self.raw("\txorl %eax, %eax")
+        self.raw("\tret")
+        self.emit_windows_ctrl_handler()
+        // (no block to run the exit hook with: ExitProcess at once)
+        self.raw("__win_no_slot:")
+        self.raw("\tandq $-16, %rsp")
+        self.raw("\tsubq $48, %rsp")
+        self.emit_windows_stderr(".Lmsg_win_no_slot", 49)
+        self.raw("\tmovl $1, %ecx")
+        self.win_call("ExitProcess")
+        self.raw(".Lmsg_win_sov:")
+        self.raw("\t.ascii \"runtime error: stack overflow\\n\"")
+        self.raw(".Lmsg_win_oom:")
+        self.raw("\t.ascii \"runtime error: out of memory\\n\"")
+        self.raw(".Lmsg_win_no_slot:")
+        self.raw("\t.ascii \"runtime error: no thread-local storage slot left\\n\"")
+        self.raw("")
+    }
+
+    // `__win_on_fault`'s commit of memory reserved to be committed as it is
+    // touched, the address in %rax: private memory reserved PAGE_READONLY
+    // (the rings, `_start`'s) is committed from the page touched, 64 KiB at
+    // most, and the access runs again (EXCEPTION_CONTINUE_EXECUTION, also
+    // when another thread committed it meanwhile); a commit Windows refuses
+    // (the system's limit) is reported once as out of memory, as a stack
+    // overflow is; anything else goes on to the look at the stack
+    // (`.Lwin_fault_near`, the exception's pointers in %rcx again).
+    // `VirtualQuery`'s MEMORY_BASIC_INFORMATION is above the shadow space
+    // (the region's base at 0, the allocation's protection at 16, the
+    // region's size at 24, its state at 32, its type at 40); %rbx, which
+    // keeps the pointers meanwhile, is kept, as Win64 asks.
+    fun emit_windows_lazy_commit(var self) {
+        self.raw(".Lwin_fault_lazy:")
+        // (not an instruction fetched from it: committed, it still
+        // couldn't run)
+        self.raw("\tmovq (%rcx), %rdx")
+        self.raw("\tcmpq $8, 32(%rdx)")
+        self.raw("\tje .Lwin_fault_near")
+        self.raw("\tpushq %rbx")
+        self.raw("\tmovq %rcx, %rbx")
+        self.raw("\tsubq $80, %rsp")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tleaq 32(%rsp), %rdx")
+        self.raw("\tmovl $48, %r8d")
+        self.win_call("VirtualQuery")
+        self.raw("\tcmpq $48, %rax")
+        self.raw("\tjne .Lwin_fault_lazy_not")
+        self.raw("\tcmpl $0x20000, 72(%rsp)")
+        self.raw("\tjne .Lwin_fault_lazy_not")
+        self.raw("\tcmpl $2, 48(%rsp)")
+        self.raw("\tjne .Lwin_fault_lazy_not")
+        self.raw("\tcmpl $0x1000, 64(%rsp)")
+        self.raw("\tje .Lwin_fault_lazy_again")
+        self.raw("\tcmpl $0x2000, 64(%rsp)")
+        self.raw("\tjne .Lwin_fault_lazy_not")
+        // VirtualAlloc(page, min(region, 64 KiB), MEM_COMMIT, PAGE_READWRITE)
+        self.raw("\tmovq 32(%rsp), %rcx")
+        self.raw("\tmovq 56(%rsp), %rdx")
+        self.raw("\tmovl $65536, %eax")
+        self.raw("\tcmpq %rax, %rdx")
+        self.raw("\tcmovaq %rax, %rdx")
+        self.raw("\tmovl $0x1000, %r8d")
+        self.raw("\tmovl $4, %r9d")
+        self.win_call("VirtualAlloc")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lwin_fault_lazy_oom")
+        self.raw(".Lwin_fault_lazy_again:")
+        self.raw("\taddq $80, %rsp")
+        self.raw("\tpopq %rbx")
+        self.raw("\tmovl $-1, %eax")
+        self.raw("\tret")
+        self.raw(".Lwin_fault_lazy_not:")
+        self.raw("\taddq $80, %rsp")
+        self.raw("\tmovq %rbx, %rcx")
+        self.raw("\tpopq %rbx")
+        self.raw("\tjmp .Lwin_fault_near")
+        self.raw(".Lwin_fault_lazy_oom:")
+        self.raw("\tandq $-16, %rsp")
+        self.raw("\tsubq $48, %rsp")
+        self.raw("\tmovl $1, %eax")
+        self.raw("\txchgl %eax, __segv_once(%rip)")
+        self.raw("\ttestl %eax, %eax")
+        self.raw("\tjnz .Lwin_fault_sleep")
+        self.emit_windows_stderr(".Lmsg_win_oom", 29)
+        self.raw("\tmovl $1, %edi")
+        self.raw("\tcall __exit_program")
+    }
+
+    // `__win_on_ctrl` (MYLA-707, D216), the console's control handler that
+    // std.platform adds (`SetConsoleCtrlHandler`): Windows calls it with
+    // the event in %ecx, Win64's, on a thread of its own, which has no state
+    // block (the workers' TLS slot is empty there), so it reaches only the
+    // process's words. Ctrl-C and Ctrl-Break (0, 1) are SIGINT, the
+    // console's close, a logoff and a shutdown (2, 5, 6) SIGTERM; anything
+    // else is passed on (FALSE). A Ctrl-C or a Ctrl-Break is counted first
+    // (`__win_console_cp`'s fifth word, a locked add): Windows ends a read
+    // of the console's lines with it, giving 0 bytes and no error, and
+    // std.platform's `read` tells that from the input's end by the count
+    // (MYLA-708). While someone listens (`__sig_pipe`'s
+    // count), the signal's number goes to std.signal's pipe as a byte (its
+    // write end the first word), as Linux's `__on_signal` writes it, a
+    // packet tells std.platform's poller to look at the pipe (MYLA-744: the
+    // port can't wait on an anonymous pipe, and the poller looked at it
+    // each millisecond), and the event is handled (TRUE); after a
+    // SIGTERM's, the thread waits,
+    // since Windows ends the process once its handlers return, so that the
+    // program can end itself first. Else `__on_raw_signal` puts the console
+    // back, its mode if std.term holds it raw (`__exit_hook`, D192) and the
+    // code pages and output mode the program changed (MYLA-798: Windows'
+    // default ended the program without them), and the event goes on to
+    // the next handler, Windows' default, which ends the process. The
+    // registers Win64 keeps and Myla's code doesn't (%rdi,
+    // %rsi, %xmm6 to %xmm15) are saved with the rest it keeps; the stack
+    // aligned to 16 bytes, the shadow space, the fifth argument at 32, the
+    // byte at 40, the count written at 48, the vector registers from 56.
+    fun emit_windows_ctrl_handler(var self) {
+        let saved = ["%rbx", "%rbp", "%rdi", "%rsi", "%r12", "%r13", "%r14", "%r15"]
+        self.raw("__win_on_ctrl:")
+        for r in saved { self.raw(f"\tpushq {r}") }
+        self.raw("\tsubq $216, %rsp")
+        var x = 6
+        while x <= 15 {
+            self.raw(format("\tmovdqu %xmm{}, {}(%rsp)", x, 56 + 16 * (x - 6)))
+            x += 1
+        }
+        self.raw("\tmovl $2, %ebx")
+        self.raw("\tcmpl $1, %ecx")
+        self.raw("\tja .Lwin_ctrl_term")
+        self.raw("\tlock incq __win_console_cp+32(%rip)")
+        self.raw("\tjmp .Lwin_ctrl_signal")
+        self.raw(".Lwin_ctrl_term:")
+        self.raw("\tmovl $15, %ebx")
+        for ev in [2, 5] {
+            self.raw(f"\tcmpl ${ev}, %ecx")
+            self.raw("\tje .Lwin_ctrl_signal")
+        }
+        self.raw("\tcmpl $6, %ecx")
+        self.raw("\tjne .Lwin_ctrl_pass")
+        self.raw(".Lwin_ctrl_signal:")
+        self.raw("\tcmpq $0, __sig_pipe+16(%rip)")
+        self.raw("\tje .Lwin_ctrl_raw")
+        self.raw("\tmovb %bl, 40(%rsp)")
+        self.raw("\tmovq __sig_pipe(%rip), %rcx")
+        self.raw("\tleaq 40(%rsp), %rdx")
+        self.raw("\tmovl $1, %r8d")
+        self.raw("\tleaq 48(%rsp), %r9")
+        self.raw("\tmovq $0, 32(%rsp)")
+        self.win_call("WriteFile")
+        // the poller told (MYLA-744): a packet of no operation with the
+        // key 1 (`SIGNAL_KEY`) posted to the process's port, once there is
+        // one (`__win_net`'s second word), after the byte is in the pipe
+        self.raw("\tmovq __win_net+8(%rip), %rcx")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tje .Lwin_ctrl_posted")
+        self.raw("\txorl %edx, %edx")
+        self.raw("\tmovl $1, %r8d")
+        self.raw("\txorl %r9d, %r9d")
+        self.win_call("PostQueuedCompletionStatus")
+        self.raw(".Lwin_ctrl_posted:")
+        self.raw("\tcmpl $15, %ebx")
+        self.raw("\tjne .Lwin_ctrl_handled")
+        self.raw(".Lwin_ctrl_wait:")
+        self.raw("\tmovl $-1, %ecx")
+        self.win_call("Sleep")
+        self.raw("\tjmp .Lwin_ctrl_wait")
+        self.raw(".Lwin_ctrl_handled:")
+        self.raw("\tmovl $1, %eax")
+        self.raw("\tjmp .Lwin_ctrl_done")
+        self.raw(".Lwin_ctrl_raw:")
+        self.raw("\tmovl %ebx, %edi")
+        self.raw("\tcall __on_raw_signal")
+        self.raw(".Lwin_ctrl_pass:")
+        self.raw("\txorl %eax, %eax")
+        self.raw(".Lwin_ctrl_done:")
+        x = 6
+        while x <= 15 {
+            self.raw(format("\tmovdqu {}(%rsp), %xmm{}", 56 + 16 * (x - 6), x))
+            x += 1
+        }
+        self.raw("\taddq $216, %rsp")
+        var k = saved.len() - 1
+        while k >= 0 {
+            self.raw(f"\tpopq {saved[k]}")
+            k -= 1
+        }
+        self.raw("\tret")
+    }
+
+    // The `len` bytes at `label` written to the standard error
+    // (`GetStdHandle`, `WriteFile`), the stack aligned with 48 bytes free
+    // below it (the count's word at 40).
+    fun emit_windows_stderr(var self, label: str, len: int32) {
+        self.raw("\tmovl $-12, %ecx")
+        self.win_call("GetStdHandle")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw(f"\tleaq {label}(%rip), %rdx")
+        self.raw(f"\tmovl ${len}, %r8d")
+        self.raw("\tleaq 40(%rsp), %r9")
+        self.raw("\tmovq $0, 32(%rsp)")
+        self.win_call("WriteFile")
+    }
+
+    // __start_workers: Windows' workers besides the main thread (worker 0),
+    // as many as `__exec_workers` says (`_start` set it); each a thread
+    // (`CreateThread`) with its state block, which it puts in its TLS slot
+    // (`__win_worker`), and 8 MiB of stack reserved, as Linux's workers
+    // have, which Windows commits as it grows (the prologues probe a frame
+    // of a page or more: MYLA-717); the handle isn't kept.
+    fun emit_windows_start_workers(var self) {
+        self.raw("__start_workers:")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tandq $-16, %rsp")
+        self.raw("\tsubq $48, %rsp")
+        self.raw("\tmovq $1, %rbx")
+        self.raw(".Lwin_workers_next:")
+        self.raw("\tcmpl __exec_workers(%rip), %ebx")
+        self.raw("\tjae .Lwin_workers_done")
+        self.raw("\tmovq %rbx, %r12")
+        self.raw(format("\timulq ${}, %r12", TLS_SIZE))
+        self.raw("\tleaq __tls_blocks(%rip), %rax")
+        self.raw("\taddq %rax, %r12")
+        self.raw("\tmovq %r12, (%r12)")
+        self.raw(format("\tmovq %rbx, {}(%r12)", tls_offset("__worker_id")))
+        // CreateThread(0, 8 MiB, __win_worker, block,
+        // STACK_SIZE_PARAM_IS_A_RESERVATION, 0)
+        self.raw("\txorl %ecx, %ecx")
+        self.raw("\tmovl $8388608, %edx")
+        self.raw("\tleaq __win_worker(%rip), %r8")
+        self.raw("\tmovq %r12, %r9")
+        self.raw("\tmovq $65536, 32(%rsp)")
+        self.raw("\tmovq $0, 40(%rsp)")
+        self.win_call("CreateThread")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lwin_workers_short")
+        self.raw("\tlock incq __win_threads(%rip)")
+        self.raw("\tmovq %rax, %rcx")
+        self.win_call("CloseHandle")
+        self.raw("\tincq %rbx")
+        self.raw("\tjmp .Lwin_workers_next")
+        // no more threads to be had: the workers made so far
+        self.raw(".Lwin_workers_short:")
+        self.raw("\tmovl %ebx, __exec_workers(%rip)")
+        self.raw(".Lwin_workers_done:")
+        self.raw("\tmovq %rbp, %rsp")
+        self.raw("\tpopq %rbp")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
         self.raw("\tret")
         self.raw("")
-        // __str_drop: rdi = str cell. Decrement; free at zero (a str owns nothing
-        // else); static cells never reach zero. Built as IR with std.rt's
-        // allocator (MYLA-162).
-        self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
-        self.raw("\t.set __str_drop, myla___str_drop")
-        // the executor's routines and the allocator in std.rt (MYLA-162):
-        // the names the rest of the runtime calls stand for its functions
-        for p in self.rt_exec() {
-            self.raw(format("\t.set {}, myla_{}", p.0, p.1))
-        }
-        self.raw("\t.set __print_str, myla_std$rt$print_str")
-        let names = self.rt_alloc_names()
-        self.raw(format("\t.set __alloc, myla_{}", names.0))
-        self.raw(format("\t.set __free, myla_{}", names.1))
+        // the new thread, its block in %rcx: counted started (for the
+        // exit, `__win_threads`), the block in its TLS slot, its guarantee
+        // of stack for a stack overflow's report, then the executor on the
+        // stack aligned as Linux's workers start (its chunks mapped as it
+        // allocates, std.rt)
+        self.raw("__win_worker:")
+        self.raw("\tlock incq __win_threads+8(%rip)")
+        self.raw("\tmovq __win_tls_off(%rip), %rax")
+        self.raw("\tmovq %rcx, %gs:(%rax)")
+        self.raw("\tandq $-16, %rsp")
+        self.raw("\tsubq $48, %rsp")
+        self.emit_windows_guarantee()
+        self.raw("\taddq $48, %rsp")
+        self.raw("\tjmp __exec_run")
         self.raw("")
-        self.emit_compose_runtime()
-        self.emit_derived_eq()
     }
 
     // The ready frames: each worker has a ring of its own (`emit_executor`
@@ -347,12 +881,17 @@ impl CodeGen {
         // stack recorded; a task failed (`__task_fail`): the loop again from
         // its start, on that stack, no frame running
         self.raw("__exec_run:")
-        self.raw(format("\tmovq %rsp, {}", self.tv("__exec_sp")))
+        let (sp_lines, sp) = self.tv_at("__exec_sp", "rax")
+        for l in sp_lines { self.raw(l) }
+        self.raw(format("\tmovq %rsp, {}", sp))
         self.raw("\tcall __exec_loop")
         self.raw(".Lexec_failed:")
-        self.raw(format("\tmovq {}, %rsp", self.tv("__exec_sp")))
+        let (failed_lines, failed_sp) = self.tv_at("__exec_sp", "rcx")
+        for l in failed_lines { self.raw(l) }
+        self.raw(format("\tmovq {}, %rsp", failed_sp))
         self.raw("\txorl %eax, %eax")
-        self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
+        // (%rcx still holds the thread's block on Windows, loaded just above)
+        self.raw(format("\txchgq %rax, {}", self.tv_at("__exec_cur", "rcx").1))
         self.raw("\tcall __exec_loop")
         self.raw("")
         // the runtime's entry points a frame function tail-calls take the
@@ -390,7 +929,9 @@ impl CodeGen {
         // failure is not reported: its worker goes back to the executor.
         // With no task running it returns at once.
         self.raw("__task_fail:")
-        self.raw(format("\tmovq {}, %rax", self.tv("__exec_cur")))
+        let (cur_lines, cur) = self.tv_at("__exec_cur", "rax")
+        for l in cur_lines { self.raw(l) }
+        self.raw(format("\tmovq {}, %rax", cur))
         self.raw("\ttestq %rax, %rax")
         self.raw("\tjz .Ltf_now")
         self.raw("\tmovq $1, %rcx")
@@ -401,6 +942,12 @@ impl CodeGen {
         self.raw("\txorl %eax, %eax")
         self.raw("\tret")
         self.raw("")
+        if self.windows { self.emit_windows_start_workers() } else { self.emit_start_workers() }
+        self.emit_executor_entries()
+    }
+
+    // __start_workers: Linux's workers besides the main thread.
+    fun emit_start_workers(var self) {
         // __start_workers: the workers besides the main thread (worker 0),
         // as many as `__exec_workers` says (`_start` set it); each a thread
         // (clone: the address space, files, signal handlers and thread group
@@ -486,6 +1033,11 @@ impl CodeGen {
         self.raw("\tpopq %rbx")
         self.raw("\tret")
         self.raw("")
+    }
+
+    // The executor's entry points the frame functions jump to: a yield, a
+    // wait for a task or an actor, `exit` with tasks.
+    fun emit_executor_entries(var self) {
         // myla___yield(frame): a turn for the others, the frame queued again
         // (its resume point stored before this tail call, D92)
         self.raw("myla___yield:")
@@ -506,7 +1058,7 @@ impl CodeGen {
             self.raw("\tret")
             self.raw("")
         }
-        // __task_exit: `exit` (%edi the code) when tasks take turns
+        // __task_exit: `exit` (%rdi the code, sign-extended) when tasks take turns
         self.raw("__task_exit:")
         self.raw("\tpushq %rdi")
         self.raw("\tmovslq %edi, %rsi")

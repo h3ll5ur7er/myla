@@ -1,29 +1,31 @@
 # Known issues
 
-Open bugs and gaps by component, each with a task that has its steps to reproduce; this page is the overview. A line goes when its task is `done`. The entries come from the reviews of 31 October ([[Project/Review-2026-10]]), 6 November ([[Project/Review-2026-11]]) and 9 and 10 November 2026 ([[Project/Review-2026-11-09]], [[Project/Review-2026-11-10]]), and from round 5's lanes. The findings round 5's wave A2 fixes are in its packages ([[Project/Follow-up-plan]]), not here.
+Open bugs and gaps by component, each with a task that has its steps to reproduce; this page is the overview. A line goes when its task is `done`. The entries come from the reviews of 31 October ([[Project/Review-2026-10]]), 6 November ([[Project/Review-2026-11]]) and 9, 10, 12 and 17 November 2026 ([[Project/Review-2026-11-09]], [[Project/Review-2026-11-10]], [[Project/Review-2026-11-12]], [[Project/Review-2026-11-17]]), and from round 5's lanes. Round 7's packages ([[Project/Follow-up-plan]]) hold the smaller findings of the last review; the lines here are their main ones.
 
 [TOC]
 
 ## Self-hosted compiler
 
-- `#test` coverage of `selfhost/` is 67 percent (1,402 of 2,107 value-returning functions, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
+- `#test` coverage of `selfhost/` is 61 percent (1,523 of 2,486 value-returning functions, 2026-11-18, `1f0ddd8`, `scripts/test_coverage.py`) against D109's 80, with no generator left ([[MYLA-184]]).
 - The interpreter is about 500 times slower than native code (`fib(30)`: 3.7 s against 7 ms on `d5d80bc`, [[MYLA-317]]).
-- **Interpreter:** a written `eq` or `hash` of a generic type, called for a list's `==` or a map key, binds no type parameter, so an operation typed by `T` falls back to erasure ([[MYLA-436]]); a `uint64` map key of 2^63 or more is written signed in `map key … not found` ([[MYLA-440]]).
-- Maps never shrink: iteration over an emptied map costs its old size, 82 s for 20,000 keys taken oldest-first from a once-10^6 map ([[MYLA-429]]).
-- `--checked` 64-bit arithmetic is three to five times slower in hot loops, as a checked `*` divides to detect overflow ([[MYLA-430]]).
-- **Checker:** an impl's bound that names a generic trait (`I: Iterator<int>`) isn't checked where the impl is used ([[MYLA-538]]).
-- An import of std.io checks `io`, `fs` and `bytes` whole, as they import each other: 61.8 M instructions of a hello world's 101 M, as [[Project/Review-2026-11-10]] measured ([[MYLA-432]]).
+- `--checked` int64 arithmetic is twice as slow by time in hot loops on x86-64 (`s += i * 3 - (i >> 1)`: 0.22 s against 0.11 s plain, 0.25 s with the trap inline on the same machine, where the review measured 0.62 s against 0.12 s): each check is now a `jo` to its trap after the function's return, one not-taken branch per operation ([[MYLA-551]]).
+- **Build, polymorphic recursion:** a finite program that wraps a type already 64 deep once more (`wrap([x])` of a 64-deep `x`) checks and runs, but `myla build` refuses it as 65 types deep ([[MYLA-624]]).
+- **Loading:** a hello world's check costs 21.4 M instructions and its run 24.9 M, since std.float is loaded only where a float method may be called (D258, [[MYLA-796]]); `tests/burn/test_check_cost.py` bounds both ([[MYLA-793]]).
 
 ## Backends and platforms
 
-The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows are planned ([[MYLA-62]]).
+The targets are x86-64 and aarch64 Linux, wasm32 on WASI and x86-64 Windows; macOS is planned ([[MYLA-62]]).
+
+- **Windows:** on the real runner `process/many-children` counted 393 of 400 children once (CI run 246 of `e153ee08`); the case now says what each child that failed gave, and CI's `windows` job gives its rate and the system's commit charge ([[MYLA-798]]).
+- `gen_main` ignores a failed write of its output ([[MYLA-718]]); a function named with a letter outside ASCII doesn't assemble with clang ([[MYLA-775]]).
+
 
 ## Concurrency
 
 - A non-reentrant actor method kind is still open ([[MYLA-274]]).
 - Natively, on 16 workers, armed timers make every loop top take `__timer_lock`: CPU-bound tasks about 15 % slower ([[MYLA-296]]).
 - A trait method can't be async, so there is no async `Read` or `Write` ([[MYLA-434]]).
-- The poller takes at most four events a wait ([[MYLA-531]]); a keep-alive request through std.http's lot costs about a tenth more than a worker waiting on its connection, on 4 workers ([[MYLA-530]]).
+- The poller takes at most four events a wait (under 2 percent to gain, [[MYLA-531]]); a keep-alive request through std.http's lot costs 4 to 6 percent more than a worker waiting on its connection ([[MYLA-530]]).
 
 ## Tooling in Myla
 
@@ -39,10 +41,10 @@ The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows a
 
 ## Standard library
 
-- A failing `opt.expect("…")` points into `lib/std/option.my`, not at its caller ([[MYLA-435]]).
-- `Url` isn't `Eq` or `Hash` ([[MYLA-488]]).
+- **Numerics:** a few subnormal floats print a farther one of their shortest digits than Python's repr does, though both read back ([[MYLA-910]]).
 
 ## Documentation and repository
 
-- The recorded Python answers cover only the examples and the error corpus now; 20 new corpus files are held to the CLI's own output ([[MYLA-288]]).
-- The tutorial and the "Why Myla" page aren't written yet (D114, [[MYLA-299]]).
+- Seventeen burn modules still ask the recorded Python answers about the 32 examples of the retirement, so the gates keyed by an example's text freeze it (`examples/floats.my`'s stale comments stay); token and AST expectation files would replace the recordings ([[MYLA-288]]).
+- **Website:** the skip link leaves the page and `/quickstart` scrolls sideways on a phone ([[MYLA-630]]); the playground loses output printed before a stop, a wrong-shaped progress value breaks the learn area, 26 reference signatures drop their defaults ([[MYLA-799]]).
+- The tutorial and the "Why Myla" page aren't written yet (D114, [[MYLA-234]]).

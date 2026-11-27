@@ -1,0 +1,11 @@
+//~ parse error: expected an expression, found 'str'
+//~ note: in a list, map or tuple literal `idt<int, str>(7)` is two comparisons
+//~ note span: idt<int, str>(7)
+// D186: in parentheses a comma ends the type arguments, so `idt<int, str>(7)`
+// is `idt < int` and `str > (7)`, and `str` is no expression; the note
+// says so and how to write the call (MYLA-545).
+fun idt<A, B>(a: A) -> A { return a }
+fun main() {
+    let v = (idt<int, str>(7))
+    print(v)
+}

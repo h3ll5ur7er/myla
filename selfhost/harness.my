@@ -4,26 +4,27 @@
 // The harness is the file's own text (its `#main`, if any, blanked) with
 // code appended: for each case a function that calls the tested function
 // with the case's arguments (their source text, copied by span) and gives
-// "" when the result is the expected one, else why not (`expected 3, got
-// 4`, the values as the interpreter's report shows them); for each type a
-// case compares, a structural equality and a repr; and a `#main` that
-// hands the cases to `std.test`'s runner (one child process per case; on
-// wasm32, which starts none, `myla test` runs the harness `--from <n>` and
-// again after each case that ended a run, MYLA-370). The report is the
-// interpreter's, line for line, so `myla test` and `myla test --native`
-// can be held to each other.
+// its verdict, None when the result is the expected one, else why not
+// (`expected 3, got 4`, the values as the interpreter's report shows them);
+// for each type a case compares, a structural equality and a repr; and a
+// `#main` that hands the cases to `std.test`'s runner (one child process
+// per case; on wasm32, which starts none, `myla test` runs the harness
+// `--from <n>` and again after each case that ended a run, MYLA-370). The
+// report is the interpreter's, line for line, so `myla test` and `myla test
+// --native` can be held to each other.
 //
-// A child tells how its case ended on stderr (`std.test`'s `case_end`):
-// a mark and the verdict after a case that returned; without the mark the
-// case ended the process, by a runtime error or an `exit`, `exit(0)` too.
-// An expected `[panic("…")]` matches the message exactly (D183).
+// A child tells how its case ended in a record on stderr, framed with the
+// run's nonce (D191, `std.test`'s `reporting`): the verdict of a case that
+// returned, written by std.test; a runtime error with its whole message, or
+// an `exit` with its status, written by the runtime. An expected
+// `[panic("…")]` matches the message exactly (D183).
 //
 // What differs natively, by design: a failed case runs no deferred block
 // (the child process ends), and a value with no form of its own (a
 // function, a StringBuilder) shows as `<function>` or `<StringBuilder>`.
 
 from .ast import Decl, DeclKind, FunData, Attribute, Expr, TypeExpr, TypeKind, Expected, expected_failure
-from .checker import Checker, Type, type_name, FuncSig
+from .checker import Checker, Type, type_name, FuncSig, is_op_trait, op_trait_method
 from .tokens import SrcSpan
 from .interp import selected, case_func_name
 from .parser import expr_of, type_expr_of, fun_of   // AST values for #test cases
@@ -31,6 +32,16 @@ from std.test import Case as TCase
 
 // How many cases one function of the dispatcher picks from.
 const DISPATCH_GROUP: int32 = 32
+
+// The operator of the arithmetic trait `tr` (D200).
+#test("Rem")["%"]
+fun op_symbol(tr: str) -> str {
+    if tr == "Add" { return "+" }
+    if tr == "Sub" { return "-" }
+    if tr == "Mul" { return "*" }
+    if tr == "Div" { return "/" }
+    return "%"
+}
 
 // A case the harness runs: its report name, what it expects, and the
 // function (its checked name, `T.m` for a method, `__list.m` for one on a
@@ -45,7 +56,7 @@ pub struct Harness { source: str, cases: [Case] }
 // (its declarations `decls`): None when no case of it is selected by
 // `only`.
 pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Option<Harness> {
-    var g = Gen { ch: ch, text: text, line_starts: line_starts(text), out: StringBuilder(), imports: [], type_keys: [], type_imports: [], has_async: false, cases: [], case_async: [], case_code: StringBuilder(), next_alias: 0, shown_done: [] }
+    var g = Gen { ch: ch, text: text, line_starts: line_starts(text), out: StringBuilder(), imports: [], type_keys: [], type_imports: [], has_async: false, cases: [], case_async: [], case_code: StringBuilder(), next_alias: 0, shown_done: [], op_tr: "" }
     var blanked: [SrcSpan] = []
     var k = 0
     for d in decls {
@@ -62,10 +73,20 @@ pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Opti
             },
             DeclKind.ImplDecl(target, methods, tps, trnm, targs, dattrs) => {
                 let key = impl_key(target)
+                g.op_tr = match trnm {
+                    Some(t) => if is_op_trait(t) { t } else { "" },
+                    None => "",
+                }
                 for m in methods {
-                    let name = format("{}.{}", key, m.name)
+                    var name = format("{}.{}", key, m.name)
+                    // an operator method beside others of its trait, renamed
+                    // for its right operand's type (D200)
+                    for oi in g.ch.op_impls {
+                        if oi.decl == d.id && op_trait_method(oi.tr) == m.name { name = oi.method }
+                    }
                     if !is_qualified(name) { k = g.cases_of(m, name, k, only) }
                 }
+                g.op_tr = ""
             },
             _ => {},
         }
@@ -83,30 +104,30 @@ pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Opti
     // its group of DISPATCH_GROUP and its place there, and the list of the
     // cases a function of its own, so that no function is both large and
     // run through often (a wasm engine optimizes such a function, which
-    // took Node 2 s a run on `std.int`'s 1826 cases, MYLA-370)
+    // made Node slow on `std.int`'s 1826 cases, MYLA-370)
     var aw = ""
     if g.has_async { aw = "await " }
     let fun_kw = if g.has_async { "async fun" } else { "fun" }
     var groups = 0
     var i = 0
     while i < g.cases.len() {
-        sb.append(format("{} __myla_run_group_{}(k: int32) -> str {{\n", fun_kw, groups))
+        sb.append(format("{} __myla_run_group_{}(k: int32) -> Option<str> {{\n", fun_kw, groups))
         var j = i
         while j < g.cases.len() && j < i + DISPATCH_GROUP {
             sb.append(format("    if k == {} {{ return {}__myla_case_{}() }}\n", j, if g.case_async[j] { aw } else { "" }, j))
             j = j + 1
         }
-        sb.append("    return \"\"\n}\n\n")
+        sb.append("    return None\n}\n\n")
         groups = groups + 1
         i = j
     }
-    sb.append(format("{} __myla_run_case(k: int32) -> str {{\n", fun_kw))
+    sb.append(format("{} __myla_run_case(k: int32) -> Option<str> {{\n", fun_kw))
     var gi = 0
     while gi < groups {
         sb.append(format("    if k < {} {{ return {}__myla_run_group_{}(k) }}\n", (gi + 1) * DISPATCH_GROUP, aw, gi))
         gi = gi + 1
     }
-    sb.append("    return \"\"\n}\n\n")
+    sb.append("    return None\n}\n\n")
     sb.append("fun __myla_cases() -> [__myla_Case] {\n    return [\n")
     for c in g.cases {
         let rc = runner_case(c)
@@ -116,13 +137,21 @@ pub fun harness_source(text: str, ch: Checker, decls: [Decl], only: str) -> Opti
     sb.append(format("{} __myla_test_main() {{\n", fun_kw))
     sb.append("    let __cases = __myla_cases()\n")
     sb.append("    let __argv = __myla_args()\n")
+    // `--test-tool <step>…`: the child a case starts, which every target
+    // with processes has (`std.test`'s `tool_mode`, MYLA-727)
+    sb.append("    __myla_t.tool_mode(__argv)\n")
+    // `--watch-groups`: the watcher of the cases' process groups, which
+    // outlives the runner (`std.test`'s `watch_mode`, MYLA-819)
+    sb.append("    __myla_t.watch_mode(__argv)\n")
     sb.append("    let __k = __myla_t.case_index(__argv)\n")
-    sb.append(format("    if __k >= 0 {{ __myla_t.child_done({}__myla_run_case(__k))\n        return }}\n", aw))
-    // `--from <n>`: the cases from `n` on in this process, between markers,
-    // for a host that cuts the output (wasm32, MYLA-370)
+    // the head of the records the run reads (D191), with the runtime too
+    sb.append("    let __head = __myla_t.reporting(__argv)\n")
+    sb.append(format("    if __k >= 0 {{ __myla_t.child_done(__head, {}__myla_run_case(__k))\n        return }}\n", aw))
+    // `--from <n>`: the cases from `n` on in this process, each after a
+    // record, for a host that cuts the output (wasm32, MYLA-370)
     sb.append("    var __j = __myla_t.from_index(__argv)\n")
-    sb.append("    if __j >= 0 {\n        while __j < __cases.len() {\n            __myla_t.case_begin()\n")
-    sb.append(format("            __myla_t.case_end({}__myla_run_case(__j))\n            __j = __j + 1\n        }}\n        __myla_t.end(0)\n        return\n    }}\n", aw))
+    sb.append("    if __j >= 0 {\n        while __j < __cases.len() {\n            __myla_t.case_begin(__head)\n")
+    sb.append(format("            __myla_t.case_end(__head, {}__myla_run_case(__j))\n            __j = __j + 1\n        }}\n        __myla_t.end(0)\n        return\n    }}\n", aw))
     sb.append("    match __myla_t.run_in_children(__argv[0], __cases) {\n")
     sb.append("        Some(status) => { __myla_t.end(status) },\n")
     sb.append("        None => {},\n")
@@ -152,6 +181,7 @@ pub fun runner_case(c: Case) -> TCase {
 // alias), the helpers written (`out`, one equality and one repr per type,
 // keyed by the type's name), the cases and their code.
 struct Gen {
+    op_tr: str,              // the operator trait of the impl whose methods are being read, "" for none (D200)
     ch: Checker,
     text: str,
     line_starts: [int32],
@@ -209,8 +239,8 @@ impl Gen {
     // comparison with its expected value.
     fun case_function(var self, k: int32, fd: FunData, name: str, sig: FuncSig, attr: Attribute, is_fn: bool, kind: Expected, want: str) {
         var sb = StringBuilder()
-        if fd.is_async { sb.append(format("async fun __myla_case_{}() -> str {{\n", k)) }
-        else { sb.append(format("fun __myla_case_{}() -> str {{\n", k)) }
+        if fd.is_async { sb.append(format("async fun __myla_case_{}() -> Option<str> {{\n", k)) }
+        else { sb.append(format("fun __myla_case_{}() -> Option<str> {{\n", k)) }
         var aw = ""
         if fd.is_async { aw = "await " }
         // the call: a method's receiver is the first argument (D116)
@@ -239,16 +269,27 @@ impl Gen {
             call = call + self.slice(attr.args[i].sp)
             i = i + 1
         }
-        call = aw + call + ")"
+        // an operator trait's method through its operator: one beside others
+        // of its trait is named for its right operand's type (D200), which
+        // the source's name doesn't say
+        if self.op_tr != "" && fd.name == op_trait_method(self.op_tr) && first == 1 {
+            let a1 = if attr.args.len() > 1 { self.slice(attr.args[1].sp) } else { "" }
+            if self.op_tr == "Neg" { call = "(-__recv)" }
+            else if self.op_tr == "Index" { call = format("__recv[{}]", a1) }
+            else if self.op_tr == "IndexSet" {
+                sb.append(format("    __recv[{}] = {}\n", a1, self.slice(attr.args[2].sp)))
+                call = "()"
+            } else { call = format("(__recv {} {})", op_symbol(self.op_tr), a1) }
+        } else { call = aw + call + ")" }
         let returns = match sig.ret { Some(t) => true, None => false }
         if is_fn {
             // a test function (D162): `Err(e)` fails it with `e` shown
             match sig.ret {
                 Some(Type.TEnum(en, args)) => {
                     let show = self.shown_fn(args[1])
-                    sb.append(format("    match {} {{\n        Ok(__x) => {{ return \"\" }},\n        Err(__e) => {{ return {}(__e) }},\n    }}\n", call, show))
+                    sb.append(format("    match {} {{\n        Ok(__x) => {{ return None }},\n        Err(__e) => {{ return Some({}(__e)) }},\n    }}\n", call, show))
                 },
-                _ => { sb.append(format("    {}\n    return \"\"\n", call)) },
+                _ => { sb.append(format("    {}\n    return None\n", call)) },
             }
             sb.append("}\n\n")
             self.case_code.append(sb.build())
@@ -261,9 +302,9 @@ impl Gen {
                         let eq = self.eq_fn(t)
                         let repr = self.repr_fn(t)
                         sb.append(format("    let __got = {}\n    var __want = __got\n    __want = {}\n", call, want))
-                        sb.append(format("    if !{}(__got, __want) {{ return \"expected \" + {}(__want) + \", got \" + {}(__got) }}\n    return \"\"\n", eq, repr, repr))
+                        sb.append(format("    if !{}(__got, __want) {{ return Some(\"expected \" + {}(__want) + \", got \" + {}(__got)) }}\n    return None\n", eq, repr, repr))
                     },
-                    None => { sb.append(format("    {}\n    return \"\"\n", call)) },
+                    None => { sb.append(format("    {}\n    return None\n", call)) },
                 }
             },
             Expected.Panics(m) => {
@@ -272,7 +313,10 @@ impl Gen {
             },
             Expected.Exits(n) => {
                 let wanted = format("expected exit status {}", n)
-                sb.append(self.returned_text(call, sig.ret, wanted))
+                // a process ends with 0 to 255: no call can give another
+                // (the interpreter's runner says the same)
+                if n < 0 || n > 255 { sb.append(format("    return Some({})\n", str_lit(wanted + ": a status is 0 to 255"))) }
+                else { sb.append(self.returned_text(call, sig.ret, wanted)) }
             },
         }
         sb.append("}\n\n")
@@ -285,9 +329,9 @@ impl Gen {
         match ret {
             Some(t) => {
                 let repr = self.repr_fn(t)
-                return format("    let __got = {}\n    return {} + \", got \" + {}(__got)\n", call, str_lit(wanted), repr)
+                return format("    let __got = {}\n    return Some({} + \", got \" + {}(__got))\n", call, str_lit(wanted), repr)
             },
-            None => { return format("    {}\n    return {}\n", call, str_lit(wanted + ", the call returned")) },
+            None => { return format("    {}\n    return Some({})\n", call, str_lit(wanted + ", the call returned")) },
         }
     }
 
@@ -442,7 +486,7 @@ impl Gen {
             Type.TTuple(es) => {
                 if es.len() == 0 {
                     eq.append("    return true\n")
-                    repr.append("    return \"None\"\n")
+                    repr.append("    return \"()\"\n")   // as the interpreter shows `()`
                 } else {
                     var conds: [str] = []
                     var parts: [str] = []
@@ -635,9 +679,13 @@ fun canon(n: str) -> str {
 // Whether `name` is another module's (`std$fs$IoError`).
 #test("std$fs$IoError")[true]
 #test("IoError")[false]
+#test("V.mul$float64")[false]
 pub fun is_qualified(name: str) -> bool {
+    // (before a method's dot: an operator method's own name may hold a `$`,
+    // `V.mul$float64`, D200)
     var i = 0
     while i < name.len() {
+        if name[i] == '.' { return false }
         if name[i] == '$' { return true }
         i = i + 1
     }

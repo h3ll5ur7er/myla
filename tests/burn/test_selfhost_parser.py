@@ -18,15 +18,18 @@ from __future__ import annotations
 import glob
 import os
 import random
+import re
 import subprocess
 import tempfile
 import time
 import unittest
 
 from ._golden import NoGolden, answer_for_file, golden, recorded, recorded_examples
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, shown
 from ._continuation import continues_a_line
 from ._tools import selfhost_tool
+from .test_aarch64 import A64_SKIP, HAVE_A64, build_a64
+from .test_wasm import HAVE_WASM, WASM_SKIP, build_wasm, under_the_runner
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -291,7 +294,9 @@ class SelfHostedParserParity(unittest.TestCase):
         cls._binary = selfhost_tool("parse_main")
 
     def _myla_parse_source(self, source: str) -> str:
-        with tempfile.NamedTemporaryFile("w", suffix=".my", encoding="utf-8", delete=False) as fh:
+        # (newline="": the source as given, its line ends not made CRLF on
+        # Windows, where the columns an error at one gives would differ)
+        with tempfile.NamedTemporaryFile("w", suffix=".my", encoding="utf-8", newline="", delete=False) as fh:
             fh.write(source)
         try:
             return self._myla_parse(fh.name)
@@ -348,8 +353,11 @@ class SelfHostedParserParity(unittest.TestCase):
                 n = int(word) if word.isdigit() else 0
                 # `same 0` is two parses failing alike (MYLA-418), as is
                 # `same error` (MYLA-416): a file of the library or the
-                # compiler parses and has bodies
-                if os.path.relpath(path, _REPO).startswith(("lib" + os.sep, "selfhost" + os.sep)):
+                # compiler parses and has bodies (but a module of constants
+                # alone, std.path_style's, MYLA-704)
+                with open(path, encoding="utf-8") as fh:
+                    has_funs = re.search(r"^(pub )?fun ", fh.read(), re.M) is not None
+                if os.path.relpath(path, _REPO).startswith(("lib" + os.sep, "selfhost" + os.sep)) and has_funs:
                     self.assertGreater(n, 0, proc.stdout[:2000])
                 bodies += n
         self.assertGreater(bodies, 5000)
@@ -359,19 +367,122 @@ class SelfHostedParserParity(unittest.TestCase):
         # `x < y, x < y, …` from every `<` to the end (32,000 in a list: 25 s
         # in the review, 13 s here); a comma ends it in a literal's element,
         # and a budget of tokens in a call's arguments
-        n = 32000
+        # Linear against the same run a quarter as long, on this machine (an
+        # absolute bound failed a slower one, 5.02 s against 5, MYLA-926):
+        # four times the comparisons take about four times as long, not 16
+        def parse(tmp: str, name: str, n: int) -> float:
+            path = os.path.join(tmp, f"{name}{n}.my")
+            body = ", ".join(["x < y"] * n)
+            line = f"    let t = [{body}]\n" if name == "list" else f"    let t = f({body})\n"
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("fun main() {\n    let x = 1\n    let y = 2\n" + line + "}\n")
+            start = time.monotonic()
+            proc = subprocess.run([self._binary, path], capture_output=True, text=True)
+            took = time.monotonic() - start
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stdout.count('(binary "<" (name "x") (name "y"))'), n, name)
+            return took
         with tempfile.TemporaryDirectory() as tmp:
-            for name, line in [("list", "    let t = [" + ", ".join(["x < y"] * n) + "]\n"),
-                               ("call", "    let t = f(" + ", ".join(["x < y"] * n) + ")\n")]:
+            for name in ("list", "call"):
+                quarter = parse(tmp, name, 8000)
+                whole = parse(tmp, name, 32000)
+                self.assertLess(whole, 8 * quarter + 0.5, f"{name}: {whole:.2f} s, a quarter as many {quarter:.2f} s")
+
+    def test_type_arguments_have_no_budget_of_tokens(self) -> None:
+        # MYLA-545: the scan looked at 128 tokens, so a tuple of 63 types was
+        # a type argument and one of 64 a comparison (`generic function 'mk'
+        # cannot be used as a value`), and so was a type 43 deep
+        myla = selfhost_tool("main")
+        wide = "(" + ", ".join(["int"] * 200) + ")"
+        deep = "B<" * 60 + "int" + ">" * 60
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, targ in (("wide", wide), ("deep", deep)):
                 path = os.path.join(tmp, name + ".my")
                 with open(path, "w", encoding="utf-8") as fh:
-                    fh.write("fun main() {\n    let x = 1\n    let y = 2\n" + line + "}\n")
-                start = time.monotonic()
-                proc = subprocess.run([self._binary, path], capture_output=True, text=True)
-                took = time.monotonic() - start
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertEqual(proc.stdout.count('(binary "<" (name "x") (name "y"))'), n, name)
-                self.assertLess(took, 5.0, name)
+                    fh.write("struct B<T> { v: [T] }\nfun mk<T>(n: int) -> int { return n }\n"
+                             f"fun main() {{\n    print(mk<{targ}>(1))\n}}\n")
+                proc = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=120)
+                self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("1\n", "", 0), name)
+
+    def test_a_long_chain_of_operators_is_a_parse_error(self) -> None:
+        # MYLA-545: `x < y && x < y && …` 16,000 long overflowed the
+        # checker's stack (its tree is as deep as the chain); M10 of the
+        # review of 2026-11-17: 6,000 `|> id` and 20,000 `else if` arms did
+        # too, under the old limit of 8,192
+        self.check_long_chains([selfhost_tool("main")], 2048)
+
+    @unittest.skipUnless(HAVE_A64, A64_SKIP)
+    def test_the_aarch64_tools_hold_a_long_chain(self) -> None:
+        # MYLA-826: the tools built for aarch64, under qemu with the 120 MiB
+        # stack Linux gives them (`_start` raises the limit, MYLA-182)
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "myla")
+            build_a64("selfhost/main.my", exe)
+            self.check_long_chains(["qemu-aarch64", exe], 2048, dict(os.environ, QEMU_STACK_SIZE="125829120"))
+
+    @unittest.skipUnless(HAVE_WASM, WASM_SKIP)
+    def test_the_wasm32_tools_hold_a_long_chain(self) -> None:
+        # MYLA-826: the tools built for wasm32 (the playground's), under
+        # Node's own stack, as large as a browser's: their limit is 256
+        with tempfile.TemporaryDirectory() as tmp:
+            wasm = os.path.join(tmp, "myla.wasm")
+            build_wasm("selfhost/main.my", wasm)
+            self.check_long_chains(["node", os.path.join(_REPO, "tools", "wasm", "run.mjs"), wasm], 256, wasi=True)
+
+    def check_long_chains(self, tool: list[str], limit: int, env: dict[str, str] | None = None,
+                          wasi: bool = False) -> None:
+        """`limit` operators, fields and `else if` arms, a call counted twice
+        and a `|>` three times, parse, are checked and run by the tools
+        `tool`; one more is a parse error there. `wasi`: `tool` runs under
+        run.mjs, so it is given the files as it names them, run on their
+        drive (`under_the_runner`, MYLA-926)."""
+        head = "fun id(x: int) -> int { return x }\nfun main() {\n    let x = 1\n    let y = 2\n    let c = x < y\n"
+        calls = limit // 3    # a field and a call each, or a `|>`
+        cases = (
+            # (name, the expression after `let t = ` on line 6, its output, the line of the error or 0)
+            ("and_ok", " &&\n        ".join(["x < y"] * (limit // 2)), "true", 0),    # two operators an operand
+            ("and_long", " &&\n        ".join(["x < y"] * 16000), "", 5 + limit // 2),    # the `&&` after the (limit / 2)th
+            ("plus_ok", " +\n        ".join(["x"] * (limit + 1)), str(limit + 1), 0),
+            ("plus_long", " +\n        ".join(["x"] * 16000), "", 6 + limit),    # the `+` after the (limit + 1)th
+            ("method_ok", "x" + ".abs()" * calls, "1", 0),
+            ("method_long", "x" + ".abs()" * (calls + 1), "", 6),
+            ("pipe_ok", "x" + " |> id" * calls, "1", 0),
+            ("pipe_long", "x" + " |> id" * 6000, "", 6),
+            ("else_if_ok", "if c { 0 }" + "".join(f"\n        else if c {{ {i} }}" for i in range(1, limit + 1)) + "\n        else { 1 }", "0", 0),
+            ("else_if_long", "if c { 0 }" + "".join(f"\n        else if c {{ {i} }}" for i in range(1, 20000)) + "\n        else { 1 }", "", 7 + limit),
+        )
+        error = (f"parse error: more than {limit} operators, calls, fields and 'else if' arms in one expression"
+                 " (a call counts two, a '|>' three): split it with a 'let' or a 'match'\n")
+        given = under_the_runner if wasi else (lambda p: p)
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = tmp if wasi else None
+            for name, text, out, line in cases:
+                path = os.path.join(tmp, f"{name}.my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(head + "    let t = " + text + "\n    print(t)\n}\n")
+                path = given(path)
+                for cmd in ("check", "run"):
+                    with self.subTest(name=name, cmd=cmd):
+                        proc = subprocess.run(tool + [cmd, path], capture_output=True, text=True, timeout=300, env=env,
+                                              cwd=cwd)
+                        if not line:
+                            self.assertEqual((proc.stdout, proc.stderr), ("ok\n" if cmd == "check" else out + "\n", ""))
+                        else:
+                            self.assertEqual(proc.returncode, 1)
+                            self.assertTrue(proc.stderr.startswith(f"{error}  --> {shown(path)}:{line}:"), proc.stderr[:300])
+            # an `if` statement's `else if` arms: `limit` parse
+            for arms, ok in ((limit, True), (limit + 1, False), (20000, False)):
+                path = os.path.join(tmp, f"else_if_stmt_{arms}.my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("fun main() {\n    let c = 1 < 2\n    if !c { print(0) }"
+                             + " else if !c { }" * arms + " else { }\n    print(1)\n}\n")
+                with self.subTest(arms=arms):
+                    proc = subprocess.run(tool + ["run", given(path)], capture_output=True, text=True, timeout=300,
+                                          env=env, cwd=cwd)
+                    if ok:
+                        self.assertEqual((proc.stdout, proc.stderr), ("1\n", ""))
+                    else:
+                        self.assertTrue(proc.stderr.startswith(error), proc.stderr[:300])
 
     def test_a_std_file_with_an_error_fails_the_comparison(self) -> None:
         # MYLA-416: `parse_main --lazy` tells a file that fails both ways

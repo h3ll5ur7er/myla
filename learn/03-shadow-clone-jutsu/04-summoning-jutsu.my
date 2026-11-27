@@ -1,0 +1,21 @@
+// title: Summoning Jutsu
+// xp: 25
+// hidden: use_it #test(7, 6)[42]
+// hint: The lambda gives `x` back unchanged. What should it do with `k`?
+// hint: The lambda may use `k` from `multiplier`'s parameters: it captures it.
+//
+// A summoning jutsu makes something that keeps working on its own. Here,
+// `multiplier(k)` should make a function that multiplies whatever it gets by
+// `k`. So `multiplier(3)` is a function, and `multiplier(3)(14)` is 42.
+//
+// The lambda remembers (captures) `k`. Fill in `multiplier`.
+#test(3, 14)[42]
+#test(10, 5)[50]
+fun use_it(k: int, x: int) -> int {
+    let times = multiplier(k)
+    return times(x)
+}
+
+fun multiplier(k: int) -> (int) -> int {
+    return (x: int) => x
+}

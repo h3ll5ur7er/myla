@@ -1,0 +1,35 @@
+//~ type error: type 'W<A>' can't be indexed by 'int32': 'A' isn't Conv<str> (it implements 'Conv<int32>')
+//~ span: w[0]
+// An operator impl's bounds hold where the operator picks it (MYLA-612,
+// MYLA-538): `w[0]` needs `C: Conv<str>`, and `A` is only `Conv<int>`. It
+// was taken unchecked: the interpreter read an integer as a string and
+// native code crashed.
+trait Conv<T> {
+    fun conv(self) -> T
+}
+
+struct A {
+    n: int,
+}
+
+impl Conv<int> for A {
+    fun conv(self) -> int {
+        return 123456789
+    }
+}
+
+struct W<C> {
+    v: C,
+}
+
+impl<C: Conv<str>> Index<int, str> for W<C> {
+    fun index(self, i: int) -> str {
+        return self.v.conv()
+    }
+}
+
+fun main() {
+    let w = W { v: A { n: 1 } }
+    let s = w[0]
+    print(s)
+}

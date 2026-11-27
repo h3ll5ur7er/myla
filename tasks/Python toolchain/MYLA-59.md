@@ -32,7 +32,7 @@ Prints `1` and `one`.
 
 ## Actual
 
-`type error: this match is used as a value, so every arm must produce one`. `_check_arm_body` infers the last expression statement as the arm's value without knowing whether the outer match is a statement ([[src/myla/types.py#L2316-L2334]]).
+`type error: this match is used as a value, so every arm must produce one`. `_check_arm_body` infers the last expression statement as the arm's value without knowing whether the outer match is a statement (`src/myla/types.py#L2316-L2334`).
 
 ## Done when
 
@@ -41,10 +41,11 @@ Prints `1` and `one`.
 
 ## How
 
-A statement match passes "no value needed" to its arm bodies: the last statement of an arm block is then checked as a statement (so a `match` there is marked as a statement match, recursively), and an arm whose body is a `match` expression is marked too (`_check_arm_body(…, is_stmt)` in [[src/myla/types.py]]; `check_arm_body` / `check_arm_block` with `as_stmt` in [[selfhost/checker.my]]). The backends already generated statement-match arms as statements.
+A statement match passes "no value needed" to its arm bodies: the last statement of an arm block is then checked as a statement (so a `match` there is marked as a statement match, recursively), and an arm whose body is a `match` expression is marked too (`_check_arm_body(…, is_stmt)` in `src/myla/types.py`; `check_arm_body` / `check_arm_block` with `as_stmt` in [[selfhost/checker.my]]). The backends already generated statement-match arms as statements.
 
 ## Evidence
 
-- `test_arm_block_of_a_statement_match_may_end_in_a_match` (the repro, prints `1 one`) and `test_a_value_match_still_needs_values` in [[tests/unit/test_enums_match.py]]. Before: `this match is used as a value, so every arm must produce one`.
+- `test_arm_block_of_a_statement_match_may_end_in_a_match` (the repro, prints `1 one`) and `test_a_value_match_still_needs_values` in `tests/unit/test_enums_match.py`. Before: `this match is used as a value, so every arm must produce one`.
 - Parity program `match_statement_ending_an_arm_block` (nested statement matches in blocks and as arm bodies, and inside a value match) in [[tests/burn/test_compiler_parity.py]] and the self-hosted `PARITY_PROGRAMS`: all backends agree.
 
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

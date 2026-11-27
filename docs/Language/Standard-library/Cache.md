@@ -71,6 +71,7 @@ fun main() {
 | `c.clear()` | Takes every entry out; the capacity stays. Needs a `var` place |
 | `c.len() -> int`, `c.is_empty() -> bool`, `c.capacity() -> int` | The number of entries; whether there are none; the most it holds |
 | `c.keys() -> [K]`, `c.items() -> [(K, V)]` | The keys, the entries, the most recently used first |
+| `c.iter() -> LruIter<K, V>` | An iterator over the entries in that order, without the list `items()` makes (D171, [[MYLA-553]]): `for (k, v) in c.iter()`, or a pipeline of [[Language/Standard-library/Iter|std.iter]]. Visiting isn't using: the order stays. It holds the cache as it was, and a copy keeps its own position |
 
 `unlink` and `link_front`, methods of `Lru`, are the cache's own steps on its recency list; a program has no need of them.
 
@@ -129,7 +130,7 @@ It is twice as fast (natively, Fibonacci 10 000 deep: 0.99 ms against 1.91 ms fo
 
 An `Lru` is a doubly linked list of indices, as Myla has no references: an entry lives in a slot of four lists (its key, its value, and the slots before and after it in the recency order, -1 at the ends), a map takes a key to its slot, and `head` and `tail` are the most and the least recently used slot. `get` moves the slot to the head; `put` of a new key into a full cache takes the tail's slot, `remove` puts its slot on a free list for the next `put`. Each is one or two map operations and a few index writes: constant time on average ([[MYLA-310]]'s removal). The slots never outnumber the capacity, and a slot keeps its old key and value until it is written again: a generic `V` has nothing else to fill it with.
 
-Measured natively on x86-64 with [[Language/Standard-library/Bench]] (median of 5, 1 million operations on random keys, 2026-11-09):
+Measured natively on x86-64 with [[Language/Standard-library/Bench]] (median of 5, 1 million operations on random keys, 2026-11-09, `4cdb0af`):
 
 | Work | `[int: int]` | `Lru<int, int>` |
 | --- | --- | --- |

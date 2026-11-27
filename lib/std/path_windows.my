@@ -1,0 +1,592 @@
+// std.path on Windows' paths (MYLA-704, D215): std.path's functions, with
+// the same names and types, for x86-64 Windows, whose `std/path.my` the
+// loader makes this file (`for_target`), as Python's `os.path` is `ntpath`
+// there; a program on any target may import it as `std.path_windows` to
+// read Windows' paths.
+//
+// Every function works on the text of a path alone: none of them looks at
+// the file system. `\` separates components as `/` does, and a run of them
+// counts as one. A path may start with a prefix before its root, as
+// Python's `ntpath.splitroot` reads one: a drive (`C:`), or a UNC path's
+// server and share (`\\server\share`; `\\?\UNC\server\share`, and `\\?\`
+// or `\\.\` and the name after it, `\\?\C:`, `\\.\pipe`). A path is
+// absolute with a drive and a root (`C:\a`) or with a UNC prefix (as
+// `ntpath.isabs`); one with a root alone (`\a`) is on the working
+// directory's drive, and one with a drive alone (`C:a`) in the working
+// directory that drive has. A path's anchor is its prefix and its root.
+//
+// What std.path writes is `/`, the separator `join` puts between two parts
+// and the one `normalize` and `relative` build a path with, as on every
+// target (Windows reads it), so that a program builds the same paths on
+// each; what it gives of a path it was given keeps its separators. A
+// prefix stays as written, and a drive's letter is matched whatever its
+// case (`C:` is `c:`); names are compared as they are written, as the file
+// system isn't asked.
+
+import std.list as list_m // `join`
+
+// Whether `c` separates a path's components.
+fun is_sep(c: uint8) -> bool {
+    return c == '/' || c == '\\'
+}
+
+// The ASCII letter `c` in lower case (another byte as it is).
+fun lower(c: uint8) -> uint8 {
+    if c >= 'A' && c <= 'Z' {
+        return c + 32
+    }
+    return c
+}
+
+// The length of `p`'s prefix, the part before its root: a drive (`C:`), or
+// a UNC path's `\\server\share` (`\\?\UNC\…`'s server and share, `\\?\` or
+// `\\.\` and the name after it), the whole of `p` when it ends sooner; 0
+// for none.
+#test("C:/a")[2]
+#test("c:a")[2]
+#test("//srv/share/a")[11]
+#test("\\\\srv\\share")[11]
+#test("\\\\srv")[5]
+#test("\\\\?\\C:\\a")[6]
+#test("\\\\?\\UNC\\srv\\share\\a")[17]
+#test("\\\\.\\pipe\\x")[8]
+#test("/a")[0]
+#test("1:a")[0]
+#test("")[0]
+fun prefix_len(p: str) -> int {
+    let n = p.len()
+    if n < 2 {
+        return 0
+    }
+    if is_sep(p[0]) && is_sep(p[1]) {
+        var start = 2
+        if n >= 8 && p[2] == '?' && is_sep(p[3]) && lower(p[4]) == 'u' && lower(p[5]) == 'n' && lower(p[6]) == 'c' && is_sep(p[7]) {
+            start = 8
+        }
+        var i = next_sep(p, start)
+        if i < 0 {
+            return n
+        }
+        i = next_sep(p, i + 1)
+        if i < 0 {
+            return n
+        }
+        return i
+    }
+    if p[1] == ':' && lower(p[0]) >= 'a' && lower(p[0]) <= 'z' {
+        return 2
+    }
+    return 0
+}
+
+// The position of the first separator of `p` from `i` on, or -1.
+fun next_sep(p: str, i: int) -> int {
+    var k = i
+    while k < p.len() {
+        if is_sep(p[k]) {
+            return k
+        }
+        k += 1
+    }
+    return -1
+}
+
+// Where `p`'s components start: after its prefix and the run of separators
+// of its root.
+fun anchor_end(p: str) -> int {
+    var i = prefix_len(p)
+    while i < p.len() && is_sep(p[i]) {
+        i += 1
+    }
+    return i
+}
+
+// Whether `p` has a root after its prefix.
+fun rooted(p: str) -> bool {
+    let k = prefix_len(p)
+    return k < p.len() && is_sep(p[k])
+}
+
+// The prefix and root `p` starts with, as written but for the root's one
+// separator: a drive with its root or without (`C:\`, `C:`), a UNC share
+// (`\\srv\share\`), a root alone (`\`); `""` for a relative path. It is
+// where `p` starts: `p` is it, maybe more separators, and the components.
+#test("C:\\\\a")["C:\\"]
+#test("C:a")["C:"]
+#test("\\a")["\\"]
+#test("//srv/share/a")["//srv/share/"]
+#test("//srv/share")["//srv/share"]
+#test("a\\b")[""]
+#test("")[""]
+pub fun anchor(p: str) -> str {
+    let k = prefix_len(p)
+    if rooted(p) {
+        return p[:k + 1]
+    }
+    return p[:k]
+}
+
+// Whether `p` starts at the root of a drive or a UNC share (`C:\a`,
+// `\\srv\share`), as Python's `ntpath.isabs`: `\a` and `C:a` aren't.
+#test("C:/a")[true]
+#test("C:\\a")[true]
+#test("C:a")[false]
+#test("/a")[false] // the working directory's drive
+#test("\\\\srv\\share")[true]
+#test("//srv")[true]
+#test("a\\b")[false]
+#test("")[false]
+pub fun is_absolute(p: str) -> bool {
+    if p.len() >= 2 && is_sep(p[0]) && is_sep(p[1]) {
+        return true
+    }
+    return prefix_len(p) > 0 && rooted(p)
+}
+
+// `b` after `a`, with one `/` between them, as Python's `ntpath.join`: a
+// `b` with a root replaces `a` but keeps `a`'s drive when it has none of its
+// own, one with another drive replaces it all, and one with the same drive
+// (of either case) goes on from `a`. An empty `a` gives `b`, an empty `b`
+// gives `a` with a `/` at its end.
+#test("a", "b")["a/b"]
+#test("a\\", "b")["a\\b"]
+#test("a", "/b")["/b"]
+#test("C:/x", "/y")["C:/y"] // the root replaces, the drive stays
+#test("C:/x", "D:y")["D:y"] // another drive
+#test("C:/x", "c:y")["c:/x/y"] // the same drive
+#test("C:", "x")["C:x"]
+#test("C:/", "x")["C:/x"]
+#test("//srv/share", "x")["//srv/share/x"]
+#test("x", "C:/y")["C:/y"]
+#test("", "b")["b"]
+#test("a", "")["a/"]
+#test("a//", "b")["a//b"]
+#test("", "")[""]
+#test("\\\\?\\C:\\x", "a/b")["\\\\?\\C:\\x\\a\\b"] // verbatim
+#test("\\\\?\\C:\\x\\", "./a/../b")["\\\\?\\C:\\x\\b"]
+#test("\\\\?\\C:\\x", "../..")["\\\\?\\C:\\"]
+#test("\\\\?\\C:\\x", "/y\\z")["\\\\?\\C:\\y\\z"]
+#test("\\\\?\\UNC\\srv\\share", "a/b")["\\\\?\\UNC\\srv\\share\\a\\b"]
+#test("\\\\?\\C:\\x", "")["\\\\?\\C:\\x\\"]
+#test("\\\\?\\C:\\x", "D:/y")["D:/y"]
+pub fun join(a: str, b: str) -> str {
+    let ak = prefix_len(a)
+    let ae = anchor_end(a)
+    let bk = prefix_len(b)
+    if bk == 0 && verbatim(a) {
+        return verbatim_join(a, b)
+    }
+    if rooted(b) {
+        // `a`'s drive at most stays
+        if bk > 0 || ak == 0 {
+            return b
+        }
+        return a[:ak] + b
+    }
+    if bk > 0 && !same_prefix(a[:ak], b[:bk]) {
+        return b
+    }
+    // relative to `a`, on its drive (spelled as `b` spells it)
+    let drive = if bk > 0 { b[:bk] } else { a[:ak] }
+    var rest = a[ae:]
+    if rest != "" && !is_sep(rest[rest.len() - 1]) {
+        rest = rest + "/"
+    }
+    rest = rest + b[bk:]
+    let root = a[ak:ae]
+    if rest != "" && root == "" && drive != "" && drive[drive.len() - 1] != ':' && !is_sep(drive[drive.len() - 1]) {
+        // a UNC share and a relative path: a separator between them
+        return drive + "/" + rest
+    }
+    return drive + root + rest
+}
+
+// Whether `p` is verbatim (`\\?\C:\a`, `\\?\UNC\srv\share`), which Windows
+// takes as written: `/` is no separator there, nor `.` and `..` names of
+// the directory itself and the one above.
+fun verbatim(p: str) -> bool {
+    return p.len() >= 4 && p[0] == '\\' && p[1] == '\\' && p[2] == '?' && p[3] == '\\'
+}
+
+// `b` (no prefix of its own) after the verbatim path `a`, as Rust's
+// `PathBuf::push` adds to one (MYLA-798): `b`'s components split at either
+// separator and joined with `\`, its `.` left out and its `..` taking away
+// the name before (none above the anchor); a rooted `b` goes on from
+// `a`'s prefix. `/` written there would be part of a name.
+fun verbatim_join(a: str, b: str) -> str {
+    var out = a
+    if rooted(b) {
+        out = a[:prefix_len(a)] + "\\"
+    }
+    let floor = anchor_end(out)
+    if b == "" && out != "" && !is_sep(out[out.len() - 1]) {
+        return out + "\\"
+    }
+    var start = 0
+    var i = 0
+    while i <= b.len() {
+        if i == b.len() || is_sep(b[i]) {
+            let c = b[start:i]
+            if c == ".." {
+                var k = out.len()
+                while k > floor && !is_sep(out[k - 1]) {
+                    k -= 1
+                }
+                if k < out.len() {
+                    out = out[:k]
+                } else if k > floor {
+                    // (a separator at the end: the name before it)
+                    var j = k - 1
+                    while j > floor && !is_sep(out[j - 1]) {
+                        j -= 1
+                    }
+                    out = out[:j]
+                }
+            } else if c != "" && c != "." {
+                if out != "" && !is_sep(out[out.len() - 1]) {
+                    out = out + "\\"
+                }
+                out = out + c
+            }
+            start = i + 1
+        }
+        i += 1
+    }
+    return out
+}
+
+// Whether the prefixes or anchors `a` and `b` are the same, ASCII letters
+// of either case and either separator alike.
+#test("C:/", "c:\\")[true]
+#test("C:", "D:")[false]
+#test("//srv/share", "\\\\SRV\\Share")[true]
+#test("", "")[true]
+fun same_prefix(a: str, b: str) -> bool {
+    if a.len() != b.len() {
+        return false
+    }
+    for i in 0..a.len() {
+        let x = a[i]
+        let y = b[i]
+        if x != y && !(is_sep(x) && is_sep(y)) && lower(x) != lower(y) {
+            return false
+        }
+    }
+    return true
+}
+
+// The parts joined one after another, as `join` joins two; none give `""`.
+#test(["a", "b", "c"])["a/b/c"]
+#test(["C:\\", "a", "/b", "c"])["C:/b/c"]
+#test(["/"])["/"]
+pub fun join_all(parts: [str]) -> str {
+    var out = ""
+    for p in parts {
+        out = join(out, p)
+    }
+    return out
+}
+
+// `p` without its trailing separators and trailing `.` components, which
+// name the directory before them: `a\.\` is `a`. The anchor stays (`C:\`,
+// `\`); `.` alone becomes `""`, and `C:.` `C:`.
+fun trimmed(p: str) -> str {
+    let a = anchor_end(p)
+    var floor = 1
+    if a > 1 {
+        floor = a
+    }
+    var end = p.len()
+    while true {
+        while end > floor && is_sep(p[end - 1]) {
+            end -= 1
+        }
+        if end == a + 1 && p[a] == '.' {
+            return p[:a]
+        }
+        if end >= a + 2 && p[end - 1] == '.' && is_sep(p[end - 2]) {
+            end -= 1
+        } else {
+            return p[:end]
+        }
+    }
+    unreachable()
+}
+
+// The position of the last separator of `t`, or -1.
+fun last_sep(t: str) -> int {
+    var i = t.len() - 1
+    while i >= 0 && !is_sep(t[i]) {
+        i -= 1
+    }
+    return i
+}
+
+// The directory that holds `p`: `p` without its last component and the
+// separators before it, its anchor when that is all that is left. A
+// relative path of one component gives `""`; an anchor alone (`C:\`, `C:`,
+// a UNC share), `""` and `.` have none.
+#test("a\\b")[Some("a")]
+#test("a/b\\")[Some("a")]
+#test("a")[Some("")]
+#test("C:\\a\\b")[Some("C:\\a")]
+#test("C:\\a")[Some("C:\\")]
+#test("C:a")[Some("C:")]
+#test("\\a")[Some("\\")]
+#test("a\\\\b")[Some("a")]
+#test("a\\.\\b\\..\\c")[Some("a\\.\\b\\..")] // lexical: nothing is resolved
+#test("a\\.")[Some("")]
+#test("C:\\")[None]
+#test("C:")[None]
+#test("//srv/share/a")[Some("//srv/share/")]
+#test("//srv/share")[None]
+#test("//a")[None] // a UNC server
+#test("")[None]
+#test(".")[None]
+pub fun parent(p: str) -> Option<str> {
+    let t = trimmed(p)
+    let a = anchor_end(t)
+    if t == "" || t.len() == a {
+        return None
+    }
+    var i = last_sep(t)
+    if i < a {
+        return Some(anchor(t))
+    }
+    while i > a && is_sep(t[i - 1]) {
+        i -= 1
+    }
+    return Some(t[:i])
+}
+
+// The last component of `p`; none for an anchor alone, `""`, `.` and a path
+// that ends in `..`.
+#test("a\\b")[Some("b")]
+#test("a\\b\\")[Some("b")]
+#test("C:\\a\\b.txt")[Some("b.txt")]
+#test("C:b")[Some("b")]
+#test("a\\..")[None]
+#test("C:\\")[None]
+#test("C:")[None]
+#test("//srv/share")[None]
+#test("//srv/share/x")[Some("x")]
+#test("")[None]
+#test(".")[None]
+pub fun file_name(p: str) -> Option<str> {
+    let t = trimmed(p)
+    let a = anchor_end(t)
+    if t == "" || t.len() == a {
+        return None
+    }
+    var start = last_sep(t) + 1
+    if start < a {
+        start = a
+    }
+    let name = t[start:]
+    if name == ".." {
+        return None
+    }
+    return Some(name)
+}
+
+// The position of the dot that starts the extension of the file name
+// `name`, or -1. Leading dots don't start one: `.bashrc` and `...` have none.
+fun ext_dot(name: str) -> int {
+    var lead = 0
+    while lead < name.len() && name[lead] == '.' {
+        lead += 1
+    }
+    var i = name.len() - 1
+    while i >= lead {
+        if name[i] == '.' {
+            return i
+        }
+        i -= 1
+    }
+    return -1
+}
+
+// The file name without its extension.
+#test("a\\b.tar.gz")[Some("b.tar")]
+#test("C:b.txt")[Some("b")]
+#test(".bashrc")[Some(".bashrc")]
+#test("C:\\")[None]
+pub fun stem(p: str) -> Option<str> {
+    let name = file_name(p)?
+    let k = ext_dot(name)
+    if k < 0 {
+        return Some(name)
+    }
+    return Some(name[:k])
+}
+
+// The extension of the file name, without the dot: what follows its last
+// `.`, unless that dot is one of the name's leading ones.
+#test("a\\b.tar.gz")[Some("gz")]
+#test("a.d\\b")[None]
+#test("C:\\")[None]
+pub fun extension(p: str) -> Option<str> {
+    let name = file_name(p)?
+    let k = ext_dot(name)
+    if k < 0 {
+        return None
+    }
+    return Some(name[k + 1:])
+}
+
+// `p` with the extension of its file name replaced by `ext` (without its
+// dot), or added; an empty `ext` removes it. A path without a file name
+// stays as it is; trailing separators go.
+#test("C:\\a\\b.txt\\", "md")["C:\\a\\b.md"]
+#test("C:\\a.d\\b", "md")["C:\\a.d\\b.md"]
+#test("b.tar.gz", "")["b.tar"]
+#test("C:\\", "md")["C:\\"]
+pub fun with_extension(p: str, ext: str) -> str {
+    let name = match file_name(p) {
+        Some(n) => n
+        None => { return p }
+    }
+    let t = trimmed(p)
+    let k = ext_dot(name)
+    let base = if k < 0 { name } else { name[:k] }
+    let dir = t[:t.len() - name.len()]
+    if ext == "" {
+        return dir + base
+    }
+    return dir + base + "." + ext
+}
+
+// The components of `p`: its anchor first (`anchor`) when it has one, then
+// each name. Empty components and `.` are left out, `..` is kept (nothing
+// is resolved).
+#test("C:\\a\\.\\b")[["C:\\", "a", "b"]]
+#test("C:a/b")[["C:", "a", "b"]]
+#test("\\a")[["\\", "a"]]
+#test("\\\\srv\\share\\a")[["\\\\srv\\share\\", "a"]]
+#test("a\\..\\b")[["a", "..", "b"]]
+#test("./a")[["a"]]
+pub fun components(p: str) -> [str] {
+    var out: [str] = []
+    let a = anchor_end(p)
+    if a > 0 {
+        out.push(anchor(p))
+    }
+    var start = a
+    for i in a..p.len() + 1 {
+        if i == p.len() || is_sep(p[i]) {
+            if i > start {
+                let c = p[start:i]
+                if c != "." {
+                    out.push(c)
+                }
+            }
+            start = i + 1
+        }
+    }
+    return out
+}
+
+// The names of `p` with `.` and `..` resolved: a `..` takes away the name
+// before it, stays at the root, and starts a path without one that leaves
+// its first directory.
+fun resolved(p: str) -> [str] {
+    let at_root = rooted(p)
+    var out: [str] = []
+    var first = anchor_end(p) > 0
+    for c in components(p) {
+        if first {
+            // the anchor
+            first = false
+            continue
+        }
+        if c == ".." {
+            if out.len() > 0 && out[^1] != ".." {
+                out.pop()
+            } else if !at_root {
+                out.push("..")
+            }
+        } else {
+            out.push(c)
+        }
+    }
+    return out
+}
+
+// `p` with `.` and `..` resolved lexically, without the file system: a `..`
+// takes away the name before it (so a link isn't followed back), stays at
+// the root, and a path without one keeps its leading ones. The prefix
+// stays as written, the root and the separators are one `/` each, a
+// trailing one goes, and an empty relative result is `.` (one on a drive
+// alone, `C:`).
+#test("a\\..\\b")["b"]
+#test("C:\\a\\..\\b\\.\\c\\")["C:/b/c"]
+#test("C:\\..")["C:/"]
+#test("C:a\\..")["C:"]
+#test("C:..\\a")["C:../a"]
+#test("\\a\\\\b")["/a/b"]
+#test("\\\\srv\\share\\a\\..")["\\\\srv\\share/"]
+#test("//srv/share")["//srv/share"]
+#test("")["."]
+#test("a\\..\\..")[".."]
+#test("\\\\?\\C:\\a\\..\\b/c")["\\\\?\\C:\\a\\..\\b/c"] // verbatim: as it is
+pub fun normalize(p: str) -> str {
+    if verbatim(p) {
+        // (Windows reads no `.`, `..` or `/` in it: they are names, as
+        // Python's `ntpath.normpath` keeps one, MYLA-798)
+        return p
+    }
+    let body = resolved(p).join("/")
+    let k = prefix_len(p)
+    if rooted(p) {
+        return p[:k] + "/" + body
+    }
+    if body == "" && k == 0 {
+        return "."
+    }
+    return p[:k] + body
+}
+
+// The path that leads from the directory `from_dir` to `to`, lexically:
+// both are normalized, and links aren't followed. `.` when they are the
+// same. From the same anchor (a drive's letter of either case) a path of
+// `..` and names; to a path with an anchor from one without, `to`
+// normalized. None when only the file system could tell: from an anchor to
+// a path without one, between two different anchors (`C:\` and `D:\`, `C:\`
+// and `\`), or from a `from_dir` whose `..` climb above where `to` starts.
+#test("C:\\a\\b", "c:/a/d")[Some("../d")]
+#test("C:\\a", "C:\\a")[Some(".")]
+#test("C:\\a", "D:\\a")[None]
+#test("C:\\a", "\\a")[None]
+#test("a", "C:\\b")[Some("C:/b")]
+#test("C:\\a", "b")[None]
+#test("C:a", "C:b")[Some("../b")]
+#test("..", "a")[None]
+pub fun relative(from_dir: str, to: str) -> Option<str> {
+    let fa = anchor(from_dir)
+    if !same_prefix(fa, anchor(to)) {
+        if fa == "" {
+            return Some(normalize(to))
+        }
+        return None
+    }
+    let f = resolved(from_dir)
+    let t = resolved(to)
+    var k = 0
+    while k < f.len() && k < t.len() && f[k] == t[k] {
+        k += 1
+    }
+    var out: [str] = []
+    for i in k..f.len() {
+        if f[i] == ".." {
+            return None
+        }
+        out.push("..")
+    }
+    for i in k..t.len() {
+        out.push(t[i])
+    }
+    if out.len() == 0 {
+        return Some(".")
+    }
+    return Some(out.join("/"))
+}

@@ -30,7 +30,7 @@ Their memory ordering (x86-64's are full barriers by nature; aarch64 needs acqui
 - [x] Intrinsics as a typed instruction (an enum, with arguments and result types), each with its semantics and, for the atomics, its ordering; the string prefixes gone; `RtPair` gone
 - [x] [[Architecture/IR]]: every instruction's exact semantics, written as the contract a backend implements, including the edge cases above; the x86-specific wording (`%rdi`, `%rax`) gone
 - [x] A conformance set: one program per operation and edge case, run on every target against the interpreter (grows from `test_aarch64.py`'s `PROGRAMS`)
-- [ ] Float `%` through `std.rt`'s `fmod` on x86-64 too, if it costs nothing measurable
+- [ ] Float `%` through `std.rt`'s `fmod` on x86-64 too, if it costs nothing measurable (dropped: it costs measurably, 0.054 against 0.115 s for 5 million `%`, so x86-64 keeps `fprem`; see "Done" below)
 
 ## Done (2026-11-06)
 

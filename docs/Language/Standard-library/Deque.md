@@ -78,7 +78,7 @@ A ring buffer was measured against two stacks (a reversed list for the front, a 
 
 ## Speed
 
-Measured natively on x86-64, best of five runs:
+Measured natively on x86-64, best of five runs (2026-11-07, `90177ad`):
 
 | Work | Time |
 | --- | --- |

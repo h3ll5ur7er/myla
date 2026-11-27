@@ -2,7 +2,7 @@
 id: MYLA-457
 title: "A write to a full non-blocking descriptor spins"
 type: bug
-status: backlog
+status: done
 priority: low
 labels: [runtime, platform, io, round-5]
 ---
@@ -37,3 +37,7 @@ Run with its stdout the write end of a pipe set `O_NONBLOCK` (Python: `os.set_bl
 - Before: `0.63 s of CPU in 0.69 s` interpreted, `0.60 s of CPU in 0.65 s` built, and `FdStream` had no `write_async`.
 - After (CPU in wall): sync interpreted 0.034 s in 0.69 s, built 0.002 s in 0.67 s; async interpreted 0.083 s in 0.73 s, built 0.015 s in 0.69 s. On aarch64 (qemu) 0.012 and 0.20 s built; on wasm32 (Node) 0.69 s before the shim's change, 0.09 and 0.13 s after (mostly Node's start).
 - `tests.burn.test_stdio`: 16 OK natively and with `MYLA_TEST_TARGET=aarch64-linux`; on wasm32 the one failure is `test_a_write_to_another_descriptor_reports_it`, which `_targets` excuses there.
+
+## Review 2026-11-12
+
+Built and merged (`b415e497`) while still `backlog`. Measured in [[Project/Review-2026-11-12]]: 2 MiB to a non-blocking standard output cost 0.001 s of CPU (0.306 s before). Signed off.

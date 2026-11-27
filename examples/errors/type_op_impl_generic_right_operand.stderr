@@ -1,0 +1,5 @@
+type error: the right operand of an operator impl can't use the impl's type parameters (found 'T'): the impl is picked where the operands' types are known
+  --> examples/errors/type_op_impl_generic_right_operand.my:8:1
+  |
+8 | impl<T> Mul<T, B<T>> for B<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

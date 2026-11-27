@@ -139,7 +139,7 @@ With both ends known, `find` is done; `captures` runs the Pike VM from the start
 
 ### Measured
 
-Natively on the development container (4 cores of a Xeon at 2.3 GHz, shared), the best of five runs, measured by a program outside the suite.
+Natively on the development container (4 cores of a Xeon at 2.3 GHz, shared), the best of five runs, measured by a program outside the suite (2026-11-07, `cc6687f`).
 
 | Search | Time | Throughput |
 | --- | ---: | ---: |

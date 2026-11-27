@@ -1,0 +1,24 @@
+//~ type error: duplicate impl of trait 'Mul<float64, …>' for type 'V' (one per type of the right operand or index)
+//~ note: the other impl is here
+//~ note span: impl Mul<float> for V {
+// One impl of an operator trait per right operand's type: two for `float`
+// would leave `v * 2.0` two results (D200).
+struct V {
+    x: float,
+}
+
+impl Mul<float> for V {
+    fun mul(self, k: float) -> V {
+        return V { x: self.x * k }
+    }
+}
+
+impl Mul<float, float> for V {
+    fun mul(self, k: float) -> float {
+        return self.x * k
+    }
+}
+
+fun main() {
+    print(1)
+}

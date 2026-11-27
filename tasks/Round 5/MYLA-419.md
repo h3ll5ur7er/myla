@@ -2,7 +2,7 @@
 id: MYLA-419
 title: "P5 Runtime handles, notifiers, timers, child streams, sockets"
 type: bug
-status: review
+status: done
 priority: high
 labels: [runtime, concurrency, process, net, round-5]
 ---
@@ -74,3 +74,7 @@ Suites: `lib/std/task.my` 36/36, `net.my` 96/96, `process.my` 48/48, `fs.my` 73/
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-548]]: a line limit for `net.line_reader`, the poller's creation unchecked (a hang with no descriptor left on one worker), `Signals` outside D181, and a `Notifier.close()` beside a wait that is starting.

@@ -1,0 +1,21 @@
+// std.gif's driver for tests/burn/test_images.py (MYLA-964): every frame of
+// an animation as it is shown (`decode_all`, then `composite`), each checked
+// against `decode`, which must give the first of them.
+
+import std.gif as gif
+from std.image import Image8, ImageError
+import image_driver as driver
+
+fun frames(b: [uint8], max: int64) -> Result<[Image8], ImageError> {
+    let shown = gif.composite(gif.decode_all(b, max)?)
+    if let Ok(first) = gif.decode(b, max) {
+        if first != shown[0] {
+            return Err(ImageError.Mismatch("decode isn't the first frame of decode_all"))
+        }
+    }
+    return Ok(shown)
+}
+
+fun main() {
+    driver.serve8_frames((b: [uint8], max: int64) => frames(b, max))
+}

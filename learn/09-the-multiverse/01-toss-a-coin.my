@@ -1,0 +1,23 @@
+// title: Toss a Coin
+// xp: 20
+// hidden: best_three #test([5, 1, 9, 2, 8])[22]
+// hidden: best_three #test([3, 3, 3, 3])[9]
+// hint: The notices aren't in any order: take the first three and you take whatever was pinned first.
+// hint: Sort the list first. A slice can then take the three from the end that pays most.
+//
+// *Toss a coin to your Witcher, O valley of plenty.* Geralt takes three
+// contracts per town, and he's no fool: the three that pay best.
+//
+// `best_three` gets every bounty on the notice board, in the order they
+// were pinned, and should add up the three biggest. (Every board has at
+// least three notices. A Witcher has standards.)
+#test([10, 50, 20, 40])[110]
+#test([100, 1, 1, 1])[102]
+#test([7, 7, 7])[21]
+fun best_three(bounties: [int]) -> int {
+    var total = 0
+    for b in bounties[:3] {
+        total += b
+    }
+    return total
+}

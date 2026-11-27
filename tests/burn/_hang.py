@@ -14,7 +14,10 @@ failure message."""
 from __future__ import annotations
 
 import os
-import resource
+try:
+    import resource
+except ImportError:      # Windows (MYLA-926 step 2): no cores, no gdb stacks there
+    resource = None
 import shutil
 import signal
 import subprocess
@@ -34,7 +37,7 @@ class Hung(subprocess.TimeoutExpired):
         return f"{super().__str__()}; cores and stacks kept in {self.kept}\n{self.stacks[-3000:]}"
 
 
-def _allow_cores() -> None:
+def _allow_cores() -> None:   # (Linux's: run_watched passes it only there)
     # as large as the hard limit lets (a user can't raise that)
     soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
     try:
@@ -48,7 +51,7 @@ def cores_land_here() -> bool:
     directory: a hard limit above zero and a `core_pattern` that names a
     file, not a handler (`|/usr/lib/systemd/systemd-coredump …`, as on
     GitHub's runners, which keeps the core in the system's own store)."""
-    if resource.getrlimit(resource.RLIMIT_CORE)[1] == 0:
+    if resource is None or resource.getrlimit(resource.RLIMIT_CORE)[1] == 0:
         return False
     try:
         with open("/proc/sys/kernel/core_pattern", encoding="utf-8") as fh:
@@ -87,14 +90,19 @@ def run_watched(cmd: list[str], timeout: float, text: bool = True, env: dict | N
         before = set(os.listdir(where))
         p = subprocess.Popen(cmd, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, env=env,
-                             cwd=where, preexec_fn=_allow_cores)
+                             cwd=where, preexec_fn=_allow_cores if resource is not None else None)
         try:
             out, err = p.communicate(input, timeout=timeout)
             return subprocess.CompletedProcess(cmd, p.returncode, out, err)
         except subprocess.TimeoutExpired:
             pass
-        stacks = _stacks(p.pid)
-        p.send_signal(signal.SIGQUIT)
+        if resource is None:
+            # Windows: no gdb to attach and no SIGQUIT's core (MYLA-926)
+            stacks = "(no stacks: gdb and cores are Linux's)"
+            p.kill()
+        else:
+            stacks = _stacks(p.pid)
+            p.send_signal(signal.SIGQUIT)
         try:
             out, err = p.communicate(timeout=30)
         except subprocess.TimeoutExpired:

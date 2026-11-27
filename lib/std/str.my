@@ -69,6 +69,13 @@ impl str {
             return if i <= n { Some(i) } else { None }
         }
         let first = needle[0]
+        if m == 1 {
+            while i < n {
+                if self[i] == first { return Some(i) }
+                i += 1
+            }
+            return None
+        }
         let last = n - m
         let begin = i
         var work: int64 = 0
@@ -320,6 +327,8 @@ impl str {
     // (2,147,483,647 bytes) is a runtime error.
     #test("ab", 3)["ababab"]
     #test("ab", 1)["ab"]
+    #test("ab", 17)["ababababababababababababababababab"] // in bulk: 16 + 1
+    #test("é", 33)["ééééééééééééééééééééééééééééééééé"] // 32 + 1
     #test("ab", 0)[""]
     #test("ab", -2)[""]
     #test("", 5)[""]
@@ -333,11 +342,30 @@ impl str {
             panic(f"std.str.repeat: n = {n} copies of {self.len()} bytes are more than a str holds")
         }
         var sb = StringBuilder(n * self.len())
-        var i = 0
-        while i < n {
-            sb.append(self)
-            i += 1
+        if n <= 16 {
+            var i = 0
+            while i < n {
+                sb.append(self)
+                i += 1
+            }
+            return sb.build()
         }
+        // In bulk: the text doubled into a run of `c` copies, up to 4,096
+        // bytes, appended whole, so a million copies of a byte are 245
+        // appends, not a million (slow interpreted, MYLA-546), and need
+        // 4 KB past the result
+        var run = self
+        var c = 1
+        while c <= n / 2 && run.len() <= 2048 {
+            run = run + run
+            c *= 2
+        }
+        var k = n
+        while k >= c {
+            sb.append(run)
+            k -= c
+        }
+        sb.append(run, 0, k * self.len())
         return sb.build()
     }
 
@@ -734,6 +762,27 @@ fun count_is_what_replace_replaces() {
             i += 1
         }
         assert(zeros == t.count(p), "count is the number replace replaces")
+    }
+}
+
+// `repeat` past 16 copies appends a run of copies, up to 4,096 bytes, then
+// part of one (MYLA-546): each count about a run's size, texts that
+// double into a run several times, once, or not at all.
+#test
+fun repeat_in_bulk() {
+    for t in ["x", "ab", "é", "abc".repeat(500), "q".repeat(3000)] {
+        let counts = if t.len() < 1000 { [17, 31, 32, 33, 4095, 4096, 4097, 9000] } else { [17, 18, 33] }
+        for n in counts {
+            let r = t.repeat(n)
+            assert(r.len() == n * t.len(), f"{t.len()} bytes {n} times: {r.len()} bytes")
+            var i = 0
+            while i < n {
+                if r[i * t.len():(i + 1) * t.len()] != t {
+                    assert(false, f"{t.len()} bytes {n} times: copy {i}")
+                }
+                i += 1
+            }
+        }
     }
 }
 

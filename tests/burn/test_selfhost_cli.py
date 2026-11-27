@@ -1,9 +1,10 @@
 """Burn test: the self-hosted `myla` CLI ([[selfhost/main.my]], MYLA-31, MYLA-35).
 
-The CLI is built by the self-hosted compiler and copied to `<tmp>/build/myla`,
-next to a `<tmp>/lib` that links to this repository's stdlib, the layout
-of a checkout. It is run from another directory, so the stdlib root must come
-from the binary's own location.
+The CLI is built by the self-hosted compiler and copied to `<tmp>/build/myla`
+(`myla.exe` on Windows), next to a `<tmp>/lib` that links to this
+repository's stdlib (a copy on Windows), the layout of a checkout. It is run
+from another directory, so the stdlib root must come from the binary's own
+location.
 
 Where it must print what the retired Python CLI printed, the Python CLI's
 output is its recorded answer (`tests/burn/_golden.py`, MYLA-219).
@@ -20,7 +21,7 @@ import tempfile
 import unittest
 
 from ._golden import answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, ON_WINDOWS, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -75,8 +76,12 @@ class _Layout(unittest.TestCase):
         cls._tmp = tempfile.TemporaryDirectory()
         root = cls._tmp.name
         os.makedirs(os.path.join(root, "build"))
-        os.symlink(os.path.join(_REPO, "lib"), os.path.join(root, "lib"))
-        cls.myla = os.path.join(root, "build", "myla")
+        if ON_WINDOWS:
+            # a copy: a link to a directory is a privilege on Windows (MYLA-926)
+            shutil.copytree(os.path.join(_REPO, "lib"), os.path.join(root, "lib"))
+        else:
+            os.symlink(os.path.join(_REPO, "lib"), os.path.join(root, "lib"))
+        cls.myla = os.path.join(root, "build", "myla" + EXE)
         shutil.copy(selfhost_tool("main"), cls.myla)
         cls.work = os.path.join(root, "work")       # the directory commands run in
         os.makedirs(cls.work)
@@ -85,10 +90,24 @@ class _Layout(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        if not ON_WINDOWS:
+            cls._tmp.cleanup()
+            return
+        # Windows may hold an executable that just ran a moment past its
+        # process's end (`build\myla.exe` in use, run 280, MYLA-926): a few
+        # tries, then the error as before
+        import time
+        for _ in range(20):
+            try:
+                cls._tmp.cleanup()
+                return
+            except PermissionError:
+                time.sleep(0.5)
         cls._tmp.cleanup()
 
     def myla_cmd(self, *argv: str) -> subprocess.CompletedProcess:
-        return subprocess.run([self.myla, *argv], cwd=self.work, capture_output=True, text=True)
+        # (UTF-8 whatever the locale: Windows' is its ANSI code page, MYLA-926)
+        return subprocess.run([self.myla, *argv], cwd=self.work, capture_output=True, encoding="utf-8")
 
 
 # An actor method changing its state after an `await` on the strength of a
@@ -185,26 +204,59 @@ class SelfHostedCli(_Layout):
         self.assertIn("1/1 passed", proc.stdout)
 
     def test_build_leaves_only_the_binary(self):
-        out = os.path.join(self.work, "out", "prog")
+        out = os.path.join(self.work, "out", "prog" + EXE)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         proc = self.myla_cmd("build", "prog.my", "-o", out)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(os.listdir(os.path.dirname(out)), ["prog"])
+        self.assertEqual(os.listdir(os.path.dirname(out)), ["prog" + EXE])
         run = subprocess.run([out, "z"], capture_output=True, text=True)
         self.assertEqual(run.stdout, f"2\n{out}\nz\n42\n")
 
     def test_build_without_the_assembler_on_path(self):
-        # the tools are looked for on PATH (D147): without `as` there, the
-        # build says what it needs
+        # the tools are looked for on PATH (D147): without `as` there (clang
+        # on Windows, D211), the build says what it needs
         empty = os.path.join(self.work, "empty-path")
         os.makedirs(empty, exist_ok=True)
-        out = os.path.join(self.work, "out", "noas")
+        out = os.path.join(self.work, "out", "noas" + EXE)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         proc = subprocess.run([self.myla, "build", "prog.my", "-o", out], cwd=self.work, capture_output=True,
                               text=True, env=dict(os.environ, PATH=empty))
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("myla: 'as' was not found: building for x86_64-linux here needs GNU as and ld (binutils)", proc.stderr)
+        if HOST_TARGET == "x86_64-windows":
+            missing = "myla: 'clang' was not found: building for x86_64-windows here needs clang, llvm-dlltool and lld-link"
+        else:
+            missing = f"myla: 'as' was not found: building for {HOST_TARGET} here needs GNU as and ld (binutils)"
+        self.assertIn(missing, proc.stderr)
 
+    @unittest.skipUnless(shutil.which("clang"), "needs clang")
+    def test_build_without_the_linker_on_path(self):
+        # the target's record names its tools (MYLA-700): with clang but no
+        # wasm-ld on PATH, the link names the missing one and the target
+        only = os.path.join(self.work, "clang-only")
+        os.makedirs(only, exist_ok=True)
+        if not os.path.exists(os.path.join(only, "clang" + EXE)):
+            os.symlink(shutil.which("clang"), os.path.join(only, "clang" + EXE))
+        out = os.path.join(self.work, "out", "nold")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = subprocess.run([self.myla, "build", "prog.my", "--target", "wasm32-wasi", "-o", out], cwd=self.work,
+                              capture_output=True, text=True, env=dict(os.environ, PATH=only))
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("myla: 'wasm-ld' was not found: building for wasm32-wasi here needs clang and wasm-ld", proc.stderr)
+
+    def test_windows_is_a_target_unknown_ones_are_named(self):
+        # `--target x86_64-windows` is known (MYLA-700) and built since
+        # MYLA-702 (tests/burn/test_windows.py runs its programs under Wine):
+        # the compiler writes COFF's sections for it, not ELF's
+        proc = self.myla_cmd("build", "prog.my", "--target", "x86_64-macos")
+        self.assertEqual((proc.stderr, proc.returncode),
+                         ("myla: unknown target 'x86_64-macos' (x86_64-linux, aarch64-linux, wasm32-wasi, x86_64-windows)\n", 1))
+        gen = subprocess.run([selfhost_tool("gen_main"), "prog.my", STDLIB_ROOT, "--target", "x86_64-windows"],
+                             cwd=self.work, capture_output=True, text=True)
+        self.assertEqual((gen.stderr, gen.returncode), ("", 0))
+        self.assertIn('\t.section .rdata,"dr"\n', gen.stdout)
+        self.assertIn("__imp_ExitProcess", gen.stdout)
+        self.assertNotIn(".note.GNU-stack", gen.stdout)
+        self.assertNotIn("\tsyscall", gen.stdout)
 
 if __name__ == "__main__":
     unittest.main()
@@ -389,8 +441,11 @@ class TestRepl(_Layout):
     an open bracket continues the input, errors don't end the session."""
 
     def repl(self, text: str) -> subprocess.CompletedProcess:
-        return subprocess.run([self.myla, "repl"], cwd=self.work, input=text, capture_output=True, text=True,
+        # the input as bytes, UTF-8: Windows' text mode would end each line
+        # with "\r\n" (MYLA-926)
+        proc = subprocess.run([self.myla, "repl"], cwd=self.work, input=text.encode(), capture_output=True,
                               timeout=120)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, proc.stdout.decode(), proc.stderr.decode())
 
     def test_a_session(self):
         proc = self.repl(SESSION)
@@ -429,6 +484,20 @@ class TestRepl(_Layout):
                       proc.stderr)
         self.assertIn("unknown name 'cuont'\n  --> <input>:1:1\n  |\n1 | cuont + 1\n  | ^^^^^\n"
                       "help: did you mean 'count'?\n", proc.stderr)
+
+    def test_a_uint64_is_echoed_unsigned(self):
+        # MYLA-546: a uint64 of 2^63 or more was echoed signed, alone and in
+        # a list, a tuple, a map, a struct's field and a variant's payload
+        proc = self.repl("struct P {\n    a: uint64,\n    b: int64,\n}\n"
+                         "enum E {\n    A(uint64),\n}\n"
+                         "let m: uint64 = 18446744073709551615\nm\n[m, 1]\n(m, -1i64)\n[m: [m]]\n"
+                         "P { a: m, b: -1 }\nE.A(m)\nSome(m)\n[Some((1u64, m))]\n")
+        self.assertNotIn("error", proc.stderr)
+        self.assertEqual((proc.stdout, proc.returncode),
+                         ("18446744073709551615\n[18446744073709551615, 1]\n(18446744073709551615, -1)\n"
+                          "[18446744073709551615: [18446744073709551615]]\n"
+                          "P { a: 18446744073709551615, b: -1 }\nE.A(18446744073709551615)\n"
+                          "Some(18446744073709551615)\n[Some((1, 18446744073709551615))]\n", 0))
 
     def test_exit_ends_the_session(self):
         proc = self.repl("from std.process import exit\nprint(1)\nexit(4)\nprint(2)\n")

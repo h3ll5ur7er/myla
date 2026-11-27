@@ -22,10 +22,10 @@ import tempfile
 import unittest
 
 from ._golden import answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, assemble, linux_only, shown
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-from ._tools import STDLIB_ROOT, myla_tool, selfhost_tool
+from ._tools import EXE, STDLIB_ROOT, myla_tool, selfhost_tool
 from ._lsp_scenarios import (LspScenarios, LspRequestHelpers, LspRequestScenarios, ProjectScenarios,
                              WorkspaceScanScenarios, _Client, _uri, rng)
 
@@ -35,14 +35,13 @@ _TMP = tempfile.TemporaryDirectory()
 
 def _self_hosted_build() -> str:
     """The server compiled by the self-hosted compiler (once per run)."""
-    binary = os.path.join(_TMP.name, "myla-lsp")
+    binary = os.path.join(_TMP.name, "myla-lsp" + EXE)
     if not os.path.exists(binary):
         asm = subprocess.run([selfhost_tool("gen_main"), os.path.join(_REPO, "tools", "lsp", "main.my"),
                               STDLIB_ROOT], capture_output=True, text=True, check=True)
         with open(binary + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
-        subprocess.run(["as", "--64", "-o", binary + ".o", binary + ".s"], check=True)
-        subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
+        assemble(binary + ".s", binary)
     return binary
 
 
@@ -82,6 +81,7 @@ class TestMylaLsp(LspScenarios, unittest.TestCase):
         self.client.response(rid)                     # no other diagnostics came first
         self.assertTrue(self.client.messages.empty())
 
+    @linux_only("reads the server's resident size in /proc")
     def test_memory_stays_flat(self):
         # std/json.my matches on Option and Result throughout: checking it
         # leaked about 7 kB a time before loops released what they iterate on
@@ -592,6 +592,71 @@ class TypeScenarios(LspRequestHelpers):
         self.assertEqual(self.hover(uri, 0, 8), "pub fun first<T: Eq>(xs: [T]) -> T")
         self.assertEqual(self.hover(uri, 3, 11), "pub struct Box<T>")
 
+    def test_literals_and_index_results_are_typed(self):
+        # MYLA-710's follow-up (the review of 2026-11-17): a float literal's
+        # type, and the result of a type's `Index` impl, were unknown, so
+        # `let m = (2.5).floor()` and `let h = g[0]` had no type, nor `.floor`
+        # its hover
+        text = ("struct Grid { cells: [int], w: int }\n\n"
+                "impl Index<int, int> for Grid {\n    fun index(self, at: int) -> int { return self.cells[at] }\n}\n\n"
+                "fun main() {\n    let m = (2.5).floor()\n    let k = 2.5.floor()\n    let s = 2.0f32\n    let t = 7u8\n"
+                "    let g = Grid { cells: [1], w: 1 }\n    let h = g[0]\n    let b = \"ab\"[0]\n    print(h)\n}\n")
+        uri = self.open(text)
+        lines = text.splitlines()
+        for line, want in ((7, "let m: float64"), (8, "let k: float64"), (9, "let s: float32"), (10, "let t: uint8"),
+                           (12, "let h: int"), (13, "let b: uint8")):
+            with self.subTest(line=line):
+                self.assertEqual(self.hover(uri, line, 8), want)
+        self.assertEqual(self.hover(uri, 7, lines[7].index("floor")), "fun floor(self) -> float64")
+        self.assertEqual(self.hover(uri, 8, lines[8].index("floor")), "fun floor(self) -> float64")
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspABrokenLibraryBody(LspRequestHelpers, unittest.TestCase):
+    """MYLA-710's follow-up (the review of 2026-11-17): a library module with
+    one body that doesn't parse, which no program calls (D179), keeps its
+    other members' hover, definition and completion; they were all gone, in a
+    document that checks clean."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import shutil
+        cls.binary = myla_tool("tools/lsp/main.my", "lsp")
+        cls._lib = tempfile.TemporaryDirectory(prefix="myla_lsp_lib_")
+        cls.lib = os.path.join(cls._lib.name, "lib")
+        shutil.copytree(STDLIB_ROOT, cls.lib)
+        for name, head in (("str", "    fun split(self, sep: str) -> [str] {"), ("text", "pub fun fill(")):
+            path = os.path.join(cls.lib, "std", name + ".my")
+            with open(path, encoding="utf-8") as fh:
+                src = fh.read()
+            at = src.index("{", src.index(head)) + 1
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src[:at] + "\n    let = 1\n" + src[at:])
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._lib.cleanup()
+
+    def server_command(self) -> list[str]:
+        return [self.binary, "--stdlib", self.lib]
+
+    def hover(self, uri, line, character):
+        h = self.at("textDocument/hover", uri, line, character)
+        return h and h["contents"]["value"].removeprefix("```myla\n").removesuffix("\n```")
+
+    def labels(self, uri, line, character):
+        return sorted(i["label"] for i in self.at("textDocument/completion", uri, line, character)["items"])
+
+    def test_the_other_members_stay(self):
+        uri = self.open("import std.text as text\n\nfun main() {\n    print(text.dedent(\"  x\"))\n    print(\"x\".trim())\n}\n")
+        self.assertEqual(self.hover(uri, 3, 16), "pub fun dedent(text: str) -> str")
+        self.assertEqual(self.hover(uri, 4, 14), "fun trim(self) -> str")
+        found = self.at("textDocument/definition", uri, 4, 14)
+        found = found[0] if isinstance(found, list) else found
+        self.assertTrue(found["uri"].endswith("/std/str.my"), found)
+        self.assertIn("trim", self.labels(uri, 4, len("    print(\"x\".")))
+        self.assertIn("dedent", self.labels(uri, 3, len("    print(text.")))
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestMylaLspTypes(TypeScenarios, unittest.TestCase):
@@ -713,9 +778,9 @@ class TestResolutionCorpus(unittest.TestCase):
         uses = [line.split()[1] for line in out.splitlines() if line.startswith("use ")]
         self.assertEqual(uses, ["2:4-5", "3:10-11"])
 
-    def test_the_corpus_resolves(self) -> None:
-        files = _corpus()
-        self.assertGreater(len(files), 50)
+    def _resolve(self, *files: str) -> dict[str, list[str]]:
+        """`lsp --resolve`'s lines for each of `files`, by the path as it
+        prints it (`shown`: with `/` on Windows, MYLA-926)."""
         out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", STDLIB_ROOT, "--resolve",
                               *files], capture_output=True, text=True, check=True).stdout
         sections = {}
@@ -724,48 +789,110 @@ class TestResolutionCorpus(unittest.TestCase):
                 current = sections.setdefault(line[5:], [])
             else:
                 current.append(line)
-        self.assertEqual(sorted(sections), files)
+        return sections
+
+    def _resolves(self, path: str, lines: list[str]) -> int:
+        """Checks `lsp --resolve`'s `lines` for `path`: each name the file
+        declares resolves where it is used bare, a local only after its
+        declaration, no position twice. A member (a field, a method) is used
+        bare only where it is one, never in a call: a field in a struct's
+        literal or pattern, a method nowhere (there is no implicit `self`),
+        so `format(…)` beside a field or method `format` is the builtin
+        (MYLA-710). How many uses it checked."""
+        self.assertNotIn("unparsed", lines)
+        declared, members, defs, uses = set(), set(), set(), set()
+        for line in lines:
+            parts = line.split()
+            l, rest = parts[1].split(":")
+            pos = (int(l), int(rest.split("-")[0]))
+            if parts[0] == "def":
+                (members if parts[2] in ("field", "method") else declared).add(parts[3])
+                defs.add(pos)
+            else:
+                self.assertNotIn(pos, uses, line)
+                uses.add(pos)
+                if parts[-1] not in ("global", "module", "field", "method", "variant"):
+                    self.assertEqual(parts[4], shown(path), line)
+                    dl, dc = parts[5].split(":")
+                    # a bound may name a type parameter declared after
+                    # it in the same list, `<I: Iterator<T>, T>` (D171)
+                    if not (parts[-1] == "typeparam" and int(dl) == pos[0]):
+                        self.assertLess((int(dl), int(dc)), pos, line)
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        source_lines = text.splitlines()
+        known = defs | uses
+        resolved = 0
+        for lexeme, line, column, member in _identifiers(path):
+            if lexeme not in declared and lexeme not in members:
+                continue
+            if lexeme in ("int", "float"):
+                continue    # the type names that are identifiers, never resolved, also a method's name (`r.float()`, `sc.int()`)
+            if member:
+                continue    # a member, or an attribute's name
+            if not source_lines[line - 1][column - 1:].startswith(lexeme):
+                continue    # the lexer's own, as the `format` an f-string expands to (MYLA-299)
+            after = source_lines[line - 1][column - 1 + len(lexeme):].lstrip()
+            if lexeme not in declared and after.startswith("("):
+                continue    # a call, which no member is: a builtin's, as `format(…)` (MYLA-710)
+            prefix = source_lines[line - 1][:column - 1]
+            pos = (line - 1, len(prefix.encode("utf-16-le")) // 2)
+            self.assertIn(pos, known, f"{lexeme} at {line}:{column} is not resolved")
+            resolved += 1
+        return resolved
+
+    def test_the_corpus_resolves(self) -> None:
+        files = _corpus()
+        self.assertGreater(len(files), 50)
+        sections = self._resolve(*files)
+        self.assertEqual(sorted(sections), sorted(shown(f) for f in files))
         resolved_total = 0
         for path in files:
             with self.subTest(file=os.path.relpath(path, _REPO)):
-                lines = sections[path]
-                self.assertNotIn("unparsed", lines)
-                declared, defs, uses = set(), set(), set()
-                for line in lines:
-                    parts = line.split()
-                    l, rest = parts[1].split(":")
-                    pos = (int(l), int(rest.split("-")[0]))
-                    if parts[0] == "def":
-                        declared.add(parts[3])
-                        defs.add(pos)
-                    else:
-                        self.assertNotIn(pos, uses, line)
-                        uses.add(pos)
-                        if parts[-1] != "global" and parts[-1] != "module":
-                            self.assertEqual(parts[4], path, line)
-                            dl, dc = parts[5].split(":")
-                            # a bound may name a type parameter declared after
-                            # it in the same list, `<I: Iterator<T>, T>` (D171)
-                            if not (parts[-1] == "typeparam" and int(dl) == pos[0]):
-                                self.assertLess((int(dl), int(dc)), pos, line)
-                with open(path, encoding="utf-8") as fh:
-                    text = fh.read()
-                source_lines = text.splitlines()
-                known = defs | uses
-                for lexeme, line, column, member in _identifiers(path):
-                    if lexeme not in declared:
-                        continue
-                    if lexeme in ("int", "float"):
-                        continue    # the type names that are identifiers, never resolved, also a method's name (`r.float()`, `sc.int()`)
-                    if member:
-                        continue    # a member, or an attribute's name
-                    if not source_lines[line - 1][column - 1:].startswith(lexeme):
-                        continue    # the lexer's own, as the `format` an f-string expands to (MYLA-299)
-                    prefix = source_lines[line - 1][:column - 1]
-                    pos = (line - 1, len(prefix.encode("utf-16-le")) // 2)
-                    self.assertIn(pos, known, f"{lexeme} at {line}:{column} is not resolved")
-                    resolved_total += 1
+                resolved_total += self._resolves(path, sections[shown(path)])
         self.assertGreater(resolved_total, 30000)
+
+    def test_a_member_is_no_global(self) -> None:
+        # a field and a method are their type's, not the file's: a call of
+        # the builtin `format` beside them is no use of either (MYLA-710:
+        # `--resolve` listed them as globals, and std files and
+        # selfhost/target.my wrote f-strings instead)
+        source = ("struct T { format: int }\n\nstruct U { n: int }\n\nimpl U {\n"
+                  "    fun format(self, spec: str) -> str { return format(\"{}\", self.n) }\n}\n\n"
+                  "enum E {\n    A(int)\n}\n\n"
+                  "fun f(n: int) -> str {\n    let t = T { format: n }\n    let e = E.A(n)\n"
+                  "    let k = match e { A(v) => v }\n    return format(\"{} {}\", t.format, k)\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "members.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            lines = self._resolve(path)[shown(path)]
+            defs = sorted(line for line in lines if line.startswith("def ") and line.split()[2] not in ("param", "local"))
+            self.assertEqual(defs, ["def 0:11-17 field format", "def 0:7-8 global T", "def 12:4-5 global f",
+                                    "def 2:11-12 field n", "def 2:7-8 global U", "def 5:8-14 method format",
+                                    "def 8:5-6 global E", "def 9:4-5 variant A"])
+            self.assertIn("use 13:16-22 format -> " + shown(path) + " 0:11 field", lines)    # the literal's field
+            self.assertIn("use 15:22-23 A -> " + shown(path) + " 9:4 variant", lines)        # the pattern's variant
+            self.assertEqual(self._resolves(path, lines), 24)
+
+    def test_aliases_defaults_and_wildcards(self) -> None:
+        # MYLA-955 (found by D313's image modules): an import's alias is a use
+        # of its module, a parameter's default is resolved (as the caller's
+        # expression), and `_` binds nothing, so a `_` pattern needn't resolve
+        source = ("import std.option as option\n\nenum Mode {\n    Fast\n    Slow\n}\n\n"
+                  "struct S { option: int }\n\n"
+                  "fun f(n: int, m: Mode = Mode.Fast) -> int {\n    var c = 0\n"
+                  "    for _ in 0..n {\n        c += 1\n    }\n"
+                  "    return match m {\n        Fast => c\n        _ => 0\n    }\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "aliases.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            lines = self._resolve(path)[shown(path)]
+            self.assertTrue(any(line.startswith("use 0:21-27 option -> ") and line.endswith(" module") for line in lines), lines)
+            self.assertIn("use 9:24-28 Mode -> " + shown(path) + " 2:5 global", lines)    # the default's type name
+            self.assertFalse([line for line in lines if line.split()[-1] == "_"], lines)
+            self._resolves(path, lines)
 
     def test_members_agree_with_the_checker(self) -> None:
         """Where the server resolves `x.f` or `x.m(…)` in an example, it is the
@@ -788,12 +915,12 @@ class TestResolutionCorpus(unittest.TestCase):
             # are where they were
             for line, column, member, kind, decl_line, decl_column in answered_or_recorded(path, _checked_members)[0]:
                 checked += 1
-                found = uses.get((path, line - 1, column - 1))
+                found = uses.get((shown(path), line - 1, column - 1))
                 if found is None:
                     continue
                 resolved += 1
                 with self.subTest(file=os.path.basename(path), line=line, member=member):
-                    self.assertEqual(found[0], path)
+                    self.assertEqual(found[0], shown(path))
                     if kind == "field":
                         self.assertEqual((found[1], found[2]), (decl_line, decl_column))
                     else:
@@ -860,6 +987,10 @@ class SemanticTokenScenarios:
             fh.write(text)
         c = _Client([self.binary, "--stdlib", STDLIB_ROOT])
         self.addCleanup(c.close)
+        # a second more per 100 KB: selfhost/embedded_std.my, 5 MB with the
+        # image modules, took over 10 s on aarch64 beside the other suites
+        # (1.3 s on x86-64, MYLA-929; MYLA-956)
+        c.TIMEOUT = _Client.TIMEOUT + len(text) // 100_000
         rid = c.send("initialize", {"processId": None, "rootUri": _uri(root), "capabilities": {}}, request=True)
         caps = c.response(rid)["result"]["capabilities"]
         self.assertEqual(caps["semanticTokensProvider"]["legend"]["tokenTypes"], LEGEND_TYPES)
@@ -971,6 +1102,7 @@ def _node_strips_types() -> bool:
 _EXTENSION = os.path.join(_REPO, "vscode-extension", "myla")
 
 
+@linux_only("the extension's choice is checked with POSIX paths (`/r/build/myla-lsp`) and links")
 @unittest.skipUnless(CAN_BUILD_NATIVE and _node_strips_types(), "needs a native toolchain and node 22.6+")
 class TestExtensionStartsTheServer(unittest.TestCase):
     """The VS Code extension's server command (`vscode-extension/myla/src/

@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON, shown
 from ._tools import STDLIB_ROOT, myla_tool, selfhost_tool
 from ._lsp_scenarios import LspRequestHelpers
 
@@ -251,7 +251,7 @@ class ImplicitModules(Fixture):
             proc = self.myla_cmd("check", path, lib=lib)
             self.assertEqual(proc.returncode, 1, body)
             self.assertIn("type error: return type mismatch", proc.stderr, body)
-            self.assertIn("--> " + int_my + ":", proc.stderr, body)
+            self.assertIn("--> " + shown(int_my) + ":", proc.stderr, body)
 
     def test_their_bodies_are_parsed_once_called(self) -> None:
         # MYLA-359: an implicit module's function bodies are lexed and
@@ -273,7 +273,7 @@ class ImplicitModules(Fixture):
         def at(line_text: str, text: str) -> str:
             # the place of `text` on the last line holding `line_text`
             n = max(i for i, line in enumerate(lines, 1) if line_text in line)
-            return f"{int_my}:{n}:{lines[n - 1].index(text) + 1}"
+            return f"{shown(int_my)}:{n}:{lines[n - 1].index(text) + 1}"
 
         path = self.write("unparsed_ok.my", "fun main() {\n    print(21.doubled())\n}\n")
         for cmd in ("run", "check"):
@@ -318,7 +318,7 @@ class ImplicitModules(Fixture):
             int_my = os.path.join(lib, "std", "int.my")
             with open(int_my, encoding="utf-8") as fh:
                 n = max(i for i, line in enumerate(fh.read().split("\n"), 1) if "fun q4_after" in line)
-            where = f"--> {int_my}:{n}:5\n"
+            where = f"--> {shown(int_my)}:{n}:5\n"
             eager = self.myla_cmd("check", int_my, lib=lib)
             self.assertIn(error, eager.stderr, name)
             self.assertIn(where, eager.stderr, name)
@@ -328,6 +328,34 @@ class ImplicitModules(Fixture):
                     proc = self.myla_cmd(cmd, path, lib=lib)
                     self.assertEqual(proc.returncode, 1, (name, call, cmd, proc.stdout))
                     self.assertIn(error + "\n  " + where, proc.stderr, (name, call, cmd))
+
+    def test_a_declaration_after_a_missing_brace_anywhere_on_its_line(self) -> None:
+        # MYLA-545 (Z1's residual): a declaration's keyword that doesn't start
+        # its line, after a comment, a `};`, a `#test` or another attribute,
+        # sends the skipped body back to the lexer too: the error is the eager
+        # one at load, not a method that is silently gone (on the eager one's
+        # line: the entry's own `#test` is parsed, an imported module's isn't)
+        head = ("impl int {\n    fun q5_ok(self) -> int { return self + 1 }\n\n"
+                "    fun q5_missing(self) -> int {\n        if self > 0 { return 1\n        return 2\n    }")
+        for name, text in [("swallow_comment", head + "\n\n    /* the next one */ fun q5_after(self) -> int { return 3 }\n}\n}\n"),
+                           ("swallow_semi", head + "; fun q5_after(self) -> int { return 3 }\n}\n}\n"),
+                           ("swallow_test", head + "\n\n    #test(1)[3] fun q5_after(self) -> int { return 3 }\n}\n}\n"),
+                           ("swallow_derive", "pub fun q5_a(x: int) -> int {\n    if x > 0 { return 1\n    return 2\n}\n"
+                                              "#derive(Eq) pub struct Q5 { x: int }\n}\n")]:
+            lib = self.lib_with(name, "int", text)
+            int_my = os.path.join(lib, "std", "int.my")
+            eager = self.myla_cmd("check", int_my, lib=lib)
+            self.assertEqual(eager.returncode, 1, name)
+            self.assertTrue(eager.stderr.startswith("parse error: "), (name, eager.stderr))
+            first = eager.stderr.split("\n")[:4]
+            path = self.write(f"{name}.my", "fun main() {\n    print(1.q5_ok())\n}\n")
+            for cmd in ("check", "run"):
+                proc = self.myla_cmd(cmd, path, lib=lib)
+                self.assertEqual(proc.returncode, 1, (name, cmd, proc.stdout))
+                lines = proc.stderr.split("\n")[:4]
+                self.assertTrue(lines[0].startswith("parse error: expected an expression, found "), (name, cmd, lines))
+                self.assertEqual(lines[1].rsplit(":", 1)[0], first[1].rsplit(":", 1)[0], (name, cmd))
+                self.assertEqual(lines[3], first[3], (name, cmd))
 
     def test_a_signature_over_two_lines_keeps_its_body(self) -> None:
         # MYLA-416 (Z2): a body is keyed by the place of its `{`, which the
@@ -354,18 +382,22 @@ class ImplicitModules(Fixture):
         # where an attribute may stand, at the start of a line: one in the
         # middle of a statement is lexed, its error the eager one, imported
         # as when checked itself. A body read late is lexed as the module
-        # read whole, its cases at the start of a line left out as there
+        # read whole: a `#test` in a function's body is lexed there too, and
+        # an error (M9 of the review of 2026-11-17, MYLA-825: it was left
+        # out, with whatever its brackets held)
         self.write("attr/m.my", "pub fun f() -> int {\n    let x = 1 #test(\"anything\", @ $)[1 2 3]\n    return x\n}\n")
         main = self.write("attr/main.my", "from .m import f\n\nfun main() {\n    print(f())\n}\n")
         m_my = os.path.join(self.work, "attr", "m.my")
         for target in (main, m_my):
             proc = self.myla_cmd("check", target)
             self.assertEqual(proc.returncode, 1, target)
-            self.assertIn("lex error: unexpected character '@'\n  --> " + m_my + ":2:33\n", proc.stderr, target)
+            self.assertIn("lex error: unexpected character '@'\n  --> " + shown(m_my) + ":2:33\n", proc.stderr, target)
         lib = self.lib_with("case_lib", "int", "impl int {\n    fun with_case(self) -> int {\n        #test(1)[2]\n        return 5\n    }\n}\n")
         path = self.write("with_case.my", "fun main() {\n    print(1.with_case())\n}\n")
         proc = self.myla_cmd("run", path, lib=lib)
-        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("5\n", "", 0))
+        self.assertEqual((proc.stdout, proc.returncode), ("", 1))
+        self.assertTrue(proc.stderr.startswith("parse error: expected an expression, found '#'\n  --> "), proc.stderr)
+        self.assertIn("int.my:", proc.stderr.split("\n")[1])
 
     def test_the_repl(self) -> None:
         proc = self.myla_cmd("repl", stdin="\"ab\".shout()\n3.doubled()\n")
@@ -400,13 +432,13 @@ class ImplicitModules(Fixture):
                                     "fun main() {\n    print(\"a\".shout())\n}\n")
         proc = self.myla_cmd("check", path)
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("type error: duplicate method 'shout' for type 'str'\n  --> " + path + ":2:5", proc.stderr)
+        self.assertIn("type error: duplicate method 'shout' for type 'str'\n  --> " + shown(path) + ":2:5", proc.stderr)
         self.assertIn("note: 'shout' for 'str' is first defined in std.str, which every program sees, at "
-                      + os.path.join(self.lib, "std", "str.my") + f":{self.line_of('str', 'fun shout')}:5", proc.stderr)
+                      + shown(os.path.join(self.lib, "std", "str.my")) + f":{self.line_of('str', 'fun shout')}:5", proc.stderr)
         # the same with the module imported
         path = self.write("dup2.my", "import std.str as s\n\nimpl str {\n    fun shout(self) -> str {\n        return self\n    }\n}\n")
         proc = self.myla_cmd("check", path)
-        self.assertIn("  --> " + path + ":4:5", proc.stderr)
+        self.assertIn("  --> " + shown(path) + ":4:5", proc.stderr)
         self.assertIn("first defined in std.str", proc.stderr)
 
     def test_a_library_without_them(self) -> None:

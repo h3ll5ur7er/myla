@@ -6,6 +6,7 @@ interpreter and native code give bit-identical results (the functions are
 written in Myla on two primitives), and each result lies within the units in
 the last place std.math documents of what Python's `math` (the C library)
 gives. A NaN must be a NaN; a zero must have the right sign."""
+import decimal
 import math
 import os
 import random
@@ -14,7 +15,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, ON_WINDOWS, SKIP_REASON
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 
@@ -48,6 +49,32 @@ def _integral(f):
     return g
 
 
+def _expm1_exact(x: float) -> float:
+    """expm1 rounded once from 80 digits (decimal's), the reference on
+    Windows, whose C library (the UCRT) isn't within a unit of it everywhere:
+    expm1(0.09570212915659848) is 0.1004312287919032156…, which std.math and
+    glibc round to 0.10043122879190322, the UCRT gives 0.1004312287919032,
+    1.6 units below and 2 from std.math's (run 277, MYLA-926). glibc is
+    within a unit of it on every input here, std.math too."""
+    if not math.isfinite(x) or x == 0.0:
+        return math.expm1(x)
+    with decimal.localcontext() as ctx:
+        ctx.prec = 80
+        ctx.traps[decimal.Overflow] = False      # past the largest float: inf
+        d = decimal.Decimal(x)
+        if abs(d) >= 1:
+            return float(d.exp() - 1)
+        # the series, which keeps a small x's digits that exp(x) - 1 loses
+        total, term, n = d, d, 1
+        while abs(term) > abs(total) * decimal.Decimal(10) ** -80:
+            n += 1
+            term = term * d / n
+            total += term
+        return float(total)
+
+
+_EXPM1 = _expm1_exact if ON_WINDOWS else math.expm1
+
 rng = random.Random(242)
 _UNARY = {
     "sqrt": (math.sqrt, 0, [rng.uniform(0, 1e6) for _ in range(150)] + [rng.uniform(0, 1e-300) for _ in range(20)]),
@@ -64,7 +91,23 @@ _UNARY = {
     "log2": (math.log2, 1, [rng.uniform(0, 1e300) for _ in range(50)] + [rng.uniform(0.5, 4) for _ in range(150)]
              + [2.0 ** k for k in range(-60, 60)]),
     "log10": (math.log10, 1, [rng.uniform(0, 1e300) for _ in range(50)] + [rng.uniform(0.1, 10) for _ in range(150)]
-              + [10.0 ** k for k in range(-5, 23)]),
+              + [10.0 ** k for k in range(-5, 23)]
+              # near 1, where adding k·log10(2) cancelled (MYLA-796)
+              + [rng.uniform(0.999999, 1.000001) for _ in range(50)] + [0.999999, 0.9999999999999999]),
+    # MYLA-796: from expm1 near 0, in two halves near the overflow (sinh(710)
+    # is finite), the sign of a zero kept
+    "expm1": (_EXPM1, 1, [rng.uniform(-1e-5, 1e-5) for _ in range(50)] + [rng.uniform(-2, 2) for _ in range(100)]
+              + [rng.uniform(-50, 709.7) for _ in range(100)] + [1e-300, -1e-300]),
+    "sinh": (math.sinh, 2, [rng.uniform(-1e-5, 1e-5) for _ in range(50)] + [rng.uniform(-2, 2) for _ in range(100)]
+             + [rng.uniform(-30, 30) for _ in range(50)] + [rng.uniform(-710.47, 710.47) for _ in range(100)]
+             + [710.0, -710.0, 711.0, 1.16e-05, 0.001]),
+    "cosh": (math.cosh, 2, [rng.uniform(-0.4, 0.4) for _ in range(50)] + [rng.uniform(-30, 30) for _ in range(100)]
+             + [rng.uniform(-710.47, 710.47) for _ in range(100)] + [710.0, -711.0]),
+    "tanh": (math.tanh, 2, [rng.uniform(-1e-5, 1e-5) for _ in range(50)] + [rng.uniform(-2, 2) for _ in range(150)]
+             + [rng.uniform(-25, 25) for _ in range(50)] + [1.0035695199723702e-05]),
+    # glibc's cbrt is up to 3 units from the exact cube root, std.math's within 1
+    "cbrt": (math.cbrt, 4, [rng.uniform(-10, 10) for _ in range(100)] + [rng.uniform(-1e300, 1e300) for _ in range(50)]
+             + [rng.uniform(0, 1e-308) for _ in range(30)] + [27.0, -8.0, 1e-320]),
     # small, medium (three-part π/2) and large (Payne-Hanek) arguments
     "sin": (math.sin, 1, [rng.uniform(-10, 10) for _ in range(150)] + [rng.uniform(-1e5, 1e5) for _ in range(100)]
             + [rng.uniform(-1, 1) * 10 ** rng.uniform(6.3, 300) for _ in range(100)]),
@@ -116,7 +159,7 @@ def _expected(name: str, args: tuple[float, ...]) -> float:
     except ValueError:
         return float("nan")
     except OverflowError:
-        return math.copysign(float("inf"), 1.0)
+        return math.copysign(float("inf"), args[0] if name == "sinh" else 1.0)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

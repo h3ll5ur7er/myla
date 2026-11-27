@@ -1,0 +1,1784 @@
+// std.tiff: baseline TIFF files, read and written (MYLA-965, D313).
+//
+// A TIFF file is a header (the byte order, "II" or "MM", and 42) and a chain
+// of image file directories (IFDs), one a page. An IFD is a list of tags,
+// each a field type, a count and its values (inline when they fit four
+// bytes, else at an offset). The pixels are in strips (rows) or tiles, each
+// compressed on its own, either every sample of a pixel together (planar
+// configuration 1) or a plane a sample (2).
+//
+// The decoder reads both byte orders, every field type, strips and tiles,
+// both planar configurations, the compressions none, PackBits, LZW and
+// Deflate (8 and the old 32946), the horizontal (2) and floating point (3)
+// predictors, 1 to 16-bit unsigned samples and 32-bit floats, bilevel and
+// gray (BlackIsZero, WhiteIsZero), RGB and palette images, and an extra
+// sample as alpha (associated alpha is unpremultiplied, as Pillow does).
+// Every offset and count is checked against the file before it is used, and
+// the IFD chain is walked with a guard against loops and IFDs that overlap
+// (`info` and the decoders skip the IFDs before a page unread). JPEG (old and new),
+// CCITT, BigTIFF, YCbCr, CMYK and the rest are `Unsupported`, by name.
+//
+// The encoder writes little-endian files of one page: strips of about
+// 8 KB, uncompressed or with PackBits, LZW or Deflate (the last two with
+// the horizontal predictor), 8 or 16 bits, gray, gray and alpha, RGB or
+// RGBA (ExtraSamples 2, unassociated alpha).
+
+import std.image as image
+from std.image import Image, Image8, Image16, ImageF, ImageError, ImageInfo, Layout, Sample
+import std.compress as compress
+from std.compress import CompressError
+import std.bytes as bytes_m // `to_str`, `writer`
+import std.list as list_m // `filled`, `extend`
+import std.map as map_m // `get`
+import std.option as option_m // `expect` in the tests
+import std.float as fl // `from_bits32`, `from_bits`, `floor`
+import std.char as char_m // `to_digit`, in the tests
+
+// A tag's values, by their field type.
+#derive(Eq)
+pub enum TagValue {
+    // BYTE, SHORT, LONG, SBYTE, SSHORT, SLONG and IFD (field types 1, 3, 4,
+    // 6, 8, 9 and 13), signed where the type is
+    Ints([int64])
+    // RATIONAL and SRATIONAL (5, 10): numerator and denominator
+    Rationals([(int64, int64)])
+    // FLOAT and DOUBLE (11, 12)
+    Floats([float64])
+    // ASCII (2), without the NUL that ends it
+    Ascii(str)
+    // UNDEFINED (7)
+    Bytes([uint8])
+}
+
+impl Format for TagValue {
+    // The values separated by commas, a rational as `n/d`, the first eight
+    // of a long list and how many there are; text as it is; bytes counted.
+    #test(TagValue.Ints([8i64, 8i64, 8i64]), "")["8, 8, 8"]
+    #test(TagValue.Rationals([(72i64, 1i64)]), "")["72/1"]
+    #test(TagValue.Floats([0.5]), "")["0.5"]
+    #test(TagValue.Ascii("Myla"), "")["Myla"]
+    #test(TagValue.Bytes([1u8, 2u8]), "")["2 bytes"]
+    #test(TagValue.Ints([1i64, 2i64, 3i64, 4i64, 5i64, 6i64, 7i64, 8i64, 9i64, 10i64]), "")["1, 2, 3, 4, 5, 6, 7, 8, … (10 values)"]
+    fun format(self, spec: str) -> str {
+        var parts: [str] = []
+        var n = 0
+        match self {
+            Ints(vs) => {
+                n = vs.len()
+                for v in vs {
+                    if parts.len() < 8 { parts.push(f"{v}") }
+                }
+            }
+            Rationals(vs) => {
+                n = vs.len()
+                for v in vs {
+                    if parts.len() < 8 { parts.push(f"{v.0}/{v.1}") }
+                }
+            }
+            Floats(vs) => {
+                n = vs.len()
+                for v in vs {
+                    if parts.len() < 8 { parts.push(f"{v}") }
+                }
+            }
+            Ascii(s) => {
+                parts.push(s)
+            }
+            Bytes(b) => {
+                parts.push(f"{b.len()} bytes")
+            }
+        }
+        var s = parts.join(", ")
+        if n > 8 {
+            s = s + f", … ({n} values)"
+        }
+        return s
+    }
+}
+
+// How `encode` compresses the strips.
+#derive(Eq)
+pub enum Compression {
+    // Compression 1
+    Uncompressed
+    // 32773, each row on its own
+    PackBits
+    // 5, with the horizontal predictor
+    Lzw
+    // 8 (zlib, level 6), with the horizontal predictor
+    Deflate
+}
+
+// --- Reading the file's structure --------------------------------------------------
+
+// A file's bytes and their byte order.
+struct Src {
+    b: [uint8],
+    le: bool,
+}
+
+impl Src {
+    // The 16-bit value at `p` (checked by the caller).
+    fun u16(self, p: int) -> int {
+        if self.le {
+            return (self.b[p] as int) | ((self.b[p + 1] as int) << 8)
+        }
+        return ((self.b[p] as int) << 8) | (self.b[p + 1] as int)
+    }
+
+    // The 32-bit value at `p` (checked by the caller).
+    fun u32(self, p: int) -> int64 {
+        let a = self.b[p] as int64
+        let b = self.b[p + 1] as int64
+        let c = self.b[p + 2] as int64
+        let d = self.b[p + 3] as int64
+        if self.le {
+            return a | (b << 8) | (c << 16) | (d << 24)
+        }
+        return (a << 24) | (b << 16) | (c << 8) | d
+    }
+}
+
+// One tag of an IFD: its values are `count` of type `typ` at `at`, or lie
+// (partly) outside the file when `at` is -1.
+struct Entry {
+    tag: int,
+    typ: int,
+    count: int64,
+    at: int,
+}
+
+// An IFD: its tags, in the order of the file, and where the next IFD is
+// (0: none).
+struct Ifd {
+    entries: [int: Entry],
+    order: [int],
+    next: int64,
+}
+
+// The bytes a value of field type `t` takes; 0 for a type TIFF 6 doesn't
+// define (its tags are skipped, as the specification asks).
+#test(1)[1]
+#test(3)[2]
+#test(5)[8]
+#test(12)[8]
+#test(13)[4]
+#test(16)[0]
+fun type_size(t: int) -> int {
+    return match t {
+        1 | 2 | 6 | 7 => 1
+        3 | 8 => 2
+        4 | 9 | 11 | 13 => 4
+        5 | 10 | 12 => 8
+        _ => 0
+    }
+}
+
+// The byte order and the first IFD's offset of the file `b`.
+fun open(b: [uint8]) -> Result<(Src, int64), ImageError> {
+    let n = b.len()
+    var le = true
+    if n >= 1 && b[0] != 0x49u8 && b[0] != 0x4Du8 {
+        return Err(ImageError.BadSignature)
+    }
+    if n >= 2 {
+        if b[0] == 0x49u8 && b[1] == 0x49u8 {
+            le = true
+        } else if b[0] == 0x4Du8 && b[1] == 0x4Du8 {
+            le = false
+        } else {
+            return Err(ImageError.BadSignature)
+        }
+    }
+    let s = Src { b: b, le: le }
+    if n >= 4 {
+        let magic = s.u16(2)
+        if magic == 43 {
+            return Err(ImageError.Unsupported("BigTIFF"))
+        }
+        if magic != 42 {
+            return Err(ImageError.BadSignature)
+        }
+    }
+    if n < 8 {
+        return Err(ImageError.Truncated)
+    }
+    return Ok((s, s.u32(4)))
+}
+
+// Where the IFD at `off` ends (past its entries and the next IFD's offset)
+// and that offset (0: none), checked against the file.
+fun ifd_span(s: Src, off: int64) -> Result<(int64, int64), ImageError> {
+    let n = s.b.len() as int64
+    if off < 8 || off >= n {
+        return Err(ImageError.Corrupt(f"an IFD at {off}, outside the file of {n} bytes"))
+    }
+    if off + 2 > n {
+        return Err(ImageError.Truncated)
+    }
+    let end = off + 2 + 12 * (s.u16(off as int) as int64)
+    if end > n {
+        return Err(ImageError.Truncated)
+    }
+    // a file that ends right after its last IFD's entries has no more
+    if end + 4 <= n {
+        return Ok((end + 4, s.u32(end as int)))
+    }
+    return Ok((end, 0i64))
+}
+
+// Whether IFDs of `used` bytes in all fit the file `s`. Those of a file
+// don't overlap, so they always do; a chain of IFDs that overlap, each
+// read in full, would take time quadratic in the file's size, and it ends
+// where they no longer fit.
+fun ifds_fit(s: Src, used: int64) -> bool {
+    return used <= (s.b.len() as int64)
+}
+
+// The IFD at `off`.
+fun read_ifd(s: Src, off: int64) -> Result<Ifd, ImageError> {
+    let (_, next) = ifd_span(s, off)?
+    let p = off as int
+    let count = s.u16(p)
+    let n = s.b.len() as int64
+    var entries: [int: Entry] = [:]
+    var order: [int] = []
+    for i in 0..count {
+        let at = p + 2 + 12 * i
+        let tag = s.u16(at)
+        let typ = s.u16(at + 2)
+        let cnt = s.u32(at + 4)
+        let size = type_size(typ)
+        if size == 0 || entries.contains(tag) {
+            continue
+        }
+        let total = cnt * (size as int64)
+        var where = at + 8
+        if total > 4 {
+            let ptr = s.u32(at + 8)
+            where = if ptr + total <= n { ptr as int } else { -1 }
+        }
+        entries[tag] = Entry { tag: tag, typ: typ, count: cnt, at: where }
+        order.push(tag)
+    }
+    return Ok(Ifd { entries: entries, order: order, next: next })
+}
+
+// The IFD of page `page` (0 the first), walking the chain from `first`.
+fun nth_ifd(s: Src, first: int64, page: int) -> Result<Ifd, ImageError> {
+    if page < 0 {
+        return Err(ImageError.Mismatch(f"no page {page}"))
+    }
+    if first == 0 {
+        return Err(ImageError.Corrupt("no IFD"))
+    }
+    // the IFDs before it only for where the next one is
+    var seen: [int64: bool] = [:]
+    var off = first
+    var used = 0i64
+    var i = 0
+    while true {
+        let (end, next) = ifd_span(s, off)?
+        used += end - off
+        if !ifds_fit(s, used) {
+            break
+        }
+        if i == page {
+            return read_ifd(s, off)
+        }
+        seen[off] = true
+        off = next
+        i += 1
+        if off == 0 || seen.contains(off) {
+            break
+        }
+    }
+    let pages = if i == 1 { "1 page" } else { f"{i} pages" }
+    return Err(ImageError.Mismatch(f"no page {page}: the file has {pages}"))
+}
+
+// The integers of the entry `e`.
+fun ints_of(s: Src, e: Entry) -> Result<[int64], ImageError> {
+    if e.at < 0 {
+        return Err(ImageError.Truncated)
+    }
+    let c = e.count as int
+    var out: [int64] = []
+    if e.typ == 1 || e.typ == 7 {
+        for i in 0..c { out.push(s.b[e.at + i] as int64) }
+    } else if e.typ == 6 {
+        for i in 0..c { out.push(signed(s.b[e.at + i] as int64, 8)) }
+    } else if e.typ == 3 {
+        for i in 0..c { out.push(s.u16(e.at + 2 * i) as int64) }
+    } else if e.typ == 8 {
+        for i in 0..c { out.push(signed(s.u16(e.at + 2 * i) as int64, 16)) }
+    } else if e.typ == 4 || e.typ == 13 {
+        for i in 0..c { out.push(s.u32(e.at + 4 * i)) }
+    } else if e.typ == 9 {
+        for i in 0..c { out.push(signed(s.u32(e.at + 4 * i), 32)) }
+    } else {
+        return Err(ImageError.Corrupt(f"tag {e.tag} has the field type {e.typ}, not an integer"))
+    }
+    return Ok(out)
+}
+
+// `v`, the bits of a `bits`-bit two's complement integer, as a number.
+#test(255i64, 8)[-1i64]
+#test(127i64, 8)[127i64]
+#test(32768i64, 16)[-32768i64]
+#test(4294967295i64, 32)[-1i64]
+fun signed(v: int64, bits: int) -> int64 {
+    let half = 1i64 << ((bits - 1) as int64)
+    return if v >= half { v - (half << 1i64) } else { v }
+}
+
+// The entry `e`'s values.
+fun value_of(s: Src, e: Entry) -> Result<TagValue, ImageError> {
+    if e.at < 0 {
+        return Err(ImageError.Truncated)
+    }
+    let c = e.count as int
+    if e.typ == 2 {
+        var end = e.at + c
+        while end > e.at && s.b[end - 1] == 0u8 { end -= 1 }
+        return Ok(TagValue.Ascii(bytes_m.to_str(s.b[e.at:end])))
+    }
+    if e.typ == 7 {
+        return Ok(TagValue.Bytes(s.b[e.at:e.at + c]))
+    }
+    if e.typ == 5 || e.typ == 10 {
+        var out: [(int64, int64)] = []
+        for i in 0..c {
+            var a = s.u32(e.at + 8 * i)
+            var d = s.u32(e.at + 8 * i + 4)
+            if e.typ == 10 {
+                a = signed(a, 32)
+                d = signed(d, 32)
+            }
+            out.push((a, d))
+        }
+        return Ok(TagValue.Rationals(out))
+    }
+    if e.typ == 11 || e.typ == 12 {
+        var out: [float64] = []
+        for i in 0..c {
+            if e.typ == 11 {
+                out.push(fl.from_bits32(s.u32(e.at + 4 * i) as uint32) as float64)
+            } else {
+                let hi = s.u32(e.at + 8 * i) as uint64
+                let lo = s.u32(e.at + 8 * i + 4) as uint64
+                let bits = if s.le { (lo << 32) | hi } else { (hi << 32) | lo }
+                out.push(fl.from_bits(bits))
+            }
+        }
+        return Ok(TagValue.Floats(out))
+    }
+    return Ok(TagValue.Ints(ints_of(s, e)?))
+}
+
+// --- A page ------------------------------------------------------------------------
+
+// What decoding a page needs from its tags, checked.
+struct Page {
+    width: int,
+    height: int,
+    // the bits of each sample
+    bits: int,
+    // samples a pixel
+    spp: int,
+    compression: int,
+    planar: int,
+    predictor: int,
+    is_float: bool,
+    fill_order: int,
+    // tiles, or strips of `block_h` rows the width of the image
+    tiled: bool,
+    block_w: int,
+    block_h: int,
+    offsets: [int64],
+    counts: [int64],
+    // what the samples become: the image's layout, the samples of colour
+    // (3 for RGB, else 1), which sample is alpha (-1: none), whether it is
+    // associated (premultiplied), whether 0 is white, and the palette (each
+    // red, then each green, then each blue, 16 bits) when there is one
+    layout: Layout,
+    base: int,
+    alpha: int,
+    associated: bool,
+    invert: bool,
+    palette: bool,
+    colormap: [int64],
+}
+
+// The name of a compression this module doesn't read.
+#test(7)["JPEG compression"]
+#test(4)["CCITT G4 compression"]
+#test(99)["compression 99"]
+fun compression_name(c: int) -> str {
+    return match c {
+        2 => "CCITT RLE compression"
+        3 => "CCITT G3 compression"
+        4 => "CCITT G4 compression"
+        6 => "old-style JPEG compression"
+        7 => "JPEG compression"
+        32771 => "CCITT RLEW compression"
+        32809 => "ThunderScan compression"
+        34661 => "JBIG compression"
+        34676 => "SGI LogLuv compression"
+        34677 => "SGI LogL compression"
+        34712 => "JPEG 2000 compression"
+        34887 => "LERC compression"
+        34925 => "LZMA compression"
+        50000 => "Zstandard compression"
+        50001 => "WebP compression"
+        _ => f"compression {c}"
+    }
+}
+
+// The name of a photometric interpretation this module doesn't read.
+#test(5)["CMYK"]
+#test(6)["YCbCr"]
+#test(12)["photometric interpretation 12"]
+fun photometric_name(p: int) -> str {
+    return match p {
+        4 => "transparency masks"
+        5 => "CMYK"
+        6 => "YCbCr"
+        8 => "CIE L*a*b*"
+        9 => "ICC L*a*b*"
+        10 => "ITU L*a*b*"
+        32803 => "color filter arrays"
+        32844 => "LogL"
+        32845 => "LogLuv"
+        34892 => "LinearRaw"
+        _ => f"photometric interpretation {p}"
+    }
+}
+
+// The integers of `tag`, or `none` without it.
+fun ints_or(s: Src, ifd: Ifd, tag: int, none: [int64]) -> Result<[int64], ImageError> {
+    return match ifd.entries.get(tag) {
+        Some(e) => ints_of(s, e)
+        None => Ok(none)
+    }
+}
+
+// The first integer of `tag`, or `none` without it.
+fun int_or(s: Src, ifd: Ifd, tag: int, none: int64) -> Result<int64, ImageError> {
+    let vs = ints_or(s, ifd, tag, [none])?
+    if vs.len() == 0 {
+        return Err(ImageError.Corrupt(f"tag {tag} has no value"))
+    }
+    return Ok(vs[0])
+}
+
+// The first integer of `tag`, which the page must have (`what` names it).
+fun needed(s: Src, ifd: Ifd, tag: int, what: str) -> Result<int64, ImageError> {
+    if !ifd.entries.contains(tag) {
+        return Err(ImageError.Corrupt(f"no {what}"))
+    }
+    return int_or(s, ifd, tag, 0i64)
+}
+
+// `vs` if all of them are the same (`what` names them): the first.
+fun same(vs: [int64], what: str) -> Result<int64, ImageError> {
+    if vs.len() == 0 {
+        return Err(ImageError.Corrupt(f"no {what}"))
+    }
+    for v in vs {
+        if v != vs[0] {
+            return Err(ImageError.Unsupported(f"{what} that differ between samples"))
+        }
+    }
+    return Ok(vs[0])
+}
+
+// `a / b` rounded up (both positive).
+#test(37i64, 16i64)[3i64]
+#test(32i64, 16i64)[2i64]
+fun ceil_div(a: int64, b: int64) -> int64 {
+    return (a + b - 1) / b
+}
+
+const MAX_INT: int64 = 0x7FFFFFFF
+
+// The page an IFD describes, checked: whatever this module can't decode is
+// an error here, before any pixel is read.
+fun page_of(s: Src, ifd: Ifd) -> Result<Page, ImageError> {
+    let w = needed(s, ifd, 256, "ImageWidth")?
+    let h = needed(s, ifd, 257, "ImageLength")?
+    if w < 1 || h < 1 {
+        return Err(ImageError.Corrupt(f"an image of {w}x{h} pixels"))
+    }
+    if w > MAX_INT || h > MAX_INT {
+        return Err(ImageError.TooLarge(if w > MAX_INT { w } else { h }))
+    }
+    let compression = int_or(s, ifd, 259, 1i64)? as int
+    if compression != 1 && compression != 5 && compression != 8 && compression != 32946 && compression != 32773 {
+        return Err(ImageError.Unsupported(compression_name(compression)))
+    }
+    // Pillow's default, as some fax files leave it out
+    let photometric = int_or(s, ifd, 262, 0i64)? as int
+    var base = 1
+    if photometric == 2 {
+        base = 3
+    } else if photometric != 0 && photometric != 1 && photometric != 3 {
+        return Err(ImageError.Unsupported(photometric_name(photometric)))
+    }
+    let spp64 = int_or(s, ifd, 277, 1i64)?
+    if spp64 < 1 || spp64 > 64 {
+        return Err(ImageError.Corrupt(f"{spp64} samples a pixel"))
+    }
+    let spp = spp64 as int
+    if spp < base {
+        return Err(ImageError.Corrupt(f"RGB with {spp} samples a pixel"))
+    }
+    let bits = same(ints_or(s, ifd, 258, [1i64])?, "bit depths")?
+    let sfmt = same(ints_or(s, ifd, 339, [1i64])?, "sample formats")?
+    let is_float = sfmt == 3
+    if sfmt == 2 {
+        return Err(ImageError.Unsupported("signed integer samples"))
+    }
+    if sfmt != 1 && sfmt != 3 && sfmt != 4 {
+        return Err(ImageError.Unsupported(f"sample format {sfmt}"))
+    }
+    if is_float && bits != 32 {
+        return Err(ImageError.Unsupported(f"{bits}-bit floating point samples"))
+    }
+    if !is_float && (bits < 1 || bits > 16) {
+        return Err(ImageError.Unsupported(f"{bits}-bit samples"))
+    }
+    let palette = photometric == 3
+    var colormap: [int64] = []
+    if palette {
+        if is_float {
+            return Err(ImageError.Corrupt("a palette of floating point indices"))
+        }
+        if !ifd.entries.contains(320) {
+            return Err(ImageError.Corrupt("a palette image without a ColorMap"))
+        }
+        colormap = ints_or(s, ifd, 320, [])?
+        if colormap.len() != 3 << bits {
+            return Err(ImageError.Corrupt(f"a ColorMap of {colormap.len()} values for {bits}-bit indices"))
+        }
+    }
+    var alpha = -1
+    var associated = false
+    if spp > base {
+        let extra = ints_or(s, ifd, 338, [2i64])?
+        let kind = if extra.len() > 0 { extra[0] } else { 2i64 }
+        if kind != 0 {
+            alpha = base
+            associated = kind == 1
+        }
+    }
+    let layout = if base == 1 && !palette {
+        if alpha >= 0 { Layout.GrayAlpha } else { Layout.Gray }
+    } else {
+        if alpha >= 0 { Layout.Rgba } else { Layout.Rgb }
+    }
+    let predictor = int_or(s, ifd, 317, 1i64)? as int
+    if predictor == 2 && bits != 8 && bits != 16 && bits != 32 {
+        return Err(ImageError.Unsupported(f"the horizontal predictor on {bits}-bit samples"))
+    }
+    if predictor == 3 && !is_float {
+        return Err(ImageError.Corrupt("the floating point predictor on integer samples"))
+    }
+    if predictor < 1 || predictor > 3 {
+        return Err(ImageError.Unsupported(f"predictor {predictor}"))
+    }
+    var planar = int_or(s, ifd, 284, 1i64)? as int
+    if planar != 1 && planar != 2 {
+        return Err(ImageError.Corrupt(f"planar configuration {planar}"))
+    }
+    if spp == 1 {
+        planar = 1
+    }
+    let fill_order = if int_or(s, ifd, 266, 1i64)? == 2i64 { 2 } else { 1 }
+    let pspp = if planar == 1 { spp } else { 1 }
+    let tiled = ifd.entries.contains(322)
+    var bw = w
+    var bh = h
+    var off_tag = 273
+    var count_tag = 279
+    var per_plane = 0i64
+    if tiled {
+        let tw = needed(s, ifd, 322, "TileWidth")?
+        let th = needed(s, ifd, 323, "TileLength")?
+        if tw < 1 || th < 1 || tw > MAX_INT || th > MAX_INT {
+            return Err(ImageError.Corrupt(f"tiles of {tw}x{th} pixels"))
+        }
+        if (tw * (pspp as int64) * bits) % 8 != 0 {
+            return Err(ImageError.Unsupported(f"tiles {tw} pixels wide of {bits}-bit samples"))
+        }
+        bw = tw
+        bh = th
+        off_tag = 324
+        count_tag = 325
+        per_plane = ceil_div(w, tw) * ceil_div(h, th)
+    } else {
+        var rps = int_or(s, ifd, 278, h)?
+        if rps < 1 || rps > h {
+            rps = h
+        }
+        bh = rps
+        per_plane = ceil_div(h, rps)
+    }
+    let what = if tiled { "tile" } else { "strip" }
+    // each block's offset takes a byte of the file at least
+    if per_plane > (s.b.len() as int64) {
+        return Err(ImageError.Corrupt(f"{per_plane} {what}s a plane in a file of {s.b.len()} bytes"))
+    }
+    let blocks = per_plane * (if planar == 2 { spp as int64 } else { 1i64 })
+    if !ifd.entries.contains(off_tag) {
+        return Err(ImageError.Corrupt(f"no {what} offsets"))
+    }
+    let offsets = ints_or(s, ifd, off_tag, [])?
+    if (offsets.len() as int64) < blocks {
+        return Err(ImageError.Corrupt(f"{offsets.len()} {what} offsets for {blocks} {what}s"))
+    }
+    var counts: [int64] = []
+    if ifd.entries.contains(count_tag) {
+        counts = ints_or(s, ifd, count_tag, [])?
+    } else if compression == 1 {
+        // as libtiff does: an uncompressed block takes what its pixels need
+        let row = ceil_div(bw * (pspp as int64) * bits, 8i64)
+        for i in 0..offsets.len() { counts.push(row * bh) }
+    } else {
+        return Err(ImageError.Corrupt(f"no {what} byte counts"))
+    }
+    if (counts.len() as int64) < blocks {
+        return Err(ImageError.Corrupt(f"{counts.len()} {what} byte counts for {blocks} {what}s"))
+    }
+    return Ok(Page {
+        width: w as int, height: h as int, bits: bits as int, spp: spp, compression: compression,
+        planar: planar, predictor: predictor, is_float: is_float, fill_order: fill_order,
+        tiled: tiled, block_w: bw as int, block_h: bh as int, offsets: offsets, counts: counts,
+        layout: layout, base: base, alpha: alpha, associated: associated,
+        invert: photometric == 0, palette: palette, colormap: colormap,
+    })
+}
+
+fun info_of(p: Page) -> ImageInfo {
+    return ImageInfo { width: p.width, height: p.height, layout: p.layout, bit_depth: p.bits, frames: 1, format: "tiff" }
+}
+
+// --- Pixels ------------------------------------------------------------------------
+
+// A page's samples as stored, decompressed and with the predictor undone:
+// a buffer per plane (one for planar configuration 1, a sample's each for
+// 2), `row_bytes` a row, in the file's byte order.
+struct Raw {
+    p: Page,
+    le: bool,
+    bufs: [[uint8]],
+    row_bytes: int,
+}
+
+// The bits of each byte of `b` in the opposite order (FillOrder 2).
+fun reverse_bits(b: [uint8]) -> [uint8] {
+    var table: [uint8] = []
+    for v in 0..256 {
+        var r = 0
+        for k in 0..8 {
+            if (v >> k) & 1 == 1 { r |= 1 << (7 - k) }
+        }
+        table.push(r as uint8)
+    }
+    var out: [uint8] = []
+    for x in b { out.push(table[x as int]) }
+    return out
+}
+
+// The block (strip or tile) `i` decompressed: `rows` rows of `row_bytes`,
+// `pspp` samples a pixel, its predictor undone.
+fun block(s: Src, p: Page, i: int, rows: int, row_bytes: int, pspp: int) -> Result<[uint8], ImageError> {
+    let need = rows * row_bytes
+    let what = if p.tiled { "tile" } else { "strip" }
+    let n = s.b.len() as int64
+    let off = p.offsets[i]
+    let cnt = p.counts[i]
+    if off < 0 || cnt < 0 || off > n {
+        return Err(ImageError.Corrupt(f"{what} {i} at {off}, outside the file of {n} bytes"))
+    }
+    if off + cnt > n {
+        return Err(ImageError.Truncated)
+    }
+    let start = off as int
+    var d: [uint8] = []
+    if p.compression == 1 {
+        if (cnt as int) < need {
+            return Err(ImageError.Truncated)
+        }
+        d = s.b[start:start + need]
+        if p.fill_order == 2 {
+            d = reverse_bits(d)
+        }
+    } else {
+        var raw = s.b[start:start + (cnt as int)]
+        if p.fill_order == 2 {
+            raw = reverse_bits(raw)
+        }
+        // room for a little more than the block, which some writers leave
+        let room = (need as int64) + (need as int64) / 4i64 + 256i64
+        let most = (if room > MAX_INT { MAX_INT } else { room }) as int
+        let r = if p.compression == 5 {
+            compress.lzw_decode_tiff(raw, most)
+        } else if p.compression == 32773 {
+            compress.packbits_decode(raw, most)
+        } else {
+            compress.zlib_decompress(raw, most)
+        }
+        match r {
+            Ok(out) => {
+                d = out
+            }
+            Err(e) => {
+                if e == CompressError.Truncated {
+                    return Err(ImageError.Truncated)
+                }
+                return Err(ImageError.Corrupt(f"{what} {i}: {e}"))
+            }
+        }
+        if d.len() < need {
+            return Err(ImageError.Truncated)
+        }
+        if d.len() > need {
+            d = d[:need]
+        }
+    }
+    if p.predictor == 2 {
+        d = unpredicted(d, rows, row_bytes, pspp, p.bits, s.le)
+    } else if p.predictor == 3 {
+        d = unpredicted_float(d, rows, row_bytes, pspp, s.le)
+    }
+    return Ok(d)
+}
+
+// `d0` with the horizontal predictor undone: each sample of a row the sum
+// of the stored difference and the same sample of the pixel before it,
+// samples of `bits` (8, 16 or 32) in the file's byte order.
+#test([1u8, 2u8, 3u8, 4u8, 1u8, 255u8], 2, 3, 1, 8, true)[[1u8, 3u8, 6u8, 4u8, 5u8, 4u8]]
+#test([1u8, 2u8, 1u8, 2u8], 1, 4, 1, 16, true)[[1u8, 2u8, 2u8, 4u8]]
+#test([1u8, 2u8, 1u8, 2u8], 1, 4, 1, 16, false)[[1u8, 2u8, 2u8, 4u8]]
+#test([0u8, 255u8, 0u8, 1u8], 1, 4, 1, 16, false)[[0u8, 255u8, 1u8, 0u8]]
+fun unpredicted(d0: [uint8], rows: int, row_bytes: int, pspp: int, bits: int, le: bool) -> [uint8] {
+    var d = d0
+    if bits == 8 {
+        for r in 0..rows {
+            let end = (r + 1) * row_bytes
+            var i = r * row_bytes + pspp
+            while i < end {
+                d[i] = d[i].wrapping_add(d[i - pspp])
+                i += 1
+            }
+        }
+        return d
+    }
+    let size = bits / 8
+    let step = pspp * size
+    let mask = (1i64 << (bits as int64)) - 1i64
+    for r in 0..rows {
+        let end = (r + 1) * row_bytes - size + 1
+        var i = r * row_bytes + step
+        while i < end {
+            let v = (load(d, i, size, le) + load(d, i - step, size, le)) & mask
+            var k = 0
+            while k < size {
+                let shift = if le { 8 * k } else { 8 * (size - 1 - k) }
+                d[i + k] = ((v >> (shift as int64)) & 255i64) as uint8
+                k += 1
+            }
+            i += size
+        }
+    }
+    return d
+}
+
+// The `size`-byte unsigned integer at `d[i]`.
+fun load(d: [uint8], i: int, size: int, le: bool) -> int64 {
+    var v = 0i64
+    for k in 0..size {
+        let b = d[if le { i + size - 1 - k } else { i + k }] as int64
+        v = (v << 8) | b
+    }
+    return v
+}
+
+// `d0` with the floating point predictor undone (Adobe's Technical Note 3):
+// each row's bytes summed horizontally `pspp` apart, then put back together
+// from the planes of bytes they were split into, the most significant
+// first, as 32-bit floats in the file's byte order.
+#test([0x3Fu8, 0u8, 0x41u8, 0u8, 0x80u8, 0u8, 0u8, 0u8], 1, 8, 1, false)[[0x3Fu8, 0x80u8, 0u8, 0u8, 0x3Fu8, 0x80u8, 0u8, 0u8]]
+#test([0x3Fu8, 0u8, 0x41u8, 0u8, 0x80u8, 0u8, 0u8, 0u8], 1, 8, 1, true)[[0u8, 0u8, 0x80u8, 0x3Fu8, 0u8, 0u8, 0x80u8, 0x3Fu8]]
+fun unpredicted_float(d0: [uint8], rows: int, row_bytes: int, pspp: int, le: bool) -> [uint8] {
+    var d = d0
+    let n = row_bytes / 4
+    for r in 0..rows {
+        let base = r * row_bytes
+        var i = base + pspp
+        while i < base + row_bytes {
+            d[i] = d[i].wrapping_add(d[i - pspp])
+            i += 1
+        }
+        let tmp = d[base:base + row_bytes]
+        for k in 0..n {
+            for j in 0..4 {
+                let to = if le { base + 4 * k + 3 - j } else { base + 4 * k + j }
+                d[to] = tmp[j * n + k]
+            }
+        }
+    }
+    return d
+}
+
+// The page `page` of `b`, its samples as stored.
+fun load_raw(b: [uint8], page: int, max_pixels: int64) -> Result<Raw, ImageError> {
+    let (s, first) = open(b)?
+    let ifd = nth_ifd(s, first, page)?
+    let p = page_of(s, ifd)?
+    let w = p.width
+    let h = p.height
+    image.check_size(w, h, p.spp, max_pixels)?
+    let planes = if p.planar == 2 { p.spp } else { 1 }
+    let pspp = if planes == 1 { p.spp } else { 1 }
+    let rb64 = ceil_div((w as int64) * (pspp as int64) * (p.bits as int64), 8i64)
+    if rb64 * (h as int64) > MAX_INT {
+        return Err(ImageError.TooLarge((w as int64) * (h as int64)))
+    }
+    let rb = rb64 as int
+    var bufs: [[uint8]] = []
+    if p.tiled {
+        image.check_size(p.block_w, p.block_h, pspp, max_pixels)?
+        let tw = p.block_w
+        let th = p.block_h
+        let trb64 = ceil_div((tw as int64) * (pspp as int64) * (p.bits as int64), 8i64)
+        if trb64 * (th as int64) > MAX_INT {
+            return Err(ImageError.TooLarge((tw as int64) * (th as int64)))
+        }
+        let trb = trb64 as int
+        let across = ceil_div(w as int64, tw as int64) as int
+        let down = ceil_div(h as int64, th as int64) as int
+        let per = across * down
+        for pl in 0..planes {
+            var buf: [uint8] = []
+            for k in 0..per {
+                let tx = (k % across) * tw
+                let ty = (k / across) * th
+                let d = block(s, p, pl * per + k, th, trb, pspp)?
+                if k == 0 {
+                    // only once a tile has come: a few bytes may claim a
+                    // plane of gigabytes, and their tile then fails
+                    buf = list_m.filled(h * rb, 0u8)
+                }
+                let cw = if w - tx < tw { w - tx } else { tw }
+                let ch = if h - ty < th { h - ty } else { th }
+                let cb = ceil_div((cw as int64) * (pspp as int64) * (p.bits as int64), 8i64) as int
+                let x0 = ((tx as int64) * (pspp as int64) * (p.bits as int64) / 8i64) as int
+                for r in 0..ch {
+                    let src = r * trb
+                    let to = (ty + r) * rb + x0
+                    for j in 0..cb { buf[to + j] = d[src + j] }
+                }
+            }
+            bufs.push(buf)
+        }
+    } else {
+        let rps = p.block_h
+        let per = ceil_div(h as int64, rps as int64) as int
+        for pl in 0..planes {
+            if let Some(whole) = contiguous(s, p, pl * per, per, rb) {
+                bufs.push(whole)
+                continue
+            }
+            var buf: [uint8] = []
+            for k in 0..per {
+                let rows = if h - k * rps < rps { h - k * rps } else { rps }
+                let d = block(s, p, pl * per + k, rows, rb, pspp)?
+                if per == 1 {
+                    buf = d
+                } else {
+                    buf.extend(d)
+                }
+            }
+            bufs.push(buf)
+        }
+    }
+    return Ok(Raw { p: p, le: s.le, bufs: bufs, row_bytes: rb })
+}
+
+// The `per` strips from `first` on as one slice of the file, when they are
+// stored as they are, one after the other: one copy instead of a push a
+// byte (an uncompressed file of 50 MB loads in a quarter of the time).
+fun contiguous(s: Src, p: Page, first: int, per: int, row_bytes: int) -> Option<[uint8]> {
+    if p.compression != 1 || p.fill_order != 1 || p.predictor != 1 || per < 2 {
+        return None
+    }
+    let start = p.offsets[first]
+    let strip = (p.block_h as int64) * (row_bytes as int64)
+    let total = (p.height as int64) * (row_bytes as int64)
+    for k in 0..per {
+        let need = if k == per - 1 { total - strip * (k as int64) } else { strip }
+        if p.offsets[first + k] != start + strip * (k as int64) || p.counts[first + k] < need {
+            return None
+        }
+    }
+    if start < 0 || start + total > (s.b.len() as int64) {
+        return None
+    }
+    return Some(s.b[start as int:(start + total) as int])
+}
+
+// The integer samples of row `y`, every sample of a pixel together.
+fun int_row(raw: Raw, y: int) -> [int] {
+    let p = raw.p
+    if raw.bufs.len() == 1 {
+        return unpack(raw.bufs[0], y * raw.row_bytes, p.width * p.spp, p.bits, raw.le)
+    }
+    var planes: [[int]] = []
+    for c in 0..p.spp {
+        planes.push(unpack(raw.bufs[c], y * raw.row_bytes, p.width, p.bits, raw.le))
+    }
+    var out: [int] = []
+    for x in 0..p.width {
+        for c in 0..p.spp { out.push(planes[c][x]) }
+    }
+    return out
+}
+
+// `n` samples of `bits` from `b[start]` on: bytes at 8 bits, two in the
+// byte order `le` at 16, else packed, the highest bits first.
+#test([0xA5u8, 0xF0u8], 0, 4, 4, true)[[10, 5, 15, 0]]
+#test([0b10110000u8], 0, 4, 1, true)[[1, 0, 1, 1]]
+#test([1u8, 2u8, 3u8, 4u8], 0, 2, 16, true)[[513, 1027]]
+#test([1u8, 2u8, 3u8, 4u8], 0, 2, 16, false)[[258, 772]]
+#test([0xABu8, 0xCDu8, 0xEFu8], 0, 2, 12, false)[[0xABC, 0xDEF]]
+fun unpack(b: [uint8], start: int, n: int, bits: int, le: bool) -> [int] {
+    var out: [int] = []
+    if bits == 8 {
+        for i in start..start + n { out.push(b[i] as int) }
+    } else if bits == 16 {
+        var i = start
+        for k in 0..n {
+            if le {
+                out.push((b[i] as int) | ((b[i + 1] as int) << 8))
+            } else {
+                out.push(((b[i] as int) << 8) | (b[i + 1] as int))
+            }
+            i += 2
+        }
+    } else {
+        var acc = 0
+        var have = 0
+        var next = start
+        let mask = (1 << bits) - 1
+        for k in 0..n {
+            while have < bits {
+                acc = ((acc << 8) | (b[next] as int)) & 0xFFFFFF
+                next += 1
+                have += 8
+            }
+            have -= bits
+            out.push((acc >> have) & mask)
+        }
+    }
+    return out
+}
+
+// The float samples of row `y`, every sample of a pixel together.
+fun float_row(raw: Raw, y: int) -> [float32] {
+    let p = raw.p
+    var out: [float32] = []
+    for x in 0..p.width {
+        for c in 0..p.spp {
+            let buf = if raw.bufs.len() == 1 { 0 } else { c }
+            let at = y * raw.row_bytes + 4 * (if raw.bufs.len() == 1 { x * p.spp + c } else { x })
+            out.push(fl.from_bits32(load(raw.bufs[buf], at, 4, raw.le) as uint32))
+        }
+    }
+    return out
+}
+
+// The `S` the value `v` of a sample of `bits` stands for, scaled to `S`'s
+// range (rounded to the nearest), 0 white when `invert`.
+fun scaled<S: Sample>(v: int, bits: int, invert: bool) -> S {
+    let top = (1 << bits) - 1
+    let full = S.max_value().to_f32()
+    let r = if invert { top - v } else { v }
+    if full > 1.0f32 {
+        let f = (r as float64) * (full as float64) / (top as float64)
+        return S.from_f32((f + 0.5).floor() as float32)
+    }
+    return S.from_f32((r as float32) / (top as float32))
+}
+
+// The `S` of channel `c` of the palette entry `i` (`map` holds each red,
+// then each green, then each blue, `n` of each, 16 bits): the high byte at
+// 8 bits, as Pillow reads it, else scaled.
+fun paletted<S: Sample>(map: [int64], c: int, n: int, i: int) -> S {
+    let v = map[c * n + i] & 0xFFFFi64
+    let full = S.max_value().to_f32()
+    if full == 255.0f32 {
+        return S.from_f32((v >> 8i64) as float32)
+    }
+    if full > 1.0f32 {
+        let f = (v as float64) * (full as float64) / 65535.0
+        return S.from_f32((f + 0.5).floor() as float32)
+    }
+    return S.from_f32((v as float32) / 65535.0f32)
+}
+
+// `scaled` of every value of a `bits`-bit sample.
+fun scale_table<S: Sample>(bits: int, invert: bool) -> [S] {
+    var out: [S] = []
+    for v in 0..1 << bits { out.push(scaled<S>(v, bits, invert)) }
+    return out
+}
+
+// `paletted` of every entry of channel `c`.
+fun palette_table<S: Sample>(map: [int64], c: int, bits: int) -> [S] {
+    var out: [S] = []
+    for i in 0..1 << bits { out.push(paletted<S>(map, c, 1 << bits, i)) }
+    return out
+}
+
+// The page's pixels as an image of `S`.
+fun finish<S: Sample>(raw: Raw) -> Image<S> {
+    let p = raw.p
+    let data = if p.is_float {
+        float_samples<S>(raw)
+    } else if (p.width as int64) * (p.height as int64) < (1i64 << (p.bits as int64)) {
+        int_samples<S>(raw)
+    } else {
+        looked_up<S>(raw)
+    }
+    let img = Image { width: p.width, height: p.height, layout: p.layout, data: data }
+    return if p.associated { img.unpremultiplied() } else { img }
+}
+
+// The sample a channel of the image comes from: colour from the first (a
+// palette's index) or its own, alpha from `p.alpha`.
+fun source_of(p: Page, c: int) -> int {
+    if p.alpha >= 0 && c == p.layout.channels() - 1 {
+        return p.alpha
+    }
+    return if p.palette { 0 } else { c }
+}
+
+// The samples of a page of floats, scaled to `S`.
+fun float_samples<S: Sample>(raw: Raw) -> [S] {
+    let p = raw.p
+    let out_c = p.layout.channels()
+    let full = S.max_value().to_f32()
+    var data: [S] = []
+    for y in 0..p.height {
+        let row = float_row(raw, y)
+        for x in 0..p.width {
+            for c in 0..out_c {
+                let src = source_of(p, c)
+                var v = row[x * p.spp + src]
+                if p.invert && src != p.alpha {
+                    v = 1.0f32 - v
+                }
+                data.push(S.from_f32(v * full))
+            }
+        }
+    }
+    return data
+}
+
+// The samples of a page of integers, each converted on its own: for an
+// image of fewer pixels than a sample has values.
+fun int_samples<S: Sample>(raw: Raw) -> [S] {
+    let p = raw.p
+    let out_c = p.layout.channels()
+    let n = 1 << p.bits
+    var data: [S] = []
+    for y in 0..p.height {
+        let row = int_row(raw, y)
+        for x in 0..p.width {
+            for c in 0..out_c {
+                let src = source_of(p, c)
+                let v = row[x * p.spp + src]
+                if src == p.alpha {
+                    data.push(scaled<S>(v, p.bits, false))
+                } else if p.palette {
+                    data.push(paletted<S>(p.colormap, c, n, v))
+                } else {
+                    data.push(scaled<S>(v, p.bits, p.invert))
+                }
+            }
+        }
+    }
+    return data
+}
+
+// The samples of a page of integers through a table a channel.
+fun looked_up<S: Sample>(raw: Raw) -> [S] {
+    let p = raw.p
+    let spp = p.spp
+    let out_c = p.layout.channels()
+    let empty: [S] = []
+    var l0 = empty
+    var l1 = empty
+    var l2 = empty
+    var l3 = empty
+    if p.palette {
+        l0 = palette_table<S>(p.colormap, 0, p.bits)
+        l1 = palette_table<S>(p.colormap, 1, p.bits)
+        l2 = palette_table<S>(p.colormap, 2, p.bits)
+    } else {
+        l0 = scale_table<S>(p.bits, p.invert)
+        l1 = l0
+        l2 = l0
+    }
+    if p.alpha >= 0 {
+        let la = if p.invert || p.palette { scale_table<S>(p.bits, false) } else { l0 }
+        if out_c == 2 {
+            l1 = la
+        } else {
+            l3 = la
+        }
+    }
+    let s0 = source_of(p, 0)
+    let s1 = if out_c > 1 { source_of(p, 1) } else { 0 }
+    let s2 = if out_c > 2 { source_of(p, 2) } else { 0 }
+    let s3 = if out_c > 3 { source_of(p, 3) } else { 0 }
+    var data: [S] = []
+    for y in 0..p.height {
+        let row = int_row(raw, y)
+        var at = 0
+        for x in 0..p.width {
+            data.push(l0[row[at + s0]])
+            if out_c > 1 {
+                data.push(l1[row[at + s1]])
+            }
+            if out_c > 2 {
+                data.push(l2[row[at + s2]])
+            }
+            if out_c > 3 {
+                data.push(l3[row[at + s3]])
+            }
+            at += spp
+        }
+    }
+    return data
+}
+
+// Whether the stored samples are already the 8-bit image: 8-bit gray or
+// RGB, with an unassociated alpha or none, every sample of a pixel
+// together.
+fun as_stored(p: Page) -> bool {
+    return p.bits == 8 && !p.is_float && p.planar == 1 && !p.palette && !p.invert && !p.associated &&
+        p.spp == p.layout.channels()
+}
+
+// --- Decoding ----------------------------------------------------------------------
+
+// Page `page` (0 the first) of the TIFF file `b` with 8-bit samples:
+// fewer bits scaled up, 16 rounded down, floats from 0..1 rounded and
+// clamped; a palette's colours (the high byte of each of its 16-bit values,
+// as Pillow), WhiteIsZero inverted. Gray, gray and alpha, RGB or RGBA.
+pub fun decode(b: [uint8], page: int = 0, max_pixels: int64 = image.MAX_PIXELS) -> Result<Image8, ImageError> {
+    let raw = load_raw(b, page, max_pixels)?
+    let p = raw.p
+    if as_stored(p) {
+        return Ok(Image { width: p.width, height: p.height, layout: p.layout, data: raw.bufs[0] })
+    }
+    return Ok(finish<uint8>(raw))
+}
+
+// Page `page` of `b` with 16-bit samples: fewer bits scaled up (8 bits
+// times 257), floats from 0..1 rounded and clamped.
+pub fun decode16(b: [uint8], page: int = 0, max_pixels: int64 = image.MAX_PIXELS) -> Result<Image16, ImageError> {
+    return Ok(finish<uint16>(load_raw(b, page, max_pixels)?))
+}
+
+// Page `page` of `b` with `float32` samples: floats as stored, integers
+// scaled to 0..1.
+pub fun decode_f32(b: [uint8], page: int = 0, max_pixels: int64 = image.MAX_PIXELS) -> Result<ImageF, ImageError> {
+    return Ok(finish<float32>(load_raw(b, page, max_pixels)?))
+}
+
+// Every page of `b`, in order: its size, the layout `decode` gives, the
+// bits of a sample as stored (32 for floats). A loop in the chain of IFDs
+// ends it, and so do IFDs that overlap (`ifds_fit`); a page this module
+// can't decode is an error.
+pub fun pages(b: [uint8]) -> Result<[ImageInfo], ImageError> {
+    let (s, first) = open(b)?
+    if first == 0 {
+        return Err(ImageError.Corrupt("no IFD"))
+    }
+    var out: [ImageInfo] = []
+    var seen: [int64: bool] = [:]
+    var off = first
+    var used = 0i64
+    while off != 0 && !seen.contains(off) {
+        seen[off] = true
+        let (end, _) = ifd_span(s, off)?
+        used += end - off
+        if !ifds_fit(s, used) {
+            break
+        }
+        let ifd = read_ifd(s, off)?
+        out.push(info_of(page_of(s, ifd)?))
+        off = ifd.next
+    }
+    return Ok(out)
+}
+
+// The first page of `b` as `pages` describes it, `frames` the number of
+// pages (counted until the chain of IFDs ends, loops, overlaps or breaks).
+pub fun info(b: [uint8]) -> Result<ImageInfo, ImageError> {
+    let (s, first) = open(b)?
+    let ifd = nth_ifd(s, first, 0)?
+    let one = info_of(page_of(s, ifd)?)
+    // the later IFDs only for where the next one is
+    var count = 1
+    var seen: [int64: bool] = [first: true]
+    let (end0, _) = ifd_span(s, first)?
+    var used = end0 - first
+    var off = ifd.next
+    while off != 0 && !seen.contains(off) {
+        seen[off] = true
+        match ifd_span(s, off) {
+            Ok((end, next)) => {
+                used += end - off
+                if ifds_fit(s, used) {
+                    count += 1
+                    off = next
+                } else {
+                    off = 0
+                }
+            }
+            Err(_) => {
+                off = 0
+            }
+        }
+    }
+    return Ok(ImageInfo { width: one.width, height: one.height, layout: one.layout, bit_depth: one.bit_depth,
+        frames: count, format: "tiff" })
+}
+
+// Every tag of page `page` of `b`, by number, its values as stored. A tag
+// of a field type TIFF 6 doesn't define, or whose values lie past the end
+// of the file, is left out; of a tag given twice, the first.
+pub fun tags(b: [uint8], page: int = 0) -> Result<[int: TagValue], ImageError> {
+    let (s, first) = open(b)?
+    let ifd = nth_ifd(s, first, page)?
+    var out: [int: TagValue] = [:]
+    for tag in ifd.order {
+        let e = ifd.entries[tag]
+        if e.at >= 0 {
+            out[tag] = value_of(s, e)?
+        }
+    }
+    return Ok(out)
+}
+
+// --- Encoding ----------------------------------------------------------------------
+
+// Whether `c` is written with the horizontal predictor.
+fun predicts(c: Compression) -> bool {
+    return c == Compression.Lzw || c == Compression.Deflate
+}
+
+// A TIFF file of `img`, one page in strips of about 8 KB: gray, gray and
+// alpha, RGB or RGBA (its alpha unassociated, ExtraSamples 2), 8 bits a
+// sample, compressed with `compression`.
+pub fun encode(img: Image8, compression: Compression = Compression.Lzw) -> [uint8] {
+    let spp = img.layout.channels()
+    var d = img.data
+    if predicts(compression) && d.len() > 0 {
+        let rb = img.width * spp
+        for y in 0..img.height {
+            var i = (y + 1) * rb - 1
+            let start = y * rb + spp
+            while i >= start {
+                d[i] = d[i].wrapping_sub(d[i - spp])
+                i -= 1
+            }
+        }
+    }
+    return write_file(img.width, img.height, img.layout, 8, d, compression)
+}
+
+// A TIFF file of `img` as `encode` writes one, 16 bits a sample.
+pub fun encode16(img: Image16, compression: Compression = Compression.Lzw) -> [uint8] {
+    let spp = img.layout.channels()
+    let pred = predicts(compression)
+    // an image without samples (0 by 2^31 - 1 too) has no rows to go through
+    let rows = if img.data.len() > 0 { img.height } else { 0 }
+    let rb = if rows > 0 { img.width * spp } else { 0 }
+    var d: [uint8] = []
+    for y in 0..rows {
+        for i in y * rb..(y + 1) * rb {
+            var v = img.data[i]
+            if pred && i - y * rb >= spp {
+                v = v.wrapping_sub(img.data[i - spp])
+            }
+            d.push((v & 255u16) as uint8)
+            d.push((v >> 8) as uint8)
+        }
+    }
+    return write_file(img.width, img.height, img.layout, 16, d, compression)
+}
+
+// An IFD being written: tag, field type, count and values (little endian).
+struct TagList {
+    items: [(int, int, int, [uint8])],
+}
+
+impl TagList {
+    fun shorts(var self, tag: int, vs: [int]) {
+        var b: [uint8] = []
+        for v in vs {
+            b.push((v & 255) as uint8)
+            b.push(((v >> 8) & 255) as uint8)
+        }
+        self.items.push((tag, 3, vs.len(), b))
+    }
+
+    fun longs(var self, tag: int, vs: [int]) {
+        var b: [uint8] = []
+        for v in vs {
+            for k in 0..4 { b.push(((v >> (8 * k)) & 255) as uint8) }
+        }
+        self.items.push((tag, 4, vs.len(), b))
+    }
+
+    fun rational(var self, tag: int, n: int, d: int) {
+        var b: [uint8] = []
+        for v in [n, d] {
+            for k in 0..4 { b.push(((v >> (8 * k)) & 255) as uint8) }
+        }
+        self.items.push((tag, 5, 1, b))
+    }
+}
+
+// The file: the header, the strips of `d` (the samples, `bits` each, as
+// they go in: predicted already), then the IFD and its values.
+fun write_file(w: int, h: int, layout: Layout, bits: int, d: [uint8], c: Compression) -> [uint8] {
+    let spp = layout.channels()
+    // an image with a side of 0 has no strips (and `w * spp * bits` may
+    // overflow for one 2^31 - 1 wide)
+    let empty = w == 0 || h == 0
+    let rb = if empty { 0 } else { w * spp * bits / 8 }
+    var rps = if rb > 0 { 8192 / rb } else { h }
+    if rps > h {
+        rps = h
+    }
+    if rps < 1 {
+        rps = 1
+    }
+    let strips = if empty { 0 } else { h / rps + (if h % rps > 0 { 1 } else { 0 }) }
+    var out = bytes_m.writer()
+    out.put_str("II")
+    out.put_u16_le(42u16)
+    out.put_u32_le(0u32)
+    var offsets: [int] = []
+    var counts: [int] = []
+    for k in 0..strips {
+        let y0 = k * rps
+        let rows = if h - y0 < rps { h - y0 } else { rps }
+        offsets.push(out.len())
+        if c == Compression.Uncompressed {
+            // straight from the samples: one copy
+            for i in y0 * rb..(y0 + rows) * rb { out.out.push(d[i]) }
+            counts.push(rows * rb)
+        } else {
+            let chunk = d[y0 * rb:(y0 + rows) * rb]
+            var z: [uint8] = []
+            if c == Compression.Lzw {
+                z = compress.lzw_encode_tiff(chunk)
+            } else if c == Compression.Deflate {
+                z = compress.zlib_compress(chunk, 6)
+            } else {
+                for r in 0..rows {
+                    z.extend(compress.packbits_encode(chunk[r * rb:(r + 1) * rb]))
+                }
+            }
+            counts.push(z.len())
+            out.put_bytes(z)
+        }
+        if out.len() % 2 == 1 {
+            out.put_u8(0u8)
+        }
+    }
+    let code = if c == Compression.Uncompressed { 1 } else if c == Compression.Lzw { 5 }
+        else if c == Compression.Deflate { 8 } else { 32773 }
+    var t = TagList { items: [] }
+    t.longs(256, [w])
+    t.longs(257, [h])
+    t.shorts(258, list_m.filled(spp, bits))
+    t.shorts(259, [code])
+    t.shorts(262, [if layout.is_color() { 2 } else { 1 }])
+    t.longs(273, offsets)
+    t.shorts(277, [spp])
+    t.longs(278, [rps])
+    t.longs(279, counts)
+    t.rational(282, 72, 1)
+    t.rational(283, 72, 1)
+    t.shorts(284, [1])
+    t.shorts(296, [2])
+    if predicts(c) {
+        t.shorts(317, [2])
+    }
+    if layout.has_alpha() {
+        t.shorts(338, [2])
+    }
+    let ifd = out.len()
+    out.set_u32_le(4, ifd as uint32)
+    let n = t.items.len()
+    out.put_u16_le(n as uint16)
+    var values: [uint8] = []
+    let values_at = ifd + 2 + 12 * n + 4
+    for item in t.items {
+        out.put_u16_le(item.0 as uint16)
+        out.put_u16_le(item.1 as uint16)
+        out.put_u32_le(item.2 as uint32)
+        if item.3.len() <= 4 {
+            out.put_bytes(item.3)
+            out.put_zeros(4 - item.3.len())
+        } else {
+            out.put_u32_le((values_at + values.len()) as uint32)
+            values.extend(item.3)
+            if values.len() % 2 == 1 {
+                values.push(0u8)
+            }
+        }
+    }
+    out.put_u32_le(0u32)
+    out.put_bytes(values)
+    return out.finish()
+}
+
+// --- Tests -------------------------------------------------------------------------
+
+// Small files made by the writer of tests/burn/_images_vendor.py (libtiff's
+// LZW, zlib, PackBits; FillOrder 2 and the extra tags added), each read
+// alike by Pillow 13 but FLOAT_MM, which Pillow misreads (see Tiff.md). The
+// pixels are `pattern8`, `pattern16` and `pattern_f` unless said otherwise.
+const GRAY8: str = "49492a001400000000254a6f658aafd4caef14390a0000010400010000000400000001010400010000000300000002010300010000000800000003010300010000000100000006010300010000000100000011010400020000009200000015010300010000000100000016010400010000000200000017010400020000009a0000001c01030001000000010000000000000008000000100000000800000004000000"
+const RGB8_LZW_MM: str = "4d4d002a0000001c80000767612c160d01008019540db12c160d0100000b0100000400000001000000030101000400000001000000020102000300000003000000a60103000300000001000500000106000300000001000200000111000400000002000000ac0115000300000001000300000116000400000001000000010117000400000002000000b4011c00030000000100010000013d000300000001000200000000000000080008000800000008000000120000000900000009"
+const TILES: str = "49492a005600000078da63b02e532505a42eb84d92fa53ac0e24a9671805a3808e00001bb417240078da0be83ea6aaaada1d20ca401cd8fa411ba85eedf50622d54b854e00aa3fd8e6cd300a46c1e00300fd1c0a01000c000001040001000000120000000101040001000000030000000201030003000000ec0000000301030001000000080000000601030001000000020000001501030001000000030000001c01030001000000010000003d01030001000000020000004201030001000000100000004301030001000000100000004401040002000000f20000004501040002000000fa0000000000000008000800080008000000280000001f0000002d000000"
+const PLANAR_MM: str = "4d4d002a00000044800004b03129960825808000803284b0312c0400800ec4b0312a820825808000800144b0312c0400801d84b0312b6e0825808000801004b0312c0400000b0100000400000001000000050101000400000001000000030102000300000003000000ce0103000300000001000500000106000300000001000200000111000400000006000000d40115000300000001000300000116000400000001000000020117000400000006000000ec011c00030000000100020000013d000300000001000200000000000000080008000800000008000000140000001c00000028000000300000003c0000000b000000070000000b000000070000000b00000007"
+const PACKBITS: str = "49492a00400000001a003b7625609b4a85c06faae594cf0ab9f42fde1954033e7928639e1a65a0db8ac500afea25d40f4af9346f1e5994437eb968a3de8dc8030a000001040001000000090000000101040001000000020000000201030003000000be0000000301030001000000058000000601030001000000020000001101040001000000080000001501030001000000030000001601040001000000020000001701040001000000380000001c010300010000000100000000000000080008000800"
+const DEFLATE_OLD: str = "49492a001800000078da6350f5ca4fed5a7f05000a5603510a000001040001000000040000000101040001000000020000000201030001000000080000000301030001000000b28000000601030001000000010000001101040001000000080000001501030001000000010000001601040001000000020000001701040001000000100000001c010300010000000100000000000000"
+const BILEVEL_WHITE_FILL2: str = "49492a000c00000070001e070b0000010400010000000b0000000101040001000000020000000201030001000000010000000301030001000000010000000601030001000000000000000a01030001000000020000001101040001000000080000001501030001000000010000001601040001000000020000001701040001000000040000001c010300010000000100000000000000"
+const GRAY4_MM: str = "4d4d002a0000000e02469068adf0000a010000040000000100000005010100040000000100000002010200030000000100040000010300030000000100010000010600030000000100010000011100040000000100000008011500030000000100010000011600040000000100000002011700040000000100000006011c0003000000010001000000000000"
+const GRAY16_II: str = "49492a001600000080000002911c10061082412020000b0000010400010000000300000001010400010000000200000002010300010000001000000003010300010000000500000006010300010000000100000011010400010000000800000015010300010000000100000016010400010000000200000017010400010000000d0000001c01030001000000010000003d010300010000000200000000000000"
+const GRAY16_MM: str = "4d4d002a0000001a78da636050d654d6146006910006f7014400000b010000040000000100000003010100040000000100000002010200030000000100100000010300030000000100080000010600030000000100010000011100040000000100000008011500030000000100010000011600040000000100000002011700040000000100000011011c00030000000100010000013d0003000000010002000000000000"
+const FLOAT_MM: str = "4d4d002a0000001e78dadbc7e0d4d0c00005760c8718a03c003c10040100000c010000040000000100000003010100040000000100000002010200030000000100200000010300030000000100080000010600030000000100010000011100040000000100000008011500030000000100010000011600040000000100000002011700040000000100000015011c00030000000100010000013d0003000000010003000001530003000000010003000000000000"
+const FLOAT_II: str = "49492a001e000000802f800424020001078441c7c00610020b09004040000c000001040001000000030000000101040001000000020000000201030001000000200000000301030001000000050000000601030001000000010000001101040001000000080000001501030001000000010000001601040001000000020000001701040001000000150000001c01030001000000010000003d010300010000000300000053010300010000000300000000000000"
+const PALETTE4: str = "49492a000c00000005a0f4900b000001040001000000030000000101040001000000020000000201030001000000040000000301030001000000010000000601030001000000030000001101040001000000080000001501030001000000010000001601040001000000020000001701040001000000040000001c0103000100000001000000400103003000000096000000000000000000111122223333444455556666777788889999aaaabbbbccccddddeeeeffffffffeeeeddddccccbbbbaaaa9999888877776666555544443333222211110000ff00ff70ffe0ff50ffc0ff30ffa0ff10ff80fff0ff60ffd0ff40ffb0ff20ff90"
+const RGBA_ASSOCIATED: str = "49492a0014000000003b76ff13304e80000000000b0000010400010000000300000001010400010000000100000002010300040000009e00000003010300010000000100000006010300010000000200000011010400010000000800000015010300010000000400000016010400010000000100000017010400010000000c0000001c0103000100000001000000520103000100000001000000000000000800080008000800"
+const GRAY_ALPHA: str = "49492a0010000000003b256065a08ac50b000001040001000000020000000101040001000000020000000201030002000000080008000301030001000000010000000601030001000000010000001101040001000000080000001501030001000000020000001601040001000000020000001701040001000000080000001c010300010000000100000052010300010000000200000000000000"
+const RGB_EXTRA0: str = "49492a0010000000003b76b125609bd60b0000010400010000000200000001010400010000000100000002010300040000009a0000000301030001000000010000000601030001000000020000001101040001000000080000001501030001000000040000001601040001000000010000001701040001000000080000001c0103000100000001000000520103000100000000000000000000000800080008000800"
+const PAGES: str = "4d4d002a000000188000076761298136655036d14c500404000a010000040000000100000002010100040000000100000002010200030000000300000096010300030000000100050000010600030000000100020000011100040000000100000008011500030000000100030000011600040000000100000002011700040000000100000010011c00030000000100010000000000a000080008000800254a00001401000004000000010000000301010004000000010000000101020003000000010008000001030003000000010001000001060003000000010001000001110004000000010000009c011500030000000100010000011600040000000100000001011700040000000100000003011a00050000000100000196011c0003000000010001000001310002000000050000019e015300030000000100010000fde8000800000002fffe0003fde9000900000001fffeee90fdea000600000002ff020000fdeb000b000000013f000000fdec000c00000001000001a4fded000a00000001000001acfdee000700000005000001b4000001bc00000048000000014d796c610000bff4000000000000ffffffff000000030102030405000000000a0100000400000001000000010101000400000001000000010102000300000001001000000103000300000001000100000106000300000001000100000111000400000001000001ba011500030000000100010000011600040000000100000001011700040000000100000002011c0003000000010001000000000000"
+// The bytes the hex digits `s` stand for.
+fun unhex(s: str) -> [uint8] {
+    var out: [uint8] = []
+    var i = 0
+    while i + 1 < s.len() {
+        out.push((((s[i] as char).to_digit(16).unwrap_or(0) << 4) | (s[i + 1] as char).to_digit(16).unwrap_or(0)) as uint8)
+        i += 2
+    }
+    return out
+}
+
+// The little-endian file `b` with the first IFD's SHORT or LONG `tag` set
+// to `v` (it must be there).
+fun with_tag(b: [uint8], tag: int, v: int) -> [uint8] {
+    var out = b
+    let s = Src { b: b, le: true }
+    let ifd = s.u32(4) as int
+    for i in 0..s.u16(ifd) {
+        let at = ifd + 2 + 12 * i
+        if s.u16(at) == tag {
+            for k in 0..4 { out[at + 8 + k] = ((v >> (8 * k)) & 255) as uint8 }
+            return out
+        }
+    }
+    panic(f"no tag {tag}")
+}
+
+// (x * 37 + y * 101 + c * 59) % 256 at each sample.
+fun pattern8(w: int, h: int, c: int) -> [uint8] {
+    var out: [uint8] = []
+    for y in 0..h {
+        for x in 0..w {
+            for k in 0..c { out.push(((x * 37 + y * 101 + k * 59) % 256) as uint8) }
+        }
+    }
+    return out
+}
+
+// (x * 9001 + y * 4099 + c * 12345) % 65536 at each sample.
+fun pattern16(w: int, h: int, c: int) -> [uint16] {
+    var out: [uint16] = []
+    for y in 0..h {
+        for x in 0..w {
+            for k in 0..c { out.push(((x * 9001 + y * 4099 + k * 12345) % 65536) as uint16) }
+        }
+    }
+    return out
+}
+
+// (x + 2y + c / 4) / 8 - 0.25 at each sample.
+fun pattern_f(w: int, h: int, c: int) -> [float32] {
+    var out: [float32] = []
+    for y in 0..h {
+        for x in 0..w {
+            for k in 0..c { out.push((((x + 2 * y) as float64 + (k as float64) / 4.0) / 8.0 - 0.25) as float32) }
+        }
+    }
+    return out
+}
+
+fun image8(b: [uint8], page: int) -> Image8 {
+    return decode(b, page, image.MAX_PIXELS).expect("a TIFF")
+}
+
+fun image16(b: [uint8], page: int) -> Image16 {
+    return decode16(b, page, image.MAX_PIXELS).expect("a TIFF")
+}
+
+fun same_image<S: Sample + Eq>(img: Image<S>, w: int, h: int, layout: Layout, data: [S]) -> bool {
+    return img.width == w && img.height == h && img.layout == layout && img.data == data
+}
+
+#test
+fun strips_and_byte_orders() {
+    assert(same_image<uint8>(image8(unhex(GRAY8), 0), 4, 3, Layout.Gray, pattern8(4, 3, 1)))
+    assert(same_image<uint8>(image8(unhex(RGB8_LZW_MM), 0), 3, 2, Layout.Rgb, pattern8(3, 2, 3)))
+    assert(same_image<uint8>(image8(unhex(PACKBITS), 0), 9, 2, Layout.Rgb, pattern8(9, 2, 3)))
+    assert(same_image<uint8>(image8(unhex(DEFLATE_OLD), 0), 4, 2, Layout.Gray, pattern8(4, 2, 1)))
+    // the same samples at 16 bits, widened
+    let wide = image16(unhex(GRAY8), 0)
+    assert(wide.data == pattern8(4, 3, 1).map<uint16>((v: uint8) => (v as uint16) * 257u16))
+}
+
+#test
+fun tiles_and_planes() {
+    // two 16x16 tiles over 18x3: the second cropped to 2x3
+    assert(same_image<uint8>(image8(unhex(TILES), 0), 18, 3, Layout.Rgb, pattern8(18, 3, 3)))
+    // a plane a sample, LZW, the predictor, big endian
+    assert(same_image<uint8>(image8(unhex(PLANAR_MM), 0), 5, 3, Layout.Rgb, pattern8(5, 3, 3)))
+}
+
+#test
+fun bit_depths_and_photometrics() {
+    // 1 bit, WhiteIsZero, FillOrder 2: 0 is white
+    assert(same_image<uint8>(image8(unhex(BILEVEL_WHITE_FILL2), 0), 11, 2, Layout.Gray,
+        [255u8, 255u8, 255u8, 255u8, 0u8, 0u8, 0u8, 255u8, 255u8, 255u8, 255u8,
+         255u8, 0u8, 0u8, 0u8, 0u8, 255u8, 255u8, 255u8, 0u8, 0u8, 0u8]))
+    // 4 bits scaled by 17
+    assert(same_image<uint8>(image8(unhex(GRAY4_MM), 0), 5, 2, Layout.Gray,
+        [0u8, 34u8, 68u8, 102u8, 153u8, 102u8, 136u8, 170u8, 221u8, 255u8]))
+    assert(image16(unhex(GRAY4_MM), 0).data[1] == 8738u16)
+    // a 4-bit palette: the high byte of each 16-bit colour, as Pillow
+    assert(same_image<uint8>(image8(unhex(PALETTE4), 0), 3, 2, Layout.Rgb,
+        [0u8, 255u8, 0u8, 85u8, 170u8, 48u8, 170u8, 85u8, 96u8, 255u8, 0u8, 144u8, 68u8, 187u8, 192u8, 153u8, 102u8, 240u8]))
+    // at 16 bits the colours as they are: index 5 is (5 * 4369, 10 * 4369, 3 * 4096 + 255)
+    let p16 = image16(unhex(PALETTE4), 0)
+    assert(p16.data[3] == 21845u16 && p16.data[4] == 43690u16 && p16.data[5] == 12543u16)
+}
+
+#test
+fun sixteen_bits() {
+    // the predictor on 16-bit samples, in both byte orders
+    for hex in [GRAY16_II, GRAY16_MM] {
+        assert(same_image<uint16>(image16(unhex(hex), 0), 3, 2, Layout.Gray, pattern16(3, 2, 1)))
+        // at 8 bits, rounded: (v * 255 + 32767) / 65535
+        let small = image8(unhex(hex), 0)
+        let want = pattern16(3, 2, 1).map<uint8>((v: uint16) => (((v as int) * 255 + 32767) / 65535) as uint8)
+        assert(small.data == want)
+    }
+}
+
+#test
+fun decoding_floats() {
+    // the floating point predictor, with Deflate big endian and LZW little endian
+    for hex in [FLOAT_MM, FLOAT_II] {
+        let f = decode_f32(unhex(hex), 0, image.MAX_PIXELS).expect("floats")
+        assert(same_image<float32>(f, 3, 2, Layout.Gray, pattern_f(3, 2, 1)))
+    }
+    // at 8 bits: -0.25 is 0, 0.125 is 32 (31.875 rounded)
+    let small = image8(unhex(FLOAT_II), 0)
+    assert(small.data == [0u8, 0u8, 0u8, 0u8, 32u8, 64u8])
+    // integers as floats: scaled to 0..1
+    let g = decode_f32(unhex(GRAY8), 0, image.MAX_PIXELS).expect("floats")
+    assert(g.data[1] == 37.0f32 / 255.0f32)
+}
+
+#test
+fun extra_samples() {
+    // associated alpha, unpremultiplied as Pillow does ("RGBa" to "RGBA")
+    assert(same_image<uint8>(image8(unhex(RGBA_ASSOCIATED), 0), 3, 1, Layout.Rgba,
+        [0u8, 59u8, 118u8, 255u8, 37u8, 95u8, 155u8, 128u8, 0u8, 0u8, 0u8, 0u8]))
+    assert(same_image<uint8>(image8(unhex(GRAY_ALPHA), 0), 2, 2, Layout.GrayAlpha, pattern8(2, 2, 2)))
+    // ExtraSamples 0, unspecified: left out
+    let rgb = image8(unhex(RGB_EXTRA0), 0)
+    assert(rgb.layout == Layout.Rgb && rgb.data == [0u8, 59u8, 118u8, 37u8, 96u8, 155u8])
+}
+
+#test
+fun several_pages() {
+    let b = unhex(PAGES)
+    let ps = pages(b).expect("pages")
+    assert(ps.len() == 3)
+    assert(ps[0] == ImageInfo { width: 2, height: 2, layout: Layout.Rgb, bit_depth: 8, frames: 1, format: "tiff" })
+    assert(ps[1].width == 3 && ps[1].layout == Layout.Gray)
+    assert(ps[2].bit_depth == 16)
+    assert(same_image<uint8>(image8(b, 1), 3, 1, Layout.Gray, pattern8(3, 1, 1)))
+    assert(image16(b, 2).data == [0u16])
+    assert(info(b).expect("info").frames == 3)
+    match decode(b, 3, image.MAX_PIXELS) {
+        Ok(_) => assert(false)
+        Err(e) => assert(e == ImageError.Mismatch("no page 3: the file has 3 pages"))
+    }
+}
+
+#test
+fun the_tags_of_a_page() {
+    let t = tags(unhex(PAGES), 1).expect("tags")
+    assert(t[256] == TagValue.Ints([3i64]))
+    assert(t[258] == TagValue.Ints([8i64]))
+    assert(t[305] == TagValue.Ascii("Myla"))
+    assert(t[282] == TagValue.Rationals([(72i64, 1i64)]))
+    assert(t[65000] == TagValue.Ints([-2i64, 3i64]))
+    assert(t[65001] == TagValue.Ints([-70000i64]))
+    assert(t[65002] == TagValue.Ints([-1i64, 2i64]))
+    assert(t[65003] == TagValue.Floats([0.5]))
+    assert(t[65004] == TagValue.Floats([-1.25]))
+    assert(t[65005] == TagValue.Rationals([(-1i64, 3i64)]))
+    assert(t[65006] == TagValue.Bytes([1u8, 2u8, 3u8, 4u8, 5u8]))
+    assert(f"{t[258]}" == "8")
+    let first = tags(unhex(GRAY8), 0).expect("tags")
+    assert(first.len() == 10 && first[273] == TagValue.Ints([8i64, 16i64]))
+}
+
+#test
+fun a_loop_in_the_ifd_chain() {
+    // the first IFD's next pointer made to point at itself
+    var b = unhex(GRAY8)
+    let s = Src { b: b, le: true }
+    let ifd = s.u32(4) as int
+    let next = ifd + 2 + 12 * s.u16(ifd)
+    for k in 0..4 { b[next + k] = ((ifd >> (8 * k)) & 255) as uint8 }
+    assert(pages(b).expect("pages").len() == 1)
+    assert(info(b).expect("info").frames == 1)
+    assert(decode(b, 0, image.MAX_PIXELS).expect("page 0").data == pattern8(4, 3, 1))
+    assert(decode(b, 1, image.MAX_PIXELS) == Err(ImageError.Mismatch("no page 1: the file has 1 page")))
+}
+
+// GRAY8, its IFD's next one a chain of three IFDs of 20 entries each, 4
+// bytes after the one before: IFDs that overlap, which no file has, end the
+// chain once their bytes add up past the file's (each of a long chain of
+// them read in full would take time quadratic in the file's size: 20,000
+// of 20,000 entries in 320 KB took 9 s).
+#test
+fun overlapping_ifds_end_the_chain() {
+    var b = unhex(GRAY8)
+    let s = Src { b: b, le: true }
+    let ifd = s.u32(4) as int
+    let next = ifd + 2 + 12 * s.u16(ifd)
+    let at = b.len()
+    for k in 0..4 { b[next + k] = ((at >> (8 * k)) & 255) as uint8 }
+    let entries = 20
+    b.extend(list_m.filled(8 + 12 * entries + 6, 0u8))
+    for i in 0..3 {
+        let o = at + 4 * i
+        b[o] = entries as uint8
+        let to = if i < 2 { o + 4 } else { 0 }
+        for k in 0..4 { b[o + 2 + 12 * entries + k] = ((to >> (8 * k)) & 255) as uint8 }
+    }
+    assert(info(b).expect("info").frames == 2)
+    assert(decode(b, 2, image.MAX_PIXELS) == Err(ImageError.Mismatch("no page 2: the file has 2 pages")))
+    assert(decode(b, 0, image.MAX_PIXELS).expect("page 0").data == pattern8(4, 3, 1))
+}
+
+// What doesn't decode, and why.
+#test(unhex(""), 0, image.MAX_PIXELS)[Err(ImageError.Truncated)]
+#test(unhex("4949"), 0, image.MAX_PIXELS)[Err(ImageError.Truncated)]
+#test(unhex("89504e470d0a1a0a"), 0, image.MAX_PIXELS)[Err(ImageError.BadSignature)]
+#test(unhex("494d2a0008000000"), 0, image.MAX_PIXELS)[Err(ImageError.BadSignature)]
+#test(unhex("49492b0008000000"), 0, image.MAX_PIXELS)[Err(ImageError.Unsupported("BigTIFF"))]
+#test(unhex("4d4d002b00080000"), 0, image.MAX_PIXELS)[Err(ImageError.Unsupported("BigTIFF"))]
+#test(unhex("49492a0000000000"), 0, image.MAX_PIXELS)[Err(ImageError.Corrupt("no IFD"))]
+#test(unhex("49492a0064000000"), 0, image.MAX_PIXELS)[Err(ImageError.Corrupt("an IFD at 100, outside the file of 8 bytes"))]
+#test(unhex(GRAY8)[:40], 0, image.MAX_PIXELS)[Err(ImageError.Truncated)] // cut inside the IFD
+#test(unhex(GRAY8), 0, 11i64)[Err(ImageError.TooLarge(12i64))]
+#test(unhex(GRAY8), 1, image.MAX_PIXELS)[Err(ImageError.Mismatch("no page 1: the file has 1 page"))]
+#test(unhex(GRAY8), -1, image.MAX_PIXELS)[Err(ImageError.Mismatch("no page -1"))]
+#test(with_tag(unhex(GRAY8), 259, 7), 0, image.MAX_PIXELS)[Err(ImageError.Unsupported("JPEG compression"))]
+#test(with_tag(unhex(GRAY8), 259, 6), 0, image.MAX_PIXELS)[Err(ImageError.Unsupported("old-style JPEG compression"))]
+#test(with_tag(unhex(GRAY8), 259, 3), 0, image.MAX_PIXELS)[Err(ImageError.Unsupported("CCITT G3 compression"))]
+#test(with_tag(unhex(GRAY8), 259, 4), 0, image.MAX_PIXELS)[Err(ImageError.Unsupported("CCITT G4 compression"))]
+#test(with_tag(unhex(GRAY8), 262, 5), 0, image.MAX_PIXELS)[Err(ImageError.Unsupported("CMYK"))]
+#test(with_tag(unhex(GRAY8), 262, 6), 0, image.MAX_PIXELS)[Err(ImageError.Unsupported("YCbCr"))]
+#test(with_tag(unhex(GRAY8), 262, 2), 0, image.MAX_PIXELS)[Err(ImageError.Corrupt("RGB with 1 samples a pixel"))]
+#test(with_tag(unhex(GRAY8), 258, 32), 0, image.MAX_PIXELS)[Err(ImageError.Unsupported("32-bit samples"))]
+#test(with_tag(unhex(GRAY8), 256, 0), 0, image.MAX_PIXELS)[Err(ImageError.Corrupt("an image of 0x3 pixels"))]
+#test(with_tag(unhex(GRAY8), 257, 7), 0, image.MAX_PIXELS)[Err(ImageError.Corrupt("2 strip offsets for 4 strips"))]
+#test(with_tag(unhex(GRAY8), 273, 1000), 0, image.MAX_PIXELS)[Err(ImageError.Truncated)] // the offsets' values moved past the end
+#test(with_tag(unhex(TILES), 322, 1), 0, image.MAX_PIXELS)[Err(ImageError.Corrupt("2 tile offsets for 18 tiles"))]
+#test(with_tag(with_tag(unhex(TILES), 256, 0x7FFFFFFF), 322, 1), 0, image.MAX_PIXELS)[Err(ImageError.Corrupt("2147483647 tiles a plane in a file of 258 bytes"))]fun decode_errors(b: [uint8], page: int, max_pixels: int64) -> Result<Image8, ImageError> {
+    return decode(b, page, max_pixels)
+}
+
+// Everything `encode` and `encode16` write comes back.
+#test
+fun encoding_round_trips() {
+    for layout in [Layout.Gray, Layout.GrayAlpha, Layout.Rgb, Layout.Rgba] {
+        let c = layout.channels()
+        let img = Image { width: 7, height: 5, layout: layout, data: pattern8(7, 5, c) }
+        let img16 = Image { width: 7, height: 5, layout: layout, data: pattern16(7, 5, c) }
+        for comp in [Compression.Uncompressed, Compression.PackBits, Compression.Lzw, Compression.Deflate] {
+            assert(decode(encode(img, comp), 0, image.MAX_PIXELS) == Ok(img))
+            assert(decode16(encode16(img16, comp), 0, image.MAX_PIXELS) == Ok(img16))
+        }
+    }
+    // several strips of about 8 KB: 27 rows of 300 bytes a strip
+    let wide = Image { width: 300, height: 30, layout: Layout.Gray, data: pattern8(300, 30, 1) }
+    let b = encode(wide, Compression.Lzw)
+    let t = tags(b, 0).expect("tags")
+    assert(t[278] == TagValue.Ints([27i64]) && t[317] == TagValue.Ints([2i64]))
+    assert(decode(b, 0, image.MAX_PIXELS) == Ok(wide))
+    // through the tables of `looked_up`, at least 2^8 pixels
+    assert(image16(b, 0).data == wide.data.map<uint16>((v: uint8) => (v as uint16) * 257u16))
+    let f = decode_f32(b, 0, image.MAX_PIXELS).expect("floats")
+    assert(f.data[301] == (wide.data[301] as float32) / 255.0f32)
+    // an empty image has no strips
+    let none: Image8 = Image { width: 0, height: 0, layout: Layout.Rgb, data: [] }
+    assert(tags(encode(none, Compression.Lzw), 0).expect("tags")[273] == TagValue.Ints([]))
+}
+
+// An image with a side of 0 and the other 2^31 - 1 is written at once,
+// without strips (a loop over its empty rows took 2^31 turns, and the
+// strip count overflowed).
+#test
+fun encoding_empty_images() {
+    let tall: Image8 = Image { width: 0, height: 0x7FFFFFFF, layout: Layout.Gray, data: [] }
+    let wide: Image8 = Image { width: 0x7FFFFFFF, height: 0, layout: Layout.Rgba, data: [] }
+    let tall16: Image16 = Image { width: 0, height: 0x7FFFFFFF, layout: Layout.Rgb, data: [] }
+    let wide16: Image16 = Image { width: 0x7FFFFFFF, height: 0, layout: Layout.GrayAlpha, data: [] }
+    for comp in [Compression.Uncompressed, Compression.PackBits, Compression.Lzw, Compression.Deflate] {
+        for b in [encode(tall, comp), encode(wide, comp), encode16(tall16, comp), encode16(wide16, comp)] {
+            assert(tags(b, 0).expect("tags")[273] == TagValue.Ints([]))
+        }
+    }
+    let t = tags(encode(tall, Compression.Lzw), 0).expect("tags")
+    assert(t[256] == TagValue.Ints([0i64]) && t[257] == TagValue.Ints([2147483647i64]))
+}
+
+// The bytes `encode` writes, read alike by Pillow 13 and libtiff (through
+// ImageMagick 6): header, the strip, the IFD (13 tags, sorted), then the
+// resolutions' values.
+const ENCODED_GRAY: str = "49492a000a00000007090d000001040001000000020000000101040001000000010000000201030001000000080000000301030001000000010000000601030001000000010000001101040001000000080000001501030001000000010000001601040001000000010000001701040001000000020000001a01050001000000ac0000001b01050001000000b40000001c01030001000000010000002801030001000000020000000000000048000000010000004800000001000000"
+
+#test(Image { width: 2, height: 1, layout: Layout.Gray, data: [7u8, 9u8] }, Compression.Uncompressed)[unhex(ENCODED_GRAY)]
+fun encode_case(img: Image8, c: Compression) -> [uint8] {
+    return encode(img, c)
+}

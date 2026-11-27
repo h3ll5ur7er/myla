@@ -1,0 +1,18 @@
+//~ type error: operator '/' is not defined for 'V': it needs 'impl Div<float64> for V'
+//~ span: v / 2.0
+// The impl a missing operator needs names the right operand's type: the
+// classic `impl Div for V` wouldn't give `v / 2.0` (D200).
+struct V {
+    x: float,
+}
+
+impl Mul<float> for V {
+    fun mul(self, k: float) -> V {
+        return V { x: self.x * k }
+    }
+}
+
+fun main() {
+    let v = V { x: 1.0 }
+    print((v / 2.0).x)
+}

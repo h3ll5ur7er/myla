@@ -1,0 +1,83 @@
+// Image files with std.pnm, std.bmp and std.qoi (MYLA-960): a small
+// picture written in each format, the size of each file, each read back, a
+// tiny plain PGM shown as the text it is, and a file cut short.
+
+import std.image as image
+from std.image import Image8, ImageError, Layout
+import std.pnm as pnm
+from std.pnm import Kind
+import std.bmp as bmp
+import std.qoi as qoi
+import std.bytes as bytes
+
+// A `w` by `h` picture: red to blue from left to right, a green band, and
+// alpha fading to half towards the right.
+#test(2, 1)[image.from_data<uint8>(2, 1, Layout.Rgba, [255u8, 0u8, 0u8, 255u8, 0u8, 0u8, 255u8, 128u8]).expect("")]
+fun picture(w: int, h: int) -> Image8 {
+    var img: Image8 = image.new(w, h, Layout.Rgba, 0u8)
+    for y in 0..h {
+        for x in 0..w {
+            let t = if w > 1 { x * 255 / (w - 1) } else { 0 }
+            let g = if y >= h / 4 && y < h / 2 { 200u8 } else { 0u8 }
+            img.set_color(x, y, image.rgba((255 - t) as uint8, g, t as uint8, (255 - t / 2) as uint8))
+        }
+    }
+    return img
+}
+
+// A line about a file: its name, its size, and whether it read back as
+// `want`.
+#test("QOI", [1u8, 2u8], Err(ImageError.Truncated), image.new(1, 1, Layout.Gray, 0u8))["QOI: 2 bytes, read back: truncated input"]
+#test("PGM", [1u8], Ok(image.new(1, 1, Layout.Gray, 0u8)), image.new(1, 1, Layout.Gray, 0u8))["PGM: 1 bytes, read back: the same"]
+fun report(name: str, b: [uint8], back: Result<Image8, ImageError>, want: Image8) -> str {
+    let how = match back {
+        Ok(img) => if img == want { "the same" } else { "different" }
+        Err(e) => f"{e}"
+    }
+    return f"{name}: {b.len()} bytes, read back: {how}"
+}
+
+fun main() {
+    let img = picture(16, 8)
+    let opaque = img.convert(Layout.Rgb)
+
+    // PAM keeps alpha, PPM is RGB alone; BMP takes 32 bits for alpha, 24
+    // without; QOI compresses
+    let pam = pnm.encode(img)
+    print(report("PAM", pam, pnm.decode(pam), img))
+    let ppm = pnm.encode(opaque)
+    print(report("PPM", ppm, pnm.decode(ppm), opaque))
+    let bmp32 = bmp.encode(img)
+    print(report("BMP, 32 bits", bmp32, bmp.decode(bmp32), img))
+    let bmp24 = bmp.encode(opaque)
+    print(report("BMP, 24 bits", bmp24, bmp.decode(bmp24), opaque))
+    let q = qoi.encode(img)
+    print(report("QOI", q, qoi.decode(q), img))
+    if let Ok(i) = bmp.info(bmp32) {
+        print(f"{i.format}: {i.width}x{i.height} {i.layout}, {i.bit_depth} bits a sample")
+    }
+
+    // a plain PGM is text: the header, then a row of samples a line
+    let tiny = picture(4, 2).convert(Layout.Gray)
+    for line in bytes.to_str(pnm.encode_as(tiny, Kind.Pgm, true)).split("\n") {
+        if line.len() > 0 {
+            print(line)
+        }
+    }
+
+    // a decoder never fails on a broken file: it says what is wrong
+    print(report("QOI cut short", q[:20], qoi.decode(q[:20]), img))
+}
+// output:
+// PAM: 578 bytes, read back: the same
+// PPM: 396 bytes, read back: the same
+// BMP, 32 bits: 634 bytes, read back: the same
+// BMP, 24 bits: 438 bytes, read back: the same
+// QOI: 274 bytes, read back: the same
+// bmp: 16x8 rgba, 8 bits a sample
+// P2
+// 4 2
+// 255
+// 194 178 162 146
+// 76 61 45 29
+// QOI cut short: 20 bytes, read back: truncated input

@@ -8,7 +8,9 @@
 // Output is not buffered, so whatever a program wrote is out before it waits
 // for input.
 
-from .ioerror import IoError, from_errno
+from .ioerror import IoError, from_cause, code_number, BAD_HANDLE, OTHER
+import .system_error as system_error // the target's words for its codes
+import .str as str_m // `find_from`
 
 // Write `s`'s bytes to file descriptor `fd` (1 = stdout, 2 = stderr), all of
 // them, or the error that stopped it (D146). A closed pipe on the standard
@@ -18,7 +20,7 @@ pub fun write(fd: int32, s: str) -> Result<(), IoError> {
     __write(fd, s)
     let err = __io_errno()
     if err != 0 {
-        return Err(from_errno(err))
+        return Err(from_cause(err))
     }
     return Ok(())
 }
@@ -53,26 +55,30 @@ fun put(fd: int32, s: str) {
     }
 }
 
-// What the errno `code` of a failed write means (std.rt's `errno_text`).
-#test(28)["no space left on device"]
-#test(77)["errno 77"]
+// What the cause code `code` (`__io_errno`'s, D209) of a failed write means
+// (std.rt's `errno_text`): a handle that isn't open; a system's own code as
+// the target's std.system_error says it (`no space left on device` on Linux,
+// `there is not enough space on the disk` on Windows, MYLA-716); else
+// `errno` and the number `code_number` gives the cause.
+#test(34)["bad file descriptor"]
+#test(11)["errno 22"]
 pub fun errno_text(code: int32) -> str {
-    if code == 28 {
-        return "no space left on device"
-    }
-    if code == 5 {
-        return "input/output error"
-    }
-    if code == 9 {
+    if code == BAD_HANDLE {
         return "bad file descriptor"
     }
-    if code == 27 {
-        return "file too large"
+    if code >= OTHER {
+        return system_error.error_text((code - OTHER) as int64)
     }
-    if code == 122 {
-        return "disk quota exceeded"
-    }
-    return f"errno {code}"
+    return f"errno {code_number(code)}"
+}
+
+// A system's own code in the words of the target the case runs on: Linux's
+// `no space left on device`, Windows' `there is not enough space on the
+// disk` (std.system_error's own cases say which).
+#test
+fun a_system_code_in_the_target_s_words() {
+    assert(errno_text(OTHER + 28) == system_error.error_text(28), "a full disk")
+    assert(errno_text(OTHER + 77) == system_error.error_text(77), "a code without words")
 }
 
 // --- Streams (MYLA-338) ---------------------------------------------------------
@@ -128,6 +134,19 @@ pub trait Pollable {
 // How many bytes one `read` asks for at least.
 const CHUNK: int32 = 4096
 
+// How many bytes `read_exact` asks for when it holds `got` and needs `need`
+// more: all of them, but at most CHUNK more than it holds, so the reads
+// double and a count past the input's end isn't allocated up front (a read
+// of `n` bytes takes room for `n`).
+#test(0, 10)[10]
+#test(0, 2000000000)[4096]
+#test(10000, 2000000000)[14096]
+#test(2000000000, 147483647)[147483647]
+fun exact_ask(got: int32, need: int32) -> int32 {
+    if need > CHUNK && need - CHUNK > got { return CHUNK + got }
+    return need
+}
+
 // How many bytes `copy` reads at a time (MYLA-379): a 256 MiB file copied
 // into a new one natively took 164 ms with 4 KiB, 91 with 64 KiB and 85 with
 // 128 KiB; to `/dev/null`, 57, 40 and 39.
@@ -177,7 +196,7 @@ impl Read for FdStream {
         if n <= 0 { return Ok([]) }
         let chunk = __read_bytes(self.fd, n)
         let err = __io_errno()
-        if err != 0 { return Err(from_errno(err)) }
+        if err != 0 { return Err(from_cause(err)) }
         return Ok(chunk)
     }
 }
@@ -188,7 +207,7 @@ impl Write for FdStream {
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
         __write_bytes(self.fd, b)
         let err = __io_errno()
-        if err != 0 { return Err(from_errno(err)) }
+        if err != 0 { return Err(from_cause(err)) }
         return Ok(b.len())
     }
 
@@ -239,7 +258,7 @@ impl Seek for FdStream {
             End(k) => (k, 2)
         }
         let r = __seek(self.fd, offset, whence)
-        if r < 0 { return Err(from_errno(__io_errno())) }
+        if r < 0 { return Err(from_cause(__io_errno())) }
         return Ok(r)
     }
 }
@@ -323,12 +342,14 @@ impl Read for MemoryStream {
 
 impl Write for MemoryStream {
     // Over the bytes at the cursor, and on past the end; a gap left by a
-    // seek past the end is filled with zeros.
+    // seek past the end is filled with zeros, as a file's is, once a byte is
+    // written past it (writing none leaves no gap).
     // Past 2,147,483,647 bytes is `Other(27)` (EFBIG), as for a file too
     // large.
     #test(from_str("abc"), [120u8])[Ok(1)]
     fun write(var self, b: [uint8]) -> Result<int, IoError> {
         let n = b.len()
+        if n == 0 { return Ok(0) }
         if self.pos > 2147483647 - n { return Err(IoError.Other(27)) }
         self.fill_gap()
         var i = 0
@@ -456,16 +477,14 @@ impl<R: Read> Buffered<R> {
         return Ok(true)
     }
 
-    // The offset of the first "\n" in the buffer from `start` on, or -1.
+    // The offset of the first "\n" in the buffer from `start` on, or -1
+    // (by std.str's `find_from`, which the interpreter runs without a step
+    // a byte, MYLA-546).
     fun newline_from(self, start: int32) -> int32 {
-        let buf = self.buf
-        let n = buf.len()
-        var i = start
-        while i < n {
-            if buf[i] == '\n' { return i }
-            i += 1
+        return match self.buf.find_from("\n", start) {
+            Some(i) => i
+            None => -1
         }
-        return -1
     }
 
     // The line up to `end`, past the "\n" there if there is one.
@@ -514,7 +533,8 @@ impl<R: Read> Buffered<R> {
 
     // Exactly the next `n` bytes ("" for n <= 0); None if the input ends
     // first, and then the bytes that were there stay unread, as after a
-    // failed read. Linear in `n` however short the reads (M17).
+    // failed read. Linear in `n` however short the reads (M17); a count far
+    // past the input's end isn't allocated (MYLA-550).
     fun read_exact(var self, n: int32) -> Result<Option<str>, IoError> {
         if n <= 0 { return Ok(Some("")) }
         var out = StringBuilder()
@@ -528,7 +548,7 @@ impl<R: Read> Buffered<R> {
             out.append(self.buf, self.pos, self.buf.len())
             self.buf = ""
             self.pos = 0
-            let more = self.fill(n - out.len())
+            let more = self.fill(exact_ask(out.len(), n - out.len()))
             match more {
                 Ok(true) => {}
                 Ok(false) => {
@@ -591,7 +611,12 @@ impl<R: Read + Seek> Seek for Buffered<R> {
     fun seek(var self, pos: SeekFrom) -> Result<int64, IoError> {
         var to = pos
         match pos {
-            Current(k) => { to = SeekFrom.Current(k - ((self.buf.len() - self.pos) as int64)) }
+            Current(k) => {
+                // back past int64's smallest, so before the start (D184)
+                let held = (self.buf.len() - self.pos) as int64
+                if k < -9223372036854775807i64 - 1i64 + held { return Err(IoError.InvalidInput) }
+                to = SeekFrom.Current(k - held)
+            }
             _ => {}
         }
         var r = self.src.pop()
@@ -683,7 +708,7 @@ impl<R: Read + Pollable> Buffered<R> {
             out.append(self.buf, self.pos, self.buf.len())
             self.buf = ""
             self.pos = 0
-            let more = await self.fill_async(n - out.len())
+            let more = await self.fill_async(exact_ask(out.len(), n - out.len()))
             match more {
                 Ok(true) => {}
                 Ok(false) => {
@@ -952,6 +977,7 @@ fun memory_seeks() {
     assert(m.text() == "01ab456789XYZ", "appended")
     assert(said(m.seek(SeekFrom.End(2))) == "15", "past the end")
     assert(shown(m.read(4)) == "", "nothing to read past the end")
+    assert(said(m.write([])) == "0" && m.bytes().len() == 13, "writing nothing leaves no gap, as in a file (MYLA-550)")
     assert(said(m.write(bytes_of("!"))) == "1", "write past the end")
     let b = m.bytes()
     assert(b.len() == 16 && b[13] == 0u8 && b[14] == 0u8 && b[15] == '!', "the gap is zeros")
@@ -1124,6 +1150,14 @@ fun buffered_seeks() {
     assert(shown_line(r.read_line()) == "<end>", "the end")
     assert(said(r.seek(SeekFrom.Start(13))) == "13", "a seek after the end of the input")
     assert(shown_line(r.read_line()) == "third", "reads again")
+    // an offset back past what is buffered (int64's smallest) is
+    // `InvalidInput`, as `MemoryStream` gives (D184, MYLA-550)
+    assert(said(r.seek(SeekFrom.Start(1))) == "1", "to 1")
+    assert(shown_line(r.read_line()) == "irst", "a line, the rest buffered")
+    assert(said(r.seek(SeekFrom.Current(-9223372036854775807 - 1))) == "InvalidInput", "far back")
+    assert(said(r.seek(SeekFrom.Current(-9223372036854775807 + 12))) == "InvalidInput", "far back, by less than the buffer")
+    assert(said(r.seek(SeekFrom.Current(9223372036854775807))) == "InvalidInput", "far on")
+    assert(said(r.seek(SeekFrom.Current(-6))) == "0", "back to the start")
     var w = buffered_writer(from_str("0123456789"))
     assert(said(w.write_str("ab")) == "2", "buffered")
     assert(said(w.seek(SeekFrom.Start(5))) == "5", "a seek")
@@ -1299,6 +1333,37 @@ fun buffered_failed_read_keeps_bytes() {
     assert(shown_line(r.read_exact(3)) == "ghi", "the bytes before it are kept")
     assert(shown_line(r.read_line()) == "j", "the rest")
     assert(shown_line(r.read_line()) == "<end>", "the end")
+}
+
+// A stream of `parts`, one a read, that keeps the largest count asked for.
+struct AskLog {
+    parts: [str],
+    at: int,
+    most: int,
+}
+
+impl Read for AskLog {
+    fun read(var self, n: int) -> Result<[uint8], IoError> {
+        if n > self.most { self.most = n }
+        if self.at >= self.parts.len() { return Ok([]) }
+        self.at += 1
+        return Ok(bytes_of(self.parts[self.at - 1]))
+    }
+}
+
+// An exact count far past the input's end asks for little more than the
+// input holds, not for the count (MYLA-550: 2,000,000,000 bytes under a
+// memory limit were `out of memory`).
+#test
+fun exact_count_past_the_end() {
+    var xs = StringBuilder()
+    for k in 0..10000 {
+        xs.append_byte('x')
+    }
+    var r = buffered(AskLog { parts: ["abc", xs.build()], at: 0, most: 0 })
+    assert(shown_line(r.read_exact(2000000000)) == "<end>", "the input ends first")
+    assert(r.src[0].most <= 4096 + 10003, f"asked for {r.src[0].most}")
+    assert(shown_line(r.read_exact(4)) == "abcx", "the bytes stay unread")
 }
 
 // Offsets and lengths a memory stream can't hold are errors, not overflow

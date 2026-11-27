@@ -2,7 +2,7 @@
 id: MYLA-397
 title: "A target's own platform module can't be tested on that target"
 type: bug
-status: review
+status: done
 priority: low
 labels: [testing, harness, platforms]
 ---
@@ -36,3 +36,7 @@ Not ready ([[Project/Review-2026-11-10]]): works only when the file and the libr
 - [x] The review's blocker, fixed with [[MYLA-418]]
 
   `native_tests` keys the harness where `for_target` reads the platform module, and `for_target` finds an override under any spelling (`override_text`): `./lib/std/platform_aarch64.my`, `lib/./std/…`, an absolute path, `--stdlib lib/`, `--stdlib ./lib`, `MYLA_STDLIB=$PWD/lib` and no `--stdlib` at all give `23/23 passed.` under qemu and `13/13 passed.` on wasm32 (were `the harness ended with status -11` and `internal error: wasm: myla_main … takes 2 words, called with 0`); `test_test_native.TestAarch64`/`TestWasm32.test_its_platform_module_however_the_paths_are_written`. `lib/std/platform.my --target wasm32-wasi` is now an error naming the target's own module.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-545]]: a library root or a file written with a leading `..` (`--stdlib ..` from `lib/std`) still fails with `duplicate method 'map'`: `in_stdlib` compares two relative paths as text.

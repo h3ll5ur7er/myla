@@ -4,9 +4,9 @@
 The checker keeps a literal column's open elements (those whose type had a
 hole, `None` before the `Some` that fixes `T`) and its literals (which a later
 element's type is given to, L2) in lists of its own, added to in place. They
-used to be fields of the column, a value copied at every element: 64,000
-`None`s and then a `Some(1)` took 40 seconds. Four times the elements must take
-about four times as long, not sixteen."""
+used to be fields of the column, a value copied at every element, so 64,000
+`None`s and then a `Some(1)` took quadratic time. Four times the elements must
+take about four times as long, not sixteen."""
 import os
 import subprocess
 import tempfile

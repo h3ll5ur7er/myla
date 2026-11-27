@@ -17,7 +17,9 @@ first (`captures`); the answers must be the same.
   RE2's Pike VM), so it checks the whole syntax, but for a literal `A`:
   go1.24's parser merges a case-sensitive `A` with a case-folded `a` that
   starts another alternative, and finds `A|(?i:a)c` in `acA` at 2-3, where
-  Python and `std.regex` find 0-2. The test skips without `go`.
+  Python and `std.regex` find 0-2. The test skips without `go`, but not
+  in CI, which installs Go and sets MYLA_REQUIRE_TARGETS: there
+  `GoOracle.test_go_is_there` fails without it (MYLA-555).
 - Python's `re` backtracks: it agrees only where no repetition can repeat
   an empty match, so its patterns repeat only what can't be empty, and `$`
   and `\\z` are written in its spelling. Backtracking takes exponential
@@ -29,16 +31,20 @@ self-hosted interpreter.
 """
 from __future__ import annotations
 
+import inspect
 import os
+import queue
 import random
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 DRIVER = """import std.regex as regex
@@ -266,21 +272,80 @@ def _too_slow(signum, frame) -> None:
 
 def python_answers(cases: list[tuple[str, bytes]]) -> list[str | None]:
     """`python_answer` of each case, None for one that takes more than 20 ms
-    (`re` checks for signals while it matches)."""
+    (`re` checks for signals while it matches; on Windows, which has no
+    SIGALRM, a child answers them, `_answers_of_a_child`)."""
+    if not hasattr(signal, "SIGALRM"):
+        return _answers_of_a_child(cases)
     old = signal.signal(signal.SIGALRM, _too_slow)
     out: list[str | None] = []
     try:
         for pattern, text in cases:
             signal.setitimer(signal.ITIMER_REAL, 0.02)
             try:
-                out.append(python_answer(pattern, text))
+                try:
+                    answer = python_answer(pattern, text)
+                finally:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
             except TooSlow:
-                out.append(None)
-            finally:
-                signal.setitimer(signal.ITIMER_REAL, 0)
+                # (also the alarm of a case at its limit, which may come as
+                # the timer is cleared: native aarch64, run 277, MYLA-926)
+                answer = None
+            out.append(answer)
     finally:
         signal.signal(signal.SIGALRM, old)
     return out
+
+
+# The child that answers cases for `_answers_of_a_child`: `python_answer`
+# of each line's pattern and text (in hex), a line each, after a first
+# line that says it is ready.
+_ANSWERER = ("import re, sys\n{source}\n"
+             "print('ready', flush=True)\n"
+             "for line in sys.stdin:\n"
+             "    pattern, _, text = line.strip().partition(':')\n"
+             "    print(python_answer(bytes.fromhex(pattern).decode(), bytes.fromhex(text)), flush=True)\n")
+
+
+def _lines_to(stream, lines: queue.Queue) -> None:
+    """Each line of `stream` to `lines`, to its end (then closed)."""
+    with stream:
+        for line in stream:
+            lines.put(line.rstrip("\n"))
+
+
+def _answers_of_a_child(cases: list[tuple[str, bytes]]) -> list[str | None]:
+    """`python_answers` without SIGALRM (Windows, MYLA-926): a child Python
+    answers each case, stopped, and another started, when an answer takes
+    more than 20 ms."""
+    script = _ANSWERER.format(source=inspect.getsource(python_answer))
+    out: list[str | None] = []
+    child = None
+    for pattern, text in cases:
+        if child is None:
+            child = subprocess.Popen([sys.executable, "-I", "-c", script], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, text=True)
+            answers: queue.Queue = queue.Queue()
+            threading.Thread(target=_lines_to, args=(child.stdout, answers), daemon=True).start()
+            assert answers.get(timeout=60) == "ready"
+        child.stdin.write(f"{pattern.encode().hex()}:{text.hex()}\n")
+        child.stdin.flush()
+        try:
+            out.append(answers.get(timeout=0.02))
+        except queue.Empty:
+            child.kill()
+            _ended(child)
+            child = None
+            out.append(None)
+    if child is not None:
+        _ended(child)
+    return out
+
+
+def _ended(child: subprocess.Popen) -> None:
+    """`child` waited for to its end, its input closed (its output closes
+    at its end, `_lines_to`)."""
+    child.stdin.close()
+    child.wait()
 
 
 def python_answer(pattern: str, text: bytes) -> str:
@@ -320,6 +385,15 @@ def python_answer(pattern: str, text: bytes) -> str:
     return "".join(out)
 
 
+@unittest.skipUnless(os.environ.get("MYLA_REQUIRE_TARGETS"), "MYLA_REQUIRE_TARGETS is not set")
+class GoOracle(unittest.TestCase):
+    """CI sets MYLA_REQUIRE_TARGETS, so the Go half below fails there
+    without `go` instead of skipping unnoticed (MYLA-555)."""
+
+    def test_go_is_there(self):
+        self.assertIsNotNone(shutil.which("go"), "the Go oracle needs go (CI's burn job installs it)")
+
+
 class RegexDifferentialTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -331,12 +405,15 @@ class RegexDifferentialTest(unittest.TestCase):
         if CAN_BUILD_NATIVE:
             asm = subprocess.run([selfhost_tool("gen_main"), cls.path, STDLIB_ROOT], capture_output=True, text=True,
                                  check=True)
-            exe = os.path.join(cls.tmp, "driver")
+            exe = os.path.join(cls.tmp, "driver" + EXE)
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm.stdout)
-            subprocess.run(["as", "--64", "-o", exe + ".o", exe + ".s"], check=True)
-            subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
+            assemble(exe + ".s", exe)   # for the machine (MYLA-926: Windows' too)
             cls.native = exe
+            # the same driver built checked, where an integer overflow is an error (D184, MYLA-550)
+            cls.checked = os.path.join(cls.tmp, "driver-checked" + EXE)
+            subprocess.run([selfhost_tool("main"), "build", cls.path, "-o", cls.checked, "--stdlib", STDLIB_ROOT,
+                            "--checked"], capture_output=True, check=True)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -347,15 +424,17 @@ class RegexDifferentialTest(unittest.TestCase):
             argv = [self.native]
         else:
             argv = [selfhost_tool("main"), "run", self.path, "--stdlib", STDLIB_ROOT]
-        proc = subprocess.run(argv, input="\n".join(lines) + "\n", capture_output=True, text=True, timeout=900)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        out = proc.stdout.splitlines()
+        # the lines as bytes: in text mode Windows would end each with CRLF,
+        # and the driver splits at LF (a `\r` left is no hex, MYLA-926)
+        proc = subprocess.run(argv, input=("\n".join(lines) + "\n").encode(), capture_output=True, timeout=900)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode(errors="replace"))
+        out = proc.stdout.decode().splitlines()
         self.assertEqual(len(out), len(lines))
         return out
 
     def go(self, lines: list[str]) -> list[str]:
         src = os.path.join(self.tmp, "gooracle")
-        exe = os.path.join(self.tmp, "gooracle-bin")
+        exe = os.path.join(self.tmp, "gooracle-bin" + EXE)
         if not os.path.exists(exe):
             os.makedirs(src, exist_ok=True)
             with open(os.path.join(src, "go.mod"), "w", encoding="utf-8") as fh:
@@ -404,6 +483,21 @@ class RegexDifferentialTest(unittest.TestCase):
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_python_natively(self) -> None:
         self.against_python(True, 4211, 10_000)
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_checked_natively(self) -> None:
+        # the plain and the checked build answer the same, counted
+        # repetitions such as `a{99999999999}` included
+        made = corpus(4214, 10_000, 0.75, python=True)
+        lines = [line(g, t) for g, _, t in made]
+        lines += [line(f"a{{{n}}}", b"aaa") for n in ("2147483647", "2147483648", "4294967296", "99999999999999999999")]
+        lines += [line(f"a{{1,{n}}}", b"aaa") for n in ("2147483647", "2147483648", "99999999999999999999")]
+        plain = self.myla(True, lines)
+        # (the lines as bytes, as `myla` gives them: MYLA-926)
+        proc = subprocess.run([self.checked], input=("\n".join(lines) + "\n").encode(), capture_output=True,
+                              timeout=900)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode(errors="replace"))
+        self.assertEqual(proc.stdout.decode().splitlines(), plain, "the plain and the checked build differ")
 
     @unittest.skipUnless(shutil.which("go"), "Go isn't installed")
     def test_go_interpreted(self) -> None:

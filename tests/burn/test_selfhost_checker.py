@@ -386,6 +386,10 @@ _COUNTER = ("struct Counter {\n    n: int,\n}\nimpl Counter {\n    fun bump(var 
             "    fun reset(var self) {\n        self.n = 0\n    }\n}\n")
 _STALL = "actor Stall {\n    items: [int],\n    c: Counter,\n}\nimpl Stall {\n"
 _SELL = "    async fun sell(var self, p: Pay) -> {ret} {{\n        if self.items.len() == 0 {{\n            return {none}\n        }}\n        let paid = await p.charge()\n{body}    }}\n}}\n"
+_TILL = "actor Till {\n    n: int,\n}\nimpl Till {\n    fun price(var self) -> int {\n        self.n += 1\n        return 0\n    }\n}\n"
+_SHOP = ("actor Shop {{\n    items: [int],\n    m: [int: int],\n}}\nimpl Shop {{\n    async fun sell(var self, t: Till) {{\n"
+         "        if self.items.len() == 0 {{\n            return\n        }}\n{body}    }}\n}}\n")
+_W = "warning: 'self.{f}' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"
 FIELD_MUTATOR_WARNINGS: dict[str, tuple[str, list[str]]] = {
     "pop_in_a_let": (_PAY + _COUNTER + _STALL + _SELL.format(ret="int", none="0", body="        let x = self.items.pop()\n        return x\n"),
         ["warn 32 31 32:17-32:33 warning: 'self.items' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]),
@@ -406,6 +410,18 @@ FIELD_MUTATOR_WARNINGS: dict[str, tuple[str, list[str]]] = {
         "    async fun sell(var self, p: Pay) -> int {\n        if self.items.len() == 0 {\n            return 0\n        }\n"
         "        let x = self.items.pop()\n        let paid = await p.charge()\n        return x\n    }\n}\n",
         []),
+    # MYLA-394's follow-up (the review of 2026-11-17): an `await` in the
+    # index or key of a plain assignment runs before the write, and a
+    # `defer` registered before an `await` runs after it
+    "await_in_the_index": (_TILL + _SHOP.format(body="        self.items[await t.price()] = 5\n"),
+        ["warn 19 19 19:9-19:36 WARN".replace("WARN", _W.format(f="items"))]),
+    "await_in_a_map_key": (_TILL + _SHOP.format(body="        self.m[await t.price()] = 5\n").replace("self.items.len() == 0", "self.m.contains(0)"),
+        ["warn 19 15 19:9-19:32 WARN".replace("WARN", _W.format(f="m"))]),
+    "defer_before_the_await": (_TILL + _SHOP.format(body="        defer {\n            let x = self.items.pop()\n        }\n        let c = await t.price()\n"),
+        ["warn 20 35 20:21-20:37 WARN".replace("WARN", _W.format(f="items"))]),
+    "quiet_defer_after_a_check_again": (_TILL + _SHOP.format(body="        defer {\n            let x = self.items.pop()\n        }\n        let c = await t.price()\n"
+                                                         "        if self.items.len() == 0 {\n            return\n        }\n"),
+        []),
 }
 
 # Verdicts a later decision changed from the retired Python checker's
@@ -424,10 +440,11 @@ SUPERSEDED: dict[str, str] = {
     # D162: an async function takes cases; an async method still doesn't
     "unit_test_165": "err 5 5 5:5-5:25 type: '#test' can't run an async method (test it through an async test function, D162)",
     # D161: a method takes '#allow' too
-    "unit_test_164": "err 5 5 5:5-5:10 type: attribute '#main' can't be applied to a method (a method takes only '#test' and '#allow')",
+    "unit_test_164": "err 5 5 5:5-5:10 type: attribute '#main' can't be applied to a method (a method takes only '#test', '#allow' and '#track_caller')",
     # D163 (MYLA-313): map keys are the Eq + Hash types; tuples and lists are Eq (and Hash) when
     # their elements are; Hash is derivable
-    "unit_test_76": "err 1 21 1:21-1:35 type: map key type must be Eq and Hash, found 'float64': 'float64' isn't Hash (NaN is unequal to itself)",
+    # (unit_test_76, a float key, was refused by D163; D198 (MYLA-586): floats are Hash)
+    "unit_test_76": "ok",
     "unit_test_144": "err 1 9 1:9-1:12 type: cannot derive 'Ord': only 'Eq', 'Hash', 'Json' and 'Toml' are derivable",
     "unit_test_156": "ok",
     # MYLA-379: a generic type derives `Eq` (its impl bounded by `T: Eq`)
@@ -441,6 +458,14 @@ SUPERSEDED: dict[str, str] = {
                     "err 4 9 4:9-4:20 type: return type mismatch: expected 'int32', found 'bool'\n"
                     "note 3 20 3:20-3:23: the return type is declared here",
     "unit_test_113": "ok",
+    # D257 (MYLA-790): a repeated impl's error names the other impl
+    "unit_test_8": "err 9 1 9:1-13:2 type: duplicate impl of trait 'Eq' for type 'S' (at most one user impl per trait/type pair)\n"
+                   "note 4 1 4:1-8:2: the other impl is here\n"
+                   "err 18 5 18:5-18:22 type: cannot assign value of type 'bool' to binding of type 'int32'",
+    "unit_test_100": "err 12 1 12:1-14:2 type: duplicate impl of trait 'Comparable' for type 'Money' (at most one user impl per trait/type pair)\n"
+                     "note 5 1 5:1-11:2: the other impl is here",
+    "unit_test_145": "err 4 1 4:1-4:49 type: duplicate impl of trait 'T' for type 'S' (at most one user impl per trait/type pair)\n"
+                     "note 3 1 3:1-3:49: the other impl is here",
 }
 
 def _corpus() -> list[str]:

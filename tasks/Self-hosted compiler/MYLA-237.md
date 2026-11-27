@@ -29,7 +29,7 @@ fun main() {
 }
 ```
 
-- [x] Both backends copy a receiver or argument read from a variable that a later argument may write, when it is evaluated: `_aliased_args` in [[src/myla/compiler/codegen_x86.py]] (direct and indirect calls; `_may_write` now sees a method call in the code generator's form, `T.m(recv, args)`), `later_writes` and `stage` in `direct_call` and `indirect_call` of [[selfhost/lower.my]]
+- [x] Both backends copy a receiver or argument read from a variable that a later argument may write, when it is evaluated: `_aliased_args` in `src/myla/compiler/codegen_x86.py` (direct and indirect calls; `_may_write` now sees a method call in the code generator's form, `T.m(recv, args)`), `later_writes` and `stage` in `direct_call` and `indirect_call` of [[selfhost/lower.my]]
 - [x] The Python interpreter likewise for function and closure calls (`_eval_args`); a method's arguments were copied already
 - [x] A parity program in all four runners, its output pinned; [[Language/Expressions-and-operators]] says it
 
@@ -46,3 +46,5 @@ The fix found the bug wider than reported. On the program `argument_values_befor
 After: all four print 102, 102, 102, 10506, 102, 102 (pinned by `TestArgumentOrder` in `tests/unit/test_interpreter.py`; the parity test compares the native binary with the interpreter). The self-hosted compiler grows by 16 KB (6,194,029 to 6,210,821 bytes: its own source has such calls, now copying); a self-compile takes the same time (1.03–1.10 s before, 1.01–1.05 s after, three runs each).
 
 Unit 627, integration 2, burn 836 (5 skipped) and the extension's 54 tests pass on commit 2f49187; the bootstrap reaches its byte-identical fixed point (6,210,821 bytes).
+
+*Historical paths ([[MYLA-800]]): the `src/myla/` and `tests/unit/` files this task names were the Python toolchain's, removed by D101 ([[MYLA-219]]); the tag `python-toolchain-final` keeps them.*

@@ -48,14 +48,31 @@ pub fun type_args(t: str) -> [str] {
     return split_top(part(t, i + 1, t.len() - 1), ',')
 }
 
-// The element of a list type, the value of a map type: what indexing gives.
+// The element of a list type, the value of a map type, a string's byte:
+// what indexing gives.
 #test("[P]")["P"]
 #test("[str: [int]]")["[int]"]
+#test("str")["uint8"]
 #test("P")[""]
 pub fun index_of(t: str) -> str {
+    if t == "str" { return "uint8" }
     if t.len() < 2 || t[0] != '[' || t[t.len() - 1] != ']' { return "" }
     let parts = split_top(part(t, 1, t.len() - 1), ':')
     return parts[parts.len() - 1]
+}
+
+// The type a literal's suffix names (`5i64`, `2.0f32`).
+#test("i64")["int64"]
+#test("u8")["uint8"]
+#test("f32")["float32"]
+#test("f64")["float64"]
+pub fun suffix_type(s: str) -> str {
+    if s.len() < 2 { return s }
+    let bits = s[1:]
+    if s[0] == 'i' { return "int" + bits }
+    if s[0] == 'u' { return "uint" + bits }
+    if s[0] == 'f' { return "float" + bits }
+    return s
 }
 
 // What `for x in` a value of type `t` binds: a list's element, a map's key.

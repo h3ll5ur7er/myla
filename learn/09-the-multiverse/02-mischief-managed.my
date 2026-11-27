@@ -1,0 +1,20 @@
+// title: Mischief Managed
+// xp: 20
+// hidden: opens #test("i solemnly swear that i am up to no good")[true]
+// hidden: opens #test("I solemnly swear that I am up to good")[false]
+// hint: Two phrases are "the same" here if they have the same words, whatever their case and spacing.
+// hint: Bring both sides to one form before comparing: one method lowers the case, another breaks text into words without empty ones, and a list of strings can be joined again.
+//
+// The Marauder's Map only opens for the right words. Harry, under the
+// Invisibility Cloak at two in the morning, doesn't always say them with
+// perfect capitals and spacing, and the map should forgive him.
+//
+// Make `opens` accept the phrase whatever its case, with any spaces
+// before, after and between the words. A wrong word still keeps the map
+// blank: it's a magical map, not a fool.
+#test("I solemnly swear that I am up to no good")[true]
+#test("  I SOLEMNLY swear   that I am up to no good ")[true]
+#test("I solemnly swear that I am up to no harm")[false]
+fun opens(words: str) -> bool {
+    return words == "I solemnly swear that I am up to no good"
+}

@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, SKIP_REASON, assemble, shown
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 PROGRAM = """// MYLA-162's prototype: string concatenation and equality written in Myla
@@ -141,15 +141,14 @@ class RawMemory(unittest.TestCase):
             path = os.path.join(tmp, "concat.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(PROGRAM)
-            exe = os.path.join(tmp, "concat")
+            exe = os.path.join(tmp, "concat" + EXE)
             # a program may call them only for the toolchain's tests
             # (`--primitives`; the review of 2026-11-06, R4)
             asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT, "--primitives"], capture_output=True,
                                  text=True, check=True).stdout
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm)
-            subprocess.run(["as", "--64", "-o", exe + ".o", exe + ".s"], check=True)
-            subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
+            assemble(exe + ".s", exe)   # for the machine (MYLA-926: Windows' too)
             outs = [subprocess.run([exe, mode], capture_output=True, text=True).stdout
                     for mode in ("asm", "myla", "intrinsic")]
             self.assertEqual(outs, ["1360000\n8000\n"] * 3)
@@ -178,6 +177,43 @@ class RawMemory(unittest.TestCase):
             self.assertNotEqual(ran.returncode, 0)
             self.assertIn("reads or writes raw memory: only the standard library may call it", ran.stderr)
 
+    def test_a_programs_own_std_directory_is_the_programs(self):
+        # MYLA-584: the checker took any function named `std$…` for the
+        # library's, so a module of the program's own `std/` (`std$raw`)
+        # called a raw-memory primitive with no type error and a `__`
+        # primitive with no warning; it is the program's, as under `other/`.
+        # Since D255 the loader refuses a `std/` at the program's root, so
+        # `sub/std/` stands for it: a folder named `std` below the root
+        raw = "pub fun peek(s: str) -> int64 {\n    let p = __addr_of(s)\n    return __load64(p)\n}\n"
+        helper = 'pub fun say() {\n    let n = __write(1, "hi\\n")\n}\n'
+        for directory in ("sub/std", "other"):
+            with self.subTest(directory=directory), tempfile.TemporaryDirectory() as tmp:
+                os.makedirs(os.path.join(tmp, directory))
+                for name, text in (("raw.my", raw), ("helper.my", helper)):
+                    with open(os.path.join(tmp, directory, name), "w", encoding="utf-8") as fh:
+                        fh.write(text)
+                cases = (
+                    ("raw.my", f"from .{directory.replace('/', '.')}.raw import peek\nfun main() {{\n    print(peek(\"abcdefgh\") != 0)\n}}\n"),
+                    ("helper.my", f"from .{directory.replace('/', '.')}.helper import say\nfun main() {{\n    say()\n}}\n"),
+                )
+                for module, main in cases:
+                    path = os.path.join(tmp, "main.my")
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(main)
+                    ran = subprocess.run([selfhost_tool("main"), "check", path, "--stdlib", STDLIB_ROOT],
+                                         capture_output=True, text=True)
+                    where = shown(os.path.join(tmp, directory, module))   # (as myla writes it)
+                    if module == "raw.my":
+                        self.assertEqual(ran.returncode, 1, ran.stderr)
+                        self.assertTrue(ran.stderr.startswith("type error: '__addr_of' reads or writes raw memory: "
+                                                              f"only the standard library may call it\n  --> {where}:2:13\n"),
+                                        ran.stderr)
+                    else:
+                        self.assertEqual(ran.returncode, 0, ran.stderr)
+                        self.assertTrue(ran.stderr.startswith("warning[primitive]: '__write' is a primitive of the "
+                                                              "standard library, not meant to be called from a program\n"
+                                                              f"  --> {where}:2:13\n"), ran.stderr)
+
     def test_native_code_concatenates_with_the_runtime_in_myla(self):
         # `+` and `==` on strings call std.rt's functions (MYLA-162; a
         # standard library without std/rt.my gets the embedded one, see
@@ -189,8 +225,9 @@ class RawMemory(unittest.TestCase):
                 fh.write(source)
             asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,
                                  check=True).stdout
-            self.assertIn("call myla_std$rt$str_concat", asm)
-            self.assertIn("call myla_std$rt$str_eq", asm)
+            call = "bl" if HOST_TARGET == "aarch64-linux" else "call"   # the machine's call
+            self.assertIn(f"{call} myla_std$rt$str_concat", asm)
+            self.assertIn(f"{call} myla_std$rt$str_eq", asm)
 
 
 if __name__ == "__main__":

@@ -92,7 +92,7 @@ The tests pin the outputs of the reference C code (`splitmix64.c`, `xoshiro256st
 
 ## Speed
 
-Measured natively on x86-64, best of five runs:
+Measured natively on x86-64, best of five runs (2026-11-08, `a1e0269`):
 
 | Work | Time |
 | --- | --- |

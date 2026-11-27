@@ -1,0 +1,12 @@
+//~ type error: integer literal 300 does not fit in 'uint8'
+//~ span: 300
+// A literal inside `Some(…)`, a tuple or a list left of `==` takes the type
+// of the other side, as a bare literal does (MYLA-544, MYLA-609): here
+// `uint8`, which 300 doesn't fit. `Some(1) == Some(b)` checks.
+fun same(b: uint8) -> bool {
+    return Some(300) == Some(b)
+}
+
+fun main() {
+    print(same(1))
+}

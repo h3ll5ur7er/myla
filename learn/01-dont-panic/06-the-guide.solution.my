@@ -1,0 +1,10 @@
+fun main() {
+    let planet = "Earth"
+    let entry = "Mostly harmless."
+    let light_years = 42
+    let travellers = 5
+    let per_towel = 2
+    print(f"{planet}: {entry}")
+    print(f"Distance: {light_years * 1000} light years")
+    print(f"Towels needed: {(travellers + per_towel - 1) / per_towel}")
+}

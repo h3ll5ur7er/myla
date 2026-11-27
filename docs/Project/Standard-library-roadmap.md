@@ -172,7 +172,7 @@ Three questions for the owner are worth deciding before the first module is writ
 
 - **Library lanes:** modules in Myla under `lib/std/`, one task each. Each task owns its files, so many of them run at once.
 - **The compiler track:** tasks that change `selfhost/`. They run one at a time, because they share the checker and the lowering. MYLA-310 is the exception: it changes only the map routines (`std.rt`, the lowering's `map_remove`, the interpreter's maps), so it can run beside MYLA-320.
-- **The platform track:** tasks that add primitives. Each changes the three platform modules, the primitive tables, the three backends and the interpreter, and needs a seed staging commit (D156). They run one at a time.
+- **The platform track:** tasks that add primitives. Each changes the three platform modules, the primitive tables, the three backends and the interpreter, and needs a seed staging commit (a `Stage:` commit, D207). They run one at a time.
 
 | Wave | Library lanes, in parallel | Compiler track | Platform track |
 | --- | --- | --- | --- |
@@ -181,6 +181,7 @@ Three questions for the owner are worth deciding before the first module is writ
 | 3 Streams and the middle tier | [[MYLA-337]], [[MYLA-339]] and [[MYLA-340]] (after MYLA-336 and MYLA-338), [[MYLA-341]], [[MYLA-342]] (after MYLA-330), [[MYLA-343]], [[MYLA-344]], [[MYLA-345]] | [[MYLA-353]] (a decision); the fixes the lanes needed, [[MYLA-360]], [[MYLA-367]], [[MYLA-374]], [[MYLA-375]] | [[MYLA-378]] (what the lanes found missing) |
 | 4 Networks and larger formats | [[MYLA-347]] (after MYLA-346), [[MYLA-348]], [[MYLA-349]], [[MYLA-351]], [[MYLA-352]], [[MYLA-354]] (a decision) | | [[MYLA-346]], then [[MYLA-350]] |
 | 5 Small modules (2026-11-09) | [[MYLA-402]] (#55), [[MYLA-403]] (#67), [[MYLA-404]] (#32) | [[MYLA-396]], [[MYLA-359]] (check time) | |
+| 6 Images, vision and fonts (D313, 2026-11-24) | [[MYLA-956]] (decided), then [[MYLA-957]] to [[MYLA-971]] in the order of [[Project/Standard-library-roadmap/Images-vision-and-fonts#The plan]] | | |
 | Later | No tasks yet: #10, #39, #40 | | |
 
 A wave's lanes start once the previous wave's pull request is merged. A lane whose task needs nothing may start earlier, while an agent is free: MYLA-327, MYLA-328, MYLA-329, MYLA-335 and MYLA-338 need nothing at all.
@@ -203,12 +204,12 @@ The integrator, one agent per wave:
 1. Merges the lanes' branches into the wave's branch in task order, and resolves the index rows.
 2. Replaces the private helpers with the modules that now exist.
 3. Runs the whole suite (`scripts/test.sh`).
-4. Makes the one seed commit (`scripts/update-seed.sh`, D156) and opens one pull request for the wave.
+4. Commits `selfhost/embedded_std.my`, and a new seed only when the old one can't bootstrap the sources (D207, which replaced D156's seed in every pull request), and opens one pull request for the wave.
 
-Compiler and platform tasks have their own pull requests, each with its seed commit, and the wave's branch merges master after each one.
+Compiler and platform tasks have their own pull requests, staging a seed when the library is about to use what they add, and the wave's branch merges master after each one.
 
 ## Left out
 
-- **Graphics, audio, GUI and databases.** These are packages for the project tool ([[Architecture/Project-tool]]), not std.
+- **Graphics, audio, GUI and databases.** These are packages for the project tool ([[Architecture/Project-tool]]), not std. Image files, image processing, 2D drawing and fonts are pure computation, and are std modules by D313 ([[Project/Standard-library-roadmap/Images-vision-and-fonts]], [[MYLA-956]]). Displays, windows and the GUI stay out either way.
 - **A full YAML, XML Schema or HTTP/2.** Each would be a size 8. The subsets above cover the common use.
 - **Dynamic dispatch for streams** (`[Box<dyn Read>]`). Myla has no trait objects ([[Language/Methods-and-traits]]). Generic adapters and an enum of known stream kinds cover the cases seen so far.

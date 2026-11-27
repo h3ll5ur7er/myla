@@ -12,12 +12,13 @@
 from std.io import stdin
 from std.json import Json, field
 from std.fs import read_to_string
-from ...selfhost.loader import load_program_opts, normalize, type_errors, warning_reports, source_text, in_stdlib
+from ...selfhost.loader import load_program_opts, for_host, normalize, type_errors, warning_reports, source_text, in_stdlib
 from ...selfhost.diag import Report, all_reports, caret_range, warning_name
 from ...selfhost.checker import build_checker_lazy
 from ...selfhost.tokens import SrcSpan
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
-from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
+from .text import lines_of, to_lsp, word_end, uri_path, path_uri, drive_upper, Pos
+import std.path_style as style
 from .symbols import Symbol, SymKind, Range, document_symbols, outline, best_match, lsp_kind, start_key, is_member_kind, kind_eq
 from .features import Location, identifier_at, identifier_ranges, render, is_member_access, completion_keywords, lexes, completion_attempts
 from .workspace import Workspace, Entry, new_workspace
@@ -54,7 +55,8 @@ struct Resolved { text: str, stamp: int, res: Resolution }
 struct Good { text: str, symbols: [Symbol] }
 
 pub fun new_server(stdlib: str) -> Server {
-    return Server { ch: Channel { input: stdin() }, stdlib: stdlib, docs: [:], dirty: [], urgent: false,
+    // a drive spelled as the documents' (MYLA-938): an editor may write `c:\`
+    return Server { ch: Channel { input: stdin() }, stdlib: drive_upper(stdlib, style.WINDOWS), docs: [:], dirty: [], urgent: false,
                     elsewhere: [:], shut_down: false, ws: new_workspace(), good: [:], resolved: [:], known: [:], stamp: 0 }
 }
 
@@ -196,7 +198,8 @@ impl Server {
         var found: Option<Report> = None
         // the warnings of a program that checks (D95)
         var warned: [Report] = []
-        match load_program_opts(path, ctx.opts) {
+        // with the host's own modules, as `myla check` (MYLA-723)
+        match load_program_opts(path, for_host(path, ctx.opts)) {
             Err(r) => { found = Some(r) },
             Ok(prog) => {
                 // a file of the standard library may use its primitives (D152)
@@ -412,17 +415,18 @@ impl Server {
             Some(n) => n,
             None => { return Json.Null },
         }
+        let names = self.spellings()
         match self.resolved_at(d, pos) {
-            Some(def) => { return location(def.path, def.range) },
+            Some(def) => { return location(def.path, def.range, names) },
             None => {},
         }
         match best_match(d.symbols, ident) {
-            Some(s) => { return location(d.path, s.selection) },
+            Some(s) => { return location(d.path, s.selection, names) },
             None => {},
         }
         let matches = self.ws.lookup(ident, self.overrides(), self.context(d.path).package_dirs)
         if matches.len() == 0 { return Json.Null }
-        return location(matches[0].path, matches[0].range)
+        return location(matches[0].path, matches[0].range, names)
     }
 
     fun hover(var self, params: Json) -> Json {
@@ -517,12 +521,13 @@ impl Server {
         }
         var seen: [str: bool] = [:]
         for x in decls { seen[f"{x.path}:{start_key(x.range)}"] = true }
+        let names = self.spellings()
         var out: [Json] = []
         for l in found {
             let key = f"{l.path}:{start_key(l.range)}"
             if !seen.contains(key) {
                 seen[key] = true
-                out.push(location(l.path, l.range))
+                out.push(location(l.path, l.range, names))
             }
         }
         return Json.Array(out)
@@ -624,6 +629,18 @@ impl Server {
             }
         }
         return Completion { found: false, member: false, known: false, items: [] }
+    }
+
+    // The client's URI of each open document, by its path (normalized): the
+    // spelling to name the file in (MYLA-938: a file has more than one, and
+    // VS Code on Windows writes a drive `file:///c%3A/…`).
+    fun spellings(self) -> [str: str] {
+        var out: [str: str] = [:]
+        for u in self.docs.keys() {
+            let p = uri_path(u)
+            if p != "" { out[normalize(p)] = u }
+        }
+        return out
     }
 
     // The URI to publish an error in `file` under: the checked document's
@@ -817,7 +834,8 @@ fun workspace_roots(params: Json) -> [str] {
         let p = uri_path(str_field(params, "rootUri"))
         if p != "" { roots.push(normalize(p)) }
     }
-    if roots.len() == 0 && str_field(params, "rootPath") != "" { roots.push(normalize(str_field(params, "rootPath"))) }
+    let root_path = str_field(params, "rootPath")
+    if roots.len() == 0 && root_path != "" { roots.push(normalize(drive_upper(root_path, style.WINDOWS))) }
     return roots
 }
 
@@ -834,8 +852,14 @@ fun range_json(r: Range) -> Json {
     return Json.Object([("start", position(r.start)), ("end", position(r.end))])
 }
 
-fun location(path: str, r: Range) -> Json {
-    return Json.Object([("uri", Json.Str(path_uri(path))), ("range", range_json(r))])
+// A Location in the file `path`: under the client's URI of it when it is an
+// open document (`spellings`), else one made from the path.
+fun location(path: str, r: Range, spellings: [str: str]) -> Json {
+    let uri = match spellings.get(normalize(path)) {
+        Some(u) => u,
+        None => path_uri(path),
+    }
+    return Json.Object([("uri", Json.Str(uri)), ("range", range_json(r))])
 }
 
 // The symbols whose parent is `parent`, as DocumentSymbols with their members.

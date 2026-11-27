@@ -21,24 +21,50 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, shown
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
-# a runtime error inside a body of std.option, which the loader reads late:
-# its message names the place in the library's file
+# a runtime error inside a body of std.list, which the loader reads late:
+# its message names the place in the library's file (std.option's `expect`
+# reports its caller's position since MYLA-435)
 PANIC = """fun main() {
     let xs = [3, 1, 2]
     print(xs.sorted()[0])
-    let o: Option<int> = None
-    print(o.expect("boom"))
+    let n = 0
+    print(xs.chunks(n).len())
 }
 """
 
 # the examples built for the other targets too (all of them build for x86-64)
 OTHER_TARGETS = ["aarch64-linux", "wasm32-wasi"]
 ON_EVERY_TARGET = ["hello.my", "maps.my", "strings.my", "slices_and_formats.my", "traits_on_builtins.my"]
+
+
+def _named(path: str) -> str:
+    """`path` as an outcome's key names it: relative to the checkout, with
+    `/`; as it is when it can't be (on Windows the temporary directory may
+    be on another drive, MYLA-926)."""
+    try:
+        return os.path.relpath(path, _REPO).replace(os.sep, "/")
+    except ValueError:
+        return path
+
+
+def _strings_apart(carried: object, parsed: object) -> str:
+    """For two builds' outcomes that differ, the printable strings of each
+    binary the other hasn't, which name what put them apart (a path in
+    another spelling, say: on Windows 8.3's `RUNNER~1` and `runneradmin`,
+    MYLA-926); "" for outcomes without binaries."""
+    if not (isinstance(carried, tuple) and len(carried) == 2 and isinstance(carried[1], bytes)
+            and isinstance(parsed, tuple) and len(parsed) == 2 and isinstance(parsed[1], bytes)):
+        return ""
+    import re
+    def strings(b: bytes) -> set[bytes]:
+        return set(re.findall(rb"[ -~]{6,}", b))
+    a, b = strings(carried[1]), strings(parsed[1])
+    return f"only with the cache: {sorted(a - b)[:8]}; only without: {sorted(b - a)[:8]}"
 
 
 def _programs() -> list[str]:
@@ -90,23 +116,24 @@ class WithAndWithoutTheCache(unittest.TestCase):
         builds += [(os.path.join(_REPO, "examples", e), t) for e in ON_EVERY_TARGET for t in OTHER_TARGETS]
         builds += [(cls.panic, None)]
         for path, target in builds:
-            exe = os.path.join(bins, "prog")
+            # (a program for this machine is run: on Windows an .exe)
+            exe = os.path.join(bins, "prog" + (EXE if target is None else ""))
             if os.path.exists(exe):
                 os.remove(exe)
             args = ["build", path, "-o", exe] + (["--target", target] if target else [])
             result = cls._run(args)
             with open(exe, "rb") as fh:
                 binary = fh.read()
-            out[f"build {os.path.relpath(path, _REPO)} {target or 'x86_64-linux'}"] = (result, binary)
+            out[f"build {_named(path)} {target or 'x86_64-linux'}"] = (result, binary)
             if path == cls.panic:
                 p = subprocess.run([exe], capture_output=True, text=True)
-                out["panic native"] = (p.returncode, p.stdout, p.stderr.replace(cls.lib, "LIB"))
+                out["panic native"] = (p.returncode, p.stdout, p.stderr.replace(shown(cls.lib), "LIB"))
         out["panic run"] = cls._run(["run", cls.panic])
         for path in sorted(glob.glob(os.path.join(_REPO, "examples", "errors", "*.my"))):
-            out[f"check {os.path.relpath(path, _REPO)}"] = cls._run(["check", path])
+            out[f"check {_named(path)}"] = cls._run(["check", path])
             with open(path, encoding="utf-8") as fh:
                 if "runtime error" in fh.readline():
-                    out[f"run {os.path.relpath(path, _REPO)}"] = cls._run(["run", path])
+                    out[f"run {_named(path)}"] = cls._run(["run", path])
         return out
 
     def _same(self, prefix: str) -> None:
@@ -114,7 +141,7 @@ class WithAndWithoutTheCache(unittest.TestCase):
         self.assertTrue(keys)
         for k in keys:
             with self.subTest(k):
-                self.assertEqual(self.carried[k], self.parsed[k])
+                self.assertEqual(self.carried[k], self.parsed[k], _strings_apart(self.carried[k], self.parsed[k]))
 
     def test_the_programs_build_to_the_same_bytes(self):
         for k, (result, binary) in ((k, v) for k, v in self.carried.items() if k.startswith("build")):
@@ -129,7 +156,7 @@ class WithAndWithoutTheCache(unittest.TestCase):
     def test_an_error_in_a_body_read_late_is_at_its_place(self):
         code, out, err = self.carried["panic run"]
         self.assertEqual((code, out), (1, "1\n"))
-        self.assertRegex(err, r"^runtime error: boom\n  --> .*/std/option\.my:\d+:\d+\n")
+        self.assertRegex(err, r"^runtime error: chunks: size 0 isn't positive\n  --> .*/std/list\.my:\d+:\d+\n")
         self._same("panic")
 
 

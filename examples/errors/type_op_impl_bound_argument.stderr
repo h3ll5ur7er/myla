@@ -1,0 +1,5 @@
+type error: type 'W<A>' does not satisfy the bound 'T: Mul<float64>' required by 'scale': 'A' isn't Conv<str> (it implements 'Conv<int32>')
+  --> examples/errors/type_op_impl_bound_argument.my:37:18
+   |
+37 |     let r = scale(W { v: A { n: 1 } })
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -2,7 +2,7 @@
 id: MYLA-422
 title: "P8 HTTP and URL: chunk sizes, timeouts, replay, resolution"
 type: bug
-status: review
+status: done
 priority: high
 labels: [std, http, url, security, round-5]
 ---
@@ -48,3 +48,7 @@ Work package P8 of [[Project/Review-2026-11-09]] (wave A2). Files: `lib/std/http
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-549]]: a request that has begun holds a worker for `read_ms` (with [[MYLA-468]]); four client behaviours (`Proxy-Authorization` across hosts, a redirect's fragment, unbounded `100 Continue`, two `Host` fields written).

@@ -4,7 +4,8 @@
 // contents as a `str` or an `IoError` describing why it failed. Errors are
 // carried in a `Result`, so callers compose them with `?` (D16/D36). The
 // underlying open/read/close go through the platform layer (`std.platform`),
-// natively and in the interpreter alike, with one errno-keyed error mapping.
+// natively and in the interpreter alike, with one error mapping: the cause
+// codes the primitives give (`from_cause`, D209).
 //
 // `File` (MYLA-339) is a descriptor opened by path, a stream of `std.io`'s
 // `Read`, `Write` and `Seek`, which this module imports from there; the
@@ -13,10 +14,12 @@
 
 from .io import Read, Write, Seek, SeekFrom, Pollable, buffered, buffered_writer, copy
 import .bytes as bytes_m // `from_str`, `to_str`: a `File`'s bytes
+import .path_style as style // `WINDOWS` (D215)
 
 // `IoError` and its functions are std.ioerror's (MYLA-432), re-exported
 // here, where programs have always imported them.
 pub from .ioerror import IoError, from_errno, io_error_name
+from .ioerror import from_cause, ALREADY_EXISTS, IS_A_DIRECTORY
 
 // Read the entire file at `path` into a string. On success the bytes are
 // returned verbatim (as UTF-8 text); on failure an `IoError` is returned.
@@ -26,7 +29,7 @@ pub fun read_to_string(path: str) -> Result<str, IoError> {
     if err == 0 {
         return Ok(data)
     }
-    return Err(from_errno(err))
+    return Err(from_cause(err))
 }
 
 // Write `contents` to `path`, creating or truncating the file (mode 0644). The
@@ -40,7 +43,7 @@ pub fun write_to_file(path: str, contents: str) -> Result<(), IoError> {
     if err == 0 {
         return Ok(())
     }
-    return Err(from_errno(err))
+    return Err(from_cause(err))
 }
 
 // The bytes of the file at `path`, all of them (MYLA-339's follow-up):
@@ -62,33 +65,40 @@ pub fun write_bytes(path: str, b: [uint8]) -> Result<(), IoError> {
 // `__list_dir(path)` gives every name the directory lists, each followed by a
 // NUL byte, in the file system's order ("." and ".." may be among them);
 // `__mkdir(path, mode)` makes one directory; `__stat(path)` gives the
-// `st_mode` of what the path names (symbolic links followed), or -1, and
-// `__path_stat(path, follow)` its size, mode, modification time, device and
-// number, of a symbolic link itself when not `follow`, without opening it
+// kind of what the path names (symbolic links followed), or -1, and
+// `__path_stat(path, follow)` its size, kind, permissions, modification
+// time, device and number, of a symbolic link itself when not `follow`,
+// without opening it
 // (MYLA-378, MYLA-363); `__getcwd()` gives the working directory, or ""
 // (MYLA-98); `__unlink(path)`, `__rmdir(path)` and `__rename(from, to)`
 // remove a file (or a symbolic link itself), remove an empty directory and
-// rename (MYLA-96). Each sets the errno that `__io_errno` reads.
+// rename (MYLA-96). Each sets the cause code that `__io_errno` reads
+// (std.ioerror's, D209).
 //
 // `tests/burn/test_fs.py` covers them on every target, and the test functions
 // at the end of this file use them (`myla test` runs only the cases of the
 // file it is given, not those of the modules it links).
 
-const S_IFMT: int32 = 0xF000
-const S_IFDIR: int32 = 0x4000
-const S_IFREG: int32 = 0x8000
-const S_IFLNK: int32 = 0xA000
+// The kinds `__stat` and `__path_stat` give: std.platform's KIND_FILE, …
+// (D209; tests/burn/test_platform_interface.py holds them to it).
+const KIND_FILE: int64 = 1
+const KIND_DIR: int64 = 2
+const KIND_SYMLINK: int64 = 3
+const KIND_CHAR_DEVICE: int64 = 4
+const KIND_BLOCK_DEVICE: int64 = 5
+const KIND_FIFO: int64 = 6
+const KIND_SOCKET: int64 = 7
 
 // The working directory, as an absolute path without symbolic links (the
-// kernel's getcwd, through the primitive `__getcwd`, MYLA-98). A directory
-// that was removed is `NotFound`.
+// kernel's getcwd, through the primitive `__getcwd`, MYLA-98; Windows' own
+// path there, `C:\Users\me`). A directory that was removed is `NotFound`.
 pub fun current_dir() -> Result<str, IoError> {
     let dir = __getcwd()
     let err = __io_errno()
     if err == 0 {
         return Ok(dir)
     }
-    return Err(from_errno(err))
+    return Err(from_cause(err))
 }
 
 // The names of the entries of the directory `path`, without "." and "..",
@@ -98,7 +108,7 @@ pub fun list_dir(path: str) -> Result<[str], IoError> {
     let raw = __list_dir(path)
     let err = __io_errno()
     if err != 0 {
-        return Err(from_errno(err))
+        return Err(from_cause(err))
     }
     return Ok(sorted_names(split_names(raw)))
 }
@@ -111,16 +121,21 @@ pub fun make_dir(path: str) -> Result<(), IoError> {
     if err == 0 {
         return Ok(())
     }
-    return Err(from_errno(err))
+    return Err(from_cause(err))
 }
 
 // Make the directory `path` and the parents it lacks, like `mkdir -p`. A
 // directory that exists already is fine; a file at `path` is
 // `AlreadyExists`, and a file where a parent should be is `NotADirectory`.
+// On Windows a `\` separates too, and a UNC share is where it starts
+// (`share_end`).
 pub fun make_dir_all(path: str) -> Result<(), IoError> {
     var i = 1
+    if style.WINDOWS {
+        i = share_end(path)
+    }
     while i <= path.len() {
-        if i == path.len() || path[i] == '/' {
+        if i == path.len() || path[i] == '/' || (style.WINDOWS && path[i] == '\\') {
             var sb = StringBuilder()
             sb.append(path, 0, i)
             let prefix = sb.build()
@@ -133,7 +148,46 @@ pub fun make_dir_all(path: str) -> Result<(), IoError> {
     if is_dir(path) {
         return Ok(())
     }
-    return Err(from_errno(17))
+    return Err(IoError.AlreadyExists)
+}
+
+// Where the directories of the Windows path `p` start that `make_dir_all`
+// may make: after its UNC server and share (`\\srv\share`, `\\?\C:`,
+// `\\?\UNC\srv\share`), which are none, as std.path's prefix reads them;
+// else at 1 (a drive's `C:` is one: its working directory). std.path itself
+// isn't imported, for what it would add to checking every program that
+// imports this module.
+#test("C:\\a\\b")[1]
+#test("\\\\srv\\share\\a")[11]
+#test("//srv/share")[11]
+#test("\\\\?\\C:\\a")[6]
+#test("\\\\?\\unc\\srv\\share\\a")[17]
+#test("\\\\srv")[5]
+fun share_end(p: str) -> int {
+    let n = p.len()
+    if n < 2 || !is_sep(p[0]) || !is_sep(p[1]) {
+        return 1
+    }
+    // `\\?\UNC\` has two separators more before its server
+    var want = 2
+    if n >= 8 && p[2] == '?' && is_sep(p[3]) && (p[4] | 32) == 'u' && (p[5] | 32) == 'n' && (p[6] | 32) == 'c' && is_sep(p[7]) {
+        want = 4
+    }
+    var seen = 0
+    for i in 2..n {
+        if is_sep(p[i]) {
+            seen += 1
+            if seen == want {
+                return i
+            }
+        }
+    }
+    return n
+}
+
+// Whether `c` is one of Windows' separators.
+fun is_sep(c: uint8) -> bool {
+    return c == '/' || c == '\\'
 }
 
 // Remove the file `path` (a symbolic link is removed itself, not what it
@@ -153,14 +207,14 @@ pub fun remove_dir(path: str) -> Result<(), IoError> {
 // Remove `path` and, for a directory, everything in it, like `rm -r`. A
 // symbolic link is removed, not followed, even one naming a directory.
 pub fun remove_dir_all(path: str) -> Result<(), IoError> {
-    // a file or a link goes at once; a directory is EISDIR
+    // a file or a link goes at once; a directory is IS_A_DIRECTORY
     __unlink(path)
     let err = __io_errno()
     if err == 0 {
         return Ok(())
     }
-    if err != 21 {
-        return Err(from_errno(err))
+    if err != IS_A_DIRECTORY {
+        return Err(from_cause(err))
     }
     for name in list_dir(path)? {
         remove_dir_all(path + "/" + name)?
@@ -181,7 +235,7 @@ fun io_result() -> Result<(), IoError> {
     if err == 0 {
         return Ok(())
     }
-    return Err(from_errno(err))
+    return Err(from_cause(err))
 }
 
 // Whether `path` names something that exists (a dangling symbolic link
@@ -192,21 +246,19 @@ pub fun exists(path: str) -> bool {
 
 // Whether `path` names a directory (or a symbolic link to one).
 pub fun is_dir(path: str) -> bool {
-    let mode = __stat(path)
-    return mode >= 0 && (mode & S_IFMT) == S_IFDIR
+    return __stat(path) as int64 == KIND_DIR
 }
 
 // Whether `path` names a regular file (or a symbolic link to one).
 pub fun is_file(path: str) -> bool {
-    let mode = __stat(path)
-    return mode >= 0 && (mode & S_IFMT) == S_IFREG
+    return __stat(path) as int64 == KIND_FILE
 }
 
 // Whether `path` names a symbolic link (itself, not what it names: a
 // dangling one too), MYLA-363.
 pub fun is_symlink(path: str) -> bool {
     let st = __path_stat(path, false)
-    return st.len() == 5 && ((st[1] as int32) & S_IFMT) == S_IFLNK
+    return st.len() == 6 && st[1] == KIND_SYMLINK
 }
 
 // The names in `raw`, each followed by a NUL byte, without "." and "..".
@@ -275,7 +327,7 @@ fun sorted_names(names: [str]) -> [str] {
 // `__open(path, flags, mode)` opens a descriptor with Myla's own flags, the
 // same on every target (the constants below); `__read`, `__write`,
 // `__seek`, `__fstat` and `__close` work on it (MYLA-336). Each sets the
-// errno `__io_errno` reads (`__close` since MYLA-378).
+// cause `__io_errno` reads (`__close` since MYLA-378).
 
 const O_READ: int32 = 1
 const O_WRITE: int32 = 2
@@ -283,6 +335,8 @@ const O_CREATE: int32 = 4
 const O_TRUNCATE: int32 = 8
 const O_APPEND: int32 = 16
 const O_EXCLUSIVE: int32 = 32
+const O_NONBLOCKING: int32 = 64
+const O_NO_FOLLOW: int32 = 128
 
 // An open file: a descriptor of the platform, read and written at its
 // cursor. It is unbuffered: each `read` and `write` is a system call, so put
@@ -293,7 +347,7 @@ const O_EXCLUSIVE: int32 = 32
 // is a value holding a handle into the runtime's table (D181), and a copy
 // holds the same one, the same descriptor with the same cursor (the
 // platform keeps it). `close` closes it for every copy: each later
-// operation through any of them is `Other(9)` (EBADF), also once a file
+// operation through any of them is `Other(9)` (BAD_HANDLE), also once a file
 // opened later got the descriptor, and so is one through a `File` built by
 // hand.
 pub struct File {
@@ -336,7 +390,7 @@ pub fun open_append(path: str) -> Result<File, IoError> {
 fun open_fd(path: str, flags: int32, mode: int32) -> Result<File, IoError> {
     let fd = __open(path, flags, mode)
     if fd < 0 {
-        return Err(from_errno(__io_errno()))
+        return Err(from_cause(__io_errno()))
     }
     return Ok(File { fd: fd })
 }
@@ -395,6 +449,24 @@ impl OpenOptions {
         return OpenOptions { bits: with_bit(self.bits, O_EXCLUSIVE, on), perms: self.perms }
     }
 
+    // Open without waiting for what the path names to be ready (MYLA-842):
+    // a FIFO opens at once, with no writer yet, where an open would wait
+    // for one (O_NONBLOCK; a regular file reads and writes as ever).
+    // Windows has no FIFOs in its file system: nothing changes there.
+    #test(options(), true)[OpenOptions { bits: 64, perms: 0o644 }]
+    fun nonblocking(self, on: bool) -> OpenOptions {
+        return OpenOptions { bits: with_bit(self.bits, O_NONBLOCKING, on), perms: self.perms }
+    }
+
+    // Don't follow a symbolic link at the path's end (MYLA-842): a link
+    // there fails the open with `Other(40)` (Linux's ELOOP) on every target
+    // (O_NOFOLLOW; on Windows the reparse point opened itself and refused
+    // when it is a link). The links before the end are followed.
+    #test(options(), true)[OpenOptions { bits: 128, perms: 0o644 }]
+    fun no_follow(self, on: bool) -> OpenOptions {
+        return OpenOptions { bits: with_bit(self.bits, O_NO_FOLLOW, on), perms: self.perms }
+    }
+
     // The permissions of a file `open` creates (less the umask; unused on
     // wasm32, which has none).
     #test(options(), 0o600)[OpenOptions { bits: 0, perms: 0o600 }]
@@ -446,22 +518,22 @@ impl File {
     // The file's size, kind, permissions and modification time now.
     fun metadata(self) -> Result<Metadata, IoError> {
         let st = __fstat(handle_of(self))
-        if st.len() != 3 {
-            return Err(from_errno(__io_errno()))
+        if st.len() != 4 {
+            return Err(from_cause(__io_errno()))
         }
-        return Ok(metadata_of(st[0], st[1] as int32, st[2]))
+        return Ok(metadata_of(st[0], st[1], st[2] as int32, st[3]))
     }
 
     // Close the file. Every later operation on it, and a second `close`,
-    // is `Other(9)` (EBADF); data the system couldn't keep is `Other(5)`
-    // (EIO). The descriptor is closed even then.
+    // is `Other(9)` (BAD_HANDLE); data the system couldn't keep is
+    // `Other(5)` (EIO). The descriptor is closed even then.
     fun close(var self) -> Result<(), IoError> {
         let fd = handle_of(self)
         self.fd = -1
         __close(fd)
         let err = __io_errno()
         if err != 0 {
-            return Err(from_errno(err))
+            return Err(from_cause(err))
         }
         return Ok(())
     }
@@ -476,7 +548,7 @@ impl Read for File {
         let chunk = __read_bytes(handle_of(self), n)
         let err = __io_errno()
         if err != 0 {
-            return Err(from_errno(err))
+            return Err(from_cause(err))
         }
         return Ok(chunk)
     }
@@ -489,7 +561,7 @@ impl Write for File {
         __write_bytes(handle_of(self), b)
         let err = __io_errno()
         if err != 0 {
-            return Err(from_errno(err))
+            return Err(from_cause(err))
         }
         return Ok(b.len())
     }
@@ -510,7 +582,7 @@ impl Seek for File {
         }
         let r = __seek(handle_of(self), offset, whence)
         if r < 0 {
-            return Err(from_errno(__io_errno()))
+            return Err(from_cause(__io_errno()))
         }
         return Ok(r)
     }
@@ -539,7 +611,8 @@ pub enum FileKind {
 }
 
 // What the file system knows of a file: its size in bytes, its kind, its
-// permission bits (`mode & 0o7777`) and when it was last changed, in
+// permission bits (POSIX's `0o7777`; what the platform makes of its own
+// where it has none, D209) and when it was last changed, in
 // nanoseconds since 1970 (`std.time.from_unix_ns` makes a `DateTime` of it).
 #derive(Eq)
 pub struct Metadata {
@@ -551,22 +624,22 @@ pub struct Metadata {
 
 impl Metadata {
     // Whether it is a regular file.
-    #test(metadata_of(3, 0o100644, 0))[true]
-    #test(metadata_of(0, 0o40755, 0))[false]
+    #test(metadata_of(3, 1, 0o644, 0))[true]
+    #test(metadata_of(0, 2, 0o755, 0))[false]
     fun is_file(self) -> bool {
         return self.kind == FileKind.File
     }
 
     // Whether it is a directory.
-    #test(metadata_of(0, 0o40755, 0))[true]
-    #test(metadata_of(3, 0o100644, 0))[false]
+    #test(metadata_of(0, 2, 0o755, 0))[true]
+    #test(metadata_of(3, 1, 0o644, 0))[false]
     fun is_dir(self) -> bool {
         return self.kind == FileKind.Dir
     }
 
     // Whether it is a symbolic link (only `symlink_metadata` gives one).
-    #test(metadata_of(4, 0o120777, 0))[true]
-    #test(metadata_of(3, 0o100644, 0))[false]
+    #test(metadata_of(4, 3, 0o777, 0))[true]
+    #test(metadata_of(3, 1, 0o644, 0))[false]
     fun is_symlink(self) -> bool {
         return self.kind == FileKind.Symlink
     }
@@ -589,39 +662,222 @@ pub fun symlink_metadata(path: str) -> Result<Metadata, IoError> {
 // `metadata` or `symlink_metadata`, from `__path_stat`.
 fun stat_of(path: str, follow: bool) -> Result<Metadata, IoError> {
     let st = __path_stat(path, follow)
-    if st.len() != 5 {
-        return Err(from_errno(__io_errno()))
+    if st.len() != 6 {
+        return Err(from_cause(__io_errno()))
     }
-    return Ok(metadata_of(st[0], st[1] as int32, st[2]))
+    return Ok(metadata_of(st[0], st[1], st[2] as int32, st[3]))
 }
 
-// The metadata `__fstat`'s three values (`[size, mode, mtime]`) make.
-#test(5, 0o100600, 7)[Metadata { size: 5, kind: FileKind.File, permissions: 0o600, modified_ns: 7 }]
-#test(0, 0o41777, 0)[Metadata { size: 0, kind: FileKind.Dir, permissions: 0o1777, modified_ns: 0 }]
-fun metadata_of(size: int64, mode: int32, modified_ns: int64) -> Metadata {
-    return Metadata { size: size, kind: kind_of(mode), permissions: mode & 0o7777, modified_ns: modified_ns }
+// The metadata `__fstat`'s four values (`[size, kind, permissions, mtime]`)
+// make, and the first four of `__path_stat`'s.
+#test(5, 1, 0o600, 7)[Metadata { size: 5, kind: FileKind.File, permissions: 0o600, modified_ns: 7 }]
+#test(0, 2, 0o1777, 0)[Metadata { size: 0, kind: FileKind.Dir, permissions: 0o1777, modified_ns: 0 }]
+fun metadata_of(size: int64, kind: int64, permissions: int32, modified_ns: int64) -> Metadata {
+    return Metadata { size: size, kind: kind_of(kind), permissions: permissions, modified_ns: modified_ns }
 }
 
-// The kind the type bits of `mode` name (wasm32's made-up 0o644 has none:
+// The `FileKind` of the platform's kind `k` (KIND_UNKNOWN and KIND_OTHER:
 // `Other`).
-#test(0o100644)[FileKind.File]
-#test(0o40755)[FileKind.Dir]
-#test(0o20666)[FileKind.CharDevice]
-#test(0o60660)[FileKind.BlockDevice]
-#test(0o10644)[FileKind.Fifo]
-#test(0o140755)[FileKind.Socket]
-#test(0o120777)[FileKind.Symlink]
-#test(0o644)[FileKind.Other]
-fun kind_of(mode: int32) -> FileKind {
-    let t = mode & S_IFMT
-    if t == S_IFREG { return FileKind.File }
-    if t == S_IFDIR { return FileKind.Dir }
-    if t == S_IFLNK { return FileKind.Symlink }
-    if t == 0x2000 { return FileKind.CharDevice }
-    if t == 0x6000 { return FileKind.BlockDevice }
-    if t == 0x1000 { return FileKind.Fifo }
-    if t == 0xC000 { return FileKind.Socket }
+#test(1)[FileKind.File]
+#test(2)[FileKind.Dir]
+#test(4)[FileKind.CharDevice]
+#test(5)[FileKind.BlockDevice]
+#test(6)[FileKind.Fifo]
+#test(7)[FileKind.Socket]
+#test(3)[FileKind.Symlink]
+#test(8)[FileKind.Other]
+#test(0)[FileKind.Other]
+fun kind_of(k: int64) -> FileKind {
+    if k == KIND_FILE { return FileKind.File }
+    if k == KIND_DIR { return FileKind.Dir }
+    if k == KIND_SYMLINK { return FileKind.Symlink }
+    if k == KIND_CHAR_DEVICE { return FileKind.CharDevice }
+    if k == KIND_BLOCK_DEVICE { return FileKind.BlockDevice }
+    if k == KIND_FIFO { return FileKind.Fifo }
+    if k == KIND_SOCKET { return FileKind.Socket }
     return FileKind.Other
+}
+
+// --- Where a symbolic link leads (MYLA-841) ----------------------------------------
+
+// What the symbolic link `path` holds: the path it leads to as written in
+// it (relative to the link's directory, or absolute), without following it
+// (readlink(2); on Windows a symbolic link's or a junction's target, D215's
+// UTF-8). A path that names no link is `InvalidInput`, a missing one
+// `NotFound`.
+pub fun read_link(path: str) -> Result<str, IoError> {
+    let target = __read_link(path)
+    let err = __io_errno()
+    if err != 0 {
+        return Err(from_cause(err))
+    }
+    return Ok(target)
+}
+
+// The absolute path of what `path` names, without a symbolic link, `.` or
+// `..` (realpath(3), MYLA-841): a relative path taken from the working
+// directory, each link on the way read and followed (a relative one from
+// its own directory), `..` after a link taken off what the link led to.
+// Everything on the way must be there: a missing part is `NotFound`, a
+// part that isn't a directory before the end `NotADirectory`, more than
+// LINKS_MAX links (a loop) `Other(40)`, Linux's ELOOP, on every target. On
+// Windows it is Windows' own path, as `current_dir` gives it (`C:\www\a.css`,
+// `\\server\share\a.css`; `\x` on the working directory's drive), its
+// names spelled as written: a link that names a directory in another case
+// leads to another spelling of it.
+pub fun canonical(path: str) -> Result<str, IoError> {
+    let win = style.WINDOWS
+    if path == "" {
+        return Err(IoError.NotFound)
+    }
+    var full = path
+    if !rooted(path, win) {
+        full = joined(current_dir()?, path)
+    } else if win && is_sep(path[0]) && (path.len() == 1 || !is_sep(path[1])) {
+        // `\x`: on the working directory's drive
+        let cwd = current_dir()?
+        if cwd.len() >= 2 && cwd[1] == ':' {
+            full = cwd[:2] + path
+        }
+    }
+    let start = split_root(full, win)
+    var root = start.0
+    var done: [str] = []
+    var rest = pushed_back([], start.1, win)
+    var links = 0
+    while rest.len() > 0 {
+        let part = rest.pop()
+        if part == "" || part == "." {
+            continue
+        }
+        if part == ".." {
+            if done.len() > 0 {
+                let up = done.pop()
+            }
+            continue
+        }
+        done.push(part)
+        let at = spelled(root, done, win)
+        let m = symlink_metadata(at)?
+        if m.kind == FileKind.Symlink {
+            links += 1
+            if links > LINKS_MAX {
+                return Err(from_cause(LINK_LOOP))
+            }
+            let target = read_link(at)?
+            let gone = done.pop()
+            if rooted(target, win) {
+                let r = split_root(target, win)
+                root = r.0
+                done = []
+                rest = pushed_back(rest, r.1, win)
+            } else {
+                rest = pushed_back(rest, target, win)
+            }
+        } else if m.kind != FileKind.Dir && rest.len() > 0 {
+            return Err(IoError.NotADirectory)
+        }
+    }
+    return Ok(spelled(root, done, win))
+}
+
+// The most symbolic links `canonical` follows (Linux's MAXSYMLINKS), and
+// the cause past them (OTHER plus ELOOP, as std.ioerror numbers it).
+const LINKS_MAX: int32 = 40
+const LINK_LOOP: int32 = 296
+
+// Whether `p` starts at a root: `/`, and on Windows (`win`) `\`, a drive
+// (`C:`) or a share.
+#test("/a", false)[true]
+#test("a/b", false)[false]
+#test("\\a", false)[false]
+#test("C:\\a", true)[true]
+#test("c:a", true)[true]
+#test("\\a", true)[true]
+#test("a\\b", true)[false]
+fun rooted(p: str, win: bool) -> bool {
+    if p.len() > 0 && (p[0] == '/' || (win && p[0] == '\\')) {
+        return true
+    }
+    return win && p.len() >= 2 && p[1] == ':' && ((p[0] | 32) >= 'a' && (p[0] | 32) <= 'z')
+}
+
+// The root of the rooted path `p` and the rest after it: `/`, and on
+// Windows (`win`) a drive's (`C:\`, also for `C:x` and `\\?\C:\`) or a
+// share's (`\\server\share\`, also for `\\?\UNC\server\share\`), its
+// separators Windows'.
+#test("/a/b", false)[("/", "a/b")]
+#test("//a", false)[("/", "/a")]
+#test("C:\\a\\b", true)[("C:\\", "a\\b")]
+#test("c:/a", true)[("c:\\", "a")]
+#test("C:", true)[("C:\\", "")]
+#test("\\\\srv\\share\\a", true)[("\\\\srv\\share\\", "a")]
+#test("//srv/share", true)[("\\\\srv\\share\\", "")]
+#test("\\\\?\\C:\\a", true)[("C:\\", "a")]
+#test("\\\\?\\UNC\\srv\\share\\a", true)[("\\\\srv\\share\\", "a")]
+#test("\\a", true)[("\\", "a")]
+fun split_root(p: str, win: bool) -> (str, str) {
+    if !win {
+        return ("/", p[1:])
+    }
+    if p.len() >= 2 && p[1] == ':' {
+        let rest = if p.len() > 2 && is_sep(p[2]) { p[3:] } else { p[2:] }
+        return (p[:2] + "\\", rest)
+    }
+    if p.len() >= 2 && is_sep(p[0]) && is_sep(p[1]) {
+        if p.len() >= 7 && p[2] == '?' && is_sep(p[3]) && p[5] == ':' {
+            return split_root(p[4:], win)
+        }
+        let end = share_end(p)
+        let start = if end > 2 && p[2] == '?' { 8 } else { 2 }
+        var share = StringBuilder()
+        share.append("\\\\", 0, 2)
+        for i in start..end {
+            share.append_byte(if is_sep(p[i]) { '\\' } else { p[i] })
+        }
+        share.append_byte('\\')
+        let rest = if end < p.len() { p[end + 1:] } else { "" }
+        return (share.build(), rest)
+    }
+    return ("\\", p[1:])
+}
+
+// `rest`, the parts still to resolve last first, with the parts of `p`
+// (split on `/`, and on Windows on `\` too) put before them.
+#test(["c"], "a/b", false)[["c", "b", "a"]]
+#test([], "a\\b", true)[["b", "a"]]
+#test([], "a\\b", false)[["a\\b"]]
+fun pushed_back(rest: [str], p: str, win: bool) -> [str] {
+    var out = rest
+    var end = p.len()
+    var i = p.len() - 1
+    while i >= -1 {
+        if i < 0 || p[i] == '/' || (win && p[i] == '\\') {
+            out.push(p[i + 1:end])
+            end = i
+        }
+        i -= 1
+    }
+    return out
+}
+
+// The path of `root` and the parts `done` after it, joined with the
+// system's separator.
+#test("/", ["a", "b"], false)["/a/b"]
+#test("/", [], false)["/"]
+#test("C:\\", ["a", "b"], true)["C:\\a\\b"]
+fun spelled(root: str, done: [str], win: bool) -> str {
+    var sb = StringBuilder()
+    sb.append(root, 0, root.len())
+    var first = true
+    for part in done {
+        if !first {
+            sb.append_byte(if win { '\\' } else { '/' })
+        }
+        sb.append(part, 0, part.len())
+        first = false
+    }
+    return sb.build()
 }
 
 // --- Temporary files and directories (MYLA-339) ---------------------------------
@@ -637,22 +893,43 @@ fun kind_of(mode: int32) -> FileKind {
 const TEMP_TRIES: int32 = 100
 
 // The directory for temporary files: `$TMPDIR` when it is set and not
-// empty, else `/tmp`, without a trailing `/`.
+// empty, else `/tmp`, without a trailing `/`. On Windows the first of
+// `%TMPDIR%`, `%TEMP%` and `%TMP%` set, else the working directory (`.`),
+// without a trailing `/` or `\`.
 pub fun temp_root() -> str {
-    return root_of(__getenv("TMPDIR"))
+    if style.WINDOWS {
+        for name in ["TMPDIR", "TEMP", "TMP"] {
+            let dir = __getenv(name)
+            if dir != "" {
+                return root_of(dir, true)
+            }
+        }
+        return root_of("", true)
+    }
+    return root_of(__getenv("TMPDIR"), false)
 }
 
-// The temporary root `$TMPDIR` names.
-#test("")["/tmp"]
-#test("/var/tmp")["/var/tmp"]
-#test("/var/tmp//")["/var/tmp"]
-#test("/")["/"]
-fun root_of(env: str) -> str {
+// The temporary root the variable's value `env` names (Windows' when
+// `win`).
+#test("", false)["/tmp"]
+#test("/var/tmp", false)["/var/tmp"]
+#test("/var/tmp//", false)["/var/tmp"]
+#test("/", false)["/"]
+#test("C:\\Temp\\", false)["C:\\Temp\\"]
+#test("C:\\Temp\\/", true)["C:\\Temp"]
+#test("C:\\", true)["C:\\"]
+#test("", true)["."]
+fun root_of(env: str, win: bool) -> str {
     if env == "" {
-        return "/tmp"
+        return if win { "." } else { "/tmp" }
+    }
+    // the root stays: `/`, a drive's `C:\`
+    var floor = 1
+    if win && env.len() >= 3 && env[1] == ':' && (env[2] == '/' || env[2] == '\\') {
+        floor = 3
     }
     var end = env.len()
-    while end > 1 && env[end - 1] == '/' {
+    while end > floor && (env[end - 1] == '/' || (win && env[end - 1] == '\\')) {
         end -= 1
     }
     // not a slice, which links `std.slice`: its own harness links this
@@ -690,7 +967,7 @@ pub fun make_temp_file_in(dir: str, prefix: str) -> Result<(str, File), IoError>
 
 // `make` tried on `dir`/`prefix` and a suffix from `suffix` (given the
 // try's number), again while the name is taken: the path made and what
-// `make` gave (at least 0; -1 with the errno for a failure).
+// `make` gave (at least 0; -1 with the cause for a failure).
 fun make_unique(dir: str, prefix: str, suffix: (int32) -> Result<str, IoError>, make: (str) -> int32) -> Result<(str, int32), IoError> {
     var k = 0
     while true {
@@ -700,15 +977,15 @@ fun make_unique(dir: str, prefix: str, suffix: (int32) -> Result<str, IoError>, 
             return Ok((path, r))
         }
         let err = __io_errno()
-        if err != 17 || k + 1 >= TEMP_TRIES {
-            return Err(from_errno(err))
+        if err != ALREADY_EXISTS || k + 1 >= TEMP_TRIES {
+            return Err(from_cause(err))
         }
         k += 1
     }
     unreachable()
 }
 
-// Make the directory `path`, mode 0700: 0, or -1 with the errno.
+// Make the directory `path`, mode 0700: 0, or -1 with the cause.
 fun mkdir_fd(path: str) -> int32 {
     __mkdir(path, 0o700)
     if __io_errno() == 0 {
@@ -718,7 +995,7 @@ fun mkdir_fd(path: str) -> int32 {
 }
 
 // Create the file `path` (it mustn't be there), mode 0600, open to read and
-// write: its descriptor, or -1 with the errno.
+// write: its descriptor, or -1 with the cause.
 fun new_file_fd(path: str) -> int32 {
     return __open(path, O_READ | O_WRITE | O_CREATE | O_EXCLUSIVE, 0o600)
 }
@@ -727,13 +1004,15 @@ fun new_file_fd(path: str) -> int32 {
 fun random_suffix() -> Result<str, IoError> {
     let b = __random_bytes(8)
     if b.len() != 8 {
-        return Err(from_errno(__io_errno()))
+        return Err(from_cause(__io_errno()))
     }
     return Ok(hex_of(b))
 }
 
 // The bytes `b` as hexadecimal digits, two each: std.encoding's
-// `hex_encode`, which would add 2.5 ms to checking every program using std.io.
+// `hex_encode`, whose import would add 1.4 M instructions (3.4 %) to
+// checking a program that imports std.fs, for the names of temporary files
+// (measured in November 2026 with the lazy modules, MYLA-553).
 #test([0u8, 15u8, 160u8, 255u8])["000fa0ff"]
 fun hex_of(b: [uint8]) -> str {
     let digits = "0123456789abcdef"
@@ -746,17 +1025,27 @@ fun hex_of(b: [uint8]) -> str {
 }
 
 // `name` in the directory `dir`.
-#test("/tmp", "a")["/tmp/a"]
-#test("/", "a")["/a"]
-#test("", "a")["a"]
 fun joined(dir: str, name: str) -> str {
+    return joined_on(dir, name, style.WINDOWS)
+}
+
+// `name` in the directory `dir`, on Windows when `win` (a directory ending
+// in `\` too, joined with `\`, MYLA-722).
+#test("/tmp", "a", false)["/tmp/a"]
+#test("/", "a", false)["/a"]
+#test("", "a", false)["a"]
+#test("C:\\Temp", "a", true)["C:\\Temp\\a"]
+#test("C:\\", "a", true)["C:\\a"]
+#test("C:/t/", "a", true)["C:/t/a"]
+#test("a\\", "b", false)["a\\/b"]
+fun joined_on(dir: str, name: str, win: bool) -> str {
     if dir == "" {
         return name
     }
-    if dir[dir.len() - 1] == '/' {
+    if dir[dir.len() - 1] == '/' || (win && dir[dir.len() - 1] == '\\') {
         return dir + name
     }
-    return dir + "/" + name
+    return dir + (if win { "\\" } else { "/" }) + name
 }
 
 // --- Test functions (D162) ----------------------------------------------------------
@@ -879,8 +1168,9 @@ fun open_options() -> Result<(), IoError> {
     rw.close()?
     assert(read_to_string(path)? == "abcdXY", "written at the cursor")
     let m = metadata(path)?
-    // wasm32 has no permissions: the mode it reads is made up from the kind
-    assert(m.permissions == 0o600 || m.permissions == 0o644, "the mode of a new file")
+    // wasm32 has no permissions: the mode it reads is made up from the kind;
+    // Windows' is its read-only attribute's (D218)
+    assert(m.permissions == 0o600 || m.permissions == 0o644 || (style.WINDOWS && m.permissions == 0o666), "the mode of a new file")
     assert(error_of(options().write(true).create_new(true).open(path)) == "AlreadyExists", "create_new of a file that's there")
     var t = options().write(true).truncate(true).open(path)?
     t.close()?
@@ -944,6 +1234,41 @@ fun metadata_of_paths() -> Result<(), IoError> {
     return Ok(())
 }
 
+// Where a path leads with no link on the way (MYLA-841): absolute, without
+// `.` or `..`; a missing part `NotFound` (one that `..` would take off
+// too), a file before the end `NotADirectory`; `read_link` of what is no
+// link `InvalidInput`. tests/burn/test_fs.py follows links.
+#test
+fun canonical_paths() -> Result<(), IoError> {
+    let dir = canonical(make_temp_dir()?)?
+    defer { let gone = remove_dir_all(dir) }
+    make_dir(joined(dir, "a"))?
+    write_to_file(joined(dir, "f"), "x")?
+    assert(canonical(dir + "/a/../f")? == joined(dir, "f"), "`..` taken off")
+    assert(canonical(dir + "/./a/")? == joined(dir, "a"), "`.` and a trailing separator")
+    assert(canonical(dir + "/a/../../" + dir_name(dir) + "/f")? == joined(dir, "f"), "up and back")
+    assert(error_of(canonical(dir + "/nothing/../f")) == "NotFound", "a missing part")
+    assert(error_of(canonical(dir + "/f/x")) == "NotADirectory", "a file before the end")
+    assert(error_of(canonical(dir + "/f/")) == "NotADirectory", "a file as a directory")
+    assert(error_of(canonical("")) == "NotFound", "no path")
+    assert(canonical(".")? == canonical(current_dir()?)?, "the working directory")
+    assert(error_of(read_link(dir + "/f")) == "InvalidInput", "a file is no link")
+    assert(error_of(read_link(dir + "/a")) == "InvalidInput", "nor a directory")
+    assert(error_of(read_link(dir + "/nothing")) == "NotFound", "nothing")
+    return Ok(())
+}
+
+// The last part of the path `p` (after its last separator).
+#test("/a/b")["b"]
+#test("C:\\a\\b")["b"]
+fun dir_name(p: str) -> str {
+    var i = p.len() - 1
+    while i >= 0 && !is_sep(p[i]) {
+        i -= 1
+    }
+    return p[i + 1:]
+}
+
 // Temporary names are new each time, under the root, and taken ones are
 // tried again.
 #test
@@ -969,7 +1294,7 @@ fun temporary_names() -> Result<(), IoError> {
     // a name that's taken is tried again with the next suffix
     make_dir(a + "/x-0")?
     let made = make_unique(a, "x-", (k: int32) => Ok(f"{k}"), (p: str) => mkdir_fd(p))?
-    assert(made.0 == a + "/x-1", "the second name")
+    assert(made.0 == joined(a, "x-1"), "the second name")
     let failed = make_unique(a, "x-", (k: int32) => Ok("0"), (p: str) => mkdir_fd(p))
     assert(error_of(failed) == "AlreadyExists", "gives up on a name always taken")
     assert(error_of(make_temp_dir_in(a + "/none", "y")) == "NotFound", "in a missing directory")

@@ -98,7 +98,7 @@ Updates are top-down, in one pass: an insert splits a full child before it enter
 
 ## Speed
 
-Measured natively on x86-64, best of five runs, with a million random `int` keys (a few repeat):
+Measured natively on x86-64, best of five runs, with a million random `int` keys (a few repeat), 2026-11-08, `d0e4f0c`:
 
 | Work | Time |
 | --- | --- |

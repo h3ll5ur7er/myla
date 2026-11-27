@@ -1,0 +1,22 @@
+//~ type error: type 'B<str>' does not satisfy the bound 'D: Index<int32, int32>' required by 'first': it implements 'Index<int32, str>'
+//~ span: first(B { v: 1 }, B { v: "a" })
+// A type parameter only operator bounds name is fixed by the impl each
+// argument's type has (D200, MYLA-802): `B<int32>`'s indexing makes `T`
+// an `int32`, so `B<str>`'s, which gives a `str`, doesn't meet `D`'s bound.
+struct B<T> {
+    v: T,
+}
+
+impl<T> Index<int, T> for B<T> {
+    fun index(self, i: int) -> T {
+        return self.v
+    }
+}
+
+fun first<C: Index<int, T>, D: Index<int, T>, T>(c: C, d: D) -> T {
+    return c[0]
+}
+
+fun main() {
+    print(first(B { v: 1 }, B { v: "a" }))
+}

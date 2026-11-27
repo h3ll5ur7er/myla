@@ -1,0 +1,128 @@
+// std.vector and std.matrix against the same work written by hand (MYLA-587):
+// each pair computes the same value, the library's way and with plain loops
+// over `[float]`, so the difference is what the library's shape costs.
+// `build/myla build benchmarks/linalg_std.my -o /tmp/linalg && /tmp/linalg`
+// (natively; `myla run` times the interpreter). The numbers are on
+// Language/Standard-library/Matrix and Vector.
+import std.bench as bench
+from std.bench import Report
+from std.vector import Vec4, Vector, vec4, vector
+from std.matrix import Mat4, Matrix, mat4, matrix
+
+// A 4x4 matrix, column-major, its elements 1.0 / (i + 1) apart.
+fun mat_data(seed: float) -> [float] {
+    var d: [float] = []
+    for i in 0..16 { d.push(seed + (i as float) * 0.25) }
+    return d
+}
+
+fun mat4_of(d: [float]) -> Mat4 {
+    return mat4(vec4(d[0], d[1], d[2], d[3]), vec4(d[4], d[5], d[6], d[7]), vec4(d[8], d[9], d[10], d[11]), vec4(d[12], d[13], d[14], d[15]))
+}
+
+// `a * b` for 4x4 matrices stored column by column in 16 floats, by hand.
+#test([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0])[[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]]
+fun mul_by_hand(a: [float], b: [float]) -> [float] {
+    var out: [float] = []
+    var j = 0
+    while j < 4 {
+        var i = 0
+        while i < 4 {
+            var acc = 0.0
+            var k = 0
+            while k < 4 {
+                acc += a[k * 4 + i] * b[j * 4 + k]
+                k += 1
+            }
+            out.push(acc)
+            i += 1
+        }
+        j += 1
+    }
+    return out
+}
+
+// The dot product of two lists of the same length, by hand.
+#test([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])[32.0]
+fun dot_by_hand(a: [float], b: [float]) -> float {
+    var acc = 0.0
+    var i = 0
+    while i < a.len() {
+        acc += a[i] * b[i]
+        i += 1
+    }
+    return acc
+}
+
+// `a + b` by element, by hand.
+#test([1.0, 2.0], [3.0, 4.0])[[4.0, 6.0]]
+fun add_by_hand(a: [float], b: [float]) -> [float] {
+    var out: [float] = []
+    var i = 0
+    while i < a.len() {
+        out.push(a[i] + b[i])
+        i += 1
+    }
+    return out
+}
+
+// `n` floats from `seed` on, a quarter apart.
+#test(1.0, 3)[[1.0, 1.25, 1.5]]
+fun floats(seed: float, n: int) -> [float] {
+    var d: [float] = []
+    for i in 0..n { d.push(seed + (i as float) * 0.25) }
+    return d
+}
+
+// `m * v` written on the fields, by hand.
+#test(mat4(vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(0.0, 0.0, 1.0, 0.0), vec4(2.0, 3.0, 4.0, 1.0)), vec4(1.0, 1.0, 1.0, 1.0))[vec4(3.0, 4.0, 5.0, 1.0)]
+fun mat_vec_by_hand(m: Mat4, v: Vec4) -> Vec4 {
+    return Vec4 {
+        x: m.x_axis.x * v.x + m.y_axis.x * v.y + m.z_axis.x * v.z + m.w_axis.x * v.w,
+        y: m.x_axis.y * v.x + m.y_axis.y * v.y + m.z_axis.y * v.z + m.w_axis.y * v.w,
+        z: m.x_axis.z * v.x + m.y_axis.z * v.y + m.z_axis.z * v.z + m.w_axis.z * v.w,
+        w: m.x_axis.w * v.x + m.y_axis.w * v.y + m.z_axis.w * v.z + m.w_axis.w * v.w,
+    }
+}
+
+fun show(r: Report) {
+    print(r.line())
+}
+
+fun main() {
+    let da = mat_data(1.0)
+    let db = mat_data(2.0)
+    let ma = mat4_of(da)
+    let mb = mat4_of(db)
+    let xa = matrix(4, 4, da)
+    let xb = matrix(4, 4, db)
+    // the three agree before they are timed
+    let by_hand = mul_by_hand(da, db)
+    let lib = ma * mb
+    if (xa * xb).data != by_hand || lib.x_axis.x != by_hand[0] || lib.w_axis.w != by_hand[15] {
+        panic("the 4x4 products differ")
+    }
+    show(bench.run("Mat4 * Mat4", () => ma * mb))
+    show(bench.run("Matrix * Matrix (4x4)", () => xa * xb))
+    show(bench.run("4x4 product by hand ([float])", () => mul_by_hand(da, db)))
+
+    let n = 1000
+    let fa = floats(1.0, n)
+    let fb = floats(-3.0, n)
+    let va = vector(fa)
+    let vb = vector(fb)
+    if va.dot(vb) != dot_by_hand(fa, fb) || (va + vb).data != add_by_hand(fa, fb) {
+        panic("the vector results differ")
+    }
+    show(bench.run("Vector.dot (1000)", () => va.dot(vb)))
+    show(bench.run("dot by hand (1000)", () => dot_by_hand(fa, fb)))
+    show(bench.run("Vector + Vector (1000)", () => va + vb))
+    show(bench.run("add by hand (1000)", () => add_by_hand(fa, fb)))
+
+    let u = vec4(1.0, 2.0, 3.0, 4.0)
+    let w = vec4(0.5, -1.0, 2.0, 0.25)
+    show(bench.run("Vec4.dot", () => u.dot(w)))
+    if ma * u != mat_vec_by_hand(ma, u) { panic("the matrix-vector products differ") }
+    show(bench.run("Mat4 * Vec4", () => ma * u))
+    show(bench.run("Mat4 * Vec4 by hand (fields)", () => mat_vec_by_hand(ma, u)))
+}

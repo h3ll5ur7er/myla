@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, READS_X86, X86_REASON
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 _COMMON = """#derive(Eq)
@@ -344,6 +344,7 @@ class RegisterArguments(unittest.TestCase):
         return subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT, "--no-inline"], capture_output=True, text=True,
                               check=True).stdout
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_arguments_travel_in_registers(self):
         asm = self.asm(SYNC)
         # six words and fewer: nothing pushed, nothing read above the frame
@@ -356,12 +357,13 @@ class RegisterArguments(unittest.TestCase):
         main = _function(asm, "main")
         self.assertRegex(main, r"call myla_w7\n\taddq \$8, %rsp")
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_become_reuses_the_frame(self):
         asm = self.asm(SYNC)
         # a tail call of the function itself loops back to its entry block,
         # its stack words written over the ones it received
         body = _function(asm, "spin")
-        entry = re.search(r"^(\.L\d+):$", body, re.M).group(1)
+        entry = re.search(r"^(\.L[^\s:]+_\d+):$", body, re.M).group(1)
         self.assertIn(f"jmp {entry}\n", body)
         self.assertNotIn("call myla_spin", body)
         self.assertNotIn("jmp myla_spin", body)

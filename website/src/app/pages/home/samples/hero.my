@@ -1,0 +1,21 @@
+enum Shape {
+    Square(int),
+    Rect(int, int),
+}
+
+#test(Shape.Rect(2, 3))[6]
+fun area(s: Shape) -> int {
+    return match s {
+        Square(side) => side * side,
+        Rect(w, h) => w * h,
+    }
+}
+
+fun main() {
+    let shapes = [Shape.Square(4), Shape.Rect(2, 13)]
+    let areas = shapes.map((s: Shape) => area(s))
+    let total = areas.fold(0, (a: int, b: int) => a + b)
+    print(f"Life, the universe and everything: {total}")
+}
+// output:
+// Life, the universe and everything: 42

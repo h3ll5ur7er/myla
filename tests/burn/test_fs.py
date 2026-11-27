@@ -19,10 +19,14 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import (
+from ._native import (BUILD_TARGET,
     CAN_BUILD_NATIVE,
+    EXE,
+    ON_WINDOWS,
     SKIP_REASON,
+    TEST_TARGET,
     assemble,
+    linux_only,
     run_argv,
     target_flags,
     build_and_run_full,
@@ -45,9 +49,19 @@ POEM = os.path.abspath(
 POEM_TEXT = "roses are red\nλ is a letter\n😀 is not\n"
 
 
+def literal(path: str) -> str:
+    """`path` as a Myla string literal holds it: on Windows with `/`, which
+    Windows takes too (its `\\` would start an escape)."""
+    return path.replace(os.sep, "/")
+
+
 def _run_both(source: str, args=None):
     """Link/check `source`, run it through both backends with the same argv, and
     return the agreed (stdout, stderr, exit). Asserts the backends match."""
+    if ON_WINDOWS:
+        # the recorded answers name the files by their Linux paths (the
+        # recording checkout's): on Windows today's interpreter is the oracle
+        return run_source_both_now(source, args)
     argv0 = "prog"
     program_argv = [argv0, *(args or [])]
     with tempfile.TemporaryDirectory() as tmp:
@@ -83,7 +97,7 @@ class TestReadToStringParity(unittest.TestCase):
             "from std.io import write\n"
             "from std.fs import read_to_string, IoError\n"
             "fun main() {\n"
-            f'    match read_to_string("{POEM}") {{\n'
+            f'    match read_to_string("{literal(POEM)}") {{\n'
             "        Ok(s) => write(1, s),\n"
             '        Err(e) => write(2, "err"),\n'
             "    }\n"
@@ -95,7 +109,7 @@ class TestReadToStringParity(unittest.TestCase):
         out, _, _ = _run_both(
             "from std.fs import read_to_string, IoError\n"
             "fun main() {\n"
-            f'    match read_to_string("{POEM}") {{\n'
+            f'    match read_to_string("{literal(POEM)}") {{\n'
             "        Ok(s) => print(s.len()),\n"
             "        Err(e) => print(-1),\n"
             "    }\n"
@@ -129,7 +143,7 @@ class TestWriteToFileParity(unittest.TestCase):
     def test_write_then_read_round_trip_parity(self):
         # Each backend writes the file then reads it back within its own run, so
         # a fixed path is safe; both must produce the same round-tripped output.
-        path = os.path.join(tempfile.gettempdir(), "myla_burn_wtf.txt")
+        path = literal(os.path.join(tempfile.gettempdir(), "myla_burn_wtf.txt"))
         out, err, code = run_source_both_now(
             "from std.io import write\n"
             "from std.fs import write_to_file, read_to_string, IoError\n"
@@ -461,6 +475,124 @@ lf/**: lf true
 **/dangling/**: dangling true
 """
 
+# Where links lead (MYLA-841), in the tree `test_where_links_lead` makes:
+# `t/lf` names `f.txt`, `t/la` the directory `a`, `t/a/up` its parent,
+# `t/abs` `t/f.txt` by its absolute path, `t/chain` the link `lf`, `t/back`
+# `a/../f.txt`, `t/dangling` nothing and `t/loop` itself. A path is shown
+# from the working directory (`./`), which `canonical` gives absolute.
+WHERE_LINKS_LEAD = """import std.fs as fs
+from std.fs import IoError
+
+fun shown(r: Result<str, IoError>, cwd: str) -> str {
+    return match r {
+        Ok(p) => if p == cwd { "." } else if p.starts_with(cwd + "/") { "." + p[cwd.len():] } else { p }
+        Err(e) => fs.io_error_name(e)
+    }
+}
+
+fun main() {
+    let cwd = match fs.current_dir() {
+        Ok(d) => d
+        Err(e) => "?"
+    }
+    for p in ["t/lf", "t/a/up", "t/abs", "t/chain", "t/dangling", "t/f.txt", "t/a", "t/missing"] {
+        print(f"{p}: {shown(fs.read_link(p), cwd)}")
+    }
+    for p in ["t/lf", "t/la/x.txt", "t/la/up/lf", "t/a/up/la/up/f.txt", "t/abs", "t/chain", "t/back", "t/la/",
+              "t/./la/../f.txt", "t/dangling", "t/loop", "t/lf/x", "t/missing/..", "/", "."] {
+        print(f"{p} -> {shown(fs.canonical(p), cwd)}")
+    }
+    print(fs.canonical(cwd + "/t/la/up/lf") == fs.canonical("t/f.txt"))
+}
+"""
+WHERE_LINKS_LEAD_OUTPUT = """t/lf: f.txt
+t/a/up: ..
+t/abs: ./t/f.txt
+t/chain: lf
+t/dangling: nothing
+t/f.txt: InvalidInput
+t/a: InvalidInput
+t/missing: NotFound
+t/lf -> ./t/f.txt
+t/la/x.txt -> ./t/a/x.txt
+t/la/up/lf -> ./t/f.txt
+t/a/up/la/up/f.txt -> ./t/f.txt
+t/abs -> ./t/f.txt
+t/chain -> ./t/f.txt
+t/back -> ./t/f.txt
+t/la/ -> ./t/a
+t/./la/../f.txt -> ./t/f.txt
+t/dangling -> NotFound
+t/loop -> Other(40)
+t/lf/x -> NotADirectory
+t/missing/.. -> NotFound
+/ -> /
+. -> .
+true
+"""
+
+
+def where_links_lead_on_windows(drive: str) -> tuple[str, str]:
+    """WHERE_LINKS_LEAD and its output on Windows itself (MYLA-926), where a
+    path `canonical` gives is Windows' own (`\\`, the drive's root for `/`,
+    as `current_dir` gives it), and what `read_link` gives as the link holds
+    it (test_windows' WINDOWS_LINKS, the Windows runner's `files/links`)."""
+    old = 'p.starts_with(cwd + "/")'
+    assert old in WHERE_LINKS_LEAD
+    source = WHERE_LINKS_LEAD.replace(old, 'p.starts_with(cwd + "\\\\")')
+    lines = []
+    for line in WHERE_LINKS_LEAD_OUTPUT.splitlines(True):
+        for mark in (" -> ./", ": ./"):
+            if mark in line:
+                head, tail = line.split(mark, 1)
+                line = head + mark[:-1] + "\\" + tail.replace("/", "\\")
+        lines.append(line)
+    want = "".join(lines).replace("/ -> /\n", f"/ -> {drive}\\\n")
+    return source, want
+
+
+# Opens that don't wait and don't follow a link at the end (MYLA-842), in
+# the tree `test_opens_that_neither_wait_nor_follow` makes: `t/fifo` a FIFO
+# nobody writes to, `t/lf` a link to `f.txt`, `t/la` one to the directory
+# `a`. A FIFO opened without waiting opens at once, a link at the end is
+# ELOOP's `Other(40)`, one before the end is followed.
+NEITHER_WAIT_NOR_FOLLOW = """import std.fs as fs
+import std.bytes as bytes
+from std.fs import IoError, File
+
+fun shown(r: Result<File, IoError>) -> str {
+    return match r {
+        Ok(f) => {
+            var g = f
+            let what = match g.metadata() {
+                Ok(m) => if m.is_file() { match g.read(10) { Ok(b) => f"a file: {bytes.to_str(b)}", Err(e) => fs.io_error_name(e) } } else { "not a file" }
+                Err(e) => fs.io_error_name(e)
+            }
+            let c = g.close()
+            what
+        }
+        Err(e) => fs.io_error_name(e)
+    }
+}
+
+fun main() {
+    let o = fs.options().read(true)
+    print(shown(o.nonblocking(true).open("t/fifo")))
+    print(shown(o.no_follow(true).open("t/lf")))
+    print(shown(o.no_follow(true).open("t/la/x.txt")))
+    print(shown(o.no_follow(true).nonblocking(true).open("t/f.txt")))
+    print(shown(o.open("t/lf")))
+    print(shown(o.no_follow(true).open("t/missing")))
+}
+"""
+NEITHER_WAIT_NOR_FOLLOW_OUTPUT = """not a file
+Other(40)
+a file: x
+a file: abc
+a file: abc
+NotFound
+"""
+
 # Seeks past the ends of an offset (MYLA-426): a sum past int64's range or
 # below 0 is EINVAL and leaves the cursor; past the end is allowed and a
 # write there leaves a hole. Node's WASI shim lost precision and moved the
@@ -544,6 +676,37 @@ fun main() {
 ERRNOS_OUTPUT = """a loop: Other(40)
 a long name: Other(36)
 not there: NotFound
+"""
+# Windows' own codes (MYLA-716): CANT_RESOLVE_FILENAME, which Wine gives a
+# loop of links, and FILENAME_EXCED_RANGE
+ERRNOS_OUTPUT_WINDOWS = """a loop: Other(1921)
+a long name: Other(206)
+not there: NotFound
+"""
+
+# A device's kind (MYLA-716): wasm32 gave WASI's character and block devices
+# and sockets `Other`, as its made-up modes had; they are what Linux calls
+# them.
+DEVICE_KIND = """import std.fs as fs
+
+fun main() {
+    match fs.metadata("/dev/null") {
+        Ok(m) => print(match m.kind {
+            CharDevice => "/dev/null: a character device"
+            Other => "/dev/null: other"
+            _ => "/dev/null: something else"
+        })
+        Err(e) => print(f"/dev/null: {e}")
+    }
+    // a Unix socket's (D254: under Node's host too, MYLA-798)
+    match fs.metadata("sock") {
+        Ok(m) => print(match m.kind {
+            Socket => "sock: a socket"
+            _ => "sock: something else"
+        })
+        Err(e) => print(f"sock: {e}")
+    }
+}
 """
 
 # Removing and renaming (MYLA-96): files, empty and full directories, a
@@ -636,14 +799,19 @@ NUL_PATHS_OUTPUT = ("invalid input\nfalse\nok\ninvalid input\ninvalid input\ninv
 
 
 def prepare_tree(work: str) -> None:
-    """`tree/` with files, nested directories and a link to `outside/`."""
+    """`tree/` with files, nested directories and a link to `outside/`
+    (none for Windows under Wine: Wine shows a Unix link as what it names, a
+    directory or nothing, so `remove_dir_all` would go into it; the links
+    are Windows' reparse points, MYLA-704, which Windows itself makes,
+    MYLA-926)."""
     os.makedirs(os.path.join(work, "tree", "sub", "deeper"))
     os.makedirs(os.path.join(work, "outside"))
     for rel in ("tree/one", "tree/sub/two", "tree/sub/deeper/three", "outside/keep"):
         with open(os.path.join(work, rel), "w") as fh:
             fh.write(rel)
-    os.symlink(os.path.join(work, "outside"), os.path.join(work, "tree", "link"))
-    os.symlink("nowhere", os.path.join(work, "tree", "sub", "dangling"))
+    if BUILD_TARGET != "x86_64-windows" or ON_WINDOWS:
+        os.symlink(os.path.join(work, "outside"), os.path.join(work, "tree", "link"), target_is_directory=True)
+        os.symlink("nowhere", os.path.join(work, "tree", "sub", "dangling"))
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -674,7 +842,7 @@ class IoErrorCauses(unittest.TestCase):
                 "    }\n"
                 "}\n"
                 "fun main() {\n"
-                f'    let d = "{tmp}/d"\n'
+                f'    let d = "{literal(tmp)}/d"\n'
                 "    print(cause(make_dir(d)))\n"
                 "    print(cause(make_dir(d)))\n"
                 "    print(cause(remove_file(d)))\n"
@@ -762,7 +930,7 @@ class DirectoryParity(unittest.TestCase):
             fh.write(source)
         asm = subprocess.run([self.gen, path, STDLIB_ROOT, *target_flags()],
                              capture_output=True, text=True, check=True)
-        sh_native = os.path.join(d, "sh_native")
+        sh_native = os.path.join(d, "sh_native" + EXE)
         with open(sh_native + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
         assemble(sh_native + ".s", sh_native)
@@ -799,9 +967,18 @@ class DirectoryParity(unittest.TestCase):
     def test_current_dir(self) -> None:
         for impl, result in self.run_all("cwd", CWD_PROGRAM).items():
             with self.subTest(implementation=impl):
-                work = os.path.realpath(self.work_dir("cwd", impl))
+                if ON_WINDOWS:
+                    # the directory as it was given, as Windows names it
+                    # (realpath would spell out a short name, RUNNER~1)
+                    work = os.path.abspath(self.work_dir("cwd", impl))
+                else:
+                    work = os.path.realpath(self.work_dir("cwd", impl))
+                if BUILD_TARGET == "x86_64-windows" and impl.endswith("native") and not ON_WINDOWS:
+                    # Windows' own path: Wine's drive Z: is the root
+                    work = "Z:" + work.replace("/", "\\")
                 self.assertEqual(result, (f"{work} true\n", "", 0))
 
+    @linux_only("Windows can't remove a working directory")
     def test_current_dir_removed(self) -> None:
         # The program starts in a directory that was removed: getcwd fails
         # with ENOENT.
@@ -818,10 +995,11 @@ class DirectoryParity(unittest.TestCase):
                 self.assertEqual(result, (REMOVE_TOUR_OUTPUT, "", 0))
 
     def test_a_nul_byte_in_a_path(self) -> None:
-        for impl, result in self.run_all("nul", NUL_PATHS).items():
+        # not "nul": that names Windows' null device in every directory
+        for impl, result in self.run_all("nul-byte", NUL_PATHS).items():
             with self.subTest(implementation=impl):
                 self.assertEqual(result, (NUL_PATHS_OUTPUT, "", 0))
-                self.assertEqual(sorted(os.listdir(self.work_dir("nul", impl))), ["q"])
+                self.assertEqual(sorted(os.listdir(self.work_dir("nul-byte", impl))), ["q"])
 
     def test_seeks_past_the_ends(self) -> None:
         for impl, result in self.run_all("seek_edges", SEEK_EDGES).items():
@@ -835,7 +1013,23 @@ class DirectoryParity(unittest.TestCase):
 
         for impl, result in self.run_all("errnos", ERRNOS, prepare).items():
             with self.subTest(implementation=impl):
-                self.assertEqual(result, (ERRNOS_OUTPUT, "", 0))
+                want = ERRNOS_OUTPUT
+                # (on Windows itself the interpreter is a Windows program too)
+                if BUILD_TARGET == "x86_64-windows" and (impl.endswith("native") or ON_WINDOWS):
+                    want = ERRNOS_OUTPUT_WINDOWS
+                self.assertEqual(result, (want, "", 0))
+
+    def test_a_device_s_kind(self) -> None:
+        if BUILD_TARGET == "x86_64-windows":
+            self.skipTest("Windows has no /dev/null")
+        def prepare(work: str) -> None:
+            import socket
+            with socket.socket(socket.AF_UNIX) as s:
+                s.bind(os.path.join(work, "sock"))
+
+        for impl, result in self.run_all("device", DEVICE_KIND, prepare).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, ("/dev/null: a character device\nsock: a socket\n", "", 0))
 
     def test_symbolic_links(self) -> None:
         # MYLA-363: a link's own kind, and walks that don't follow links (or
@@ -853,9 +1047,69 @@ class DirectoryParity(unittest.TestCase):
             open(os.path.join(t, "secret"), "w").close()
             os.chmod(os.path.join(t, "secret"), 0)
 
-        for impl, result in self.run_all("links", LINKS, prepare).items():
+        source = LINKS
+        if ON_WINDOWS:
+            # Windows' own (MYLA-926): a link's size is its file's, 0 (Linux
+            # gives the length of what it names), and a mode 0 is the
+            # read-only attribute, 0o444 (D218)
+            source = source.replace("m.size == 5", "m.size == 0").replace("m.permissions == 0o644",
+                                                                          "m.permissions == 0o444")
+        for impl, result in self.run_all("links", source, prepare).items():
             with self.subTest(implementation=impl):
                 self.assertEqual(result, (LINKS_OUTPUT, "", 0))
+
+    def test_where_links_lead(self) -> None:
+        # MYLA-841: what a link holds (`read_link`) and where a path leads
+        # through links (`canonical`); the working directory is link-free,
+        # as getcwd gives it
+        def prepare(work: str) -> None:
+            t = os.path.join(work, "t")
+            os.makedirs(os.path.join(t, "a"))
+            with open(os.path.join(t, "f.txt"), "w") as fh:
+                fh.write("abc")
+            open(os.path.join(t, "a", "x.txt"), "w").close()
+            os.symlink("f.txt", os.path.join(t, "lf"))
+            os.symlink("a", os.path.join(t, "la"))
+            os.symlink("..", os.path.join(t, "a", "up"))
+            # (on Windows the working directory as it was given: realpath
+            # would spell out a short name, RUNNER~1, which isn't the cwd's)
+            here = os.path.abspath(work) if ON_WINDOWS else os.path.realpath(work)
+            os.symlink(os.path.join(here, "t", "f.txt"), os.path.join(t, "abs"))
+            os.symlink("lf", os.path.join(t, "chain"))
+            os.symlink("a/../f.txt", os.path.join(t, "back"))
+            os.symlink("nothing", os.path.join(t, "dangling"))
+            os.symlink("loop", os.path.join(t, "loop"))
+
+        source, want = WHERE_LINKS_LEAD, WHERE_LINKS_LEAD_OUTPUT
+        if ON_WINDOWS:
+            source, want = where_links_lead_on_windows(self.work_dir("where", "x")[:2])
+        for impl, result in self.run_all("where", source, prepare).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, (want, "", 0))
+
+    def test_opens_that_neither_wait_nor_follow(self) -> None:
+        # MYLA-842: `OpenOptions.nonblocking` and `no_follow`
+        def prepare(work: str) -> None:
+            t = os.path.join(work, "t")
+            os.makedirs(os.path.join(t, "a"))
+            with open(os.path.join(t, "f.txt"), "w") as fh:
+                fh.write("abc")
+            with open(os.path.join(t, "a", "x.txt"), "w") as fh:
+                fh.write("x")
+            if not ON_WINDOWS:
+                os.mkfifo(os.path.join(t, "fifo"))
+            os.symlink("f.txt", os.path.join(t, "lf"))
+            os.symlink("a", os.path.join(t, "la"))
+
+        source, want = NEITHER_WAIT_NOR_FOLLOW, NEITHER_WAIT_NOR_FOLLOW_OUTPUT
+        if ON_WINDOWS:
+            # Windows has no FIFOs: the rest, the links, as on Linux
+            fifo = '    print(shown(o.nonblocking(true).open("t/fifo")))\n'
+            self.assertIn(fifo, source)
+            source, want = source.replace(fifo, ""), want.removeprefix("not a file\n")
+        for impl, result in self.run_all("open_bits", source, prepare).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, (want, "", 0))
 
     def test_many_long_names(self) -> None:
         names = [f"{i:03d}" + "x" * (i - 3) if i >= 3 else "n" * i for i in range(1, 256)]

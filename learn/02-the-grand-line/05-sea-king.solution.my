@@ -1,0 +1,17 @@
+#test([10, -5, 20, 9001, 30])[30]
+#test([1, 2, 3])[6]
+#test([9500, 1])[0]
+#test([-1, -2])[0]
+fun safe_depth(readings: [int]) -> int {
+    var total = 0
+    for depth in readings {
+        if depth < 0 {
+            continue
+        }
+        if depth > 9000 {
+            break
+        }
+        total += depth
+    }
+    return total
+}

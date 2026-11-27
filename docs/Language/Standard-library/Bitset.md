@@ -1,6 +1,6 @@
 # std.bitset
 
-`BitSet`, a set of small non-negative integers that takes a bit for each ([[MYLA-342]]). The integer `i` is bit `i % 64` of the word `i / 64`, a `uint64`, so a set of the integers below n takes n / 8 bytes and the set operations work 64 integers at a time. A set is growable, making room for whatever is inserted, or fixed, holding 0 to n - 1. The module imports nothing.
+`BitSet`, a set of small non-negative integers that takes a bit for each ([[MYLA-342]]). The integer `i` is bit `i % 64` of the word `i / 64`, a `uint64`, so a set of the integers below n takes n / 8 bytes and the set operations work 64 integers at a time. A set is growable, making room for whatever is inserted, or fixed, holding 0 to n - 1. The module imports `std.int`, for `leading_zeros` and `trailing_zeros`.
 
 ```myla
 import std.bitset as bitset
@@ -81,11 +81,11 @@ fun main() {
 | `b.is_subset(other) -> bool`, `b.is_disjoint(other) -> bool` | Whether every integer of `b` is in `other`; whether they share none |
 | `b.cleared() -> BitSet` | An empty set of `b`'s kind and size |
 
-`used`, `trim` and `reserve` are the set's own steps; a program has no need of them.
+`used`, `past`, `trim` and `reserve` are the set's own steps (the words in use; whether the set can't hold an integer; the zero words dropped; room made), public only because a method can't be private yet ([[MYLA-433]]); a program has no need of them.
 
 ## Visiting the integers
 
-`for i in b.items()` visits them in order. `next_from` does without the list:
+`for i in b.iter()` visits them in order, without the list `b.items()` makes ([[MYLA-553]]): `b.iter()` is a `BitSetIter`, an `Iterator<int>` (D171) that holds the set as it was and a copy of which keeps its own position, so it goes into a pipeline of [[Language/Standard-library/Iter|std.iter]] too, `b.iter() |> iter.filter((i) => i % 2 == 0) |> iter.count()`. `next_from` does without either:
 
 ```myla fragment
 var at = b.next_from(0)
@@ -95,7 +95,7 @@ while let Some(i) = at {
 }
 ```
 
-`for i in b` isn't possible yet ([[MYLA-353]]).
+`for i in b` isn't possible: a `BitSet` isn't an iterator itself (D171), and the checker's message says to write `b.iter()` (`help: 'bitset.BitSet' is not an Iterator: write 'b.iter()'`).
 
 ## Equality and keys
 
@@ -109,7 +109,7 @@ A written `impl Hash` that skipped the zero words would have let any two sets of
 
 ## Speed
 
-Measured natively on x86-64, best of five runs:
+Measured natively on x86-64, best of five runs (2026-11-08, `38c1555`):
 
 | Work | Time |
 | --- | --- |

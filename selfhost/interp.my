@@ -9,16 +9,20 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, TypeParam, bind_elems, names_in_expr, names_in_block, Expected, expected_failure, is_unread_body
 from .tokens import SrcSpan, no_span
-from .checker import is_notify_primitive
+from .checker import is_notify_primitive, tracks_caller
+from .checker import OpImpl, find_op_impl, op_part, arith_trait
 from .checker import Checker, Type, Subst, subst_type, subst_get, unify_param, type_name, is_raw_memory_primitive, is_net_primitive, is_lot_primitive, is_term_primitive, checker_on, builtin_method, builtin_method_name, is_wrapping_method, add_overflows, sub_overflows, mul_overflows, int_min, int_neg_overflows, shift_out_of_range, is_slice_expr, from_end_of, slice_parts, is_hole_part
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8, format_specs, written_type_name
-from std.fmt import fmt_int, fmt_float, fmt_text
+from std.fmt import fmt_int, fmt_float, fmt_text, spec_misfit
 from std.slice import range_of, str_whole, take_str
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write, eprint, errno_text
 from std.process import exit
-from std.fs import read_to_string, make_dir_all, remove_dir_all
+import std.process as process_m  // `args`: the program `myla` was started as (MYLA-727)
+from std.fs import read_to_string, list_dir, make_dir_all, remove_dir_all, temp_root
+from std.test import timed_out  // a case's verdict past its time limit (D259), as natively
+import std.path_style as style // `WINDOWS`: the separator of the machine the interpreter runs on
 from .parser import fused_compound
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -38,7 +42,7 @@ pub enum Value {
     VEnum(str, str, [Value]),              // enum name, variant, payload
     VList([Value]),
     VMap(MapV),                            // the entries in insertion order, indexed (MYLA-310)
-    VSB([int64]),                          // StringBuilder: raw byte buffer
+    VSB(StringBuilder),                    // a builder's bytes, packed (MYLA-600)
     VClosure([Param], ExprOrBlock, [str], [Value], str, bool),  // params, body, capNames, capVals, funcName, isFunc
     VCompose([Value]),                     // composed functions, applied left-to-right
     VPartial(Value, [Value], [bool]),      // base callable, arg slots, which slots are holes
@@ -107,8 +111,13 @@ pub enum TailCall {
 }
 
 // A scope's variables, and its deferred blocks (D135) in the order they were
-// met.
-pub struct RtFrame { names: [str], vals: [Value], defers: [Deferral] }
+// met. A function's outermost scope also holds the frame's named slots, -1
+// for none (in a block's scope always): `env`, the environment its type
+// parameters are bound in (an index into `envs`, D172), and `caller`, the
+// node of the call whose position it reports (`#track_caller`, MYLA-435).
+// Slots, not variables: two hidden variables both wanted the first place
+// (the 2026-11-17 review's H6).
+pub struct RtFrame { names: [str], vals: [Value], defers: [Deferral], env: int32, caller: int32 }
 
 // A deferred block, and how many of its scope's names were declared before
 // it: the ones it sees when it runs.
@@ -157,13 +166,16 @@ struct Notif { permits: int64, gen: int64, waits: [int32], id: int64 }
 // notifier's slot then (`n`), the generation it waits from (-1: any), its
 // time limit in milliseconds (-1: none), its state: 0 made, 1 parked, 2
 // notified, 3 timed out, 4 cancelled, 5 the notifier closed while it
-// waited, 6 closed before (as native code's, std.rt's `waiter`).
+// waited, 6 closed before, 7 never made (as native code's, std.rt's
+// `waiter`; D195).
 struct PWait { task: int32, n: int32, nid: int64, since: int64, ms: int64, state: int32 }
 
 // A notifier's handle is its slot in the low NOTIF_BITS bits and, above
 // them, the count of notifiers made when it was, so a handle closed is
-// never given again (D181).
-const NOTIF_BITS: int64 = 20
+// never given again (D181), and one whose count is past the notifiers
+// made was never given (D195). 31 bits: as many open at once as memory
+// holds, as natively (MYLA-548: 2^20 were "too many notifiers open" here).
+const NOTIF_BITS: int64 = 31
 
 // A task waiting for input on `fd` (D124, `std.io`'s async reads).
 // `events` 0: until `fd` (or `fd2`) is readable; else until the socket `fd`
@@ -176,7 +188,26 @@ struct FdWait { fd: int32, fd2: int32, task: int32, events: int32 }
 // ready, in the order they became so; the id of the notifier notified once
 // for each. Its handle is its index + 1.
 struct ILot { nid: int64, parked: [IParked], ready: [int32], open: bool }
-struct IParked { h: int32, deadline: int64 }
+struct IParked { h: int32, deadline: int64, events: int32 }
+
+// How often the sockets parked on lots are looked at (`wake_parked`): a
+// look's share of the time at most 1/LOOK_SHARE, the time between two
+// looks from LOOK_GAP_MIN to LOOK_GAP_MAX nanoseconds (MYLA-546).
+const LOOK_SHARE: int64 = 32
+const LOOK_GAP_MIN: int64 = 1000000
+const LOOK_GAP_MAX: int64 = 50000000
+
+// The time until the next look at the parked sockets after one that took
+// `took` nanoseconds.
+#test(1000)[1000000]
+#test(300000)[9600000]
+#test(10000000)[50000000]
+fun look_gap(took: int64) -> int64 {
+    let gap = took * LOOK_SHARE
+    if gap < LOOK_GAP_MIN { return LOOK_GAP_MIN }
+    if gap > LOOK_GAP_MAX { return LOOK_GAP_MAX }
+    return gap
+}
 
 // A task's deadline (`std.task.timeout`, D124): at `at` the task `task` is
 // cancelled and `Interp.fired[rec]` says so.
@@ -205,6 +236,13 @@ pub struct Interp {
     func_names: [str],
     func_ix: [str: int32],
     func_decls: [FunData],
+    // MYLA-435: whether each reports its caller's position (`#track_caller`);
+    // the call the next one entered reports (`caller_next`, a node of
+    // `call_sites`, for `caller_fi`)
+    tracks: [bool],
+    caller_next: int32,
+    caller_fi: int32,
+    call_sites: [int32: Expr],
     // the structs and enums with an `eq` written for them, and those with a
     // `hash` written for them (not derived), by name (D163, MYLA-313);
     // whether one of those is a generic impl's, whose frame the interpreter
@@ -212,8 +250,13 @@ pub struct Interp {
     own_eq: [str: bool],
     own_hash: [str: bool],
     typed_keys: bool,
-    const_names: [str],
+    // each constant's initializer and value, `const_state` 0 before it is
+    // evaluated, 1 while, 2 after: evaluated when first named, so one may
+    // name a constant declared after it or in a module loaded after it
+    // (MYLA-715: such a name read as unit, `C + 1` was 1)
+    const_exprs: [Expr],
     const_vals: [Value],
+    const_state: [uint8],
     const_ix: [str: int32],
     enum_names: [str],
     enum_ix: [str: bool],
@@ -275,6 +318,10 @@ pub struct Interp {
     deadlines: [Deadline],
     fired: [bool],
     fd_waits: [FdWait],
+    // when the waits for a descriptor were last looked at while tasks were
+    // ready, and the time until the next look (MYLA-604)
+    fds_seen: int64,
+    fds_gap: int64,
     // MYLA-387: the notifiers, the waits on them (`free_waits`: the slots
     // `__woken` gave back) and those parked now (as native code's
     // `__parked`)
@@ -290,6 +337,13 @@ pub struct Interp {
     sock_tags: [int32: int64],
     parked_socks: int32,
     lots_seen: int64,
+    lots_gap: int64,
+    // std.str's `find_from` and std.list's `extend`, which the interpreter
+    // runs itself (`run_own`), -1 when the program has none
+    fi_find_from: int32,
+    fi_extend: int32,
+    // each builtin's code (`builtin_codes`, MYLA-605)
+    bcodes: [str: int32],
     sleep_seq: int64,
     virtual_time: bool,
     vclock: int64,
@@ -301,6 +355,19 @@ pub struct Interp {
     // root (`std.test.temp_dir`), made on the first call and removed when
     // the case ends; the project's program under test (`std.test.program`)
     testing: bool,
+    // a case's time limit in seconds (D259, 0 for none), and while one
+    // runs its end, a clock's time (0 for none), whether the case passed
+    // it, and the blocks run since the clock was last looked at (`tick`)
+    test_timeout: int32,
+    case_deadline: int64,
+    timed_out: bool,
+    case_ticks: int32,
+    // the children a case started and hasn't reaped, killed when it ends,
+    // as natively its process group is (D272, MYLA-818); what
+    // `__run_stderr` gives after a run a case's time limit bounded
+    // (`case_run`), None after the host's own
+    case_children: [int32],
+    run_stderr: Option<str>,
     defer_errs: [str],
     captured: [str],
     captured_io: bool,
@@ -325,6 +392,9 @@ pub struct Interp {
     // a later one), `env_tail` and `env_tail_fi` a `become`'s; -1 binds
     // nothing
     static_calls: [int32: Type],
+    op_sites: [int32: str],      // the checker's operators that call an operator impl (D200)
+    op_sets: [int32: str],       // and its index assignments that call an `IndexSet`
+    op_impls: [OpImpl],
     impl_selfs: [str: Type],
     call_types: [int32: [Type]],
     tparams: [[str]],
@@ -332,7 +402,8 @@ pub struct Interp {
     env_memo: [int64: EnvMemo],
     // (`type_env_memo`: the index a call by no call site gives, by the
     // function and the closed type it binds by: a written `eq`, `hash` or
-    // `format` the interpreter calls itself, MYLA-436)
+    // `format` the interpreter calls itself, MYLA-436; and, by `#`, the
+    // function and what it binds, so equal environments are one)
     type_env_memo: [str: int32],
     env_next: int32,
     env_fi: int32,
@@ -372,12 +443,17 @@ pub struct TestRun { report: [str], passed: int32, total: int32 }
 // What `myla test` was asked (D162): `only`, a text the cases run must have
 // in their function's name ("" for all); `list`, to name the cases
 // without running them; `program`, the path of the project's program for
-// `std.test.program()` ("" outside a project with one).
-pub struct TestOptions { only: str, list: bool, program: str }
+// `std.test.program()` ("" outside a project with one); `timeout`, a
+// case's time limit in seconds, 0 for none (`--timeout`, D259).
+pub struct TestOptions { only: str, list: bool, program: str, timeout: int32 }
+
+// A case's time limit when `myla test` names none (D259), in seconds.
+pub const DEFAULT_TIMEOUT: int32 = 60
 
 pub fun all_tests() -> TestOptions {
-    return TestOptions { only: "", list: false, program: "" }
+    return TestOptions { only: "", list: false, program: "", timeout: DEFAULT_TIMEOUT }
 }
+
 
 // Whether the case of the function `name` is selected by `only`: its text
 // in the name (a method's `T.m`).
@@ -454,8 +530,12 @@ fun fill_holes(slots: [Value], holes: [bool], argv: [Value]) -> [Value] {
 #test("Point.eq")[false]
 #test("geo$area")[true]
 #test("util$strings$Point.eq")[true]
+#test("V.mul$float64")[false]
 fun is_qualified(name: str) -> bool {
+    // (before a method's dot: an operator method's own name may hold a `$`,
+    // `V.mul$float64`, D200)
     for c in name.chars() {
+        if c == '.' { return false }
         if c == '$' { return true }
     }
     return false
@@ -521,55 +601,22 @@ pub fun sched_of(spec: str) -> (int32, uint64) {
     return (SCHED_SEED, seed)
 }
 
-// MYLA_SCHED's value in the environment `environ` (/proc/self/environ:
-// NAME=value entries, each ended by a NUL), "" when it has none.
-#test("A=1\0MYLA_SCHED=fifo\0B=2\0")["fifo"]
-#test("MYLA_SCHEDX=1\0")[""]
-#test("")[""]
-pub fun sched_in(environ: str) -> str {
-    return env_entry(environ, "MYLA_SCHED=")
-}
-
-// The value of the entry starting with `key` (`NAME=`) in the environment
-// `environ`, "" when it has none.
-#test("A=1\0MYLA_TIME=virtual\0", "MYLA_TIME=")["virtual"]
-#test("A=1\0", "MYLA_TIME=")[""]
-pub fun env_entry(environ: str, key: str) -> str {
-    var i = 0
-    while i < environ.len() {
-        var j = i
-        while j < environ.len() && environ[j] != '\0' { j = j + 1 }
-        var k = 0
-        while k < key.len() && i + k < j && environ[i + k] == key[k] { k = k + 1 }
-        if k == key.len() {
-            var sb = StringBuilder()
-            sb.append(environ, i + k, j)
-            return sb.build()
-        }
-        i = j + 1
-    }
-    return ""
-}
-
-// MYLA_SCHED's value in this process's environment, "" without one.
+// MYLA_SCHED's value in this process's environment, "" without one. Read
+// with std.process's `env`, which Windows has too: /proc/self/environ,
+// read before, isn't there, so the interpreter ran every program in the
+// default order and on the real clock (MYLA-942).
 pub fun sched_from_env() -> str {
-    return match read_to_string("/proc/self/environ") {
-        Ok(e) => sched_in(e),
-        Err(_) => "",
-    }
+    return process_m.env("MYLA_SCHED").unwrap_or("")
 }
 
 // MYLA_TIME's value in this process's environment (D124), "" without one.
 pub fun time_from_env() -> str {
-    return match read_to_string("/proc/self/environ") {
-        Ok(e) => env_entry(e, "MYLA_TIME="),
-        Err(_) => "",
-    }
+    return process_m.env("MYLA_TIME").unwrap_or("")
 }
 
 // Whether the awaited `op` calls a function value (a local, or any callee
 // but a name or a method), which goes on at once natively (MYLA-228).
-#test(expr_of("f(1)"), [RtFrame { names: ["f"], vals: [Value.VUnit], defers: [] }])[true]
+#test(expr_of("f(1)"), [RtFrame { names: ["f"], vals: [Value.VUnit], defers: [], env: -1, caller: -1 }])[true]
 #test(expr_of("f(1)"), [])[false]
 #test(expr_of("a.m()"), [])[false]
 #test(expr_of("fs[0]()"), [])[true]
@@ -594,8 +641,8 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
     var it = Interp {
         decls: c.decls,
         resolved: c.resolved,
-        func_names: [], func_ix: [:], func_decls: [], own_eq: [:], own_hash: [:], typed_keys: false,
-        const_names: [], const_vals: [], const_ix: [:],
+        func_names: [], func_ix: [:], func_decls: [], tracks: [], caller_next: -1, caller_fi: -1, call_sites: [:], own_eq: [:], own_hash: [:], typed_keys: false,
+        const_exprs: [], const_vals: [], const_state: [], const_ix: [:],
         enum_names: [], enum_ix: [:], variant_ix: [:], nullary_ix: [:],
         scopes: [],
         ctrl: Ctrl.CNone,
@@ -617,9 +664,9 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
-        sleepers: [], deadlines: [], fired: [], fd_waits: [], notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], lots: [], sock_tags: [:], parked_socks: 0, lots_seen: 0, sleep_seq: 0, virtual_time: false, vclock: 0,
-        testing: false, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
-        static_calls: c.static_calls, impl_selfs: c.static_selfs, call_types: c.call_types,
+        sleepers: [], deadlines: [], fired: [], fd_waits: [], fds_seen: 0, fds_gap: LOOK_GAP_MIN, notifs: [], free_notifs: [], notif_seq: 0, pwaits: [], free_waits: [], parked_waits: [], lots: [], sock_tags: [:], parked_socks: 0, lots_seen: 0, lots_gap: LOOK_GAP_MIN, fi_find_from: -1, fi_extend: -1, bcodes: builtin_codes(), sleep_seq: 0, virtual_time: false, vclock: 0,
+        testing: false, test_timeout: 0, case_deadline: 0, timed_out: false, case_ticks: 0, case_children: [], run_stderr: None, defer_errs: [], captured: [], captured_io: false, test_root: "", test_program: "", checker: c,
+        static_calls: c.static_calls, op_sites: c.op_sites, op_sets: c.op_sets, op_impls: c.op_impls, impl_selfs: c.static_selfs, call_types: c.call_types,
         tparams: [], envs: [], env_memo: [:], type_env_memo: [:], env_next: -1, env_fi: -1, env_tail: -1, env_tail_fi: -1,
         writes: 0, fused: -1, fused_val: Value.VUnit, leaf_wanted: false, leaf: Value.VUnit,
     }
@@ -720,6 +767,8 @@ impl Interp {
         // map's key or `==` doesn't call)
         for n in self.own_eq.keys() { if self.generic_own(n, "eq") { self.typed_keys = true } }
         for n in self.own_hash.keys() { if self.generic_own(n, "hash") { self.typed_keys = true } }
+        self.fi_find_from = self.func_idx("str.find_from")
+        self.fi_extend = self.func_idx("__list.extend")
     }
 
     // Whether the method `m` written for the type `n` is a generic struct's
@@ -733,6 +782,7 @@ impl Interp {
         if !self.func_ix.contains(name) { self.func_ix[name] = self.func_names.len() }
         self.func_names.push(name)
         self.func_decls.push(fd)
+        self.tracks.push(tracks_caller(fd))
     }
 
     #test(interp_on("[int]"), "inc")[-1]
@@ -765,7 +815,7 @@ impl Interp {
 
     // -- scopes -----------------------------------------------------------
 
-    fun push_scope(var self) { self.scopes.push(RtFrame { names: [], vals: [], defers: [] }) }
+    fun push_scope(var self) { self.scopes.push(RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }) }
     fun pop_scope(var self) { self.scopes = drop_last_frame(self.scopes) }
 
     fun define(var self, name: str, v: Value) {
@@ -882,11 +932,12 @@ impl Interp {
     // of a file, MYLA-187, and in a project, MYLA-94: the entry's names are
     // the ones the loader doesn't qualify with a module id), and collect a
     // PASS/FAIL line for each.
-    #test(interp_on("[int]"), TestOptions { only: "", list: false, program: "" })[TestRun { report: [], passed: 0, total: 0 }]
+    #test(interp_on("[int]"), TestOptions { only: "", list: false, program: "", timeout: 0 })[TestRun { report: [], passed: 0, total: 0 }]
     fun run_test_cases(var self, sel: TestOptions) -> TestRun {
         self.collect()
         self.eval_consts()
         self.test_program = sel.program
+        self.test_timeout = sel.timeout
         var report: [str] = []
         var total = 0
         var passed = 0
@@ -910,14 +961,17 @@ impl Interp {
                     if sel.list {
                         report.push(case_name + "\n")
                     } else {
-                        let detail = self.run_case(i, fd, attr, is_fn)
-                        if detail == "" {
-                            passed = passed + 1
-                            report.push(format("PASS  {}\n", case_name))
-                        } else {
-                            report.push(format("FAIL  {}: {}\n", case_name, on_one_line(detail)))
-                            // what the case printed, under its line
-                            for line in output_lines(self.captured) { report.push("      | " + line + "\n") }
+                        match self.run_case(i, fd, attr, is_fn) {
+                            None => {
+                                passed = passed + 1
+                                report.push(format("PASS  {}\n", case_name))
+                            },
+                            Some(detail) => {
+                                // (an empty detail, an `Err("")`'s, fails too)
+                                report.push(fail_line(case_name, detail))
+                                // what the case printed, under its line
+                                for line in output_lines(self.captured) { report.push("      | " + line + "\n") }
+                            },
                         }
                     }
                 }
@@ -929,9 +983,9 @@ impl Interp {
 
     // One case of the function `fi`: its arguments and expected value
     // evaluated, the call made with the case running (a failure unwinds its
-    // deferred blocks, D162), its scratch directory removed; "" when it
-    // passed, else why it failed.
-    fun run_case(var self, fi: int32, fd: FunData, attr: Attribute, is_fn: bool) -> str {
+    // deferred blocks, D162), its scratch directory removed; its verdict,
+    // None when it passed, else why it failed.
+    fun run_case(var self, fi: int32, fd: FunData, attr: Attribute, is_fn: bool) -> Option<str> {
         self.push_scope()
         var argv: [Value] = []
         for a in attr.args { argv.push(self.eval(a)) }
@@ -947,9 +1001,16 @@ impl Interp {
             None => {},
         }
         self.pop_scope()
+        // a process ends with 0 to 255: no call can give another status
+        // (the native harness says the same)
+        match want {
+            Expected.Exits(n) => { if n < 0 || n > 255 { return Some(format("expected exit status {}: a status is 0 to 255", n)) } },
+            _ => {},
+        }
         self.testing = true
         self.defer_errs = []
         self.captured = []
+        if self.test_timeout > 0 { self.case_deadline = __clock_ns() + (self.test_timeout as int64) * 1000000000 }
         var actual = Value.VUnit
         match fd.receiver {
             // a method's receiver is its first argument (D116)
@@ -975,13 +1036,29 @@ impl Interp {
             },
         }
         self.testing = false
+        self.case_deadline = 0
+        self.end_children()
         var outcome = Outcome.Returned(actual)
+        if self.timed_out {
+            // past its time limit, whatever it expected (D259): it stopped
+            // as a failure does, without its deferred blocks
+            self.timed_out = false
+            self.ctrl = Ctrl.CNone
+            self.rt_err = None
+            self.exit_code = 0
+            if self.test_root != "" {
+                let gone = remove_dir_all(self.test_root)
+                self.test_root = ""
+            }
+            return Some(timed_out(self.test_timeout))
+        }
         match self.ctrl {
             Ctrl.CExit => {
                 // a runtime error or `exit` ends this case only
                 outcome = match self.rt_err {
                     Some(r) => Outcome.Failed(r.msg),
-                    None => Outcome.Exited(self.exit_code),
+                    // the status the process ends with, as natively
+                    None => Outcome.Exited(self.exit_code & 255),
                 }
                 self.ctrl = Ctrl.CNone
                 self.rt_err = None
@@ -994,6 +1071,7 @@ impl Interp {
             self.test_root = ""
         }
         var parts: [str] = []
+        var failed = false   // a test function's `Err`, its text "" too
         // the values shown by the function's checked result type (MYLA-361)
         let rt = case_ret(self.checker, self.func_names[fi])
         let returns = match fd.ret_type { Some(t) => true, None => false }
@@ -1005,7 +1083,12 @@ impl Interp {
                         if is_fn {
                             // a test function's `Err(e)` fails it with `e` (D162)
                             match v {
-                                Value.VEnum(en, vr, pl) => { if vr == "Err" { parts.push(self.shown(pl[0], err_type(rt))) } },
+                                Value.VEnum(en, vr, pl) => {
+                                    if vr == "Err" {
+                                        failed = true
+                                        parts.push(self.shown(pl[0], err_type(rt)))
+                                    }
+                                },
                                 _ => {},
                             }
                         } else if !value_eq(v, expected) { parts.push("expected " + typed_repr(ch, expected, rt) + ", got " + typed_repr(ch, v, rt)) }
@@ -1033,23 +1116,66 @@ impl Interp {
         }
         // the deferred blocks that failed while the case unwound (D162)
         for d in self.defer_errs { parts.push("deferred block: runtime error: " + d) }
-        return join_parts(parts)
+        if parts.len() == 0 && !failed { return None }
+        return Some(join_parts(parts))
     }
 
+    // Every constant, the first declared of a name: each evaluated when
+    // first named (`const_value`), so a program pays for the constants it
+    // uses (a float's literal costs the conversion of its digits: those of
+    // the modules every program loads took 8.3 M of an empty program's
+    // 35.4 M instructions under `myla run`, 2026-11-17 on fe30af6, the
+    // 2026-11-17 review's start-up follow-up).
     fun eval_consts(var self) {
         for d in self.decls {
             match d.kind {
                 DeclKind.ConstDecl(n, ty, value, attrs, isp) => {
-                    self.push_scope()
-                    let v = self.eval(value)
-                    self.pop_scope()
-                    if !self.const_ix.contains(n) { self.const_ix[n] = self.const_names.len() }
-                    self.const_names.push(n)
-                    self.const_vals.push(v)
+                    if !self.const_ix.contains(n) {
+                        self.const_ix[n] = self.const_exprs.len()
+                        self.const_exprs.push(value)
+                        self.const_vals.push(Value.VUnit)
+                        self.const_state.push(0)
+                    }
                 },
                 _ => {},
             }
         }
+    }
+
+    // How many constants have been evaluated: none before one is named.
+    #test(interp_on("const X: float = 1.5; const Y: int = 2"))[0]
+    fun consts_evaluated(self) -> int32 {
+        var n = 0
+        for st in self.const_state {
+            if st == 2 { n += 1 }
+        }
+        return n
+    }
+
+    // The value of constant `ci`, its initializer evaluated the first time,
+    // in a frame of its own: what it names are other constants (the loader
+    // qualifies another module's names), never a variable in scope. The
+    // checker refuses a cycle; one would read unit here.
+    #test(interp_on("const B: int = A + 1; const A: int = 5"), 0)[Value.VInt(6)]
+    fun const_value(var self, ci: int32) -> Value {
+        if self.const_state[ci] != 0 { return self.const_vals[ci] }
+        self.const_state[ci] = 1
+        let saved = self.scopes
+        self.scopes = []
+        self.push_scope()
+        let v = self.eval(self.const_exprs[ci])
+        self.scopes = saved
+        self.const_vals[ci] = v
+        self.const_state[ci] = 2
+        return v
+    }
+
+    // Whether `fd` is a running case's standard input, which is empty, as
+    // a native case's is (MYLA-547): a read gives "" without an error.
+    fun empty_stdin(var self, fd: int32) -> bool {
+        if fd != 0 || !self.testing { return false }
+        self.captured_io = true
+        return true
     }
 
     #test(interp_on("[int]"))[-1]
@@ -1092,12 +1218,13 @@ impl Interp {
     // not.
     #test(interp_on("enum E { A, B(int) }"), Value.VList([Value.VInt(7)]), Value.VInt(0), expr_of("a.b[0]"), false, -1)[true]
     fun check_index(var self, c: Value, k: Value, e: Expr, assigning: bool, place: int32) -> bool {
-        let msg = index_error(c, k, assigning, place)
+        let msg = index_error(c, k, assigning, place, None)
         if msg.len() > 0 {
             // a missing key written by its type, a uint64's unsigned, as
             // native code writes it (D183, MYLA-440), a type of another
-            // module's by the name messages give it (MYLA-514)
-            if is_vmap(c) { self.fail(e, missing_key(typed_repr(self.checker, as_written(k), self.index_key_type(e)))) } else { self.fail(e, msg) }
+            // module's by the name messages give it (MYLA-514); a uint64
+            // index unsigned too (MYLA-546)
+            if is_vmap(c) { self.fail(e, missing_key(typed_repr(self.checker, as_written(k), self.index_key_type(e)))) } else { self.fail(e, index_error(c, k, assigning, place, self.index_key_type(e))) }
             return false
         }
         return true
@@ -1133,6 +1260,8 @@ impl Interp {
                     Some(n) => { k = Value.VInt(value_len(self.settled_value(p)) - as_int(self.eval(n))) },
                     None => { k = self.eval(i) },
                 }
+                // a map's (a type's own `Index` may take a float)
+                if self.nan_key(k) && is_vmap(self.settled_value(p)) && self.nan_key_at(k, i) { return p }
                 p.steps.push(Step.SIndex(k, e, -2, 0))
                 p
             },
@@ -1417,19 +1546,17 @@ impl Interp {
                 }
             },
             PlaceOp.OAppend(piece) => {
-                var b = sb_bytes(self.cell)
+                // the builder taken out of its cell, so it is unique and
+                // grows in place
+                var b = sb_of(self.cell)
                 self.cell = Value.VUnit
-                var j = 0
-                while j < piece.len() {
-                    b.push(piece[j] as int64)
-                    j = j + 1
-                }
+                b.append(piece)
                 self.cell = Value.VSB(b)
             },
             PlaceOp.OAppendByte(byte) => {
-                var b = sb_bytes(self.cell)
+                var b = sb_of(self.cell)
                 self.cell = Value.VUnit
-                b.push(byte & 255)
+                b.append_byte((byte & 255) as uint8)
                 self.cell = Value.VSB(b)
             },
         }
@@ -1450,6 +1577,7 @@ impl Interp {
     // -- statements -------------------------------------------------------
 
     fun exec_block(var self, b: Block) {
+        if self.case_deadline > 0 { self.tick() }
         self.push_scope()
         var i = 0
         while i < b.stmts.len() {
@@ -1468,19 +1596,21 @@ impl Interp {
     // the arguments of a `become`, which wait for them; not on a failure or
     // `exit`, which end the program (D97), except under a `#test` case,
     // which they end instead: the case unwinds through them, and one that
-    // fails itself is noted for the report (D162). Each sees the names
-    // declared before it.
+    // fails itself is noted for the report (D162). A deferred block that
+    // fails as a case returns is the case's failure, as it is a program's
+    // (natively too, the 2026-11-17 review's M12), and the case unwinds from
+    // there. Each sees the names declared before it.
     fun run_defers(var self) {
         let top = self.scopes.len() - 1
         if self.scopes[top].defers.len() == 0 { return }
         let ds = self.scopes[top].defers
         self.scopes[top].defers = []
-        match self.ctrl { Ctrl.CExit => { if !self.testing { return } }, _ => {} }
-        let saved_ctrl = self.ctrl
+        match self.ctrl { Ctrl.CExit => { if !self.testing || self.timed_out { return } }, _ => {} }
+        var saved_ctrl = self.ctrl
         let saved_val = self.ctrl_val
         let saved_tail = self.tail
-        let saved_err = self.rt_err
-        let saved_code = self.exit_code
+        var saved_err = self.rt_err
+        var saved_code = self.exit_code
         self.ctrl = Ctrl.CNone
         self.rt_err = None
         self.exit_code = 0
@@ -1511,7 +1641,18 @@ impl Interp {
             match self.ctrl {
                 Ctrl.CExit => {
                     if !self.testing { return }
-                    self.note_defer_failure()
+                    let unwinding = match saved_ctrl { Ctrl.CExit => true, _ => false }
+                    if unwinding { self.note_defer_failure() }
+                    else {
+                        // the case's own failure, which the later blocks
+                        // unwind from
+                        saved_ctrl = Ctrl.CExit
+                        saved_err = self.rt_err
+                        saved_code = self.exit_code
+                        self.ctrl = Ctrl.CNone
+                        self.rt_err = None
+                        self.exit_code = 0
+                    }
                 },
                 _ => {},
             }
@@ -1522,6 +1663,196 @@ impl Interp {
         self.tail = saved_tail
         self.rt_err = saved_err
         self.exit_code = saved_code
+    }
+
+    // A running case's time limit (D259), looked at every 1024 blocks: past
+    // it, the case stops as a failure does (`case_timed_out`).
+    fun tick(var self) {
+        if self.timed_out {
+            self.case_timed_out()
+            return
+        }
+        self.case_ticks += 1
+        if self.case_ticks < 1024 { return }
+        self.case_ticks = 0
+        if __clock_ns() >= self.case_deadline { self.case_timed_out() }
+    }
+
+    // The running case passed its time limit: it stops, as a runtime error
+    // stops it, but runs no deferred block (natively the runner kills it);
+    // every task of it stops at its next block (a task spinning beside the
+    // one that noticed too). `run_case` reports it.
+    fun case_timed_out(var self) {
+        self.timed_out = true
+        if self.stop() { return }
+        self.rt_err = Some(RtError { msg: "timed out", line: 0, col: 0, sp: no_span(), node: -1 })
+        self.ctrl = Ctrl.CExit
+        self.exit_code = 1
+    }
+
+    // `__sleep_ns(n)`, but no longer than a running case may still run
+    // (D259), which it is past then.
+    fun nap(var self, n: int64) {
+        if self.case_deadline == 0 {
+            if n > 0 { __sleep_ns(n) }
+            return
+        }
+        let left = self.case_deadline - __clock_ns()
+        if left < n {
+            if left > 0 { __sleep_ns(left) }
+            self.case_timed_out()
+            return
+        }
+        if n > 0 { __sleep_ns(n) }
+    }
+
+    // `wait(ms)`, a host's wait of at most `ms` milliseconds (negative: no
+    // end) that gives 0 when nothing was ready, but in a running case no
+    // longer than its time limit leaves (D259): a wait it cut short with
+    // nothing ready times the case out (MYLA-818: the interpreter waited in
+    // the system call, past the limit).
+    fun case_wait(var self, ms: int32, wait: (int32) -> int32) -> int32 {
+        if self.case_deadline == 0 { return wait(ms) }
+        let left = (self.case_deadline - __clock_ns() + 999999) / 1000000
+        var cut = ms
+        if left <= 0 { cut = 0 }
+        else if ms < 0 || (ms as int64) > left { cut = if left > 1000000000 { 1000000000 } else { left as int32 } }
+        let r = wait(cut)
+        if r == 0 && cut != ms { self.case_timed_out() }
+        return r
+    }
+
+    // Whether a read of `fd` may go on: at once outside a running case; in
+    // one once `fd` is ready (input, its end, an error), but no later than
+    // the case's time limit (`case_wait`).
+    fun case_readable(var self, fd: int32) -> bool {
+        if self.case_deadline == 0 || fd < 0 { return true }
+        return self.case_wait(-1, (ms: int32) => __poll(fd, ms)) != 0
+    }
+
+    // `s` written to `fd` (`__write`, `__write_bytes`): in a running case a
+    // piece of PIPE_BUF bytes at a time, each once `fd` has room for it,
+    // which a write of that size takes without waiting, but no later than
+    // the case's time limit (`case_wait`: a child that didn't read its
+    // input held the write past it).
+    fun case_write(var self, fd: int32, s: str) {
+        if self.case_deadline == 0 || fd < 0 {
+            let w = write(fd, s)
+            return
+        }
+        var at = 0
+        while true {
+            if self.case_wait(-1, (ms: int32) => __poll_write(fd, ms)) == 0 { return }
+            let end = if s.len() - at > 4096 { at + 4096 } else { s.len() }
+            match write(fd, if at == 0 && end == s.len() { s } else { s[at:end] }) {
+                Ok(()) => {},
+                Err(e) => { return },
+            }
+            at = end
+            if at >= s.len() { return }
+        }
+    }
+
+    // `__run_with(prog, argv, opts)` (`with`; else `__run(prog, argv)`) in a
+    // running case: the child started as theirs is, its output and error
+    // read as they come and its end waited for, but no longer than the
+    // case's time limit leaves (D259); past it the child is killed and
+    // reaped, and the case times out (MYLA-818: the host's run waited in
+    // the system call). Its status is the reap's (`__run_exit_code`,
+    // `__run_signal`), its error output `run_stderr`.
+    fun case_run(var self, prog: str, argv: [str], opts: [str], with: bool) -> Value {
+        let h = if with { __spawn_with(prog, argv, opts) } else { __spawn(prog, argv) }
+        if h[0] != 0 {
+            // not started: the host's run fails as the spawn did, at once
+            self.run_stderr = None
+            if with { return bytes_to_value(__run_with(prog, argv, opts)) }
+            return bytes_to_value(__run(prog, argv))
+        }
+        let pid = h[1] as int32
+        var ofd = h[2] as int32
+        var efd = h[3] as int32
+        var out = StringBuilder()
+        var err = StringBuilder()
+        var turn = 0
+        while (ofd >= 0 || efd >= 0) && !self.timed_out {
+            // the stream with bytes, else a little while on each in turn
+            var fd: int32 = -1
+            if ofd >= 0 && __poll(ofd, 0) != 0 { fd = ofd }
+            else if efd >= 0 && __poll(efd, 0) != 0 { fd = efd }
+            else {
+                let idle = if (turn % 2 == 0 && ofd >= 0) || efd < 0 { ofd } else { efd }
+                turn += 1
+                if self.case_wait(10, (ms: int32) => __poll(idle, ms)) != 0 { fd = idle }
+            }
+            if fd >= 0 {
+                let chunk = __read(fd, 65536)
+                if chunk.len() == 0 {
+                    __close(fd)
+                    if fd == ofd { ofd = -1 } else { efd = -1 }
+                } else if fd == ofd { out.append(chunk) } else { err.append(chunk) }
+            }
+        }
+        let exited = h[4] as int32
+        if !self.timed_out { let r = self.case_wait(-1, (ms: int32) => __poll(exited, ms)) }
+        if self.timed_out { kill_tree(pid) }
+        // reaped before `exited` is closed (on Windows that handle keeps
+        // the process ID the child's, MYLA-705)
+        let code = __reap(pid)
+        if ofd >= 0 { __close(ofd) }
+        if efd >= 0 { __close(efd) }
+        __close(exited)
+        self.run_stderr = Some(err.build())
+        return Value.VBytes(out.build())
+    }
+
+    // `__reap(pid)`: in a running case the child waited for no longer than
+    // the case's time limit leaves (D259), by `__try_reap` between naps
+    // (from 1 ms, doubling to 50; a process ID gives nothing to poll); past
+    // it the child is killed and reaped, and the case times out (MYLA-818).
+    fun case_reap(var self, pid: int32) -> int32 {
+        self.forget_child(pid)
+        if self.case_deadline == 0 { return __reap(pid) }
+        var nap: int64 = 1000000
+        while true {
+            let code = __try_reap(pid)
+            if code != 256 { return code }
+            // (not a child to reap: the host's own failure)
+            if __io_errno() != 0 { return __reap(pid) }
+            let left = self.case_deadline - __clock_ns()
+            if left <= 0 {
+                kill_tree(pid)
+                let killed = __reap(pid)
+                self.case_timed_out()
+                return killed
+            }
+            __sleep_ns(if nap < left { nap } else { left })
+            if nap < 50000000 { nap = nap * 2 }
+        }
+        unreachable()
+    }
+
+    // A case started the child `h` gave (`__spawn`'s and its kin's `[cause,
+    // pid, ...]`): noted, to be killed if the case ends without reaping it.
+    fun note_child(var self, h: [int]) {
+        if self.testing && h.len() > 1 && h[0] == 0 && h[1] > 0 { self.case_children.push(h[1]) }
+    }
+
+    // The child `pid` reaped: no longer the case's to kill.
+    fun forget_child(var self, pid: int32) {
+        if self.case_children.len() == 0 { return }
+        var kept: [int32] = []
+        for c in self.case_children { if c != pid { kept.push(c) } }
+        self.case_children = kept
+    }
+
+    // The case that ended: the children it started and didn't reap killed
+    // and reaped, as natively its process group is (D272, MYLA-818).
+    fun end_children(var self) {
+        for pid in self.case_children {
+            kill_tree(pid)
+            let gone = __reap(pid)
+        }
+        self.case_children = []
     }
 
     // A deferred block of a `#test` case failed: noted for the report, and
@@ -1600,7 +1931,12 @@ impl Interp {
             None => { return Value.VUnit },
         }
         self.scopes = []
-        while true {
+        while !self.timed_out {
+            // a case's time limit (D259), looked at each turn
+            if self.case_deadline > 0 && __clock_ns() >= self.case_deadline {
+                self.timed_out = true
+                break
+            }
             self.wake_sleepers()
             if self.qlen == 0 {
                 if self.wait_for_sleeper() { continue }
@@ -1640,6 +1976,11 @@ impl Interp {
             self.frames = []
             self.scopes = []
         }
+        // a case past its time limit (D259) stops with its tasks as they are
+        if self.timed_out {
+            self.case_timed_out()
+            return Value.VUnit
+        }
         // no task ready, none asleep or waiting for input, and the first
         // not done: every task waits on a notifier nobody can wake
         // (MYLA-387), as native code's `exec_stuck` reports it
@@ -1660,10 +2001,10 @@ impl Interp {
     }
 
     // A task running `body` with the variables `scopes`, ready to run.
-    #test(interp_on("fun main() { print(1 + 2) }"), [RtFrame { names: [], vals: [], defers: [] }], block_of("{ }"))[0]
+    #test(interp_on("fun main() { print(1 + 2) }"), [RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }], block_of("{ }"))[0]
     fun new_task(var self, scopes: [RtFrame], body: Block) -> int32 {
         var sc = scopes
-        sc.push(RtFrame { names: [], vals: [], defers: [] })
+        sc.push(RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 })
         let f = AFrame { scopes: sc, conts: [Cont.KScope, Cont.KStmts(body.stmts, 0)], place: None, pend: Ctrl.CNone, pval: Value.VUnit, perr: None, pcode: 0 }
         self.tasks.push(Task { frames: [f], state: 0, value: Value.VUnit, failed: false, err: None, code: 0, awaited: false, waiters: [], cancelled: false, kids: [], requested: false })
         let id = self.tasks.len() - 1
@@ -1705,7 +2046,7 @@ impl Interp {
     // ready latest first (fifo: earliest first).
     fun wake_sleepers(var self) {
         if self.deadlines.len() > 0 { self.fire_deadlines() }
-        if self.fd_waits.len() > 0 || self.parked_socks > 0 { let any = self.wake_readers() }
+        if self.fd_waits.len() > 0 || self.parked_socks > 0 { let any = self.wake_readers(self.qlen > 0) }
         if self.sleepers.len() == 0 { return }
         let now = self.now()
         var due: [int32] = []
@@ -1763,49 +2104,84 @@ impl Interp {
 
     // The tasks whose descriptor is readable ready (in the order they began
     // waiting), and the parked sockets that are on their lots
-    // (`wake_parked`); whether there were any.
-    fun wake_readers(var self) -> bool {
+    // (`wake_parked`); whether there were any. A look is a poll a wait, so
+    // while tasks are ready (`busy`) the waits are looked at as the parked
+    // sockets are, at most 1/LOOK_SHARE of the time (a turn cost a poll a
+    // waiting task, MYLA-604); with none ready, at once.
+    fun wake_readers(var self, busy: bool) -> bool {
         var woke = false
         if self.parked_socks > 0 { woke = self.wake_parked() }
         if self.fd_waits.len() == 0 { return woke }
-        var rest: [FdWait] = []
+        var now: int64 = 0
+        if busy {
+            // (the real clock: the virtual one stands still while tasks run)
+            now = __clock_ns()
+            if now - self.fds_seen < self.fds_gap && now >= self.fds_seen { return woke }
+            self.fds_seen = now
+        }
+        // a look that finds none ready copies nothing
+        var hits: [int32] = []
+        var k = 0
         for w in self.fd_waits {
-            if fd_wait_over(w) {
+            if fd_wait_over(w) { hits.push(k) }
+            k = k + 1
+        }
+        if busy { self.fds_gap = look_gap(__clock_ns() - now) }
+        if hits.len() == 0 { return woke }
+        var rest: [FdWait] = []
+        var hi = 0
+        k = 0
+        for w in self.fd_waits {
+            if hi < hits.len() && hits[hi] == k {
                 self.tasks[w.task].state = 0
                 self.ready(w.task)
-                woke = true
+                hi = hi + 1
             } else {
                 rest.push(w)
             }
+            k = k + 1
         }
         self.fd_waits = rest
-        return woke
+        return true
     }
 
-    // The sockets parked on the lots that became readable moved to their
-    // lots' ready lists, each lot's notifier notified once for each (looked
-    // at once a millisecond at most: a look is a poll a socket); whether
-    // any did.
+    // The sockets parked on the lots that became ready (readable, or
+    // writable for one parked so, MYLA-833) moved to their lots' ready lists, each lot's notifier notified once for each; whether
+    // any did. A look is a poll a socket, a system call each, so they are
+    // looked at once a millisecond at most, and at most 1/LOOK_SHARE of the
+    // time: after a look that took t, not before LOOK_SHARE * t, up to
+    // LOOK_GAP_MAX (an idle server with 1,000 parked sockets used 28 percent
+    // of a CPU, 3 now, MYLA-546).
     fun wake_parked(var self) -> bool {
         // (the real clock: the virtual one stands still while tasks run)
         let now = __clock_ns()
-        if now - self.lots_seen < 1000000 && now >= self.lots_seen { return false }
+        if now - self.lots_seen < self.lots_gap && now >= self.lots_seen { return false }
         self.lots_seen = now
         var woke = false
         var li = 0
         while li < self.lots.len() {
             if self.lots[li].open && self.lots[li].parked.len() > 0 {
-                var rest: [IParked] = []
-                var due = 0
+                // a look that finds none ready copies nothing (MYLA-546)
+                var hits: [int32] = []
+                var k = 0
                 for q in self.lots[li].parked {
-                    if __sock_poll(q.h, 1, 0) != 0 {
-                        self.lots[li].ready.push(q.h)
-                        due = due + 1
-                    } else {
-                        rest.push(q)
-                    }
+                    if __sock_poll(q.h, q.events, 0) != 0 { hits.push(k) }
+                    k = k + 1
                 }
+                let due = hits.len()
                 if due > 0 {
+                    var rest: [IParked] = []
+                    var hi = 0
+                    k = 0
+                    for q in self.lots[li].parked {
+                        if hi < due && hits[hi] == k {
+                            self.lots[li].ready.push(q.h)
+                            hi = hi + 1
+                        } else {
+                            rest.push(q)
+                        }
+                        k = k + 1
+                    }
                     self.lots[li].parked = rest
                     self.parked_socks = self.parked_socks - due
                     let ni = self.notif_slot(self.lots[li].nid)
@@ -1817,12 +2193,14 @@ impl Interp {
             }
             li = li + 1
         }
+        self.lots_gap = look_gap(__clock_ns() - now)
         return woke
     }
 
     // `__sock_lot` and the other primitives of a lot (MYLA-468), as std.rt's
-    // natively: a socket parked waits with no task, and once readable is
-    // ready on its lot, its notifier notified.
+    // natively: a socket parked waits with no task, and once readable (or
+    // writable, as its parking's `events` say) is ready on its lot, its
+    // notifier notified.
     fun lot_primitive(var self, nm: str, args: [Expr]) -> Value {
         var ints: [int64] = []
         for a in args { ints.push(as_int(self.eval(a))) }
@@ -1836,7 +2214,7 @@ impl Interp {
         if li < 0 || li >= self.lots.len() || !self.lots[li].open { return Value.VInt(-1) }
         if nm == "__sock_park" {
             let h = ints[1] as int32
-            let q = IParked { h: h, deadline: ints[2] }
+            let q = IParked { h: h, deadline: ints[2], events: if ints[4] == 2 { 2 } else { 1 } }
             self.sock_tags[h] = ints[3]
             // after the last parked whose deadline isn't later
             var at = self.lots[li].parked.len()
@@ -1882,7 +2260,7 @@ impl Interp {
             // a millisecond at a time, until input or the next sleeper's time
             // (the virtual clock moves only once no input came)
             while true {
-                if self.wake_readers() { return true }
+                if self.wake_readers(false) { return true }
                 if (self.sleepers.len() > 0 || self.deadlines.len() > 0) && self.virtual_time { break }
                 var due = false
                 for s in self.sleepers {
@@ -1892,7 +2270,8 @@ impl Interp {
                     if d.at <= self.now() { due = true }
                 }
                 if due { return true }
-                __sleep_ns(1000000)
+                self.idle_wait()
+                if self.timed_out { return true }
             }
         }
         if self.sleepers.len() == 0 && self.deadlines.len() == 0 { return false }
@@ -1906,10 +2285,59 @@ impl Interp {
         if self.virtual_time {
             if at > self.vclock { self.vclock = at }
         } else {
-            let left = at - __clock_ns()
-            if left > 0 { __sleep_ns(left) }
+            self.nap(at - __clock_ns())
         }
         return true
+    }
+
+    // No task ready while some wait for input: a wait until the next look
+    // at the parked sockets (`wake_parked`), a millisecond at most while a
+    // task waits for a descriptor; for the one descriptor anything waits
+    // for, a wait in its poll. Either until the next sleeper's or deadline's
+    // time at the latest (MYLA-546: an idle server woke a thousand times a
+    // second).
+    fun idle_wait(var self) {
+        var w = FdWait { fd: -1, fd2: -1, task: -1, events: 1 }
+        if self.fd_waits.len() + self.parked_socks == 1 {
+            if self.fd_waits.len() == 1 { w = self.fd_waits[0] } else { w.fd = self.only_parked() }
+        }
+        let one = w.fd >= 0 && w.fd2 < 0
+        let now = __clock_ns()
+        var until = now + LOOK_GAP_MAX
+        if !one {
+            if self.fd_waits.len() > 0 { until = now + 1000000 }
+            if self.parked_socks > 0 && self.lots_seen + self.lots_gap < until { until = self.lots_seen + self.lots_gap }
+        }
+        if !self.virtual_time {
+            for s in self.sleepers {
+                if s.at < until { until = s.at }
+            }
+            for d in self.deadlines {
+                if d.at < until { until = d.at }
+            }
+        }
+        if self.case_deadline > 0 && self.case_deadline < until {
+            if self.case_deadline <= now {
+                self.case_timed_out()
+                return
+            }
+            until = self.case_deadline
+        }
+        let ms = (until - now) / 1000000
+        if one && ms > 0 {
+            // (the parked socket looked at again at once when ready)
+            if fd_wait_within(w, ms as int32) && self.parked_socks == 1 { self.lots_seen = 0 }
+            return
+        }
+        if until > now { self.nap(until - now) }
+    }
+
+    // The one socket parked on a lot (`parked_socks` is 1), -1 for none.
+    fun only_parked(self) -> int32 {
+        for l in self.lots {
+            if l.open && l.parked.len() > 0 { return l.parked[0].h }
+        }
+        return -1
     }
 
     // Room for one more ready task: the ring doubled, its tasks in order.
@@ -2017,6 +2445,9 @@ impl Interp {
             },
             Cont.KScope => { self.close_scope() },
             Cont.KWhile(c, b) => {
+                // (a loop of an async function that suspends in a branch it
+                // doesn't take runs here: its time is looked at, D259)
+                if self.case_deadline > 0 { self.tick() }
                 let cv = self.eval(c)
                 if self.stop() {
                     self.take_ctrl()
@@ -2025,6 +2456,13 @@ impl Interp {
                 if as_bool(cv) { self.push_block(b) } else { self.frames[top].conts.pop() }
             },
             Cont.KFor(v, items, i, hi, body) => {
+                if self.case_deadline > 0 {
+                    self.tick()
+                    if self.stop() {
+                        self.take_ctrl()
+                        return
+                    }
+                }
                 if i >= hi {
                     self.frames[top].conts.pop()
                     return
@@ -2176,17 +2614,29 @@ impl Interp {
         self.frames[top].conts.pop()
     }
 
-    // The task `id` and its children, cancelled: each stops when it next runs.
+    // The task `id` and its children, cancelled: each stops when it next
+    // runs, one asleep or waiting for input or a notifier at once (MYLA-620:
+    // the entry's `exit` waited for a child's sleep or input, natively not).
     fun cancel_task(var self, id: int32) {
         if self.tasks[id].cancelled { return }
         self.tasks[id].cancelled = true
+        self.wake_to_stop(id)
         for k in self.tasks[id].kids { self.cancel_task(k) }
     }
 
     // `task.cancel` of the task `id`: it and its children asked to stop (D96).
     fun request_cancel(var self, id: int32) {
         self.tasks[id].requested = true
-        // asleep, it wakes at once (D124); waiting for input, too
+        self.wake_to_stop(id)
+        for k in self.tasks[id].kids { self.request_cancel(k) }
+    }
+
+    // The task `id`, asked to stop, ready if it waits: asleep, it wakes at
+    // once (D124); waiting for input, too; waiting on a notifier (MYLA-387),
+    // the wait cancelled.
+    fun wake_to_stop(var self, id: int32) {
+        // (only a waiting task is on these lists)
+        if self.tasks[id].state != 1 { return }
         var i = 0
         while i < self.sleepers.len() {
             if self.sleepers[i].task == id { self.sleepers[i].at = -1 }
@@ -2204,14 +2654,12 @@ impl Interp {
             }
             self.fd_waits = rest
         }
-        // waiting on a notifier (MYLA-387): the wait cancelled, ready
         for wi in self.parked_waits {
             if self.pwaits[wi].task == id {
                 self.unpark(wi, 4, true)
                 self.ready(id)
             }
         }
-        for k in self.tasks[id].kids { self.request_cancel(k) }
     }
 
     // -- notifiers (MYLA-387) -------------------------------------------
@@ -2237,7 +2685,7 @@ impl Interp {
         if nm == "__notifier" { return Value.VInt(self.new_notifier()) }
         if nm == "__notify_gen" {
             let ni = self.notif_slot(ints[0])
-            if ni < 0 { return Value.VInt(-1) }
+            if ni < 0 { return Value.VInt(if self.notif_given(ints[0]) { -1 } else { -2 }) }
             return Value.VInt(self.notifs[ni].gen)
         }
         if nm == "__notify" {
@@ -2262,7 +2710,7 @@ impl Interp {
             self.free_waits.push(ints[0] as int32)
             if st == 2 { return Value.VInt(1) }
             if st == 4 { return Value.VInt(2) }
-            if st == 6 { return Value.VInt(3) }
+            if st == 7 { return Value.VInt(3) }
             return Value.VInt(0)
         }
         self.park(ints[0] as int32)
@@ -2278,8 +2726,8 @@ impl Interp {
             ni = self.free_notifs.pop()
         } else {
             if (ni as int64) >= (1i64 << NOTIF_BITS) {
-                // a million notifiers open at once: the slot wouldn't fit
-                // the handle
+                // two billion notifiers open at once: the slot wouldn't
+                // fit the handle
                 self.rt_err = Some(RtError { msg: "too many notifiers open", line: 0, col: 0, sp: no_span(), node: -1 })
                 self.ctrl = Ctrl.CExit
                 self.exit_code = 1
@@ -2290,6 +2738,14 @@ impl Interp {
         let id = (self.notif_seq << NOTIF_BITS) | (ni as int64)
         self.notifs[ni] = Notif { permits: 0, gen: 0, waits: [], id: id }
         return id
+    }
+
+    // Whether `id` is a notifier's handle given at some time, open or closed
+    // since (D195): its count is one of the notifiers made.
+    #test(interp_on("[int]"), 4096i64)[false]
+    fun notif_given(self, id: int64) -> bool {
+        let seq = id >> NOTIF_BITS
+        return id > 0 && seq >= 1 && seq <= self.notif_seq
     }
 
     // The slot of the notifier whose handle is `id`, or -1 when it is closed
@@ -2329,7 +2785,7 @@ impl Interp {
         if !outside && (self.tasks[self.cur].requested || self.tasks[self.cur].cancelled) {
             st = 4
         } else if ni < 0 {
-            st = 6
+            st = if self.notif_given(self.pwaits[wi].nid) { 6 } else { 7 }
         } else if self.notifs[ni].permits > 0 {
             self.notifs[ni].permits = self.notifs[ni].permits - 1
             st = 2
@@ -2347,7 +2803,7 @@ impl Interp {
                     self.exit_code = 1
                     return
                 }
-                if self.virtual_time { self.vclock = self.vclock + ms * 1000000 } else { __sleep_ns(ms * 1000000) }
+                if self.virtual_time { self.vclock = self.vclock + ms * 1000000 } else { self.nap(ms * 1000000) }
                 st = 3
             }
             self.pwaits[wi].state = st
@@ -2821,6 +3277,20 @@ impl Interp {
                 self.bind_destructure(bind_elems(binding), v)
             },
             StmtKind.Assign(target, value) => {
+                // `x[i] = v` by an `IndexSet` (D200): `x.set_index(i, v)`,
+                // the place first, as a method call takes it (D193)
+                if self.op_sets.len() > 0 {
+                    match target.kind {
+                        ExprKind.Index(b, ix) => {
+                            let m = self.op_set_call(target.id, b, ix)
+                            if m != "" {
+                                self.eval_method_call(target, b, m, [ix, value])
+                                return
+                            }
+                        },
+                        _ => {},
+                    }
+                }
                 if fused_compound(target, value) && self.fusable_at(target) {
                     self.exec_fused(target, value)
                     return
@@ -3186,6 +3656,10 @@ impl Interp {
         // a `char` literal where an integer is expected (`let b: uint8 =
         // 'a'`) is that number (the 2026-11-10 review's L4)
         if isc && !is_int_value_type(self.resolved_of(e.id)) { return Value.VChar(v) }
+        // a small one is itself in every integer type, and a literal's type
+        // is never a type parameter's: none looked up (most literals; the
+        // plain loop's cost, MYLA-546)
+        if v >= 0 && v < 128 { return Value.VInt(v) }
         return Value.VInt(wrap_opt(v, self.typed_of(e.id)))
     }
 
@@ -3196,7 +3670,7 @@ impl Interp {
             None => {},
         }
         let ci = self.const_idx(n)
-        if ci >= 0 { return self.const_vals[ci] }
+        if ci >= 0 { return self.const_value(ci) }
         // a bare no-payload enum variant, e.g. `None` or `North`
         match self.nullary_variant_enum(n) {
             Some(en) => { return Value.VEnum(en, n, []) },
@@ -3213,8 +3687,50 @@ impl Interp {
         return self.nullary_ix.get(name)
     }
 
+    // The operator method the node `id` calls (D200): the checker's choice,
+    // or in generic code the impl the operands' types pick now, `l`'s and
+    // `r`'s (`r` none for `Neg`); "" for a number's own operator, a list's
+    // own index, a classic impl.
+    fun op_call(self, id: int32, tr: str, l: Expr, r: Option<Expr>) -> str {
+        return match self.op_sites.get(id) {
+            Some(m) => if m != "" { m } else { self.op_by_types(tr, l, r) },
+            None => "",
+        }
+    }
+
+    // `op_call` of the index assignment `id`, by its `IndexSet` (D200).
+    fun op_set_call(self, id: int32, b: Expr, ix: Expr) -> str {
+        return match self.op_sets.get(id) {
+            Some(m) => if m != "" { m } else { self.op_by_types("IndexSet", b, Some(ix)) },
+            None => "",
+        }
+    }
+
+    // The operator method of the trait `tr` that the types of `l` and `r`
+    // pick now, in generic code (D200); "" for none.
+    fun op_by_types(self, tr: str, l: Expr, r: Option<Expr>) -> str {
+        let lt = match self.full_type_of(l.id) {
+            Some(t) => t,
+            None => { return "" },
+        }
+        var rt = lt
+        match r {
+            Some(x) => { match self.full_type_of(x.id) { Some(t) => { rt = t }, None => {} } },
+            None => {},
+        }
+        return match find_op_impl(self.op_impls, tr, type_key_of(lt), lt, rt) {
+            Some(oi) => op_part(oi),
+            None => "",
+        }
+    }
+
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "-", expr_of("a.b[0]"))[Value.VInt(0)]
     fun eval_unary(var self, e: Expr, op: str, x: Expr) -> Value {
+        // a struct's or enum's `-` by its `Neg` (D200)
+        if op == "-" && self.op_sites.len() > 0 {
+            let m = self.op_call(e.id, "Neg", x, None)
+            if m != "" { return self.eval_method_call(e, x, m, []) }
+        }
         let v = self.eval(x)
         if op == "!" { return Value.VBool(!as_bool(v)) }
         if op == "-" {
@@ -3247,6 +3763,17 @@ impl Interp {
         if op == "||" {
             if as_bool(self.eval(l)) { return Value.VBool(true) }
             return Value.VBool(as_bool(self.eval(r)))
+        }
+        // an operator impl by type arguments (D200): its method called, the
+        // operands its receiver and argument
+        if self.op_sites.len() > 0 && l.id != self.fused {
+            match arith_trait(op) {
+                Some(tr) => {
+                    let m = self.op_call(e.id, tr, l, Some(r))
+                    if m != "" { return self.eval_method_call(e, l, m, [r]) }
+                },
+                None => {},
+            }
         }
         // (a compound assignment's place, read by `exec_fused`)
         let lv = if l.id == self.fused { self.take_fused() } else { self.eval(l) }
@@ -3474,20 +4001,30 @@ impl Interp {
         var m = new_mapv()
         for en in entries {
             let k = self.eval(en.key)
+            if self.nan_key_at(k, en.key) { return Value.VUnit }
+            // the key hashed and found after its value, as natively, and as
+            // a store into a container is (MYLA-4, MYLA-546)
+            let v = self.eval(en.value)
+            if self.stop() { return Value.VUnit }
             let (found, h) = self.key_place(m, k, kt)
             var j = found
             if j < 0 { j = m.add_key(k, h) }
-            m.vs[j] = self.eval(en.value)
+            m.vs[j] = v
         }
         return Value.VMap(m)
     }
 
     #test(interp_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Value.VUnit]
     fun eval_index(var self, e: Expr, tgt: Expr, idx: Expr) -> Value {
+        // a struct's or enum's `x[i]` by its `Index` (D200)
+        if self.op_sites.len() > 0 {
+            let m = self.op_call(e.id, "Index", tgt, Some(idx))
+            if m != "" { return self.eval_method_call(e, tgt, m, [idx]) }
+        }
         let c = self.eval(tgt)
         if is_slice_expr(idx) { return self.eval_slice(e, c, idx) }
         let k = self.index_value(c, idx)
-        if self.stop() { return Value.VUnit }
+        if self.stop() || (is_vmap(c) && self.nan_key_at(k, idx)) { return Value.VUnit }
         // the key's place found once, for the check and the read (MYLA-506)
         let kt = self.hashed_index_key(k, e)
         let at = self.place_in(c, k, kt)
@@ -3586,7 +4123,8 @@ impl Interp {
             ExprKind.GetField(tgt, field) => {
                 // `h.wrapping_mul(k)` (D175) first: hashes and digests make
                 // many, and no impl can define the name on an integer
-                if is_wrapping_method(field) && is_int_value_type(self.resolved_of(tgt.id)) { return self.eval_wrapping_on(e, field, tgt, args) }
+                let bc = self.builtin_code(field)
+                if bc == G_WRAPPING && is_int_value_type(self.resolved_of(tgt.id)) { return self.eval_wrapping_on(e, field, tgt, args) }
                 // `T.zero()`, `int.zero()`: a function of the type (D172)
                 match self.static_calls.get(e.id) {
                     Some(st) => { return self.eval_static_call(e, st, field, args) },
@@ -3594,12 +4132,12 @@ impl Interp {
                 }
                 // a builtin function called as a method of its first argument
                 // (`xs.push(v)` is `push(xs, v)`, D103, MYLA-221)
-                if builtin_method_name(field) && self.func_idx(format("{}.{}", self.recv_key(tgt), field)) < 0 {
+                if is_method_code(bc) {
                     let is_builtin = match self.resolved_of(tgt.id) { Some(t) => builtin_method(t, field), None => false }
-                    if is_builtin {
+                    if is_builtin && self.func_idx(format("{}.{}", self.recv_key(tgt), field)) < 0 {
                         var all: [Expr] = [tgt]
                         for a in args { all.push(a) }
-                        return self.eval_name_call(e, field, all)
+                        return self.eval_builtin_call(e, bc, field, all)
                     }
                 }
                 return self.eval_getfield_call(e, tgt, field, args)
@@ -3730,21 +4268,54 @@ impl Interp {
             }
             let argv = self.eval_args(args)
             if self.stop() { return Value.VUnit }
-            self.bind_next(fi, e.id, self.resolved_of(recv.id))
             if var_self && place.root != "" {
                 // (its keys found once: again only if they moved, MYLA-506)
                 place = self.settle(place, false)
                 let ok = !self.stop()
                 self.receivers.push(if ok { self.value_at(place) } else { Value.VUnit })
                 if ok { self.update_place(place, PlaceOp.OSet(Value.VUnit)) }
+                // bound after `settle`: a key's written `hash` or `eq` it
+                // runs would take the binding (the 2026-11-12 review's B6)
+                self.bind_next(fi, e.id, self.resolved_of(recv.id))
+                self.note_caller(fi, e)
                 let (r, final_self) = self.call_with_receiver(fi, argv)
                 self.write_place(place, final_self)
                 // an async body deferred: its `self` goes back here when it ends
                 match self.deferred { Some(d) => { self.deferred_place = Some(place) }, None => {} }
                 return r
             }
+            self.bind_next(fi, e.id, self.resolved_of(recv.id))
+            self.note_caller(fi, e)
             let (r, fs) = self.call_method(fi, rv, argv)
             return r
+        }
+        // `x.format(spec)` of a printable builtin value, `x: T` with
+        // `T: Format` (MYLA-544): its print form by the spec, as a hole's
+        if method == "format" && args.len() == 1 && fi < 0 {
+            if !evaluated {
+                rv = self.eval(recv)
+                evaluated = true
+            }
+            let user = match self.deref(rv) {
+                Value.VStruct(n, fns, fvs) => true,
+                Value.VEnum(en, vr, pl) => true,
+                _ => false,
+            }
+            if !user {
+                let spec = as_str(self.eval(args[0]))
+                if self.stop() { return Value.VUnit }
+                let t = self.full_type_of(recv.id)
+                // a spec that isn't one, or doesn't fit the type, is the
+                // caller's mistake: at the call, on every runner (D183,
+                // MYLA-565)
+                let class = match t { Some(Type.TInt(w, sg)) => 0, Some(Type.TFloat(w)) => 1, _ => 2 }
+                let why = spec_misfit(spec, class, match t { Some(ty) => type_name(ty), None => "" })
+                if why != "" {
+                    self.fail(e, why)
+                    return Value.VUnit
+                }
+                return Value.VStr(self.format_spec_value(rv, t, spec))
+            }
         }
         // not a method: a field holding a function, called (an actor's
         // through its handle, from its own method: the 2026-11-10 review's
@@ -3825,6 +4396,7 @@ impl Interp {
             return Value.VUnit
         }
         self.bind_next(fi, e.id, Some(t))
+        self.note_caller(fi, e)
         return self.call_func(fi, argv)
     }
 
@@ -3840,11 +4412,19 @@ impl Interp {
     }
 
     // The environment the running function's frame binds (an index into
-    // `envs`), -1 for none: its first variable, `%env`.
+    // `envs`), -1 for none: its slot `env`.
     #test(interp_on("[int]"))[-1]
     fun frame_env(self) -> int32 {
-        if self.scopes.len() == 0 || self.scopes[0].names.len() == 0 || self.scopes[0].names[0] != "%env" { return -1 }
-        return as_int(self.scopes[0].vals[0]) as int32
+        if self.scopes.len() == 0 { return -1 }
+        return self.scopes[0].env
+    }
+
+    // The node of the call whose position the running function reports
+    // (`#track_caller`), -1 for none: its frame's slot `caller`.
+    #test(interp_on("[int]"))[-1]
+    fun frame_caller(self) -> int32 {
+        if self.scopes.len() == 0 { return -1 }
+        return self.scopes[0].caller
     }
 
     // The checked type of node `id`, a type parameter's the type the
@@ -3854,9 +4434,10 @@ impl Interp {
     // the common case costs a tag's test.
     #test(interp_on("[int]"), -1)[None]
     fun typed_of(self, id: int32) -> Option<Type> {
-        var r = self.resolved.get(id)
-        // (a function's test: a match here retains the type and drops it)
-        if is_param_opt(r) { r = Some(self.env_type(opt_type(r))) }
+        let r = self.resolved.get(id)
+        // (a function's test: a match here retains the type and drops it;
+        // no test before the first generic call, as nothing is bound)
+        if self.envs.len() > 0 && is_param_opt(r) { return Some(self.env_type(opt_type(r))) }
         return r
     }
 
@@ -3930,8 +4511,22 @@ impl Interp {
         }
         var k = -1
         if sub.len() > 0 {
-            k = self.envs.len()
-            self.envs.push(TEnv { fi: fi, sub: sub })
+            // one environment per content: a call site's memo is keyed by
+            // the caller's environment, so a recursion through two call
+            // sites would make one per call path (the 2026-11-12 review's
+            // C3: generic `fib(27)` held 163 MB)
+            var sb = StringBuilder()
+            sb.append(f"#{fi}")
+            for s in sub { sb.append(f" {s.name}={type_name(s.ty)}") }
+            let ck = sb.build()
+            match self.type_env_memo.get(ck) {
+                Some(j) => { k = j },
+                None => {
+                    k = self.envs.len()
+                    self.envs.push(TEnv { fi: fi, sub: sub })
+                    self.type_env_memo[ck] = k
+                },
+            }
         }
         if id >= 0 { self.env_memo[key] = EnvMemo { fi: fi, env: k } }
         if tkey != "" { self.type_env_memo[tkey] = k }
@@ -3944,12 +4539,45 @@ impl Interp {
     }
 
     // Bind the type parameters `env_next` gives in the frame of function
-    // `fi` just made, as its first variable.
+    // `fi` just made, in its slot `env`.
     fun bind_types(var self, fi: int32) {
+        self.bind_caller(fi)
         let k = self.env_next
         self.env_next = -1
         if k < 0 || self.env_fi != fi { return }
-        self.define("%env", Value.VInt(k as int64))
+        self.scopes[0].env = k
+    }
+
+    // The call `e` of function `fi` is about to enter it: when `fi`
+    // reports its caller's position (`#track_caller`, MYLA-435), that is
+    // the call's, or the running function's own caller's when it reports
+    // one too, which `bind_caller` binds in its frame.
+    fun note_caller(var self, fi: int32, e: Expr) {
+        if fi < 0 || !self.tracks[fi] { return }
+        var at = self.frame_caller()
+        if at < 0 {
+            at = e.id
+            self.call_sites[e.id] = e
+        }
+        self.caller_next = at
+        self.caller_fi = fi
+    }
+
+    // The caller's position `note_caller` found, in the slot `caller` of
+    // function `fi`'s frame just made.
+    fun bind_caller(var self, fi: int32) {
+        let at = self.caller_next
+        self.caller_next = -1
+        if at < 0 || self.caller_fi != fi { return }
+        self.scopes[0].caller = at
+    }
+
+    // Where a `panic`, `assert` or `unreachable` at `e` fails: in a function
+    // that reports its caller's position, at its call (MYLA-435).
+    fun failure_at(self, e: Expr) -> Expr {
+        let at = self.frame_caller()
+        if at < 0 { return e }
+        return self.call_sites.get(at).unwrap_or(e)
     }
 
     // The runtime method-dispatch key for a receiver: its checker-resolved type
@@ -3997,6 +4625,11 @@ impl Interp {
             self.env_next = -1
             return Value.VUnit, self.receivers.pop()
         }
+        if fi == self.fi_find_from || fi == self.fi_extend {
+            self.env_next = -1
+            self.depth = self.depth - 1
+            return self.run_own(fi, argv)
+        }
         let saved = self.scopes
         self.enter_method(fi, argv)
         // `become self.m(…)` with a `var self` method goes on with this `self`
@@ -4022,6 +4655,39 @@ impl Interp {
         self.scopes = saved
         self.depth = self.depth - 1
         return rv, final_self
+    }
+
+    // std.str's `find_from` or std.list's `extend` (`fi`) on the receiver on
+    // top of `self.receivers`, run by the interpreter itself, as the
+    // standard library's code does it but without a step a byte or an
+    // element: what `read_line` scans and a list of bytes gathers
+    // (MYLA-546: a step a byte made 3 MB in 60,000 lines slow). Yields the
+    // result and the final `self`.
+    fun run_own(var self, fi: int32, argv: [Value]) -> (Value, Value) {
+        var recv = self.receivers.pop()
+        if fi == self.fi_find_from {
+            return match as_str(recv).find_from(as_str(argv[0]), as_int(argv[1]) as int32) {
+                Some(i) => (Value.VEnum("Option", "Some", [Value.VInt(i as int64)]), recv),
+                None => (Value.VEnum("Option", "None", []), recv),
+            }
+        }
+        // (an empty list given bytes takes them as they are, still packed)
+        let empty = match recv { Value.VList(ys) => ys.len() == 0, _ => false }
+        if is_vbytes(argv[0]) && empty { return Value.VUnit, argv[0] }
+        var xs = list_values(recv)
+        recv = Value.VUnit   // (the only reference: pushed in place, MYLA-74)
+        match argv[0] {
+            Value.VBytes(b) => {
+                var i = 0
+                while i < b.len() {
+                    xs.push(Value.VInt(b[i] as int64))
+                    i += 1
+                }
+            },
+            Value.VList(ys) => { for y in ys { xs.push(y) } },
+            _ => {},
+        }
+        return Value.VUnit, Value.VList(xs)
     }
 
     // One call deeper; past MAX_CALL_DEPTH a runtime error, as the Python
@@ -4415,6 +5081,7 @@ impl Interp {
     fun key_hash(var self, v: Value, t: Option<Type>) -> int64 {
         if self.typed_keys { return self.typed_hash(v, t) }
         return match v {
+            Value.VFloat(f) => self.float_key_hash(v),
             Value.VTuple(es) => self.keys_hash(3, es),
             Value.VList(xs) => self.keys_hash(mix_key(4, xs.len() as int64), xs),
             Value.VBytes(s) => self.keys_hash(mix_key(4, s.len() as int64), byte_values(s)),
@@ -4442,6 +5109,7 @@ impl Interp {
     // it hashes, `t` for `v`, a member's type for a member's (MYLA-436).
     fun typed_hash(var self, v: Value, t: Option<Type>) -> int64 {
         return match v {
+            Value.VFloat(f) => self.float_key_hash(v),
             Value.VTuple(es) => self.typed_keys_hash(3, es, self.member_types(v, t)),
             Value.VList(xs) => self.typed_keys_hash(mix_key(4, xs.len() as int64), xs, self.member_types(v, t)),
             Value.VBytes(s) => self.keys_hash(mix_key(4, s.len() as int64), byte_values(s)),
@@ -4470,6 +5138,46 @@ impl Interp {
 
     // The state the `hash` written for the type `key` gives `v`, a generic
     // impl's type parameters bound by `v`'s type `t`.
+    // A float key's hash (D198): a NaN's is the runtime error std.hash's
+    // own `hash` raises, called here as native code calls it; any other's by
+    // its bits, -0.0's as 0.0's (`value_hash`).
+    fun float_key_hash(var self, v: Value) -> int64 {
+        let f = as_float(v)
+        if f != f { return self.written_hash("float64", v, None) }
+        return value_hash(v)
+    }
+
+    // Whether the map key `v`, the value of `at`, holds a NaN float, itself
+    // or in a tuple's or a derived struct's member: then the program stops
+    // with `cannot hash NaN` at `at` (in a function that reports its
+    // caller's position, at its call), where its map operation is, as
+    // native code's `nan_key_check` does (MYLA-850). A NaN in a list or an
+    // enum is std.hash's `hash` to find, where it hashes it.
+    fun nan_key_at(var self, v: Value, at: Expr) -> bool {
+        if !self.nan_key(v) { return false }
+        self.fail(self.failure_at(at), "cannot hash NaN")
+        return true
+    }
+
+    #test(interp_on("[int]"), Value.VTuple([Value.VInt(1), Value.VFloat(0.0 / 0.0)]))[true]
+    #test(interp_on("[int]"), Value.VList([Value.VFloat(0.0 / 0.0)]))[false]
+    #test(interp_on("[int]"), Value.VFloat(1.5))[false]
+    fun nan_key(self, v: Value) -> bool {
+        return match v {
+            Value.VFloat(f) => f != f,
+            Value.VTuple(es) => self.any_nan_key(es),
+            Value.VStruct(n, fns, fvs) => !self.own_hash.contains(n) && self.any_nan_key(fvs),
+            _ => false,
+        }
+    }
+
+    fun any_nan_key(self, vs: [Value]) -> bool {
+        for v in vs {
+            if self.nan_key(v) { return true }
+        }
+        return false
+    }
+
     fun written_hash(var self, key: str, v: Value, t: Option<Type>) -> int64 {
         let h0 = Value.VStruct("Hasher", ["state"], [Value.VInt(0)])
         let fi = self.func_idx(key + ".hash")
@@ -4602,8 +5310,16 @@ impl Interp {
             Value.VStruct(n, fns, fvs) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(typed_repr(self.checker, v, t)) } },
             Value.VEnum(en, vr, pl) => { if self.func_idx(format("{}.format", value_key(v))) < 0 { return without_module_ids(typed_repr(self.checker, v, t)) } },
             Value.VList(xs) => { return without_module_ids(typed_repr(self.checker, v, t)) },
+            // (packed bytes too: `ERR: VBytes()`, the 2026-11-12 review's C18)
+            Value.VBytes(bs) => { return py_repr(v) },
             Value.VTuple(es) => { return without_module_ids(typed_repr(self.checker, v, t)) },
             Value.VMap(m) => { return without_module_ids(typed_repr(self.checker, v, t)) },
+            // no form of their own: as natively (MYLA-547)
+            Value.VUnit => { return "()" },
+            Value.VSB(bs) => { return "<StringBuilder>" },
+            Value.VClosure(ps, body, cn, cv, fname, is_func) => { return "<function>" },
+            Value.VCompose(fs) => { return "<function>" },
+            Value.VPartial(f, slots, holes) => { return "<function>" },
             _ => {},
         }
         return self.format_spec_value(v, t, "")
@@ -4659,7 +5375,7 @@ impl Interp {
         if nm == "__sock_send_to" { r = __sock_send_to(ints[0], strs[0], strs[1]) }
         if nm == "__sock_shutdown" { r = __sock_shutdown(ints[0], ints[1]) }
         if nm == "__sock_option" { r = __sock_option(ints[0], ints[1], ints[2]) }
-        if nm == "__sock_poll" { r = __sock_poll(ints[0], ints[1], ints[2]) }
+        if nm == "__sock_poll" { r = self.case_wait(ints[2], (ms: int32) => __sock_poll(ints[0], ints[1], ms)) }
         if nm == "__sock_close" {
             r = __sock_close(ints[0])
             let gone = self.sock_tags.remove(ints[0])
@@ -4681,6 +5397,7 @@ impl Interp {
         if nm == "__term_size" { r = __term_size(fd) }
         if nm == "__term_set" { r = __term_set(fd, mode) }
         if nm == "__term_raw" { r = __term_raw(fd) }
+        if nm == "__term_cbreak" { r = __term_cbreak(fd) }
         if nm == "__term_vt" { r = __term_vt(fd) }
         if nm == "__signal_listen" { r = __signal_listen(fd) }
         if nm == "__signal_take" { r = __signal_take(fd) }
@@ -4689,13 +5406,37 @@ impl Interp {
 
     #test(interp_on("[int]"), Expr { id: 133, line: 83, col: 20, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 22 }, kind: ExprKind.Call(Expr { id: 132, line: 83, col: 11, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 20 }, kind: ExprKind.Name("page_size") }, [], []) }, "page_size", [])[Value.VUnit]
     fun eval_name_call(var self, e: Expr, nm: str, args: [Expr]) -> Value {
+        let c = self.builtin_code(nm)
+        if c == 0 {
+            // (see `eval_builtin_call`)
+            if self.captured_io { self.captured_io = false }
+            // a program's or the library's own function, or a variant
+            return self.call_named(e, nm, args)
+        }
+        return self.eval_builtin_call(e, c, nm, args)
+    }
+
+    // The code of the builtin `nm` (`builtin_codes`, MYLA-605), 0 for a name
+    // that is no builtin's. (A primitive of the checker's lists the table
+    // misses still finds its group, by name.)
+    #test(interp_on("[int]"), "len")[B_LEN]
+    #test(interp_on("[int]"), "__sock_poll")[G_NET]
+    #test(interp_on("[int]"), "fib")[0]
+    fun builtin_code(self, nm: str) -> int32 {
+        let c = self.bcodes.get_or(nm, 0)
+        if c != 0 || nm.len() < 3 || nm[0] != '_' || nm[1] != '_' { return c }
+        return primitive_group(nm)
+    }
+
+    // The call of the builtin `nm`, whose code is `c` (not 0): each case
+    // tests the code, a builtin's call compares no names (MYLA-605: it
+    // compared `nm` with each builtin's before its own, 14 percent of
+    // reading lines).
+    fun eval_builtin_call(var self, e: Expr, c: int32, nm: str, args: [Expr]) -> Value {
         // a captured write leaves no errno of its own: `__io_errno` right
         // after it reads 0, not what an earlier primitive left (M5)
-        if self.captured_io && nm != "__io_errno" { self.captured_io = false }
-        // a program's or the library's own function, or a variant, without
-        // testing every builtin's name first (MYLA-380's follow-up)
-        if !names_a_builtin(nm) { return self.call_named(e, nm, args) }
-        if nm == "std$task$cancel" {
+        if self.captured_io && c != B_IO_ERRNO { self.captured_io = false }
+        if c == B_TASK_CANCEL {
             match self.eval(args[0]) {
                 Value.VTask(id) => { self.request_cancel(id) },
                 _ => {},
@@ -4704,7 +5445,7 @@ impl Interp {
         }
         // a deadline for the child (D124, `task.timeout`), and whether it had
         // not passed
-        if nm == "__cancel_after" {
+        if c == B_CANCEL_AFTER {
             let c = self.eval(args[0])
             let ms = as_int(self.eval(args[1]))
             let rec = self.fired.len()
@@ -4717,24 +5458,32 @@ impl Interp {
             }
             return Value.VInt(rec as int64)
         }
-        if nm == "__disarm" {
+        if c == B_DISARM {
             let rec = as_int(self.eval(args[0]))
             return Value.VBool(!self.fired[rec as int32])
         }
-        if nm == "__task_cancelled" {
+        if c == B_TASK_CANCELLED {
             return Value.VBool(self.cur < self.tasks.len() && self.tasks[self.cur].requested)
         }
+        // outside any task -1; in one, whether another is ready, asleep or
+        // waiting for a descriptor: none of them runs while this one holds
+        // the thread in a blocking call (MYLA-548)
+        if c == B_TASKS_WAITING {
+            if self.cur < 0 || self.cur >= self.tasks.len() { return Value.VInt(-1) }
+            if self.qlen > 0 || self.sleepers.len() > 0 || self.fd_waits.len() > 0 { return Value.VInt(1) }
+            return Value.VInt(0)
+        }
         // std.task's notifiers (MYLA-387)
-        if is_notify_primitive(nm) { return self.notify_primitive(nm, args) }
+        if c == G_NOTIFY { return self.notify_primitive(nm, args) }
         // nothing but the turn its `await` gives (MYLA-228)
-        if nm == "__yield" { return Value.VUnit }
+        if c == B_YIELD { return Value.VUnit }
         // the running task asleep (D124): parked until its time, which
         // `wake_sleepers` sees; outside any task, the thread asleep
-        if nm == "__sleep" {
+        if c == B_SLEEP {
             let ms = as_int(self.eval(args[0]))
             if self.stop() { return Value.VUnit }
             if self.cur < 0 || self.cur >= self.tasks.len() {
-                if ms > 0 && !self.virtual_time { __sleep_ns(ms * 1000000) }
+                if ms > 0 && !self.virtual_time { self.nap(ms * 1000000) }
                 if ms > 0 && self.virtual_time { self.vclock = self.vclock + ms * 1000000 }
                 return Value.VUnit
             }
@@ -4747,17 +5496,18 @@ impl Interp {
             self.parked = true
             return Value.VUnit
         }
-        if nm == "__clock_ns" { return Value.VInt(self.now()) }
+        if c == B_CLOCK_NS { return Value.VInt(self.now()) }
         // the wall clock (MYLA-334): the host's, also under MYLA_TIME=virtual
-        if nm == "__wall_ns" { return Value.VInt(__wall_ns()) }
+        if c == B_WALL_NS { return Value.VInt(__wall_ns()) }
         // waiting for input (D124): parked until `fd` is readable, unless it
         // is now or the task was asked to stop; outside any task, nothing.
         // A negative descriptor, which poll(2) ignores, is ready at once, as
         // natively, where the poller can't watch it (`wait_fds` in std.rt)
-        if nm == "__wait_readable" {
+        if c == B_WAIT_READABLE {
             let fd = as_int(self.eval(args[0])) as int32
             if self.stop() { return Value.VUnit }
-            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fd < 0 || __poll(fd, 0) != 0 { return Value.VUnit }
+            // (a case's stdin is empty: ready at once, MYLA-547)
+            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fd < 0 || (fd == 0 && self.testing) || __poll(fd, 0) != 0 { return Value.VUnit }
             self.fd_waits.push(FdWait { fd: fd, fd2: -1, task: self.cur, events: 0 })
             self.tasks[self.cur].state = 1
             self.parked = true
@@ -4766,12 +5516,12 @@ impl Interp {
         // waiting for room to write to `fd` (a child's input, MYLA-419), as
         // for input; outside any task the thread waits in the host's
         // `__poll_write`, as natively (std.rt's `wait_alone`)
-        if nm == "__wait_writable" {
+        if c == B_WAIT_WRITABLE {
             let fd = as_int(self.eval(args[0])) as int32
             if self.stop() { return Value.VUnit }
             if fd < 0 { return Value.VUnit }
             if self.cur < 0 || self.cur >= self.tasks.len() {
-                let r = __poll_write(fd, -1)
+                let r = self.case_wait(-1, (ms: int32) => __poll_write(fd, ms))
                 return Value.VUnit
             }
             if self.tasks[self.cur].requested || __poll_write(fd, 0) != 0 { return Value.VUnit }
@@ -4780,18 +5530,19 @@ impl Interp {
             self.parked = true
             return Value.VUnit
         }
-        if nm == "__poll_write" {
+        if c == B_POLL_WRITE {
             let fd = as_int(self.eval(args[0])) as int32
-            return Value.VInt(__poll_write(fd, as_int(self.eval(args[1])) as int32) as int64)
+            let ms = as_int(self.eval(args[1])) as int32
+            return Value.VInt(self.case_wait(ms, (t: int32) => __poll_write(fd, t)) as int64)
         }
         // waiting for a socket (MYLA-346): as for input, through the host's
         // `__sock_poll`; outside any task the thread waits in it
-        if nm == "__wait_socket" {
+        if c == B_WAIT_SOCKET {
             let h = as_int(self.eval(args[0])) as int32
             let ev = as_int(self.eval(args[1])) as int32
             if self.stop() { return Value.VUnit }
             if self.cur < 0 || self.cur >= self.tasks.len() {
-                let r = __sock_poll(h, ev, -1)
+                let r = self.case_wait(-1, (ms: int32) => __sock_poll(h, ev, ms))
                 return Value.VUnit
             }
             if self.tasks[self.cur].requested || h < 0 || __sock_poll(h, ev, 0) != 0 { return Value.VUnit }
@@ -4800,24 +5551,24 @@ impl Interp {
             self.parked = true
             return Value.VUnit
         }
-        if nm == "__wait_either" {
+        if c == B_WAIT_EITHER {
             let fa = as_int(self.eval(args[0])) as int32
             let fb = as_int(self.eval(args[1])) as int32
             if self.stop() { return Value.VUnit }
             // (`fb` negative is "only `fa`", as natively)
-            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fa < 0 || __poll(fa, 0) != 0 || (fb >= 0 && __poll(fb, 0) != 0) { return Value.VUnit }
+            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || fa < 0 || (fa == 0 && self.testing) || __poll(fa, 0) != 0 || (fb >= 0 && __poll(fb, 0) != 0) { return Value.VUnit }
             self.fd_waits.push(FdWait { fd: fa, fd2: fb, task: self.cur, events: 0 })
             self.tasks[self.cur].state = 1
             self.parked = true
             return Value.VUnit
         }
-        if nm == "__sleep_ns" {
+        if c == B_SLEEP_NS {
             let n = as_int(self.eval(args[0]))
             if self.stop() { return Value.VUnit }
-            if self.virtual_time { self.vclock = self.vclock + n } else if n > 0 { __sleep_ns(n) }
+            if self.virtual_time { self.vclock = self.vclock + n } else if n > 0 { self.nap(n) }
             return Value.VUnit
         }
-        if nm == "print" {
+        if c == B_PRINT {
             let v = self.eval(args[0])
             if self.stop() { return Value.VUnit }
             // a struct or enum through its `format` (D159), the rest as before
@@ -4825,7 +5576,7 @@ impl Interp {
             self.emit("\n")
             return Value.VUnit
         }
-        if nm == "__write" {
+        if c == B_WRITE {
             let fd = as_int(self.eval(args[0])) as int32
             let s = as_str(self.eval(args[1]))
             if self.stop() { return Value.VUnit }
@@ -4833,29 +5584,35 @@ impl Interp {
                 self.captured.push(s)
                 self.captured_io = true
             }
-            else { write(fd, s) }
+            else { self.case_write(fd, s) }
             return Value.VUnit
         }
-        if nm == "__exit" {
+        if c == B_EXIT {
             let code = as_int(self.eval(args[0])) as int32
             self.ctrl = Ctrl.CExit
             self.exit_code = code
             return Value.VUnit
         }
-        if nm == "__read_file" {
+        if c == B_READ_FILE {
             return Value.VStr(__read_file(as_str(self.eval(args[0]))))
         }
-        if nm == "__read" {
+        if c == B_READ {
             let fd = as_int(self.eval(args[0])) as int32
-            return Value.VStr(__read(fd, as_int(self.eval(args[1])) as int32))
+            let n = as_int(self.eval(args[1])) as int32
+            if self.empty_stdin(fd) { return Value.VStr("") }
+            if !self.case_readable(fd) { return Value.VStr("") }
+            return Value.VStr(__read(fd, n))
         }
         // `__read` and `__write` of bytes (D177): here through a string,
         // which the bytes stay (`VBytes`, S2)
-        if nm == "__read_bytes" {
+        if c == B_READ_BYTES {
             let fd = as_int(self.eval(args[0])) as int32
-            return Value.VBytes(__read(fd, as_int(self.eval(args[1])) as int32))
+            let n = as_int(self.eval(args[1])) as int32
+            if self.empty_stdin(fd) { return Value.VBytes("") }
+            if !self.case_readable(fd) { return Value.VBytes("") }
+            return Value.VBytes(__read(fd, n))
         }
-        if nm == "__write_bytes" {
+        if c == B_WRITE_BYTES {
             let fd = as_int(self.eval(args[0])) as int32
             let s = match self.eval(args[1]) {
                 Value.VBytes(b) => b,
@@ -4871,27 +5628,30 @@ impl Interp {
                 self.captured.push(s)
                 self.captured_io = true
             }
-            else { write(fd, s) }
+            else { self.case_write(fd, s) }
             return Value.VUnit
         }
-        if nm == "__poll" {
+        if c == B_POLL {
             let fd = as_int(self.eval(args[0])) as int32
-            return Value.VInt(__poll(fd, as_int(self.eval(args[1])) as int32) as int64)
+            let ms = as_int(self.eval(args[1])) as int32
+            if self.empty_stdin(fd) { return Value.VInt(1) }
+            return Value.VInt(self.case_wait(ms, (t: int32) => __poll(fd, t)) as int64)
         }
-        if nm == "__io_errno" {
+        if c == B_IO_ERRNO {
             if self.captured_io {
                 self.captured_io = false
                 return Value.VInt(0)
             }
             return Value.VInt(__io_errno() as int64)
         }
-        if nm == "__getcwd" { return Value.VStr(__getcwd()) }
-        if nm == "__test_dir" {
+        if c == B_GETCWD { return Value.VStr(__getcwd()) }
+        if c == B_TEST_DIR {
             // the case's scratch root, made on the first call (D162)
             if self.test_root == "" && self.testing {
-                var base = __getenv("TMPDIR")
-                if base == "" { base = "/tmp" }
-                let root = format("{}/myla-test-{}", base, __clock_ns())
+                // under std.fs's temporary root, joined with `\` on
+                // Windows, as std.test's case directories (MYLA-729)
+                let sep = if style.WINDOWS { "\\" } else { "/" }
+                let root = format("{}{}myla-test-{}", temp_root(), sep, __clock_ns())
                 match make_dir_all(root) {
                     Ok(()) => { self.test_root = root },
                     Err(err) => { self.fail(e, format("test.temp_dir() could not create {}", root)) },
@@ -4899,58 +5659,61 @@ impl Interp {
             }
             return Value.VStr(self.test_root)
         }
-        if nm == "__test_program" { return Value.VStr(self.test_program) }
-        if nm == "__getenv" { return Value.VStr(__getenv(as_str(self.eval(args[0])))) }
-        if nm == "__sqrt" { return Value.VFloat(__sqrt(as_float(self.eval(args[0])))) }
-        if is_raw_memory_primitive(nm) {
+        if c == B_TEST_PROGRAM { return Value.VStr(self.test_program) }
+        if c == B_TEST_TOOL { return Value.VStr(program_path(process_m.args()[0], __getcwd())) }
+        if c == B_GETENV { return Value.VStr(__getenv(as_str(self.eval(args[0])))) }
+        if c == B_SQRT { return Value.VFloat(__sqrt(as_float(self.eval(args[0])))) }
+        if c == G_RAW_MEMORY {
             self.fail(e, format("'{}' reads and writes raw memory, which only native code does", nm))
             return Value.VUnit
         }
-        if nm == "__f64_bits" { return Value.VInt(__f64_bits(as_float(self.eval(args[0]))) as int64) }
-        if nm == "__f64_from_bits" { return Value.VFloat(__f64_from_bits(as_int(self.eval(args[0])) as uint64)) }
-        if nm == "__write_file" {
+        if c == B_F64_BITS { return Value.VInt(__f64_bits(as_float(self.eval(args[0]))) as int64) }
+        if c == B_F64_FROM_BITS { return Value.VFloat(__f64_from_bits(as_int(self.eval(args[0])) as uint64)) }
+        if c == B_WRITE_FILE {
             __write_file(as_str(self.eval(args[0])), as_str(self.eval(args[1])))
             return Value.VUnit
         }
-        if nm == "__list_dir" { return Value.VStr(__list_dir(as_str(self.eval(args[0])))) }
-        if nm == "__stat" { return Value.VInt(__stat(as_str(self.eval(args[0]))) as int64) }
-        if nm == "__mkdir" {
+        if c == B_LIST_DIR { return Value.VStr(__list_dir(as_str(self.eval(args[0])))) }
+        if c == B_STAT { return Value.VInt(__stat(as_str(self.eval(args[0]))) as int64) }
+        if c == B_MKDIR {
             let path = as_str(self.eval(args[0]))
             __mkdir(path, as_int(self.eval(args[1])) as int32)
             return Value.VUnit
         }
-        if nm == "__unlink" {
+        if c == B_UNLINK {
             __unlink(as_str(self.eval(args[0])))
             return Value.VUnit
         }
-        if nm == "__rmdir" {
+        if c == B_RMDIR {
             __rmdir(as_str(self.eval(args[0])))
             return Value.VUnit
         }
-        if nm == "__rename" {
+        if c == B_RENAME {
             let from_path = as_str(self.eval(args[0]))
             __rename(from_path, as_str(self.eval(args[1])))
             return Value.VUnit
         }
-        if nm == "__args" {
+        if c == B_ARGS {
             var out: [Value] = []
             for a in self.argv { out.push(Value.VStr(a)) }
             return Value.VList(out)
         }
         // a child not waited for (D124): the native primitives' own
-        if nm == "__spawn" {
+        if c == B_SPAWN {
             let prog = as_str(self.eval(args[0]))
             var argv: [str] = []
             match self.eval(args[1]) {
                 Value.VList(xs) => { for x in xs { argv.push(as_str(x)) } },
                 _ => {},
             }
+            let h = __spawn(prog, argv)
+            self.note_child(h)
             var out: [Value] = []
-            for x in __spawn(prog, argv) { out.push(Value.VInt(x as int64)) }
+            for x in h { out.push(Value.VInt(x as int64)) }
             return Value.VList(out)
         }
         // `__run` and `__spawn` with D147's options: the host's own
-        if nm == "__run_with" || nm == "__spawn_with" {
+        if c == B_RUN_WITH || c == B_SPAWN_WITH {
             let prog = as_str(self.eval(args[0]))
             var argv: [str] = []
             match self.eval(args[1]) {
@@ -4962,32 +5725,38 @@ impl Interp {
                 Value.VList(xs) => { for x in xs { opts.push(as_str(x)) } },
                 _ => {},
             }
-            if nm == "__run_with" { return bytes_to_value(__run_with(prog, argv, opts)) }
+            if c == B_RUN_WITH {
+                if self.case_deadline > 0 { return self.case_run(prog, argv, opts, true) }
+                self.run_stderr = None
+                return bytes_to_value(__run_with(prog, argv, opts))
+            }
+            let h = __spawn_with(prog, argv, opts)
+            self.note_child(h)
             var out: [Value] = []
-            for x in __spawn_with(prog, argv, opts) { out.push(Value.VInt(x as int64)) }
+            for x in h { out.push(Value.VInt(x as int64)) }
             return Value.VList(out)
         }
-        if nm == "__reap" { return Value.VInt(__reap(as_int(self.eval(args[0])) as int32) as int64) }
+        if c == B_REAP { return Value.VInt(self.case_reap(as_int(self.eval(args[0])) as int32) as int64) }
         // MYLA-336's: entropy, descriptors, a child with pipes; the host's own
-        if nm == "__random_bytes" { return bytes_to_value(__random_bytes(as_int(self.eval(args[0])) as int32)) }
-        if nm == "__open" {
+        if c == B_RANDOM_BYTES { return bytes_to_value(__random_bytes(as_int(self.eval(args[0])) as int32)) }
+        if c == B_OPEN {
             let path = as_str(self.eval(args[0]))
             let flags = as_int(self.eval(args[1])) as int32
             return Value.VInt(__open(path, flags, as_int(self.eval(args[2])) as int32) as int64)
         }
-        if nm == "__seek" {
+        if c == B_SEEK {
             let fd = as_int(self.eval(args[0])) as int32
             let offset = as_int(self.eval(args[1]))
             return Value.VInt(__seek(fd, offset, as_int(self.eval(args[2])) as int32))
         }
-        if nm == "__fstat" {
+        if c == B_FSTAT {
             var out: [Value] = []
             for x in __fstat(as_int(self.eval(args[0])) as int32) { out.push(Value.VInt(x)) }
             return Value.VList(out)
         }
         // a string's bytes as a list and back (MYLA-369)
-        if nm == "__str_to_bytes" { return Value.VBytes(as_str(self.eval(args[0]))) }
-        if nm == "__bytes_to_str" {
+        if c == B_STR_TO_BYTES { return Value.VBytes(as_str(self.eval(args[0]))) }
+        if c == B_BYTES_TO_STR {
             match self.eval(args[0]) {
                 Value.VBytes(s) => { return Value.VStr(s) },
                 Value.VList(xs) => {
@@ -4999,14 +5768,15 @@ impl Interp {
             }
             return Value.VStr("")
         }
-        if nm == "__path_stat" {
+        if c == B_PATH_STAT {
             let path = as_str(self.eval(args[0]))
             let follow = as_bool(self.eval(args[1]))
             var out: [Value] = []
             for x in __path_stat(path, follow) { out.push(Value.VInt(x)) }
             return Value.VList(out)
         }
-        if nm == "__spawn_piped" {
+        if c == B_READ_LINK { return Value.VStr(__read_link(as_str(self.eval(args[0])))) }
+        if c == B_SPAWN_PIPED {
             let prog = as_str(self.eval(args[0]))
             var argv: [str] = []
             match self.eval(args[1]) {
@@ -5018,57 +5788,72 @@ impl Interp {
                 Value.VList(xs) => { for x in xs { opts.push(as_str(x)) } },
                 _ => {},
             }
+            let h = __spawn_piped(prog, argv, opts)
+            self.note_child(h)
             var out: [Value] = []
-            for x in __spawn_piped(prog, argv, opts) { out.push(Value.VInt(x as int64)) }
+            for x in h { out.push(Value.VInt(x as int64)) }
             return Value.VList(out)
         }
-        if is_lot_primitive(nm) { return self.lot_primitive(nm, args) }
-        if is_net_primitive(nm) { return self.net_primitive(nm, args) }
-        if is_term_primitive(nm) { return self.term_primitive(nm, args) }
-        if nm == "__try_reap" { return Value.VInt(__try_reap(as_int(self.eval(args[0])) as int32) as int64) }
-        if nm == "__close" {
+        if c == G_LOT { return self.lot_primitive(nm, args) }
+        if c == G_NET { return self.net_primitive(nm, args) }
+        if c == G_TERM { return self.term_primitive(nm, args) }
+        if c == B_TRY_REAP {
+            let pid = as_int(self.eval(args[0])) as int32
+            let code = __try_reap(pid)
+            if code != 256 || __io_errno() != 0 { self.forget_child(pid) }
+            return Value.VInt(code as int64)
+        }
+        if c == B_CLOSE {
             __close(as_int(self.eval(args[0])) as int32)
             return Value.VUnit
         }
-        if nm == "__kill" {
+        if c == B_KILL {
             let pid = as_int(self.eval(args[0])) as int32
             __kill(pid, as_int(self.eval(args[1])) as int32)
             return Value.VUnit
         }
-        if nm == "__run" {
+        if c == B_RUN {
             let prog = as_str(self.eval(args[0]))
             var argv: [str] = []
             match self.eval(args[1]) {
                 Value.VList(xs) => { for x in xs { argv.push(as_str(x)) } },
                 _ => {},
             }
+            if self.case_deadline > 0 { return self.case_run(prog, argv, [], false) }
+            self.run_stderr = None
             return bytes_to_value(__run(prog, argv))
         }
-        if nm == "__run_stderr" { return bytes_to_value(__run_stderr()) }
-        if nm == "__run_exit_code" { return Value.VInt(__run_exit_code() as int64) }
-        if nm == "__run_signal" { return Value.VInt(__run_signal() as int64) }
-        if nm == "__run_errno" { return Value.VInt(__run_errno() as int64) }
-        if nm == "assert" {
+        if c == B_RUN_STDERR {
+            match self.run_stderr {
+                Some(s) => { return Value.VBytes(s) },
+                None => {},
+            }
+            return bytes_to_value(__run_stderr())
+        }
+        if c == B_RUN_EXIT_CODE { return Value.VInt(__run_exit_code() as int64) }
+        if c == B_RUN_SIGNAL { return Value.VInt(__run_signal() as int64) }
+        if c == B_RUN_ERRNO { return Value.VInt(__run_errno() as int64) }
+        if c == B_ASSERT {
             let ok = as_bool(self.eval(args[0]))
             if !ok && !self.stop() {
                 var msg = "assertion failed"
                 if args.len() == 2 { msg = as_str(self.eval(args[1])) }
-                self.fail(e, msg)
+                self.fail(self.failure_at(e), msg)
             }
             return Value.VUnit
         }
-        if nm == "panic" {
+        if c == B_PANIC {
             let msg = as_str(self.eval(args[0]))
-            self.fail(e, msg)
+            self.fail(self.failure_at(e), msg)
             return Value.VUnit
         }
-        if nm == "unreachable" {
-            self.fail(e, "reached unreachable code")
+        if c == B_UNREACHABLE {
+            self.fail(self.failure_at(e), "reached unreachable code")
             return Value.VUnit
         }
-        if nm == "len" { return Value.VInt(value_len(self.eval(args[0]))) }
-        if is_wrapping_method(nm) { return self.eval_wrapping(e, nm, args) }
-        if nm == "push" {
+        if c == B_LEN { return Value.VInt(value_len(self.eval(args[0]))) }
+        if c == G_WRAPPING { return self.eval_wrapping(e, nm, args) }
+        if c == B_PUSH {
             // the list's place, then the value; the list is changed afterwards,
             // so `push(xs, pop(xs))` sees the pop
             let p = self.place_of(args[0])
@@ -5078,7 +5863,7 @@ impl Interp {
             self.update_place(q, PlaceOp.OPush(v))
             return Value.VUnit
         }
-        if nm == "pop" {
+        if c == B_POP {
             let named = self.place_of(args[0])
             let p = self.settle(named, false)
             if self.stop() { return Value.VUnit }
@@ -5089,31 +5874,34 @@ impl Interp {
             }
             return self.update_place(p, PlaceOp.OPop)
         }
-        if nm == "contains" {
+        if c == B_CONTAINS {
             let m = self.eval(args[0])
             let k = self.eval(args[1])
+            if self.nan_key_at(k, args[1]) { return Value.VUnit }
             let kt = self.hashed_key_type(args[0])
             return Value.VBool(self.place_in(m, k, kt) >= 0)
         }
-        if nm == "remove" {
+        if c == B_REMOVE {
             let p = self.place_of(args[0])
             let k = self.eval(args[1])
+            if self.nan_key_at(k, args[1]) { return Value.VUnit }
             let q = self.settle(p, false)
             if self.stop() { return Value.VUnit }
             let kt = self.hashed_key_type(args[0])
             self.update_place(q, PlaceOp.ORemove(k, kt))
             return Value.VUnit
         }
-        if nm == "keys" { return map_keys(self.eval(args[0])) }
-        if nm == "chars" { return decode_chars(as_str(self.eval(args[0]))) }
-        if nm == "format" { return self.eval_format(args) }
-        if nm == "StringBuilder" {
-            // a capacity (MYLA-369) is evaluated; the interpreter's buffer
-            // grows as a list does
-            for a in args { self.eval(a) }
-            return Value.VSB(empty_bytes())
+        if c == B_KEYS { return map_keys(self.eval(args[0])) }
+        if c == B_CHARS { return decode_chars(as_str(self.eval(args[0]))) }
+        if c == B_FORMAT { return self.eval_format(args) }
+        if c == B_STRINGBUILDER {
+            // with a capacity (MYLA-369), room for as many bytes, as natively
+            if args.len() == 0 { return Value.VSB(StringBuilder()) }
+            let n = as_int(self.eval(args[0]))
+            if self.stop() { return Value.VUnit }
+            return Value.VSB(StringBuilder(n as int32))
         }
-        if nm == "append" {
+        if c == B_APPEND {
             let p = self.place_of(args[0])
             var piece = as_str(self.eval(args[1]))
             if args.len() == 4 {                    // append(sb, s, start, end) (MYLA-85)
@@ -5133,7 +5921,7 @@ impl Interp {
             self.update_place(q, PlaceOp.OAppend(piece))
             return Value.VUnit
         }
-        if nm == "append_char" {
+        if c == B_APPEND_CHAR {
             // the character's UTF-8 bytes (MYLA-390)
             let p = self.place_of(args[0])
             let c = self.eval(args[1])
@@ -5145,7 +5933,7 @@ impl Interp {
             }
             return Value.VUnit
         }
-        if nm == "append_byte" {
+        if c == B_APPEND_BYTE {
             let p = self.place_of(args[0])
             let b = as_int(self.eval(args[1]))
             let q = self.settle(p, false)
@@ -5153,11 +5941,11 @@ impl Interp {
             self.update_place(q, PlaceOp.OAppendByte(b))
             return Value.VUnit
         }
-        if nm == "build" { return Value.VStr(sb_build(self.eval(args[0]))) }
+        if c == B_BUILD { return Value.VStr(sb_build(self.eval(args[0]))) }
         return self.call_named(e, nm, args)
     }
 
-    // `nm(args)` where `nm` names no builtin (`names_a_builtin`): a
+    // `nm(args)` where `nm` names no builtin (`builtin_code`): a
     // variant, a function value in scope or a function.
     fun call_named(var self, e: Expr, nm: str, args: [Expr]) -> Value {
         // a bare enum constructor with payload, e.g. `Some(x)`, `Ok(x)`
@@ -5175,6 +5963,7 @@ impl Interp {
         if fi >= 0 {
             let argv = self.eval_args(args)
             self.bind_next(fi, e.id, None)
+            self.note_caller(fi, e)
             return self.call_func(fi, argv)
         }
         // what the checker accepted, the interpreter couldn't find: an
@@ -5229,14 +6018,19 @@ impl Interp {
         for n in reads { wanted[n] = true }
         var cnames: [str] = []
         var cvals: [Value] = []
+        // and the type parameters bound in scope (D172), first, which
+        // `call_closure` puts in the lambda's frame's slot (`frame_env`)
+        let k = self.frame_env()
+        if k >= 0 {
+            cnames.push("%env")
+            cvals.push(Value.VInt(k as int64))
+        }
         var i = 0
         while i < self.scopes.len() {
             var j = 0
             while j < self.scopes[i].names.len() {
                 let n = self.scopes[i].names[j]
-                // and the type parameters bound in scope (D172), first, as
-                // in a function's frame (`frame_env`)
-                if wanted.contains(n) || (i == 0 && j == 0 && n == "%env") {
+                if wanted.contains(n) {
                     cnames.push(self.scopes[i].names[j])
                     cvals.push(self.scopes[i].vals[j])
                 }
@@ -5271,7 +6065,11 @@ impl Interp {
         self.push_scope()
         var i = 0
         while i < cnames.len() {
-            self.define(cnames[i], cvals[i])
+            if i == 0 && cnames[0] == "%env" {
+                self.scopes[0].env = as_int(cvals[0]) as int32
+            } else {
+                self.define(cnames[i], cvals[i])
+            }
             i = i + 1
         }
         var k = 0
@@ -5377,18 +6175,240 @@ fun format_typed(v: Value, t: Option<Type>) -> str {
     return format_value(v)
 }
 
-// Whether `Interp.eval_name_call` takes the call of `nm` itself: a
-// primitive (`__…`), `task.cancel`, or a builtin function or method.
-#test("__write")[true]
-#test("push")[true]
-#test("wrapping_add")[true]
-#test("std$task$cancel")[true]
-#test("fib")[false]
-#test("Some")[false]
-#test("_")[false]
-fun names_a_builtin(nm: str) -> bool {
-    if nm.len() >= 2 && nm[0] == '_' && nm[1] == '_' { return true }
-    return nm == "print" || nm == "assert" || nm == "panic" || nm == "unreachable" || nm == "len" || nm == "push" || nm == "pop" || nm == "contains" || nm == "remove" || nm == "keys" || nm == "chars" || nm == "format" || nm == "StringBuilder" || nm == "append" || nm == "append_char" || nm == "append_byte" || nm == "build" || nm == "std$task$cancel" || is_wrapping_method(nm)
+// The builtins `Interp.eval_builtin_call` takes itself, each by a code
+// (MYLA-605): a primitive (`__…`), `task.cancel`, or a builtin function or
+// method; a group of primitives that another function takes has one code
+// for all (`G_…`). The codes follow the order of its cases.
+const B_IO_ERRNO: int32 = 1
+const B_TASK_CANCEL: int32 = 2
+const B_CANCEL_AFTER: int32 = 3
+const B_DISARM: int32 = 4
+const B_TASK_CANCELLED: int32 = 5
+const G_NOTIFY: int32 = 6
+const B_YIELD: int32 = 7
+const B_SLEEP: int32 = 8
+const B_CLOCK_NS: int32 = 9
+const B_WALL_NS: int32 = 10
+const B_WAIT_READABLE: int32 = 11
+const B_WAIT_WRITABLE: int32 = 12
+const B_POLL_WRITE: int32 = 13
+const B_WAIT_SOCKET: int32 = 14
+const B_WAIT_EITHER: int32 = 15
+const B_SLEEP_NS: int32 = 16
+const B_PRINT: int32 = 17
+const B_WRITE: int32 = 18
+const B_EXIT: int32 = 19
+const B_READ_FILE: int32 = 20
+const B_READ: int32 = 21
+const B_READ_BYTES: int32 = 22
+const B_WRITE_BYTES: int32 = 23
+const B_POLL: int32 = 24
+const B_GETCWD: int32 = 25
+const B_TEST_DIR: int32 = 26
+const B_TEST_PROGRAM: int32 = 27
+const B_GETENV: int32 = 28
+const B_SQRT: int32 = 29
+const G_RAW_MEMORY: int32 = 30
+const B_F64_BITS: int32 = 31
+const B_F64_FROM_BITS: int32 = 32
+const B_WRITE_FILE: int32 = 33
+const B_LIST_DIR: int32 = 34
+const B_STAT: int32 = 35
+const B_MKDIR: int32 = 36
+const B_UNLINK: int32 = 37
+const B_RMDIR: int32 = 38
+const B_RENAME: int32 = 39
+const B_ARGS: int32 = 40
+const B_SPAWN: int32 = 41
+const B_RUN_WITH: int32 = 42
+const B_SPAWN_WITH: int32 = 43
+const B_REAP: int32 = 44
+const B_RANDOM_BYTES: int32 = 45
+const B_OPEN: int32 = 46
+const B_SEEK: int32 = 47
+const B_FSTAT: int32 = 48
+const B_STR_TO_BYTES: int32 = 49
+const B_BYTES_TO_STR: int32 = 50
+const B_PATH_STAT: int32 = 51
+const B_SPAWN_PIPED: int32 = 52
+const G_LOT: int32 = 53
+const G_NET: int32 = 54
+const G_TERM: int32 = 55
+const B_TRY_REAP: int32 = 56
+const B_CLOSE: int32 = 57
+const B_KILL: int32 = 58
+const B_RUN: int32 = 59
+const B_RUN_STDERR: int32 = 60
+const B_RUN_EXIT_CODE: int32 = 61
+const B_RUN_SIGNAL: int32 = 62
+const B_RUN_ERRNO: int32 = 63
+const B_ASSERT: int32 = 64
+const B_PANIC: int32 = 65
+const B_UNREACHABLE: int32 = 66
+const B_LEN: int32 = 67
+const G_WRAPPING: int32 = 68
+const B_PUSH: int32 = 69
+const B_POP: int32 = 70
+const B_CONTAINS: int32 = 71
+const B_REMOVE: int32 = 72
+const B_KEYS: int32 = 73
+const B_CHARS: int32 = 74
+const B_FORMAT: int32 = 75
+const B_STRINGBUILDER: int32 = 76
+const B_APPEND: int32 = 77
+const B_APPEND_CHAR: int32 = 78
+const B_APPEND_BYTE: int32 = 79
+const B_BUILD: int32 = 80
+const B_TASKS_WAITING: int32 = 81
+const B_TEST_TOOL: int32 = 82
+const B_READ_LINK: int32 = 83
+
+// Each builtin's name and its code (`Interp.bcodes`).
+fun builtin_codes() -> [str: int32] {
+    var m: [str: int32] = [:]
+    m["__io_errno"] = B_IO_ERRNO
+    m["std$task$cancel"] = B_TASK_CANCEL
+    m["__cancel_after"] = B_CANCEL_AFTER
+    m["__disarm"] = B_DISARM
+    m["__task_cancelled"] = B_TASK_CANCELLED
+    m["__tasks_waiting"] = B_TASKS_WAITING
+    m["__yield"] = B_YIELD
+    m["__sleep"] = B_SLEEP
+    m["__clock_ns"] = B_CLOCK_NS
+    m["__wall_ns"] = B_WALL_NS
+    m["__wait_readable"] = B_WAIT_READABLE
+    m["__wait_writable"] = B_WAIT_WRITABLE
+    m["__poll_write"] = B_POLL_WRITE
+    m["__wait_socket"] = B_WAIT_SOCKET
+    m["__wait_either"] = B_WAIT_EITHER
+    m["__sleep_ns"] = B_SLEEP_NS
+    m["print"] = B_PRINT
+    m["__write"] = B_WRITE
+    m["__exit"] = B_EXIT
+    m["__read_file"] = B_READ_FILE
+    m["__read"] = B_READ
+    m["__read_bytes"] = B_READ_BYTES
+    m["__write_bytes"] = B_WRITE_BYTES
+    m["__poll"] = B_POLL
+    m["__getcwd"] = B_GETCWD
+    m["__test_dir"] = B_TEST_DIR
+    m["__test_program"] = B_TEST_PROGRAM
+    m["__test_tool"] = B_TEST_TOOL
+    m["__getenv"] = B_GETENV
+    m["__sqrt"] = B_SQRT
+    m["__f64_bits"] = B_F64_BITS
+    m["__f64_from_bits"] = B_F64_FROM_BITS
+    m["__write_file"] = B_WRITE_FILE
+    m["__list_dir"] = B_LIST_DIR
+    m["__stat"] = B_STAT
+    m["__mkdir"] = B_MKDIR
+    m["__unlink"] = B_UNLINK
+    m["__rmdir"] = B_RMDIR
+    m["__rename"] = B_RENAME
+    m["__args"] = B_ARGS
+    m["__spawn"] = B_SPAWN
+    m["__run_with"] = B_RUN_WITH
+    m["__spawn_with"] = B_SPAWN_WITH
+    m["__reap"] = B_REAP
+    m["__random_bytes"] = B_RANDOM_BYTES
+    m["__open"] = B_OPEN
+    m["__seek"] = B_SEEK
+    m["__fstat"] = B_FSTAT
+    m["__str_to_bytes"] = B_STR_TO_BYTES
+    m["__bytes_to_str"] = B_BYTES_TO_STR
+    m["__path_stat"] = B_PATH_STAT
+    m["__read_link"] = B_READ_LINK
+    m["__spawn_piped"] = B_SPAWN_PIPED
+    m["__try_reap"] = B_TRY_REAP
+    m["__close"] = B_CLOSE
+    m["__kill"] = B_KILL
+    m["__run"] = B_RUN
+    m["__run_stderr"] = B_RUN_STDERR
+    m["__run_exit_code"] = B_RUN_EXIT_CODE
+    m["__run_signal"] = B_RUN_SIGNAL
+    m["__run_errno"] = B_RUN_ERRNO
+    m["assert"] = B_ASSERT
+    m["panic"] = B_PANIC
+    m["unreachable"] = B_UNREACHABLE
+    m["len"] = B_LEN
+    m["push"] = B_PUSH
+    m["pop"] = B_POP
+    m["contains"] = B_CONTAINS
+    m["remove"] = B_REMOVE
+    m["keys"] = B_KEYS
+    m["chars"] = B_CHARS
+    m["format"] = B_FORMAT
+    m["StringBuilder"] = B_STRINGBUILDER
+    m["append"] = B_APPEND
+    m["append_char"] = B_APPEND_CHAR
+    m["append_byte"] = B_APPEND_BYTE
+    m["build"] = B_BUILD
+    for n in ["__notifier", "__notify", "__notify_gen", "__waiter", "__park", "__woken", "__notifier_close"] { m[n] = G_NOTIFY }
+    for n in ["__load8", "__load64", "__store8", "__store64", "__alloc", "__addr_of", "__str_of", "__copy_bytes", "__equal_bytes", "__syscall", "__syscall5", "__set_io_errno", "__free", "__environ", "__set_run_status", "__set_run_stderr", "__argv", "__load32", "__store32", "__list_addr", "__list_of", "__rotl", "__rt_addr", "__rt_get", "__bsr64", "__trap_oom", "__rt_waddr", "__cas64", "__xchg64", "__fetch_add64", "__pause", "__run_frame", "__f64_round", "__load_acq64", "__store_rel64", "__call_code"] { m[n] = G_RAW_MEMORY }
+    for n in ["__sock_lot", "__sock_park", "__sock_ready", "__sock_expired", "__sock_tag", "__sock_lot_close"] { m[n] = G_LOT }
+    for n in ["__sock_open", "__sock_set_nonblocking", "__sock_bind", "__sock_listen", "__sock_accept", "__sock_connect", "__sock_error", "__sock_send", "__sock_recv", "__sock_send_to", "__sock_recv_from", "__sock_addr", "__sock_shutdown", "__sock_option", "__sock_poll", "__sock_close", "__net_config"] { m[n] = G_NET }
+    for n in ["__term_is_tty", "__term_size", "__term_get", "__term_set", "__term_raw", "__term_cbreak", "__term_vt", "__signal_listen", "__signal_take"] { m[n] = G_TERM }
+    for n in ["wrapping_add", "wrapping_sub", "wrapping_mul", "wrapping_neg"] { m[n] = G_WRAPPING }
+    return m
+}
+
+// The group of the primitive `nm` by the checker's lists, 0 for none: a
+// primitive the table misses is still taken (only slower).
+#test("__park")[G_NOTIFY]
+#test("__load64")[G_RAW_MEMORY]
+#test("__sock_tag")[G_LOT]
+#test("__sock_send")[G_NET]
+#test("__term_raw")[G_TERM]
+#test("__no_such")[0]
+fun primitive_group(nm: str) -> int32 {
+    if is_notify_primitive(nm) { return G_NOTIFY }
+    if is_raw_memory_primitive(nm) { return G_RAW_MEMORY }
+    if is_lot_primitive(nm) { return G_LOT }
+    if is_net_primitive(nm) { return G_NET }
+    if is_term_primitive(nm) { return G_TERM }
+    return 0
+}
+
+// Whether the builtin of code `c` is also a method (`builtin_method_name`,
+// D103).
+#test(B_PUSH)[true]
+#test(G_WRAPPING)[true]
+#test(B_FORMAT)[false]
+#test(B_PRINT)[false]
+fun is_method_code(c: int32) -> bool {
+    return c == G_WRAPPING || (c >= B_LEN && c <= B_BUILD && c != B_FORMAT && c != B_STRINGBUILDER)
+}
+
+// The program the interpreter's cases run in, which is their test tool too
+// (`myla --test-tool`, std.test's `tool_mode`, MYLA-727): this process as
+// it was started, `argv0`, from the working directory `cwd` when it names
+// a directory that isn't absolute; a bare name, found on PATH, as it is.
+#test("/usr/bin/myla", "/w")["/usr/bin/myla"]
+#test("build/myla", "/w")["/w/build/myla"]
+#test("myla", "/w")["myla"]
+#test("Z:\\b\\myla.exe", "Z:\\w")["Z:\\b\\myla.exe"]
+#test("build\\myla.exe", "C:\\w")["C:\\w\\build\\myla.exe"]
+fun program_path(argv0: str, cwd: str) -> str {
+    if argv0.len() == 0 || argv0[0] == '/' || argv0[0] == '\\' || (argv0.len() > 1 && argv0[1] == ':') { return argv0 }
+    var named_dir = false
+    for i in 0..argv0.len() {
+        if argv0[i] == '/' || argv0[i] == '\\' { named_dir = true }
+    }
+    if !named_dir { return argv0 }
+    let windows = cwd.len() > 1 && cwd[1] == ':'
+    return cwd + (if windows { "\\" } else { "/" }) + argv0
+}
+
+// The table agrees with the checker's lists: a name's group is the one its
+// list names, and its code a method's when the name is a method's.
+#test
+fun builtin_codes_agree() {
+    for (nm, c) in builtin_codes().items() {
+        if is_method_code(c) != builtin_method_name(nm) { panic(f"{nm}: a method's code {is_method_code(c)}") }
+        if c == G_WRAPPING && !is_wrapping_method(nm) { panic(f"{nm}: not a wrapping method") }
+        let g = primitive_group(nm)
+        if (c == G_NOTIFY || c == G_RAW_MEMORY || c == G_LOT || c == G_NET || c == G_TERM) && g != c { panic(f"{nm}: group {c}, the checker's {g}") }
+    }
 }
 
 // Whether `t` names a type parameter, which a generic function's frame
@@ -5497,6 +6517,15 @@ fun fd_wait_over(w: FdWait) -> bool {
     return __poll(w.fd, 0) != 0 || (w.fd2 >= 0 && __poll(w.fd2, 0) != 0)
 }
 
+// Whether the wait `w` on one descriptor is over within `ms` milliseconds,
+// waiting for it in the host's poll.
+#allow(primitive)
+fun fd_wait_within(w: FdWait, ms: int32) -> bool {
+    if w.events < 0 { return __poll_write(w.fd, ms) != 0 }
+    if w.events != 0 { return __sock_poll(w.fd, w.events, ms) != 0 }
+    return __poll(w.fd, ms) != 0
+}
+
 #test(Value.VInt(0))[0]
 #test(Value.VInt(99))[99]
 #test(Value.VInt(100000))[100000]
@@ -5541,6 +6570,43 @@ fun as_str(v: Value) -> str {
 #allow(primitive)
 fun bytes_to_value(bytes: [uint8]) -> Value {
     return Value.VBytes(__bytes_to_str(bytes))
+}
+
+// The child `pid` killed (SIGKILL) with what it started that is still
+// there, as natively a case's process group is (D272): on Linux the
+// children /proc names for each of its threads, and theirs, each stopped
+// (SIGSTOP) as it is found so that none starts another meanwhile
+// (MYLA-818: `sh -c` left its `sleep`); elsewhere the child alone. The
+// child is still to be reaped.
+#allow(primitive)
+fun kill_tree(pid: int32) {
+    var found = [pid]
+    var i = 0
+    while i < found.len() && !style.WINDOWS {
+        let p = found[i]
+        __kill(p, 19)
+        match list_dir(f"/proc/{p}/task") {
+            Ok(threads) => {
+                for t in threads {
+                    match read_to_string(f"/proc/{p}/task/{t}/children") {
+                        Ok(text) => { for w in text.words() { found.push(decimal(w)) } },
+                        Err(e) => {},
+                    }
+                }
+            },
+            Err(e) => {},
+        }
+        i += 1
+    }
+    for p in found { __kill(p, 9) }
+}
+
+// The number the decimal digits `s` make.
+#test("4096")[4096]
+fun decimal(s: str) -> int32 {
+    var n = 0
+    for k in 0..s.len() { n = n * 10 + (s[k] - '0') as int32 }
+    return n
 }
 
 // The bytes of `s` as a list's elements, one `VInt` each: a `VBytes` taken
@@ -5921,29 +6987,32 @@ fun value_len(v: Value) -> int64 {
 
 // Why `c[k]` can't be read (or, `assigning`, written: a missing map key is
 // then an insert), with the Python interpreter's message; "" if it can.
-#test(Value.VStr("a"), Value.VInt(0), false, -1)[""]
-#test(Value.VStr("b"), Value.VInt(0), false, -1)[""]
-#test(Value.VStr("e"), Value.VInt(0), false, -1)[""]
-#test(Value.VMap(new_mapv()), Value.VInt(0), false, -1)["map key 0 not found"]
-// (`place`: a map key's place, as `Interp.place_in` finds it)
-fun index_error(c: Value, k: Value, assigning: bool, place: int32) -> str {
+#test(Value.VStr("a"), Value.VInt(0), false, -1, None)[""]
+#test(Value.VStr("b"), Value.VInt(0), false, -1, None)[""]
+#test(Value.VStr("e"), Value.VInt(0), false, -1, None)[""]
+#test(Value.VMap(new_mapv()), Value.VInt(0), false, -1, None)["map key 0 not found"]
+#test(Value.VList([]), Value.VInt(-1), false, -1, Some(Type.TInt(64, false)))["list index 18446744073709551615 out of bounds (len 0)"]
+#test(Value.VStr("ab"), Value.VInt(-1), false, -1, Some(Type.TInt(64, true)))["string index -1 out of bounds (len 2)"]
+// (`place`: a map key's place, as `Interp.place_in` finds it; `it`: the
+// index's type, by which a `uint64` is written unsigned, MYLA-546)
+fun index_error(c: Value, k: Value, assigning: bool, place: int32, it: Option<Type>) -> str {
     match c {
         Value.VList(xs) => {
             let i = as_int(k)
             if i < 0 || i >= (xs.len() as int64) {
-                return format("list index {} out of bounds (len {})", i, xs.len())
+                return format("list index {} out of bounds (len {})", index_text(i, it), xs.len())
             }
         },
         Value.VBytes(s) => {
             let i = as_int(k)
             if i < 0 || i >= (s.len() as int64) {
-                return format("list index {} out of bounds (len {})", i, s.len())
+                return format("list index {} out of bounds (len {})", index_text(i, it), s.len())
             }
         },
         Value.VStr(str_) => {
             let i = as_int(k)
             if i < 0 || i >= (str_.len() as int64) {
-                return format("string index {} out of bounds (len {})", i, str_.len())
+                return format("string index {} out of bounds (len {})", index_text(i, it), str_.len())
             }
         },
         Value.VMap(m) => {
@@ -5952,6 +7021,14 @@ fun index_error(c: Value, k: Value, assigning: bool, place: int32) -> str {
         _ => {},
     }
     return ""
+}
+
+// An index `i` of type `it` as an error's text writes it: a `uint64`'s
+// unsigned.
+#test(-1, Some(Type.TInt(64, false)))["18446744073709551615"]
+#test(-1, None)["-1"]
+fun index_text(i: int64, it: Option<Type>) -> str {
+    return match it { Some(Type.TInt(w, sg)) => if w == 64 && !sg { format("{}", i as uint64) } else { format("{}", i) }, _ => format("{}", i) }
 }
 
 // `v` with the name of each struct and enum in it as messages write it
@@ -6078,14 +7155,20 @@ fun struct_values(v: Value) -> [Value] {
     }
 }
 
-#test(Value.VSB([]))[[]]
-#test(Value.VSB([48, 49, 50, 51]))[[48, 49, 50, 51]]
-#test(Value.VSB([72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100]))[[72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100]]
-fun sb_bytes(v: Value) -> [int64] {
+// A builder's value (`Value.VSB`); an empty one for any other value
+// (builders have no `==`: `sb_build`'s cases are its).
+fun sb_of(v: Value) -> StringBuilder {
     return match v {
         Value.VSB(b) => b,
-        _ => empty_bytes(),
+        _ => StringBuilder(),
     }
+}
+
+// A builder that holds `s` (for the cases).
+fun sb_holding(s: str) -> Value {
+    var b = StringBuilder(s.len())
+    b.append(s)
+    return Value.VSB(b)
 }
 
 // A map's entries (`Value.VMap`, MYLA-310): its keys and values in the
@@ -6212,15 +7295,22 @@ impl MapV {
     }
 
     // `k` indexed at the place `j`: by its number or itself, else by its
-    // hash `h`, first among those of `h`.
+    // hash `h`, last among those of `h`, so a hash's keys are compared
+    // oldest first, as native code's probe meets them (MYLA-546).
     fun index(var self, k: Value, h: int64, j: int32) {
         if let Value.VStr(s) = k {
             self.strs[s] = j
         } else if is_int_key(k) {
             self.ints[as_int(k)] = j
         } else {
-            self.nexts[j] = self.first_of(h)
-            self.heads[h] = j
+            self.nexts[j] = -1
+            var at = self.first_of(h)
+            if at < 0 {
+                self.heads[h] = j
+            } else {
+                while self.nexts[at] >= 0 { at = self.nexts[at] }
+                self.nexts[at] = j
+            }
         }
     }
 
@@ -6306,13 +7396,22 @@ impl MapV {
         while i < self.ks.len() {
             if self.here[i] {
                 self.nexts.push(-1)
-                self.index(self.ks[i], old_hashes[i], ks.len())
+                if is_plain_key(self.ks[i]) { self.index(self.ks[i], old_hashes[i], ks.len()) }
                 ks.push(self.ks[i])
                 vs.push(self.vs[i])
                 here.push(true)
                 hashes.push(old_hashes[i])
             }
             i = i + 1
+        }
+        // each hash's chain, oldest first (`index`), linked from the newest
+        var j = ks.len() - 1
+        while j >= 0 {
+            if !is_plain_key(ks[j]) {
+                self.nexts[j] = self.first_of(hashes[j])
+                self.heads[hashes[j]] = j
+            }
+            j -= 1
         }
         self.ks = ks
         self.vs = vs
@@ -6326,6 +7425,8 @@ impl MapV {
 // `Interp.key_hash` gives for a key no type's own `hash` is in.
 #test(Value.VUnit)[7]
 #test(Value.VList([]))[mix_key(4, 0)]
+#test(Value.VFloat(-0.0))[value_hash(Value.VFloat(0.0))]
+#allow(primitive)
 fun value_hash(v: Value) -> int64 {
     return match v {
         Value.VInt(n) => mix_key(1, n),
@@ -6338,7 +7439,7 @@ fun value_hash(v: Value) -> int64 {
         Value.VBytes(s) => values_hash(mix_key(4, s.len() as int64), byte_values(s)),
         Value.VStruct(n, fns, fvs) => values_hash(mix_key(5, str_key_hash(n)), fvs),
         Value.VEnum(en, vr, pl) => values_hash(mix_key(6, str_key_hash(vr)), pl),
-        Value.VFloat(f) => mix_key(8, f as int64),
+        Value.VFloat(f) => mix_key(8, __f64_bits(if f == 0.0 { 0.0 } else { f }) as int64),
         _ => 9,
     }
 }
@@ -6456,33 +7557,14 @@ fun utf8_at(s: str, i: int32) -> int64 {
     return cp | ((need as int64) << 32)
 }
 
-#test()[[]]
-fun empty_bytes() -> [int64] {
-    let x: [int64] = []
-    return x
-}
-
-#test(Value.VSB([]))[""]
-#test(Value.VSB([48, 49, 50, 51, 52]))["01234"]
-#test(Value.VSB([72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33]))["Hello, world!"]
+#test(Value.VSB(StringBuilder()))[""]
+#test(sb_holding("01234"))["01234"]
+#test(sb_holding("Hello, world!"))["Hello, world!"]
 fun sb_build(c: Value) -> str {
     return match c {
-        Value.VSB(b) => bytes_to_str(b),
+        Value.VSB(b) => b.build(),
         _ => "",
     }
-}
-
-#test([])[""]
-#test([48, 49, 50, 51, 52])["01234"]
-#test([72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33])["Hello, world!"]
-fun bytes_to_str(b: [int64]) -> str {
-    var sb = StringBuilder()
-    var i = 0
-    while i < b.len() {
-        sb.append_byte(b[i] as uint8)
-        i = i + 1
-    }
-    return sb.build()
 }
 
 #test("{}€", ["6"])["6€"]
@@ -6600,13 +7682,16 @@ fun value_eq(a: Value, b: Value) -> bool {
 
 // A value as the Python interpreter's repr shows it, for a failed #test:
 // chars as code points, `True`, `None`, strings quoted as Python quotes them,
-// `P { x: 1 }`, `E.B(1)`, `(a, b)`, `[a]`, `[k: v]`.
+// `P { x: 1 }`, `E.B(1)`, `(a, b)`, `[a]`, `[k: v]`; a value with no form of
+// its own as natively, inside another too (`[<StringBuilder>]`, the
+// 2026-11-17 review's Low item).
 #test(Value.VBool(true))["True"]
 #test(Value.VList([Value.VInt(1), Value.VChar(97)]))["[1, 97]"]
 #test(Value.VMap(new_mapv()))["[]"]
 #test(Value.VEnum("E", "B", [Value.VStr("it's")]))["E.B(\"it's\")"]
 // (Also the key in a "map key … not found" message.)
 #test(Value.VStr("a b"))["'a\\xa0b'"]
+#test(sb_holding("a'b"))["<StringBuilder>"]
 pub fun py_repr(v: Value) -> str {
     return match v {
         Value.VInt(i) => format("{}", i),
@@ -6621,8 +7706,7 @@ pub fun py_repr(v: Value) -> str {
         Value.VList(xs) => "[" + reprs(xs) + "]",
         Value.VBytes(s) => "[" + reprs(byte_values(s)) + "]",
         Value.VMap(m) => map_repr(map_keys_of(m), map_vals_of(m)),
-        Value.VSB(bs) => "StringBuilder(" + bytes_repr(bs) + ")",
-        Value.VClosure(ps, body, cn, cv, fname, is_func) => format("<closure {} param(s), {} capture(s)>", ps.len(), cn.len()),
+        Value.VSB(b) => "<StringBuilder>",
         _ => "<function>",
     }
 }
@@ -6711,7 +7795,7 @@ pub fun typed_repr(ch: Checker, v: Value, t: Option<Type>) -> str {
 // none known.
 #test(checker_on("fun f() {}"), "Result", [Type.TStr, Type.TBool], "Err")[[Type.TBool]]
 #test(checker_on("enum E<T> { A(T, int) }"), "E", [Type.TStr], "A")[[Type.TStr, Type.TInt(32, true)]]
-fun payload_types(ch: Checker, en: str, args: [Type], vr: str) -> [Type] {
+pub fun payload_types(ch: Checker, en: str, args: [Type], vr: str) -> [Type] {
     if en == "Option" && args.len() == 1 { return [args[0]] }
     if en == "Result" && args.len() == 2 { return if vr == "Ok" { [args[0]] } else { [args[1]] } }
     return match ch.enum_variant_payload(en, args, vr) { Some(p) => p, None => [] }
@@ -6811,39 +7895,6 @@ fun map_repr(ks: [Value], vs: [Value]) -> str {
         i = i + 1
     }
     sb.append("]")
-    return sb.build()
-}
-
-// Python's repr of bytes: b'…' with printable ASCII as is.
-#test([])["b''"]
-#test([0, 1])["b'\\x00\\x01'"]
-fun bytes_repr(bs: [int64]) -> str {
-    var has_single = false
-    var has_double = false
-    for b in bs {
-        if b == 39 { has_single = true }
-        if b == 34 { has_double = true }
-    }
-    var quote: int64 = 39
-    if has_single && !has_double { quote = 34 }
-    var sb = StringBuilder()
-    sb.append("b" + cp_utf8(quote as int32))
-    for b in bs {
-        if b == quote || b == 92 {
-            sb.append("\\" + cp_utf8(b as int32))
-        } else if b == 9 {
-            sb.append("\\t")
-        } else if b == 10 {
-            sb.append("\\n")
-        } else if b == 13 {
-            sb.append("\\r")
-        } else if b < 32 || b >= 127 {
-            sb.append("\\x" + hex2(b as int32))
-        } else {
-            sb.append(cp_utf8(b as int32))
-        }
-    }
-    sb.append(cp_utf8(quote as int32))
     return sb.build()
 }
 
@@ -6947,9 +7998,9 @@ fun key_at(c: Value, j: int32, k: Value) -> Value {
     }
 }
 
-#test([RtFrame { names: [], vals: [], defers: [] }])[[]]
-#test([RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [] }, RtFrame { names: ["c"], vals: [Value.VInt(72)], defers: [] }])[[RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [] }]]
-#test([RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [] }, RtFrame { names: [], vals: [], defers: [] }, RtFrame { names: [], vals: [], defers: [] }])[[RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [] }, RtFrame { names: [], vals: [], defers: [] }]]
+#test([RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }])[[]]
+#test([RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [], env: -1, caller: -1 }, RtFrame { names: ["c"], vals: [Value.VInt(72)], defers: [], env: -1, caller: -1 }])[[RtFrame { names: ["s"], vals: [Value.VStr("Hi")], defers: [], env: -1, caller: -1 }]]
+#test([RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [], env: -1, caller: -1 }, RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }, RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }])[[RtFrame { names: ["s"], vals: [Value.VStr("apple")], defers: [], env: -1, caller: -1 }, RtFrame { names: [], vals: [], defers: [], env: -1, caller: -1 }]]
 fun drop_last_frame(xs: [RtFrame]) -> [RtFrame] {
     var out: [RtFrame] = []
     var i = 0
@@ -7091,6 +8142,15 @@ fun without_module_ids(text: str) -> str {
 #test(' ')[false]
 fun is_name_byte(c: uint8) -> bool {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+// A case's FAIL line in the report: without a detail for an empty one
+// (an `Err("")`'s), as std.test's `fail_line` writes it natively.
+#test("f #1", "x")["FAIL  f #1: x\n"]
+#test("t", "")["FAIL  t\n"]
+fun fail_line(name: str, detail: str) -> str {
+    if detail == "" { return format("FAIL  {}\n", name) }
+    return format("FAIL  {}: {}\n", name, on_one_line(detail))
 }
 
 // `text` for a report line: its newlines shown as `\n`.

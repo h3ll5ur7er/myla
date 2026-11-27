@@ -1,0 +1,30 @@
+// title: Haki
+// xp: 25
+// hidden: describe #test(Haki.Armament(1))["armament level 1"]
+// hidden: describe #test(Haki.Conqueror("Luffy"))["Luffy's conqueror's haki"]
+// hint: A pattern can name the values a variant carries, binding them in its arm.
+// hint: One arm for `Armament(…)` and one for `Conqueror(…)`, each binding its value; build the text with an f-string.
+//
+// Haki comes in three colours, and two of them carry something: armament haki
+// a level, conqueror's haki its user's name. `describe` should give
+//
+// - `Observation`: `"observation"`
+// - `Armament(5)`: `"armament level 5"`
+// - `Conqueror("Shanks")`: `"Shanks's conqueror's haki"`
+//
+// Finish the `match`, binding the values with patterns.
+enum Haki {
+    Observation,
+    Armament(int),
+    Conqueror(str),
+}
+
+#test(Haki.Observation)["observation"]
+#test(Haki.Armament(5))["armament level 5"]
+#test(Haki.Conqueror("Shanks"))["Shanks's conqueror's haki"]
+fun describe(h: Haki) -> str {
+    return match h {
+        Haki.Observation => "observation",
+        _ => "unknown",
+    }
+}

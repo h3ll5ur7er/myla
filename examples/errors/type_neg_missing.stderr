@@ -1,0 +1,5 @@
+type error: unary '-' is not defined for 'V': it needs 'impl Neg for V'
+  --> examples/errors/type_neg_missing.my:10:13
+   |
+10 |     let w = -v
+   |             ^^

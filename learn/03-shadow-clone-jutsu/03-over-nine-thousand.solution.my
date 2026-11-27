@@ -1,0 +1,9 @@
+#test()["Goku: 9001"]
+fun goku() -> str {
+    return power_level("Goku")
+}
+
+#test("Krillin", 1770)["Krillin: 1770"]
+fun power_level(name: str, level: int = 9001) -> str {
+    return f"{name}: {level}"
+}

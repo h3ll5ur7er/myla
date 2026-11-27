@@ -1,0 +1,5 @@
+runtime error: args: the positional 'to' comes after 'many' ('from'), which takes the rest
+  --> examples/errors/runtime_args_spec_at_the_caller.my:9:90
+  |
+9 |     let spec = args.spec("cp", "copies files").flag("force", 'f').many("from").positional("to")
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

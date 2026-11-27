@@ -25,7 +25,11 @@ pub struct UnionFind {
 // `n` elements, each in a set of its own.
 #test(4)[UnionFind { parent: [0, 1, 2, 3], rank: [0u8, 0u8, 0u8, 0u8], size: [1, 1, 1, 1], nsets: 4 }]
 #test(0)[UnionFind { parent: [], rank: [], size: [], nsets: 0 }]
+#test(-1)[panic("unionfind.new: a negative number of elements -1")]
 pub fun new(n: int) -> UnionFind {
+    if n < 0 {
+        panic(f"unionfind.new: a negative number of elements {n}")
+    }
     var parent: [int] = []
     var rank: [uint8] = []
     var size: [int] = []
@@ -65,7 +69,10 @@ impl UnionFind {
     // are in the same set when `find` gives the same root. Points the
     // elements on the way at the root.
     #test(new(4), 2)[2]
+    #test(new(3), -1)[panic("unionfind.find: element -1 is out of range for 3 elements")] // D184, MYLA-550
+    #test(new(3), 3)[panic("unionfind.find: element 3 is out of range for 3 elements")]
     fun find(var self, x: int) -> int {
+        self.check("find", x)
         var root = x
         while self.parent[root] != root {
             root = self.parent[root]
@@ -82,7 +89,10 @@ impl UnionFind {
     // Joins the sets of `a` and `b`; true if they were two sets.
     #test(new(4), 1, 2)[true]
     #test(new(4), 3, 3)[false]
+    #test(new(3), 0, 7)[panic("unionfind.union: element 7 is out of range for 3 elements")]
     fun union(var self, a: int, b: int) -> bool {
+        self.check("union", a)
+        self.check("union", b)
         var ra = self.find(a)
         var rb = self.find(b)
         if ra == rb {
@@ -105,15 +115,27 @@ impl UnionFind {
     // Whether `a` and `b` are in the same set.
     #test(new(4), 1, 2)[false]
     #test(new(4), 2, 2)[true]
+    #test(new(3), -5, 0)[panic("unionfind.same: element -5 is out of range for 3 elements")]
     fun same(var self, a: int, b: int) -> bool {
+        self.check("same", a)
+        self.check("same", b)
         return self.find(a) == self.find(b)
     }
 
     // The number of elements in the set of `x`.
     #test(new(4), 0)[1]
+    #test(new(0), 0)[panic("unionfind.size_of: element 0 is out of range for 0 elements")]
     fun size_of(var self, x: int) -> int {
+        self.check("size_of", x)
         let r = self.find(x)
         return self.size[r]
+    }
+
+    // A failure of the method `name` if `x` isn't an element (D184).
+    fun check(self, name: str, x: int) {
+        if x < 0 || x >= self.parent.len() {
+            panic(f"unionfind.{name}: element {x} is out of range for {self.parent.len()} elements")
+        }
     }
 
     // The sets, each in ascending order, in the order of their least

@@ -18,6 +18,10 @@
 //   is cancelled. A pool of `workers` tasks serves the requests, with
 //   keep-alive: a connection between its requests waits on the reactor,
 //   holding no task (MYLA-468).
+// - The router (D202, MYLA-613): `router(base)` with routes by method and
+//   path pattern (`/users/{id:int}`), sub-routers, static files and
+//   middleware, itself a handler (`r.handler()`); `json` and `json_body`
+//   make handlers of typed endpoints.
 // - Only plain HTTP: `https` is `Unsupported` until TLS. A failure is an
 //   `HttpError`; on wasm32, which has no sockets, every exchange is
 //   `Unsupported("sockets")`.
@@ -31,7 +35,7 @@
 
 import std.net as net
 from std.net import TcpStream, TcpListener, SocketAddr, IpAddr
-from std.ioerror import IoError, io_error_name, from_errno
+from std.ioerror import IoError, io_error_name, from_cause, WOULD_BLOCK
 from std.io import Read, Write
 import std.url as url_m
 import std.compress as compress
@@ -42,6 +46,10 @@ import std.time as time
 import std.str as str_m
 import std.list as list_m
 import std.option as option_m
+import std.json as json_m
+import std.fs as fs_m
+import std.path_style as style_m
+import std.num as num_m
 
 // --- errors --------------------------------------------------------------------------
 
@@ -732,6 +740,7 @@ pub struct Request {
     decompress: bool,
     max_header_bytes: int,
     max_body_bytes: int,
+    params: [(str, str)],
 }
 
 // A request with the method `method` (`GET`, `POST`, …, as written) for
@@ -751,6 +760,7 @@ pub fun request(method: str, url: str) -> Request {
         decompress: true,
         max_header_bytes: MAX_HEAD,
         max_body_bytes: CLIENT_MAX_BODY,
+        params: [],
     }
 }
 
@@ -793,8 +803,10 @@ impl Request {
     }
 
     // The request accepting a response head of at most `header_bytes` bytes
-    // and a body of at most `body_bytes` (as received, before decoding).
-    // A negative limit is a runtime error (D184).
+    // and a body of at most `body_bytes` (as received, before decoding; a
+    // body is a `str`, so 2,147,483,647 bytes at most whatever the limit:
+    // a longer one is `BodyTooLarge`). A negative limit is a runtime error
+    // (D184).
     #test(request("GET", "/"), -1, 5)[panic("with_limits: header_bytes -1 is negative")]
     #test(request("GET", "/"), 5, -2)[panic("with_limits: body_bytes -2 is negative")]
     fun with_limits(self, header_bytes: int, body_bytes: int) -> Request {
@@ -862,11 +874,41 @@ impl Request {
     fun bytes(self) -> [uint8] {
         return bytes_m.from_str(self.body)
     }
+
+    // The path parameter `name` a router matched (`{id}` in
+    // `/users/{id}`, D202), decoded.
+    fun param(self, name: str) -> Option<str> {
+        for kv in self.params {
+            if kv.0 == name { return Some(kv.1) }
+        }
+        return None
+    }
+
+    // The path parameter `name` as an integer: a `{name:int}` one's.
+    fun param_int(self, name: str) -> Option<int> {
+        return match self.param(name) {
+            Some(v) => match num_m.parse_int32(v) {
+                Ok(n) => Some(n),
+                Err(_) => None,
+            },
+            None => None,
+        }
+    }
+
+    // The value of the query parameter `name`, decoded: the first one.
+    fun query_param(self, name: str) -> Option<str> {
+        for kv in self.query() {
+            if kv.0 == name { return Some(kv.1) }
+        }
+        return None
+    }
 }
 
 // An HTTP response: the status, its reason phrase, the version, headers,
 // the body and the trailers of a chunked one. The client sets `url` to the
-// URL it came from, after the redirects.
+// URL it came from, after the redirects. A body sent from a file
+// (`static_files`, D260) is `file`, its path, with `body` empty: the server
+// sends the file as it reads it, and `text()` and `bytes()` read it.
 #derive(Eq)
 pub struct Response {
     status: int,
@@ -876,11 +918,12 @@ pub struct Response {
     body: str,
     trailers: Headers,
     url: str,
+    file: str,
 }
 
 // A response with the status `status`, its standard reason phrase, and
 // the body `body`; the server adds the framing (`Content-Length`).
-#test(200, "hi")[Response { status: 200, reason: "OK", version: "HTTP/1.1", headers: Headers { items: [] }, body: "hi", trailers: Headers { items: [] }, url: "" }]
+#test(200, "hi")[Response { status: 200, reason: "OK", version: "HTTP/1.1", headers: Headers { items: [] }, body: "hi", trailers: Headers { items: [] }, url: "", file: "" }]
 pub fun response(status: int, body: str) -> Response {
     return Response {
         status: status,
@@ -890,6 +933,7 @@ pub fun response(status: int, body: str) -> Response {
         body: body,
         trailers: headers(),
         url: "",
+        file: "",
     }
 }
 
@@ -922,17 +966,33 @@ impl Response {
     }
 
     // The body as UTF-8 text: valid text as it is, each byte that isn't
-    // valid UTF-8 replaced by U+FFFD.
+    // valid UTF-8 replaced by U+FFFD. A file's is read (none when it can't
+    // be).
     #test(response(200, "caf\u{E9}"))["café"]
     fun text(self) -> str {
-        return lossy_utf8(self.body)
+        return lossy_utf8(read_in(self).body)
     }
 
-    // The body's bytes.
+    // The body's bytes, a file's read.
     #test(response(200, "hi"))[[104u8, 105u8]]
     fun bytes(self) -> [uint8] {
-        return bytes_m.from_str(self.body)
+        return bytes_m.from_str(read_in(self).body)
     }
+}
+
+// `r` with the file its body is sent from (`r.file`) read into `body`, ""
+// when it can't be read.
+fun read_in(r: Response) -> Response {
+    if r.file == "" {
+        return r
+    }
+    var c = r
+    c.body = match fs_m.read_bytes(r.file) {
+        Ok(b) => bytes_m.to_str(b),
+        Err(_) => "",
+    }
+    c.file = ""
+    return c
 }
 
 // --- the parser ----------------------------------------------------------------------
@@ -1282,8 +1342,12 @@ impl Parser {
             }
             if self.headers.has("Content-Length") {
                 // both: the length is ignored, and the connection can't be
-                // trusted after the message
+                // trusted after the message; a request's must still be a
+                // length (MYLA-549)
                 self.close_after = true
+                if self.request && self.content_length() < -1 {
+                    return
+                }
             }
             if codings[^1] == "chunked" {
                 self.state = S_CHUNK_SIZE
@@ -1298,23 +1362,11 @@ impl Parser {
             self.state = S_UNTIL_CLOSE
             return
         }
-        let lengths = self.headers.get_all("Content-Length")
-        if lengths.len() > 0 {
-            var n = -1
-            for v in lengths {
-                for piece in v.split(",") {
-                    let k = parse_decimal(trim_ows(piece))
-                    if k == -2 {
-                        self.fail(HttpError.BodyTooLarge)
-                        return
-                    }
-                    if k < 0 || (n >= 0 && k != n) {
-                        self.fail(HttpError.BadLength)
-                        return
-                    }
-                    n = k
-                }
-            }
+        let n = self.content_length()
+        if n < -1 {
+            return
+        }
+        if n >= 0 {
             if n > self.max_body {
                 self.fail(HttpError.BodyTooLarge)
                 return
@@ -1330,6 +1382,29 @@ impl Parser {
             self.until_close = true
             self.state = S_UNTIL_CLOSE
         }
+    }
+
+    // The length the `Content-Length` fields give (each the same, a list
+    // of the same one allowed): -1 when there is none, -2 when they don't
+    // give one (the parser failed: `BadLength`, or `BodyTooLarge` past the
+    // largest `int`).
+    fun content_length(var self) -> int {
+        var n = -1
+        for v in self.headers.get_all("Content-Length") {
+            for piece in v.split(",") {
+                let k = parse_decimal(trim_ows(piece))
+                if k == -2 {
+                    self.fail(HttpError.BodyTooLarge)
+                    return -2
+                }
+                if k < 0 || (n >= 0 && k != n) {
+                    self.fail(HttpError.BadLength)
+                    return -2
+                }
+                n = k
+            }
+        }
+        return n
     }
 
     // A request whose body is still to come and that asked for `100
@@ -1375,6 +1450,7 @@ impl Parser {
             body: self.body.build(),
             trailers: self.trailers,
             url: "",
+            file: "",
         }
     }
 }
@@ -1526,15 +1602,24 @@ fun method_has_body(method: str) -> bool {
 
 // The request `r` as it is sent to `t`, its head and its body apart (a
 // large body isn't copied after the head): the request line, `Host` first
-// unless `r` has one, `Accept-Encoding` if it decompresses, `Connection:
-// close` unless `keep`, the framing, and the body (chunked if `r` says
-// `Transfer-Encoding: chunked`, with its trailers).
+// unless `r` has one (two, or one that isn't a host and port, are
+// `BadHeader`, as the server refuses them), `Accept-Encoding` if it
+// decompresses, `Connection: close` unless `keep`, the framing, which is
+// the body's (MYLA-549: a `Content-Length` of `r`'s own is replaced by the
+// body's, and left out beside chunked, RFC 9112 section 6.2), and the body
+// (chunked if `r` says `Transfer-Encoding: chunked`, with its trailers;
+// another transfer coding is `Unsupported`, as it isn't applied).
 fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpError> {
     if !is_token(r.method) {
         return Err(HttpError.BadStartLine)
     }
     var h = headers()
-    if !r.headers.has("Host") {
+    if r.headers.has("Host") {
+        let hosts = r.headers.get_all("Host")
+        if hosts.len() > 1 || !is_host(hosts[0]) {
+            return Err(HttpError.BadHeader)
+        }
+    } else {
         h.add("Host", t.host_header)
     }
     h = joined(h, r.headers)
@@ -1544,9 +1629,32 @@ fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpEr
     if !keep && !h.has("Connection") {
         h.add("Connection", "close")
     }
-    let chunk = h.has_token("Transfer-Encoding", "chunked")
-    if !chunk && !h.has("Content-Length") && (r.body.len() > 0 || method_has_body(r.method)) {
-        h.add("Content-Length", f"{r.body.len()}")
+    // the fields looked at, and the list rebuilt, only when the request has
+    // a framing of its own
+    var chunk = false
+    if h.has("Transfer-Encoding") {
+        for c in tokens(h.get_all("Transfer-Encoding")) {
+            if c != "chunked" {
+                return Err(HttpError.Unsupported(f"transfer coding {c}"))
+            }
+            chunk = true
+        }
+        if chunk {
+            h.set("Transfer-Encoding", "chunked")
+        } else {
+            // an empty `Transfer-Encoding` names no coding
+            h.remove("Transfer-Encoding")
+        }
+    }
+    let own_length = h.has("Content-Length")
+    if !chunk && (r.body.len() > 0 || method_has_body(r.method)) {
+        if own_length {
+            h.set("Content-Length", f"{r.body.len()}")
+        } else {
+            h.add("Content-Length", f"{r.body.len()}")
+        }
+    } else if own_length {
+        h.remove("Content-Length")
     }
     var sb = StringBuilder()
     sb.append(r.method)
@@ -1565,10 +1673,11 @@ fun request_text(r: Request, t: Target, keep: bool) -> Result<(str, str), HttpEr
 // The request `r` as a `Client` sends it: the request line with the URL's
 // target, a `Host` header from the URL unless `r` has one, `Accept-Encoding:
 // gzip, deflate` if `r` decompresses and has none, `Content-Length` when
-// there is a body (or the method is `POST`, `PUT` or `PATCH`) and no
-// framing of its own, then the body. `send` adds `Connection: close`. A URL
-// that starts with `/` (or is `*`) is sent as the target as it is, with an
-// empty `Host` unless `r` has one.
+// there is a body (or the method is `POST`, `PUT` or `PATCH`) and it isn't
+// chunked (one of `r`'s own replaced), then the body. Two `Host` fields
+// are `BadHeader`. `send` adds `Connection: close`. A URL that starts with
+// `/` (or is `*`) is sent as the target as it is, with an empty `Host`
+// unless `r` has one.
 pub fun format_request(r: Request) -> Result<str, HttpError> {
     let t = if r.url.starts_with("/") || r.url == "*" {
         Target { host: "", port: 80, path: r.url, host_header: "" }
@@ -1596,9 +1705,11 @@ fun response_parts(r: Response, head_only: bool, close: bool, keep_10: bool, chu
         return Err(HttpError.BadStartLine)
     }
     let quiet = no_body_status(r.status)
-    let chunk = !quiet && !head_only && chunk_ok && r.trailers.len() > 0
+    // a file's body is sent after the head, `opened_file` its length
+    let from_file = r.file != ""
+    let chunk = !quiet && !head_only && chunk_ok && r.trailers.len() > 0 && !from_file
     var h = r.headers
-    if !(head_only && h.has("Content-Length")) {
+    if !((head_only || from_file) && h.has("Content-Length")) {
         h.remove("Content-Length")
     }
     h.remove("Transfer-Encoding")
@@ -1641,7 +1752,7 @@ fun response_parts(r: Response, head_only: bool, close: bool, keep_10: bool, chu
 // `Transfer-Encoding: chunked` and the trailers when `r` has trailers;
 // then the body.
 pub fun format_response(r: Response) -> Result<str, HttpError> {
-    let p = response_parts(r, false, false, false, true)?
+    let p = response_parts(read_in(r), false, false, false, true)?
     return Ok(p.0 + p.1)
 }
 
@@ -1707,9 +1818,6 @@ fun decode_error(e: CompressError) -> HttpError {
 // How much one read asks for.
 const READ_SIZE: int = 65536
 
-// A socket with nothing to read, or no room to send, now (Linux's number,
-// std.net's).
-const EAGAIN: int = 11
 
 // A connection and what has been read from it but not taken yet.
 struct Wire {
@@ -1802,11 +1910,11 @@ impl Wire {
     fun try_fill(var self) -> Result<int, HttpError> {
         let chunk = __sock_recv(self.stream.handle, READ_SIZE)
         let err = __io_errno()
-        if err == EAGAIN {
+        if err == WOULD_BLOCK {
             return Ok(0)
         }
         if err != 0 {
-            return Err(io_error(from_errno(err)))
+            return Err(io_error(from_cause(err)))
         }
         if chunk.len() == 0 {
             return Ok(-1)
@@ -1995,8 +2103,9 @@ pub fun client() -> Client {
 }
 
 // The request after a redirect `resp` to `r` (from the URL `from`): the
-// `Location` resolved against `from`; a 303, or a 301 or 302 to a `POST`,
-// becomes a `GET` without a body; another host doesn't get `Authorization`
+// `Location` resolved against `from`, with `from`'s fragment when it has
+// none; a 303, or a 301 or 302 to a `POST`, becomes a `GET` without a
+// body; another host doesn't get `Authorization`, `Proxy-Authorization`
 // and `Cookie`. `None` when `resp` isn't a redirect.
 fun redirected(r: Request, resp: Response) -> Option<Request> {
     let s = resp.status
@@ -2009,6 +2118,12 @@ fun redirected(r: Request, resp: Response) -> Option<Request> {
     }
     var next = r
     next.url = resolve(r.url, loc)
+    // a Location without a fragment inherits the request's (RFC 9110,
+    // section 10.2.2)
+    let hash = find_byte(r.url, 35, 0)
+    if hash >= 0 && find_byte(next.url, 35, 0) < 0 {
+        next.url = next.url + part(r.url, hash, r.url.len())
+    }
     if (s == 303 && !same_name(r.method, "HEAD")) || ((s == 301 || s == 302) && same_name(r.method, "POST")) {
         next.method = "GET"
         next.body = ""
@@ -2019,6 +2134,7 @@ fun redirected(r: Request, resp: Response) -> Option<Request> {
     next.headers.remove("Host")
     if authority(next.url) != authority(r.url) {
         next.headers.remove("Authorization")
+        next.headers.remove("Proxy-Authorization")
         next.headers.remove("Cookie")
     }
     return Some(next)
@@ -2332,9 +2448,24 @@ fun retryable(e: HttpError) -> bool {
 // The bytes of a body up to which it is sent with its head in one write.
 const ONE_WRITE: int = 16384
 
+// The room left for the head of a response under its limit `room`, after
+// an informational response whose head took `seen` bytes (MYLA-549): the
+// heads of 1xx responses count against it, so a server can't send them
+// without end. `HeadersTooLarge` when none is left.
+#test(100, 25)[Ok(75)]
+#test(25, 25)[Err(HttpError.HeadersTooLarge)]
+fun after_informational(room: int, seen: int) -> Result<int, HttpError> {
+    let left = room - seen
+    if left <= 0 {
+        return Err(HttpError.HeadersTooLarge)
+    }
+    return Ok(left)
+}
+
 impl Wire {
     // The request's head and body (`text`) sent and the response to `r`
-    // read, the informational (1xx but 101) responses before it skipped.
+    // read, the informational (1xx but 101) responses before it skipped,
+    // their heads counted against the head's limit (`after_informational`).
     fun round_trip(var self, text: (str, str), r: Request, deadline: int64) -> Result<Parser, HttpError> {
         if text.1.len() <= ONE_WRITE {
             self.send(text.0 + text.1, deadline)?
@@ -2342,11 +2473,13 @@ impl Wire {
             self.send(text.0, deadline)?
             self.send(text.1, deadline)?
         }
+        var room = r.max_header_bytes
         while true {
-            let p = self.read_message(parser(false, r.method, r.max_header_bytes, r.max_body_bytes), deadline)?
+            let p = self.read_message(parser(false, r.method, room, r.max_body_bytes), deadline)?
             if p.status >= 200 || p.status == 101 {
                 return Ok(p)
             }
+            room = after_informational(room, p.seen)?
         }
         unreachable()
     }
@@ -2355,12 +2488,14 @@ impl Wire {
     async fun round_trip_async(var self, text: (str, str), r: Request) -> Result<Parser, HttpError> {
         let sent = await self.send_parts_async(text)
         sent?
+        var room = r.max_header_bytes
         while true {
-            let got = await self.read_message_async(parser(false, r.method, r.max_header_bytes, r.max_body_bytes))
+            let got = await self.read_message_async(parser(false, r.method, room, r.max_body_bytes))
             let p = got?
             if p.status >= 200 || p.status == 101 {
                 return Ok(p)
             }
+            room = after_informational(room, p.seen)?
         }
         unreachable()
     }
@@ -2417,8 +2552,9 @@ pub async fun post_async(url: str, body: str) -> Result<Response, HttpError> {
 
 // How a server serves: how many requests at once (`workers`, each a task),
 // how many connections it keeps open between their requests at most
-// (`max_connections`, negative: no limit; past it, the one whose time runs
-// out first is closed for a new one), how many requests before it stops
+// (`max_connections`, negative: no limit; past it, the one that has waited
+// longest since it last got on is closed for a new one), how many requests
+// before it stops
 // (negative: no limit), the limits of a request's head and body, and its
 // time limits, in milliseconds, each negative for none (MYLA-422):
 // - `keep_alive_ms`: how long after it was accepted a connection takes
@@ -2434,10 +2570,15 @@ pub async fun post_async(url: str, body: str) -> Result<Response, HttpError> {
 //   then the connection is closed (a client that doesn't read can't hold
 //   a worker).
 // A connection waiting for its next request (its first too) is parked on
-// the reactor with no task and holds no worker (MYLA-468); a keeper task
-// closes those whose time runs out, and a wait while a request is read or
-// a response sent has its time limit. The handler's own time isn't
-// limited.
+// the reactor with no task and holds no worker (MYLA-468), and so is one
+// whose request has begun and waits for more of it, its parser kept
+// (MYLA-549), the bodies so kept within `workers` times `max_body_bytes`
+// (past it 503, MYLA-794), and so is one whose response its socket didn't
+// take at once, until it takes more (MYLA-833), the bytes so kept within
+// `workers` times `max_body_bytes` too (past it the worker sends the
+// response itself, within `write_ms`); a
+// keeper task closes those whose time runs out (a request begun answered
+// 408). The handler's own time isn't limited.
 pub struct ServerOptions {
     workers: int,
     max_connections: int,
@@ -2478,18 +2619,30 @@ actor Tally {
 }
 
 impl Tally {
-    // A request may be served (one more taken), unless the limit is reached.
-    fun take(var self) -> bool {
+    // Whether a request may be served (TAKEN, one more taken), not (TAKE_NONE:
+    // the limit reached) or not yet (TAKE_LATER: the requests being answered
+    // would reach it, if each answer is sent).
+    fun take(var self) -> int {
+        if self.limit >= 0 && self.served >= self.limit {
+            return TAKE_NONE
+        }
         if self.limit >= 0 && self.taken >= self.limit {
-            return false
+            return TAKE_LATER
         }
         self.taken += 1
-        return true
+        return TAKEN
     }
 
-    // A request taken was answered.
-    fun answered(var self) {
-        self.served += 1
+    // A request taken was answered (`sent`), or its answer couldn't be
+    // sent, the connection closed under it: no answer, so it is given back
+    // (MYLA-863: counted, it stopped `serve_n` one request early, and the
+    // client's last one, sent again on a new connection, had no server).
+    fun answered(var self, sent: bool) {
+        if sent {
+            self.served += 1
+        } else {
+            self.taken -= 1
+        }
     }
 
     // A worker stopped.
@@ -2506,6 +2659,30 @@ impl Tally {
     fun count(self) -> int {
         return self.served
     }
+}
+
+// What `Tally.take` gives.
+const TAKEN: int = 0
+const TAKE_NONE: int = 1
+const TAKE_LATER: int = 2
+
+// Whether a request may be served under the limit `tally` counts: once
+// the requests answered and those being answered leave room for it, or
+// those being answered have been (an answer that couldn't be sent gives
+// its room back, MYLA-863); not when the limit is reached or the task is
+// cancelled.
+async fun taken(tally: Tally) -> bool {
+    while true {
+        let t = await tally.take()
+        if t != TAKE_LATER {
+            return t == TAKEN
+        }
+        if task.cancelled() {
+            return false
+        }
+        await task.sleep(1)
+    }
+    unreachable()
 }
 
 // The status a request that failed so is answered with.
@@ -2580,15 +2757,19 @@ fun earliest(a: int64, b: int64) -> int64 {
 }
 
 // How often the keeper looks for connections whose time ran out: a quarter
-// of the shorter of `idle_ms` and `keep_alive_ms`, from 10 ms to a second
-// (negative: neither limits a connection, no keeper).
+// of the shortest of `idle_ms`, `keep_alive_ms`, `read_ms` and `write_ms`
+// (a request begun waits parked too, MYLA-549, and a response being sent,
+// MYLA-833), from 10 ms to a second (negative: none limits a parked
+// connection, no keeper).
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: 60000, idle_ms: 5000, read_ms: 20000, write_ms: 30000 })[1000]
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: 300, read_ms: -1, write_ms: 1000 })[75]
 #test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: 0, read_ms: -1, write_ms: -1 })[10]
-#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: 50, write_ms: 50 })[-1]
+#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: 200, write_ms: 60 })[15]
+#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: -1, write_ms: 400 })[100]
+#test(ServerOptions { workers: 1, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1, keep_alive_ms: -1, idle_ms: -1, read_ms: -1, write_ms: -1 })[-1]
 fun poll_ms(o: ServerOptions) -> int {
     var shortest = -1
-    for ms in [o.keep_alive_ms, o.idle_ms] {
+    for ms in [o.keep_alive_ms, o.idle_ms, o.read_ms, o.write_ms] {
         if ms >= 0 && (shortest < 0 || ms < shortest) {
             shortest = ms
         }
@@ -2608,22 +2789,39 @@ fun poll_ms(o: ServerOptions) -> int {
 // is notified once and a worker takes it (`worker`). Each connection is
 // parked with its deadline (`idle_ms` from when it began to wait, and its
 // connection's time, `keep_alive_ms` from its accept) and its time's end as
-// its tag, which the worker that takes it up reads (`__sock_tag`).
+// its tag, which the worker that takes it up reads (`__sock_tag`). A
+// connection whose request has begun and waits for its next bytes is
+// parked too, with the request's time limit as its deadline, and what it
+// read in `pending` (MYLA-549); and one whose response its socket didn't
+// take at once, parked until it can send more, with the response's time
+// limit, and the response in `sends` (MYLA-833). `tally` is the server's
+// count of requests, which a response dropped gives back.
 struct Lot {
     id: int,
     ready: task.Notifier,
+    pending: Pending,
+    sends: Sends,
+    tally: Tally,
 }
 
-fun lot_made() -> Lot {
+fun lot_made(o: ServerOptions, tally: Tally) -> Lot {
     let n = task.notifier()
-    return Lot { id: __sock_lot(n.id), ready: n }
+    let pending = Pending { begun: [:], held: 0, room: body_room(o), order: [], first: 0, queued: [:] }
+    let sends = Sends { kept: [:], held: 0, room: send_room(o) }
+    return Lot { id: __sock_lot(n.id), ready: n, pending: pending, sends: sends, tally: tally }
 }
 
 impl Lot {
     // The socket `h` parked until it is readable, with `deadline` and `tag`:
     // how many sockets are parked then, or -1 once the lot is closed.
     fun park(self, h: int, deadline: int64, tag: int64) -> int {
-        return __sock_park(self.id, h, deadline, tag)
+        return self.park_for(h, deadline, tag, 1)
+    }
+
+    // The socket `h` parked until it is readable (`events` 1) or until it
+    // can send (2), with `deadline` and `tag`: `park`'s.
+    fun park_for(self, h: int, deadline: int64, tag: int64, events: int) -> int {
+        return __sock_park(self.id, h, deadline, tag, events)
     }
 
     // Every connection on it closed (not the listener `l`, which is only
@@ -2662,26 +2860,88 @@ fun closed(h: int) {
 
 // The connection `h` parked until its next request begins: within
 // `idle_ms` from now and its time's end `life_end` (its tag); closed once
-// the lot is (a server that stopped). Past `max_connections` sockets
-// parked (the listener `l` among them when it is), the connection whose
-// time runs out first is closed (its client opens another when it has a
-// request: a quiet connection gives way to a new one).
-fun park_connection(lot: Lot, l: TcpListener, h: int, o: ServerOptions, life_end: int64) {
-    let deadline = earliest(after(time.now_ms(), o.idle_ms), life_end)
-    let count = lot.park(h, deadline, life_end)
+// the lot is (a server that stopped). Whether a parked connection must be
+// closed for it (`evict`): past `max_connections` sockets parked (the
+// listener among them when it is), the connection that has waited longest
+// since it last got on is (its client opens another when it has a request:
+// a quiet connection gives way to a new one).
+fun park_connection(lot: Lot, h: int, o: ServerOptions, life_end: int64) -> bool {
+    return parked(lot, h, earliest(after(time.now_ms(), o.idle_ms), life_end), life_end, o)
+}
+
+// The connection `h` parked with `deadline` and `tag` (`park_connection`).
+fun parked(lot: Lot, h: int, deadline: int64, tag: int64, o: ServerOptions) -> bool {
+    let count = lot.park(h, deadline, tag)
     if count < 0 {
         closed(h)
-        return
+        return false
     }
-    if o.max_connections >= 0 && count > o.max_connections {
-        evict(lot, l)
+    return o.max_connections >= 0 && count > o.max_connections
+}
+
+// The connection `h`, its request begun `b` not all there, parked until
+// more of it comes, within the request's time limit (MYLA-549); `b` kept
+// in the lot's `pending` first, so that the worker that takes it up finds
+// it, and a parked connection closed for it past max_connections (`evict`,
+// as `park_connection` says). False when it isn't kept: its body would
+// take the bodies kept past the room for them (MYLA-794).
+async fun park_begun(lot: Lot, l: TcpListener, h: int, b: Begun, o: ServerOptions) -> bool {
+    let deadline = b.r.deadline
+    if !(await lot.pending.put(h, b)) {
+        return false
+    }
+    await park_begun_again(lot, l, h, deadline, o)
+    return true
+}
+
+// The connection `h`, its request begun kept, parked again until
+// `deadline`, a parked connection closed for it past max_connections.
+async fun park_begun_again(lot: Lot, l: TcpListener, h: int, deadline: int64, o: ServerOptions) {
+    if parked(lot, h, deadline, BEGUN, o) {
+        await evict(lot, l, o)
     }
 }
 
-// The parked connection whose time runs out first closed (with no time
-// limit, the one parked first), not the listener `l`, which is parked
-// again when it came first.
-fun evict(lot: Lot, l: TcpListener) {
+// The parked connection `h`, taken off the lot, closed: its request begun,
+// if it has one, forgotten, and answered with `answer` first (`TimedOut`:
+// 408) as far as the socket takes it at once.
+async fun dropped(lot: Lot, h: int, answer: Option<HttpError>) {
+    if __sock_tag(h) == SENDING {
+        // its response not all sent (MYLA-833)
+        match await lot.sends.take(h) {
+            Some(s) => await send_ended(lot, s, false)
+            None => {}
+        }
+    }
+    if __sock_tag(h) == BEGUN {
+        let gone = await lot.pending.take(h)
+        match answer {
+            Some(e) => {
+                let sent = __sock_send(h, error_response(e), 0)
+            }
+            None => {}
+        }
+    }
+    closed(h)
+}
+
+// A parked connection closed for a new one, past max_connections: the one
+// that has waited longest since it last got on, a request begun among them
+// (`Pending.evicted`, MYLA-794: with the one whose time runs out first,
+// connections that each sent a byte, parked for `read_ms`, made every new
+// one, parked for `idle_ms`, the one closed), else the one whose time runs
+// out first (with no time limit, the one parked first), not the listener
+// `l`, which is parked again when it came first.
+async fun evict(lot: Lot, l: TcpListener, o: ServerOptions) {
+    let begun = await lot.pending.evicted(lot.id, o.idle_ms)
+    if begun > 0 {
+        if __sock_tag(begun) == SENDING {
+            await dropped(lot, begun, None)
+        } else {
+            closed(begun)
+        }
+        return
+    }
     var oldest = __sock_expired(lot.id, -1)
     if oldest == l.handle {
         let again = lot.park(l.handle, -1, -1)
@@ -2692,7 +2952,7 @@ fun evict(lot: Lot, l: TcpListener) {
         }
     }
     if oldest > 0 {
-        closed(oldest)
+        await dropped(lot, oldest, None)
     }
 }
 
@@ -2712,7 +2972,9 @@ async fun accept_waiting(l: TcpListener, o: ServerOptions, lot: Lot) -> Result<(
         match nl.accept() {
             Ok(s) => {
                 let nd = s.set_nodelay(true)
-                park_connection(lot, l, s.handle, o, after(time.now_ms(), o.keep_alive_ms))
+                if park_connection(lot, s.handle, o, after(time.now_ms(), o.keep_alive_ms)) {
+                    await evict(lot, l, o)
+                }
             }
             Err(e) => {
                 fate = accept_fate(e)
@@ -2722,7 +2984,7 @@ async fun accept_waiting(l: TcpListener, o: ServerOptions, lot: Lot) -> Result<(
         k += 1
     }
     if fate == LATER {
-        evict(lot, l)
+        await evict(lot, l, o)
         await task.sleep(10)
     }
     let parked = lot.park(l.handle, -1, -1)
@@ -2738,71 +3000,553 @@ struct Link {
     w: Wire,
 }
 
-impl Link {
-    // More bytes read, within `deadline` (negative: none): false at the end
-    // of the stream, `TimedOut` past the deadline. What the socket has is
-    // read at once; a wait for more is a task's with that time limit.
-    async fun fill_until(var self, deadline: int64) -> Result<bool, HttpError> {
-        let now = self.w.try_fill()?
-        if now != 0 {
-            return Ok(now > 0)
+// A request being read (`Link.read_request`): its parser, which part of it
+// is coming (0: none yet, 1: its head, 2: its body), the body's length when
+// its time limit last began again, when that was (`since`: when it last got
+// on, MYLA-794) and when it ends (negative: none).
+struct Reading {
+    p: Parser,
+    part_of: int,
+    stepped: int,
+    since: int64,
+    deadline: int64,
+}
+
+// A reading of a new request with the server's limits.
+fun reading(o: ServerOptions) -> Reading {
+    return Reading { p: parser(true, "", o.max_header_bytes, o.max_body_bytes), part_of: 0, stepped: 0, since: 0, deadline: -1 }
+}
+
+impl Reading {
+    // The part of the request coming looked at, at `now`: its time limit,
+    // `read_ms`, begins again when the part changed (its head's first
+    // byte, its body's) or 16 KiB more of its body came (MYLA-549).
+    fun step(var self, now: int64, read_ms: int) {
+        let now_part = if !self.p.started { 0 } else if self.p.state >= S_LENGTH { 2 } else { 1 }
+        if now_part != self.part_of || (self.part_of == 2 && self.p.body_len - self.stepped >= READ_STEP) {
+            self.part_of = now_part
+            self.stepped = self.p.body_len
+            self.since = now
+            self.deadline = after(now, read_ms)
         }
-        if deadline < 0 {
-            return await self.w.fill_async()
+    }
+}
+
+// A request begun whose next bytes haven't come, kept while its connection
+// waits parked (MYLA-549): the reading, the bytes read and not taken yet,
+// the connection's time's end and its client's address.
+struct Begun {
+    r: Reading,
+    rest: str,
+    life_end: int64,
+    peer: Option<SocketAddr>,
+}
+
+// The bytes of a request begun that count against the server's room for
+// the bodies it keeps (`body_room`): its body's so far and those after it,
+// once its body has begun (a head is bounded by `max_header_bytes`).
+fun body_bytes(b: Begun) -> int64 {
+    if b.r.part_of < 2 {
+        return 0
+    }
+    return b.r.p.body_len as int64 + b.rest.len() as int64
+}
+
+// The room for the bodies of requests begun that a server keeps while
+// their connections wait parked (MYLA-794): what its workers held before
+// they were parked, `workers` bodies of `max_body_bytes`.
+#test(ServerOptions { workers: 64, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 16777216, keep_alive_ms: 1, idle_ms: 1, read_ms: 1, write_ms: 1 })[1073741824i64]
+#test(ServerOptions { workers: 64, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 2147483647, keep_alive_ms: 1, idle_ms: 1, read_ms: 1, write_ms: 1 })[137438953408i64]
+#test(ServerOptions { workers: 0, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: -1, keep_alive_ms: 1, idle_ms: 1, read_ms: 1, write_ms: 1 })[0i64]
+fun body_room(o: ServerOptions) -> int64 {
+    if o.max_body_bytes < 0 {
+        return 0
+    }
+    return worker_count(o) as int64 * o.max_body_bytes as int64
+}
+
+// What a request begun that was kept made of its next bytes
+// (`Pending.resume`).
+enum Resumed {
+    // It isn't kept (closed for another, `evict`)
+    Gone,
+    // Kept, still not all there: parked again until the deadline
+    More(int64),
+    // Taken: all there, or at a point where a worker goes on with it (its
+    // head asks for `100 Continue`)
+    Whole(Begun),
+    // It can't be read: its error
+    Failed(HttpError),
+    // Its body would take the bodies kept past the room for them: not kept
+    Busy,
+}
+
+// The requests begun of a server's parked connections, by the connection's
+// handle, which its workers share (MYLA-549). A connection parked so has
+// the tag BEGUN; only a request that comes in pieces costs the calls. The
+// next bytes of one are read on here (`resume`), so that a request isn't
+// copied out and back at each piece (MYLA-794: a body of 16 MB, at each);
+// the bytes of the bodies kept (`held`) stay within the server's `room`
+// for them; and the handles are kept in the order their requests last got
+// on (`order`, from `first`, for `evicted`), with entries of requests no
+// longer kept, or kept since later, among them: `queued` says which entry
+// is a handle's own.
+actor Pending {
+    begun: [int: Begun],
+    held: int64,
+    room: int64,
+    order: [(int, int64)],
+    first: int,
+    queued: [int: int64],
+}
+
+impl Pending {
+    // `b` kept for `h`: false, and not kept, when its body would take the
+    // bodies kept past the room for them.
+    fun put(var self, h: int, b: Begun) -> bool {
+        let size = body_bytes(b)
+        if size > 0 && self.held + size > self.room {
+            return false
         }
-        let left = deadline - time.now_ms()
-        if left <= 0 {
-            return Err(HttpError.TimedOut)
+        self.held += size
+        self.begun[h] = b
+        self.queue(h, b.r.since)
+        return true
+    }
+
+    // The request begun of `h`, no longer kept.
+    fun take(var self, h: int) -> Option<Begun> {
+        if !self.begun.contains(h) {
+            return None
         }
-        let st = self.w.stream
-        let got = await task.timeout(left as int, async () => {
-            var c = st
-            return await c.read_async(READ_SIZE)
-        })
-        return match got {
-            Some(Ok(b)) => self.w.took(b)
-            Some(Err(e)) => Err(io_error(e))
-            None => if task.cancelled() { Err(HttpError.Io(IoError.Cancelled)) } else { Err(HttpError.TimedOut) }
+        let b = self.begun[h]
+        self.forget(h)
+        return Some(b)
+    }
+
+    // The request begun of `h`, kept, read on with `chunk`, its next bytes,
+    // at `now` (MYLA-794): kept again while it isn't all there, in place,
+    // so that only `chunk` is copied, or taken. Its time limit begins again
+    // as `Link.read_request`'s does.
+    fun resume(var self, h: int, chunk: str, now: int64, read_ms: int) -> Resumed {
+        if !self.begun.contains(h) {
+            return Resumed.Gone
+        }
+        var b = self.begun[h]
+        // (`b` the only holder of its parser now: read on in place)
+        self.forget(h)
+        let data = if b.rest.len() == 0 { chunk } else { b.rest + chunk }
+        let at = b.r.p.advance(data, 0)
+        if b.r.p.failed {
+            return Resumed.Failed(b.r.p.err)
+        }
+        b.rest = part(data, at, data.len())
+        if b.r.p.done() || b.r.p.expect_continue {
+            return Resumed.Whole(b)
+        }
+        b.r.step(now, read_ms)
+        if b.r.deadline >= 0 && now >= b.r.deadline {
+            return Resumed.Failed(HttpError.TimedOut)
+        }
+        // kept again as `put` keeps it, without the copy a call of `put`
+        // makes of its argument
+        let size = body_bytes(b)
+        if size > 0 && self.held + size > self.room {
+            return Resumed.Busy
+        }
+        self.held += size
+        let since = b.r.since
+        let deadline = b.r.deadline
+        self.begun[h] = b
+        self.queue(h, since)
+        return Resumed.More(deadline)
+    }
+
+    // The parked connection to close for a new one, past max_connections
+    // (MYLA-794): the one that has waited longest since it last got on,
+    // whether it waits for a request to begin (since it was parked: its
+    // deadline, on the lot `lot`, is `idle_ms` after, or its time's end,
+    // sooner) or for more of a request begun (since its head began or 16
+    // KiB more of its body came): taken off the lot, or no longer kept
+    // here, for the caller to close. 0 when no request begun is kept: the
+    // caller takes the lot's first. With `idle_ms` negative, a connection
+    // waiting for a request goes first only once its time ran out.
+    fun evicted(var self, lot: int, idle_ms: int) -> int {
+        let oldest = self.oldest()
+        if oldest.0 == 0 {
+            return 0
+        }
+        let bound = if idle_ms >= 0 { oldest.1 + idle_ms as int64 } else { oldest.1 }
+        let h = __sock_expired(lot, bound)
+        if h > 0 {
+            if self.begun.contains(h) {
+                self.forget(h)
+            }
+            return h
+        }
+        self.forget(oldest.0)
+        return oldest.0
+    }
+
+    // `h` no longer kept.
+    fun forget(var self, h: int) {
+        self.held -= body_bytes(self.begun[h])
+        self.begun.remove(h)
+    }
+
+    // `h` in the order as getting on at `since`, unless its own entry says
+    // so already (a request read on without getting on keeps its place).
+    fun queue(var self, h: int, since: int64) {
+        if self.own(h, since) {
+            return
+        }
+        self.queued[h] = since
+        self.order.push((h, since))
+        if self.order.len() > 2 * self.begun.len() + 64 {
+            var kept: [(int, int64)] = []
+            var own: [int: int64] = [:]
+            for i in self.first..self.order.len() {
+                let e = self.order[i]
+                if self.current(e) {
+                    kept.push(e)
+                    own[e.0] = e.1
+                }
+            }
+            self.order = kept
+            self.first = 0
+            self.queued = own
         }
     }
 
-    // A request read with `p`, its first bytes there: its head within
-    // `o.read_ms` of them, its body within `read_ms` of the head's end and
-    // of each 16 KiB of it. A request that asked for it gets `100
-    // Continue` before its body is read. A request the client ended too
-    // soon is `Closed` (nothing of it came) or the parser's error.
-    async fun read_request(var self, p: Parser, o: ServerOptions) -> Result<Parser, HttpError> {
-        var q = p
-        // 0: before the request, 1: its head, 2: its body
-        var part_of = 0
-        var stepped = 0
-        var deadline: int64 = -1
-        while true {
-            self.w.pos = q.advance(self.w.buf, self.w.pos)
-            if q.failed {
-                return Err(q.err)
+    // Whether `h`'s own entry in the order is the one at `since`.
+    fun own(self, h: int, since: int64) -> bool {
+        return self.queued.contains(h) && self.queued[h] == since
+    }
+
+    // Whether `e` is the entry of a request kept, as of when it last got on.
+    fun current(self, e: (int, int64)) -> bool {
+        return self.own(e.0, e.1) && self.begun.contains(e.0) && self.begun[e.0].r.since == e.1
+    }
+
+    // The request kept that got on longest ago, and when: (0, 0) when none
+    // is kept. The entries before it are dropped.
+    fun oldest(var self) -> (int, int64) {
+        while self.first < self.order.len() {
+            let e = self.order[self.first]
+            if self.current(e) {
+                return e
             }
-            if q.done() {
+            if self.own(e.0, e.1) {
+                self.queued.remove(e.0)
+            }
+            self.first += 1
+        }
+        return (0, 0i64)
+    }
+}
+
+// The tag of a connection parked with a request begun (its time's end is
+// in its `Begun`; another tag is that end, or -1 for none), and of one
+// parked with a response being sent (in its `Sending`, MYLA-833).
+const BEGUN: int64 = -2
+const SENDING: int64 = -3
+
+// --- responses waiting parked for their clients (MYLA-833) ------------------------
+
+// A response being sent, kept while its socket takes no more (MYLA-833):
+// the pieces still to send (`pieces`, the first from `at`), the body's
+// file (`file`, `left` bytes of it still to read), how many bytes went
+// (`sent`) and how many had when its time limit last began again
+// (`stepped`), when that ends (`deadline`), and what is done once it all
+// went: the connection closed (`close`), the answer counted in the
+// server's tally (`counted`), else its next request served, with the
+// connection's time's end (`life_end`), its client's address (`peer`) and
+// the bytes of it read already (`unread`, a pipelining client's). `err` is
+// why it failed.
+struct Sending {
+    pieces: [str],
+    at: int,
+    file: Option<BodyFile>,
+    left: int64,
+    sent: int64,
+    stepped: int64,
+    deadline: int64,
+    close: bool,
+    counted: bool,
+    life_end: int64,
+    peer: Option<SocketAddr>,
+    unread: str,
+    err: HttpError,
+}
+
+// The response of the head and body `two` and the file `file` sent after
+// them (D260), about to be sent at `now`: the head and a small body in
+// one piece, as `Link.send_parts` sends them.
+fun sending(two: (str, str), file: Option<BodyFile>, now: int64, write_ms: int) -> Sending {
+    var pieces: [str] = []
+    if two.1.len() <= ONE_WRITE {
+        pieces.push(two.0 + two.1)
+    } else {
+        pieces.push(two.0)
+        pieces.push(two.1)
+    }
+    let left = match file {
+        Some(bf) => bf.size,
+        None => 0i64,
+    }
+    return Sending { pieces: pieces, at: 0, file: file, left: left, sent: 0, stepped: 0, deadline: after(now, write_ms), close: false, counted: false, life_end: -1, peer: None, unread: "", err: HttpError.Closed }
+}
+
+// What `Sending.go_on` did.
+const SENT_ALL: int = 0
+const SENT_MORE: int = 1
+const SENT_FAILED: int = 2
+
+impl Sending {
+    // As much of the response sent on the socket `h` as it takes now, at
+    // `now`, the file read on 64 KiB at a time: SENT_ALL once all of it
+    // went; SENT_MORE when the socket takes no more now, its time limit
+    // begun again (`deadline`, `write_ms` from now) when 64 KiB more went
+    // since it last began; SENT_FAILED, with `err`, when the socket failed,
+    // the file couldn't be read or ended sooner (`Truncated`), or the time
+    // limit passed with less than 64 KiB gone (`TimedOut`).
+    fun go_on(var self, h: int, now: int64, write_ms: int) -> int {
+        while true {
+            while self.pieces.len() > 0 {
+                let piece = self.pieces[0]
+                if self.at >= piece.len() {
+                    self.pieces = self.pieces[1:]
+                    self.at = 0
+                    continue
+                }
+                let r = __sock_send(h, piece, self.at)
+                if r < 0 {
+                    let err = __io_errno()
+                    if err != WOULD_BLOCK {
+                        self.err = io_error(from_cause(err))
+                        return SENT_FAILED
+                    }
+                    if self.sent - self.stepped >= WRITE_STEP as int64 {
+                        self.stepped = self.sent
+                        self.deadline = after(now, write_ms)
+                    } else if self.deadline >= 0 && now >= self.deadline {
+                        self.err = HttpError.TimedOut
+                        return SENT_FAILED
+                    }
+                    return SENT_MORE
+                }
+                self.at += r
+                self.sent += r as int64
+            }
+            if self.left <= 0 {
+                return SENT_ALL
+            }
+            let n = if self.left > WRITE_STEP as int64 { WRITE_STEP } else { self.left as int }
+            let chunk = match self.file {
+                Some(bf) => {
+                    var f = bf.f
+                    match f.read(n) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            self.err = io_error(e)
+                            return SENT_FAILED
+                        }
+                    }
+                }
+                None => [],
+            }
+            if chunk.len() == 0 {
+                self.err = HttpError.Truncated
+                return SENT_FAILED
+            }
+            self.left -= chunk.len() as int64
+            self.pieces.push(bytes_m.to_str(chunk))
+        }
+        unreachable()
+    }
+}
+
+// The bytes of a response being sent that it holds (`Sends.held`): its
+// pieces' left to send (a body sent from a file holds the piece read of
+// it, 64 KiB at most).
+fun send_bytes(s: Sending) -> int64 {
+    var n: int64 = -(s.at as int64)
+    for piece in s.pieces {
+        n += piece.len() as int64
+    }
+    return n
+}
+
+// The room for the bytes of the responses a server keeps parked
+// (MYLA-833), as for the request bodies it keeps (`body_room`, D270):
+// `workers` times `max_body_bytes` (with no limit to a body, its default).
+#test(ServerOptions { workers: 4, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: 1000, keep_alive_ms: 1, idle_ms: 1, read_ms: 1, write_ms: 1 })[4000i64]
+#test(ServerOptions { workers: 2, max_connections: 1, max_requests: -1, max_header_bytes: 1, max_body_bytes: -1, keep_alive_ms: 1, idle_ms: 1, read_ms: 1, write_ms: 1 })[33554432i64]
+fun send_room(o: ServerOptions) -> int64 {
+    let per = if o.max_body_bytes >= 0 { o.max_body_bytes } else { SERVER_MAX_BODY }
+    return worker_count(o) as int64 * per as int64
+}
+
+// The responses of a server's parked connections that their sockets
+// didn't take at once (MYLA-833), by the connection's handle, which its
+// workers share; the bytes they hold (`held`, `send_bytes`) within `room`
+// (`send_room`), past which a worker sends a response itself, as before.
+// A response is gone on with here (`resume`), so that its bytes aren't
+// copied out and back each time its socket takes more.
+actor Sends {
+    kept: [int: Sending],
+    held: int64,
+    room: int64,
+}
+
+// What became of a parked response gone on with (`Sends.resume`).
+enum Resent {
+    // It isn't kept (its connection was closed for another, `evict`)
+    Lost,
+    // Not all sent: parked again until the deadline
+    Waits(int64),
+    // All of it sent (true), or it failed (`err`): taken
+    Ended(Sending, bool),
+}
+
+impl Sends {
+    // `s` kept for `h`: false, and not kept, when its bytes would take
+    // those kept past the room.
+    fun put(var self, h: int, s: Sending) -> bool {
+        let size = send_bytes(s)
+        if self.held + size > self.room {
+            return false
+        }
+        self.held += size
+        self.kept[h] = s
+        return true
+    }
+
+    // The response of `h`, kept, gone on with at `now` (`Sending.go_on`):
+    // kept again, in place, while it isn't all sent, or taken, its pieces
+    // dropped.
+    fun resume(var self, h: int, now: int64, write_ms: int) -> Resent {
+        if !self.kept.contains(h) {
+            return Resent.Lost
+        }
+        var s = self.kept[h]
+        // (`s` the only holder of its pieces now: sent on in place)
+        self.kept.remove(h)
+        self.held -= send_bytes(s)
+        let how = s.go_on(h, now, write_ms)
+        if how == SENT_MORE {
+            // (a file's next piece may take it a little past the room)
+            self.held += send_bytes(s)
+            let deadline = s.deadline
+            self.kept[h] = s
+            return Resent.Waits(deadline)
+        }
+        s.pieces = []
+        return Resent.Ended(s, how == SENT_ALL)
+    }
+
+    // The response of `h`, no longer kept, its pieces dropped.
+    fun take(var self, h: int) -> Option<Sending> {
+        if !self.kept.contains(h) {
+            return None
+        }
+        var s = self.kept[h]
+        self.kept.remove(h)
+        self.held -= send_bytes(s)
+        s.pieces = []
+        return Some(s)
+    }
+
+    // The files of every response kept, none kept any more (a server that
+    // stopped).
+    fun files(var self) -> [BodyFile] {
+        var out: [BodyFile] = []
+        for h in self.kept.keys() {
+            match self.kept[h].file {
+                Some(bf) => out.push(bf)
+                None => {}
+            }
+        }
+        self.kept = [:]
+        self.held = 0
+        return out
+    }
+}
+
+// A response that was parked, ended (`ok`: all of it sent): its file
+// closed, and its answer counted (or its room given back, MYLA-863) when
+// the server counts them.
+async fun send_ended(lot: Lot, s: Sending, ok: bool) {
+    match s.file {
+        Some(bf) => {
+            var f = bf.f
+            let shut = f.close()
+        }
+        None => {}
+    }
+    if s.counted {
+        await lot.tally.answered(ok)
+    }
+}
+
+// The connection `h`, its response kept in the lot's `sends`, parked until
+// its socket can send more, within `deadline`, a parked connection closed
+// for it past max_connections (`evict`); closed, its response dropped,
+// once the lot is (a server that stopped).
+async fun park_sending(lot: Lot, l: TcpListener, h: int, deadline: int64, o: ServerOptions) {
+    let count = lot.park_for(h, deadline, SENDING, 2)
+    if count < 0 {
+        match await lot.sends.take(h) {
+            Some(s) => await send_ended(lot, s, false)
+            None => {}
+        }
+        closed(h)
+        return
+    }
+    if o.max_connections >= 0 && count > o.max_connections {
+        await evict(lot, l, o)
+    }
+}
+
+impl Link {
+    // A request read on with `r` as far as its bytes have come (MYLA-549):
+    // its head within `o.read_ms` of its first byte, its body within
+    // `read_ms` of the head's end and of each 16 KiB of it. The reading
+    // given back is done (`r.p.done()`), or waits for bytes the socket
+    // doesn't have yet: its caller parks the connection with it, holding
+    // no worker. A request that asked for it gets `100 Continue` before
+    // its body is read. A request the client ended too soon is `Closed`
+    // (nothing of it came) or the parser's error; one whose time ran out
+    // `TimedOut`.
+    async fun read_request(var self, r: Reading, o: ServerOptions) -> Result<Reading, HttpError> {
+        var q = r
+        while true {
+            self.w.pos = q.p.advance(self.w.buf, self.w.pos)
+            if q.p.failed {
+                return Err(q.p.err)
+            }
+            if q.p.done() {
                 return Ok(q)
             }
-            if q.expect_continue {
-                q.expect_continue = false
-                if q.body_len == 0 {
+            if q.p.expect_continue {
+                q.p.expect_continue = false
+                if q.p.body_len == 0 {
                     let sent = await self.send("HTTP/1.1 100 Continue\r\n\r\n", o.write_ms)
                     sent?
                 }
             }
-            let now_part = if !q.started { 0 } else if q.state >= S_LENGTH { 2 } else { 1 }
-            if now_part != part_of || (part_of == 2 && q.body_len - stepped >= READ_STEP) {
-                part_of = now_part
-                stepped = q.body_len
-                deadline = after(time.now_ms(), o.read_ms)
+            q.step(time.now_ms(), o.read_ms)
+            let got = self.w.try_fill()?
+            if got < 0 {
+                q.p.at_end()
+                if q.p.failed {
+                    return Err(q.p.err)
+                }
+                return Ok(q)
             }
-            let more = await self.fill_until(deadline)
-            if !more? {
-                q.at_end()
-                if q.failed {
-                    return Err(q.err)
+            if got == 0 {
+                if q.deadline >= 0 && time.now_ms() >= q.deadline {
+                    return Err(HttpError.TimedOut)
                 }
                 return Ok(q)
             }
@@ -2823,8 +3567,8 @@ impl Link {
                 at += r
             } else {
                 let err = __io_errno()
-                if err != EAGAIN {
-                    return Err(io_error(from_errno(err)))
+                if err != WOULD_BLOCK {
+                    return Err(io_error(from_cause(err)))
                 }
                 break
             }
@@ -2864,60 +3608,194 @@ impl Link {
         head?
         return await self.send(parts.1, write_ms)
     }
+
+    // What `snd` has still to send sent by this worker (`send`,
+    // `send_file`): a response past the room for those parked (MYLA-833),
+    // as every response was sent before.
+    async fun send_rest(var self, snd: Sending, write_ms: int) -> Result<(), HttpError> {
+        var i = 0
+        for piece in snd.pieces {
+            let start = if i == 0 { snd.at } else { 0 }
+            let sent = await self.send(part(piece, start, piece.len()), write_ms)
+            sent?
+            i += 1
+        }
+        match snd.file {
+            Some(bf) => {
+                if snd.left > 0 {
+                    return await self.send_file(BodyFile { f: bf.f, size: snd.left }, write_ms)
+                }
+            }
+            None => {}
+        }
+        return Ok(())
+    }
 }
 
 // The connection `h`, taken up ready (its next request has begun, or it
 // ended), served request after request while they come at once (a
 // pipelining client's), then parked again until the next begins, or
-// closed: a client that closes it, a request that can't be read (answered
-// with its status), one that asks to close, the connection's time up, the
-// server's limit reached. A response from a little before the time's end
-// says `Connection: close`, so that a keep-alive client doesn't send a
-// request the server won't read. Whether the worker goes on, and the
-// requests answered. Only a server with a limit counts its requests in
-// `tally` as they come: two actor calls a request.
+// parked with a request begun until more of it comes (and taken up where
+// it stopped, MYLA-549), or parked with its response until its socket takes
+// more (and taken up there, MYLA-833), or closed: a client that closes it,
+// a request that can't be read (answered with its status), one that asks
+// to close, the connection's time up, the server's limit reached. A response from a
+// little before the time's end says `Connection: close`, so that a
+// keep-alive client doesn't send a request the server won't read. Whether
+// the worker goes on, and the requests answered (their answers sent: one
+// whose connection closed under it isn't, MYLA-863). Only a server with a
+// limit counts its requests in `tally` as they come: two actor calls a
+// request.
 async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (Request) -> Response, tally: Tally, lot: Lot) -> (bool, int) {
     let counted = o.max_requests >= 0
     var answered = 0
-    let life_end = __sock_tag(h)
+    var life_end = __sock_tag(h)
+    var link = Link { w: wire(stream_of(h)) }
+    // a request begun, taken up where it waited (MYLA-549)
+    var begun: Option<Reading> = None
+    var peer: Option<SocketAddr> = None
+    if life_end == SENDING {
+        // its response sent on where it is kept, and taken once it ends
+        // (MYLA-833)
+        match await lot.sends.resume(h, time.now_ms(), o.write_ms) {
+            Lost => {
+                closed(h)
+                return (true, answered)
+            }
+            Waits(deadline) => {
+                await park_sending(lot, l, h, deadline, o)
+                return (true, answered)
+            }
+            Ended(s, ok) => {
+                await send_ended(lot, s, ok)
+                if ok {
+                    answered += 1
+                }
+                if !ok || s.close {
+                    closed(h)
+                    return (true, answered)
+                }
+                life_end = s.life_end
+                peer = s.peer
+                link.w.buf = s.unread
+                link.w.pos = 0
+            }
+        }
+    }
+    if life_end == BEGUN {
+        // its next bytes read on where it is kept, unless they end it or a
+        // worker goes on with it (MYLA-794)
+        var taken: Option<Begun> = None
+        match link.w.try_fill() {
+            Ok(got) => {
+                if got > 0 {
+                    match await lot.pending.resume(h, link.w.buf, time.now_ms(), o.read_ms) {
+                        Gone => {
+                            closed(h)
+                            return (true, answered)
+                        }
+                        More(deadline) => {
+                            await park_begun_again(lot, l, h, deadline, o)
+                            return (true, answered)
+                        }
+                        Whole(b) => {
+                            taken = Some(b)
+                        }
+                        Failed(e) => {
+                            await closed_after(link, h, if answerable(e) { error_response(e) } else { "" }, o.write_ms)
+                            return (true, answered)
+                        }
+                        Busy => {
+                            await closed_after(link, h, busy_response(), o.write_ms)
+                            return (true, answered)
+                        }
+                    }
+                } else {
+                    taken = await lot.pending.take(h)
+                }
+            }
+            Err(_) => {
+                let gone = await lot.pending.take(h)
+                closed(h)
+                return (true, answered)
+            }
+        }
+        match taken {
+            Some(b) => {
+                life_end = b.life_end
+                link.w.buf = b.rest
+                link.w.pos = 0
+                peer = b.peer
+                begun = Some(b.r)
+            }
+            None => {
+                closed(h)
+                return (true, answered)
+            }
+        }
+    }
     var close_at = life_end
     if life_end >= 0 {
         let margin = if o.keep_alive_ms / 10 > 1000 { 1000 } else { o.keep_alive_ms / 10 }
         close_at = life_end - margin as int64
     }
-    var link = Link { w: wire(stream_of(h)) }
-    let peer = match link.w.stream.peer_addr() {
-        Ok(a) => Some(a)
-        Err(_) => None
+    if begun.is_none() && peer.is_none() {
+        peer = match link.w.stream.peer_addr() {
+            Ok(a) => Some(a)
+            Err(_) => None
+        }
     }
     while true {
-        // a request may begin until the connection's time is up
-        if life_end >= 0 && time.now_ms() >= life_end {
-            closed(h)
-            return (true, answered)
+        var resumed = false
+        let r = match begun {
+            Some(b) => {
+                resumed = true
+                b
+            }
+            None => reading(o)
         }
-        if !link.w.buffered() {
-            match link.w.try_fill() {
-                Ok(got) => {
-                    if got == 0 {
-                        // nothing yet: parked until it comes
-                        park_connection(lot, l, h, o, life_end)
-                        return (true, answered)
+        if !resumed {
+            // a request may begin until the connection's time is up
+            if life_end >= 0 && time.now_ms() >= life_end {
+                closed(h)
+                return (true, answered)
+            }
+            if !link.w.buffered() {
+                match link.w.try_fill() {
+                    Ok(got) => {
+                        if got == 0 {
+                            // nothing yet: parked until it comes
+                            if park_connection(lot, h, o, life_end) {
+                                await evict(lot, l, o)
+                            }
+                            return (true, answered)
+                        }
+                        if got < 0 {
+                            closed(h)
+                            return (true, answered)
+                        }
                     }
-                    if got < 0 {
+                    Err(_) => {
                         closed(h)
                         return (true, answered)
                     }
                 }
-                Err(_) => {
-                    closed(h)
-                    return (true, answered)
-                }
             }
         }
-        let got = await link.read_request(parser(true, "", o.max_header_bytes, o.max_body_bytes), o)
+        begun = None
+        let got = await link.read_request(r, o)
         let p = match got {
-            Ok(p) => p
+            Ok(q) => {
+                if !q.p.done() {
+                    // the rest of it not there yet: parked with what came
+                    let rest = part(link.w.buf, link.w.pos, link.w.buf.len())
+                    if !(await park_begun(lot, l, h, Begun { r: q, rest: rest, life_end: life_end, peer: peer }, o)) {
+                        await closed_after(link, h, busy_response(), o.write_ms)
+                    }
+                    return (true, answered)
+                }
+                q.p
+            }
             Err(e) => {
                 if answerable(e) {
                     let sent = await link.send_parts((error_response(e), ""), o.write_ms)
@@ -2926,7 +3804,7 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
                 return (true, answered)
             }
         }
-        if counted && !(await tally.take()) {
+        if counted && !(await taken(tally)) {
             closed(h)
             return (false, answered)
         }
@@ -2934,12 +3812,32 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
         req.peer = peer
         var close = p.close_after || !persistent(req.version, req.headers)
         var parts: Result<(str, str), HttpError> = Err(HttpError.BadHeader)
+        // a body sent from a file, after the head (D260, MYLA-795)
+        var body_file: Option<BodyFile> = None
+        var stream_file = false
         if req.version == "HTTP/1.1" && !req.headers.has("Host") {
             close = true
             parts = response_parts(response(400, "a request without Host\n"), false, true, false, false)
         } else {
             // the handler's time isn't limited
-            let resp = await handler(req)
+            var resp = await handler(req)
+            if resp.file != "" {
+                let opened = opened_file(resp)
+                resp = opened.0
+                body_file = opened.1
+                stream_file = !same_name(req.method, "HEAD") && !no_body_status(resp.status)
+                if !stream_file {
+                    // (its size was all a HEAD wanted)
+                    match body_file {
+                        Some(bf) => {
+                            var f = bf.f
+                            let shut = f.close()
+                        }
+                        None => {}
+                    }
+                    body_file = None
+                }
+            }
             close = close || resp.headers.has_token("Connection", "close") || (close_at >= 0 && time.now_ms() >= close_at)
             let keep_10 = !close && req.version == "HTTP/1.0"
             parts = response_parts(resp, same_name(req.method, "HEAD"), close, keep_10, req.version == "HTTP/1.1")
@@ -2947,7 +3845,25 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
         var sent: Result<(), HttpError> = Ok(())
         match parts {
             Ok(two) => {
-                sent = await link.send_parts(two, o.write_ms)
+                // what the socket takes at once; the rest parked until it
+                // takes more, holding no worker (MYLA-833), unless the
+                // room for parked responses is full
+                var snd = sending(two, body_file, time.now_ms(), o.write_ms)
+                let how = snd.go_on(h, time.now_ms(), o.write_ms)
+                if how == SENT_MORE {
+                    snd.close = close
+                    snd.counted = counted
+                    snd.life_end = life_end
+                    snd.peer = peer
+                    snd.unread = part(link.w.buf, link.w.pos, link.w.buf.len())
+                    if await lot.sends.put(h, snd) {
+                        await park_sending(lot, l, h, snd.deadline, o)
+                        return (true, answered)
+                    }
+                    sent = await link.send_rest(snd, o.write_ms)
+                } else if how == SENT_FAILED {
+                    sent = Err(snd.err)
+                }
             }
             Err(e) => {
                 // the handler's response can't be sent (a header with CR
@@ -2957,9 +3873,18 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
                 sent = await link.send_parts((f"HTTP/1.1 500 Internal Server Error\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}", ""), o.write_ms)
             }
         }
-        answered += 1
+        match body_file {
+            Some(bf) => {
+                var f = bf.f
+                let shut = f.close()
+            }
+            None => {}
+        }
+        if sent_ok(sent) {
+            answered += 1
+        }
         if counted {
-            await tally.answered()
+            await tally.answered(sent_ok(sent))
         }
         if close || !sent_ok(sent) {
             closed(h)
@@ -2967,6 +3892,23 @@ async fun serve_ready(h: int, l: TcpListener, o: ServerOptions, handler: async (
         }
     }
     unreachable()
+}
+
+// The connection `h` closed, after `answer` (none: "") was sent in time.
+async fun closed_after(link: Link, h: int, answer: str, write_ms: int) {
+    var w = link
+    if answer.len() > 0 {
+        let sent = await w.send_parts((answer, ""), write_ms)
+    }
+    closed(h)
+}
+
+// The answer to a request begun whose body would take the bodies the
+// server keeps past the room for them (`body_room`, MYLA-794): 503, and
+// `Connection: close`.
+fun busy_response() -> str {
+    let body = "too many bodies arriving at once\n"
+    return f"HTTP/1.1 503 {reason(503)}\r\nContent-Type: text/plain\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}"
 }
 
 fun sent_ok(r: Result<(), HttpError>) -> bool {
@@ -3020,9 +3962,14 @@ async fun worker(l: TcpListener, o: ServerOptions, handler: async (Request) -> R
 }
 
 // The lot's keeper: every `poll` milliseconds the connections whose time
-// ran out while they were parked (`idle_ms` without a request beginning,
-// or their time up) closed without an answer, until the task is cancelled
-// or every worker stopped.
+// ran out while they were parked closed: without an answer those waiting
+// for a request (`idle_ms` without one beginning, or their time up), with
+// 408 those whose request began and didn't come within `read_ms`
+// (MYLA-549); until the task is cancelled or every worker stopped. One
+// whose input has come (or its end) is parked again instead, with no time
+// limit, and served as one that became ready: its wake-up was due, only
+// late (MYLA-756: the program's workers held, the keeper ran before the
+// poller, and a request sent in time was reset unread).
 async fun keeper(lot: Lot, tally: Tally, poll: int) -> Result<int, HttpError> {
     while true {
         await task.sleep(poll)
@@ -3032,7 +3979,16 @@ async fun keeper(lot: Lot, tally: Tally, poll: int) -> Result<int, HttpError> {
         let now = time.now_ms()
         var h = __sock_expired(lot.id, now)
         while h > 0 {
-            closed(h)
+            // (a response being sent waits for its socket to take more)
+            let events = if __sock_tag(h) == SENDING { 2 } else { 1 }
+            if __sock_poll(h, events, 0) > 0 {
+                let count = lot.park_for(h, -1, __sock_tag(h), events)
+                if count < 0 {
+                    closed(h)
+                }
+            } else {
+                await dropped(lot, h, Some(HttpError.TimedOut))
+            }
             h = __sock_expired(lot.id, now)
         }
     }
@@ -3046,12 +4002,15 @@ const STOP: int = 2
 const FAIL: int = 3
 
 // A connection aborted before it was accepted, or a signal: again; too
-// many open descriptors (EMFILE, ENFILE): a little later; none waits any
-// more (`TimedOut`: an accept that doesn't wait) or cancelled: stop;
-// anything else fails.
+// many open descriptors or handles: a little later (std.ioerror's
+// TOO_MANY_OPEN and TOO_MANY_OPEN_SYSTEM, `Other(24)` and `Other(23)` on
+// every target: Linux's EMFILE and ENFILE, Windows' WSAEMFILE and
+// TOO_MANY_OPEN_FILES, MYLA-716); none waits any more (`TimedOut`: an
+// accept that doesn't wait) or cancelled: stop; anything else fails.
 #test(IoError.Cancelled)[2]
 #test(IoError.ConnectionAborted)[0]
 #test(IoError.Other(24))[1]
+#test(IoError.Other(23))[1]
 #test(IoError.Other(9))[3]
 #test(IoError.Unsupported)[3]
 #test(IoError.TimedOut)[2]
@@ -3071,7 +4030,7 @@ fun accept_fate(e: IoError) -> int {
 // answered, or the first one's error. The listener is parked on the lot
 // first; once they stopped, the connections still open are closed.
 async fun run_workers(l: TcpListener, o: ServerOptions, handler: async (Request) -> Response, tally: Tally) -> Result<int, HttpError> {
-    let lot = lot_made()
+    let lot = lot_made(o, tally)
     let parked = lot.park(l.handle, -1, -1)
     var fs: [async () -> Result<int, HttpError>] = []
     for i in 0..worker_count(o) {
@@ -3094,6 +4053,11 @@ async fun run_workers(l: TcpListener, o: ServerOptions, handler: async (Request)
                 }
             }
         }
+    }
+    // (the responses still parked: their files)
+    for bf in await lot.sends.files() {
+        var f = bf.f
+        let shut = f.close()
     }
     lot.close(l)
     if failed {
@@ -3170,6 +4134,705 @@ pub async fun serve_n(l: TcpListener, n: int, handler: (Request) -> Response) ->
     var o = server_options()
     o.max_requests = n
     return await serve_with(l, o, async (req: Request) => handler(req))
+}
+
+
+// --- routing (D202, MYLA-613) ------------------------------------------------
+//
+// A route answers the requests of a method ("*" for any) whose path matches
+// its pattern, with its handler; a router holds its routes under a base path
+// and is a handler itself (`r.handler()`), so routers nest (`mount`), and
+// middleware is a function from a handler to a handler (`wrap`). A pattern's
+// segments are literal, `{name}` (one segment), `{name:int}` (one of digits)
+// or, last, `{name:path}` (the rest, maybe none); the handler reads them with
+// `req.param(name)` and `req.param_int(name)`. A pattern that is none of
+// these (an unknown kind, `{name:path}` before another segment, a brace in
+// a literal segment, a name twice) is a runtime error naming it when the
+// route is added (D184, MYLA-795). The most specific route
+// matching a path answers it (a literal segment before a parameter, a typed
+// parameter before an untyped one, the first registered among equals); a
+// path some route matches for another method is answered 405 with `Allow`,
+// any other 404.
+
+// One route: `method` ("*": any), its pattern `path`, its handler; a
+// `mount`ed router's route matches its base path and everything below it.
+pub struct Route {
+    method: str,
+    path: str,
+    handler: (Request) -> Response,
+    mount: bool,
+}
+
+// A router: its base path, its routes by method and pattern in the order
+// they were added, and the middleware around it, the first added outermost.
+pub struct Router {
+    base: str,
+    routes: [str: Route],
+    wraps: [((Request) -> Response) -> (Request) -> Response],
+}
+
+// A router of the routes under `base` ("" or "/" for the root, "/api"),
+// which is literal: a brace in it (a parameter) is a runtime error.
+#test("/api/{v}")[panic("http.router: the base '/api/{v}' has a brace: a base is literal")]
+pub fun router(base: str) -> Router {
+    if base.contains("{") || base.contains("}") {
+        panic(f"http.router: the base '{base}' has a brace: a base is literal")
+    }
+    return Router { base: base, routes: [:], wraps: [] }
+}
+
+impl Router {
+    // `handler` for the requests of `method` matching `path` (below the
+    // router's base); one for the same method and pattern is replaced. A
+    // malformed pattern is a runtime error (`pattern_problem`).
+    #test(router(""), "GET", "/files/{p:path}/meta", (req: Request) => response(200, ""))[panic("http: the route pattern '/files/{p:path}/meta': {p:path} isn't the last segment, and a path parameter takes the rest of the path")]
+    fun route(var self, method: str, path: str, handler: (Request) -> Response) {
+        self.add_route(method, path, handler, false)
+    }
+
+    // `route`, `reserved` letting a parameter's name start with `%` (the
+    // router's own: `static_files`' `{%file:path}`).
+    fun add_route(var self, method: str, path: str, handler: (Request) -> Response, reserved: bool) {
+        let problem = pattern_problem(path, reserved)
+        if problem != "" {
+            panic(f"http: the route pattern '{path}': {problem}")
+        }
+        self.routes[method + " " + path] = Route { method: method, path: path, handler: handler, mount: false }
+    }
+
+    fun get(var self, path: str, handler: (Request) -> Response) {
+        self.route("GET", path, handler)
+    }
+
+    fun post(var self, path: str, handler: (Request) -> Response) {
+        self.route("POST", path, handler)
+    }
+
+    fun put(var self, path: str, handler: (Request) -> Response) {
+        self.route("PUT", path, handler)
+    }
+
+    fun patch(var self, path: str, handler: (Request) -> Response) {
+        self.route("PATCH", path, handler)
+    }
+
+    fun delete(var self, path: str, handler: (Request) -> Response) {
+        self.route("DELETE", path, handler)
+    }
+
+    // The router `sub` under this one's base, at `sub`'s base: its routes,
+    // and its middleware around them.
+    fun mount(var self, sub: Router) {
+        self.routes["* " + sub.base + "/"] = Route { method: "*", path: sub.base, handler: sub.handler(), mount: true }
+    }
+
+    // The regular files below the directory `dir` at `prefix` (`/assets`
+    // serves `dir/app.css` as `/assets/app.css`), for GET, each sent from
+    // the file as it is read (D260, MYLA-795). A symbolic link below `dir`
+    // is followed when where it leads stays under `dir` (MYLA-841). Anything
+    // else is 404: a path that leaves `dir`, a link that leads out of it, a
+    // directory, a FIFO or a device, a file that can't be read, a dot file's
+    // (`.env`, `.git/`) unless `dot_files`, a link's too, and on Windows a
+    // device's name (`nul`, `con.txt`), a name ending in a dot or a space,
+    // one with `:` and the like, or a short name's (`~1`);
+    // `served_segments` has the rules.
+    fun static_files(var self, prefix: str, dir: str, dot_files: bool = false) {
+        let d = dir
+        self.add_route("GET", prefix + "/{%file:path}", (req: Request) => file_response(d, req.param("%file"), dot_files), true)
+    }
+
+    // `middleware` around the router's handler: one added later runs inside
+    // one added earlier.
+    fun wrap(var self, middleware: ((Request) -> Response) -> (Request) -> Response) {
+        self.wraps.push(middleware)
+    }
+
+    // The router as a handler: `await http.serve(addr, r.handler())`.
+    fun handler(self) -> (Request) -> Response {
+        let r = self
+        var h: (Request) -> Response = (req: Request) => r.dispatch(req)
+        var i = self.wraps.len() - 1
+        while i >= 0 {
+            let w = self.wraps[i]
+            h = w(h)
+            i -= 1
+        }
+        return h
+    }
+
+    // The response of the route that matches `req` best, without the
+    // middleware; 404 or 405 when none does.
+    fun dispatch(self, req: Request) -> Response {
+        // a mounted router's rest of the path, its base matched by the parent
+        var segs = split_path(req.path())
+        var consumed = false
+        match req.param("%rest") {
+            Some(r) => {
+                segs = split_path(r)
+                consumed = true
+            },
+            None => {},
+        }
+        var rest = segs
+        if !consumed {
+            let base = split_path(self.base)
+            if !segs_start(segs, base) { return response(404, "not found") }
+            rest = segs[base.len():]
+        }
+        var best_score = -1
+        var best_key = ""
+        var best_params: [(str, str)] = []
+        var allowed: [str] = []
+        for key in self.routes.keys() {
+            let rt = self.routes[key]
+            let pat = split_path(rt.path)
+            if rt.mount {
+                if segs_start(rest, pat) {
+                    let sc = pattern_score(pat)
+                    if sc > best_score {
+                        best_score = sc
+                        best_key = key
+                        best_params = [("%rest", "/" + rest[pat.len():].join("/"))]
+                    }
+                }
+                continue
+            }
+            match match_pattern(pat, rest) {
+                Some(ps) => {
+                    if rt.method == req.method || rt.method == "*" || (rt.method == "GET" && req.method == "HEAD") {
+                        let sc = pattern_score(pat)
+                        if sc > best_score {
+                            best_score = sc
+                            best_key = key
+                            best_params = ps
+                        }
+                    } else if !allowed.contains(rt.method) {
+                        allowed.push(rt.method)
+                    }
+                },
+                None => {},
+            }
+        }
+        if best_score < 0 {
+            if allowed.len() > 0 { return response(405, "method not allowed").with_header("Allow", allowed.join(", ")) }
+            return response(404, "not found")
+        }
+        var r2 = req
+        var kept: [(str, str)] = []
+        for kv in req.params {
+            if kv.0 != "%rest" { kept.push(kv) }
+        }
+        for kv in best_params { kept.push(kv) }
+        r2.params = kept
+        let h = self.routes[best_key].handler
+        return h(r2)
+    }
+}
+
+// The non-empty segments of the path `p`.
+#test("/users/42/")[["users", "42"]]
+#test("/")[[]]
+fun split_path(p: str) -> [str] {
+    var out: [str] = []
+    for s in p.split("/") {
+        if s != "" { out.push(s) }
+    }
+    return out
+}
+
+// Whether `segs` begins with `prefix`, segment by segment.
+#test(["api", "users"], ["api"])[true]
+#test(["apix"], ["api"])[false]
+fun segs_start(segs: [str], prefix: [str]) -> bool {
+    if prefix.len() > segs.len() { return false }
+    var i = 0
+    while i < prefix.len() {
+        if segs[i] != prefix[i] { return false }
+        i += 1
+    }
+    return true
+}
+
+// What is wrong with the route pattern `path`, "" when nothing (MYLA-795):
+// each segment is literal (no `{` or `}` in it) or a whole `{name}`,
+// `{name:int}` or `{name:path}`, `{name:path}` the last; a name is letters,
+// digits and `_`, each once (`reserved`: it may start with `%`, the
+// router's own).
+#test("/users/{id:int}/posts/{slug}", false)[""]
+#test("/files/{p:path}", false)[""]
+#test("/", false)[""]
+#test("/files/{p:path}/meta", false)["{p:path} isn't the last segment, and a path parameter takes the rest of the path"]
+#test("/items/{id:integer}", false)["{id:integer} is of the unknown kind 'integer' (the kinds are int and path)"]
+#test("/items/{id:}", false)["{id:} is of the unknown kind '' (the kinds are int and path)"]
+#test("/items/{id", false)["'{id' has a brace but isn't a parameter, {name} or {name:kind}"]
+#test("/items/x{id}", false)["'x{id}' has a brace but isn't a parameter, {name} or {name:kind}"]
+#test("/items/{a{b}", false)["'{a{b}' has a brace but isn't a parameter, {name} or {name:kind}"]
+#test("/items/{}", false)["{} has no name (letters, digits and _)"]
+#test("/items/{a-b}", false)["{a-b} has no name (letters, digits and _)"]
+#test("/a/{id}/b/{id:int}", false)["the parameter 'id' is named twice"]
+#test("/a/{%rest}", false)["{%rest} has no name (letters, digits and _)"]
+#test("/a/{%file:path}", true)[""]
+fun pattern_problem(path: str, reserved: bool) -> str {
+    let segs = split_path(path)
+    var names: [str] = []
+    var i = 0
+    while i < segs.len() {
+        let seg = segs[i]
+        if seg.contains("{") || seg.contains("}") {
+            let inner = if seg.len() >= 2 { seg[1:seg.len() - 1] } else { "" }
+            if !(seg.len() >= 2 && seg.starts_with("{") && seg.ends_with("}")) || inner.contains("{") || inner.contains("}") {
+                return f"'{seg}' has a brace but isn't a parameter, {{name}} or {{name:kind}}"
+            }
+            let p = match param_of(seg) {
+                Some(x) => x,
+                None => ("", ""),
+            }
+            if !param_name(p.0, reserved) {
+                return f"{seg} has no name (letters, digits and _)"
+            }
+            if seg.contains(":") && p.1 != "int" && p.1 != "path" {
+                return f"{seg} is of the unknown kind '{p.1}' (the kinds are int and path)"
+            }
+            if p.1 == "path" && i < segs.len() - 1 {
+                return f"{seg} isn't the last segment, and a path parameter takes the rest of the path"
+            }
+            if names.contains(p.0) {
+                return f"the parameter '{p.0}' is named twice"
+            }
+            names.push(p.0)
+        }
+        i += 1
+    }
+    return ""
+}
+
+// Whether `name` names a parameter: letters, digits and `_`, at least one;
+// with `reserved`, after a `%` (the router's own).
+#test("id_2", false)[true]
+#test("%file", false)[false]
+#test("%file", true)[true]
+#test("", false)[false]
+fun param_name(name: str, reserved: bool) -> bool {
+    var i = if reserved && name.starts_with("%") { 1 } else { 0 }
+    if i >= name.len() { return false }
+    while i < name.len() {
+        let c = name[i]
+        if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') { return false }
+        i += 1
+    }
+    return true
+}
+
+// A pattern segment's parameter: its name and kind ("", "int", "path"), or
+// none for a literal segment.
+#test("{id:int}")[Some(("id", "int"))]
+#test("users")[None]
+fun param_of(seg: str) -> Option<(str, str)> {
+    if !(seg.starts_with("{") && seg.ends_with("}")) { return None }
+    let inner = seg[1:seg.len() - 1]
+    return match inner.find(":") {
+        Some(i) => Some((inner[:i], inner[i + 1:])),
+        None => Some((inner, "")),
+    }
+}
+
+// How specific the pattern `pat` is: a literal segment counts 3, a typed
+// parameter 2, a parameter 1, the rest of the path 0.
+#test(["users", "me"])[6]
+#test(["users", "{id}"])[4]
+fun pattern_score(pat: [str]) -> int {
+    var n = 0
+    for seg in pat {
+        n += match param_of(seg) {
+            Some(p) => if p.1 == "int" { 2 } else if p.1 == "path" { 0 } else { 1 },
+            None => 3,
+        }
+    }
+    return n
+}
+
+// The parameters of `path` matched by `pat`, none when it doesn't match.
+#test(["users", "{id:int}"], ["users", "42"])[Some([("id", "42")])]
+#test(["users", "{id:int}"], ["users", "me"])[None]
+#test(["files", "{p:path}"], ["files", "a", "b.txt"])[Some([("p", "a/b.txt")])]
+fun match_pattern(pat: [str], path: [str]) -> Option<[(str, str)]> {
+    var ps: [(str, str)] = []
+    var i = 0
+    while i < pat.len() {
+        match param_of(pat[i]) {
+            Some(p) => {
+                if p.1 == "path" {
+                    ps.push((p.0, decoded(path[i:].join("/"))))
+                    return Some(ps)
+                }
+                if i >= path.len() { return None }
+                let v = decoded(path[i])
+                if p.1 == "int" && !all_digits(v) { return None }
+                ps.push((p.0, v))
+            },
+            None => {
+                if i >= path.len() || path[i] != pat[i] { return None }
+            },
+        }
+        i += 1
+    }
+    if path.len() != pat.len() { return None }
+    return Some(ps)
+}
+
+// A path segment percent-decoded (as it is, when it isn't valid).
+fun decoded(s: str) -> str {
+    return match url_m.percent_decode(s) {
+        Ok(d) => d,
+        Err(_) => s,
+    }
+}
+
+// Whether `s` is an optional `-` and one or more digits.
+#test("-42")[true]
+#test("4a")[false]
+#test("")[false]
+fun all_digits(s: str) -> bool {
+    var i = if s.starts_with("-") { 1 } else { 0 }
+    if i >= s.len() { return false }
+    while i < s.len() {
+        if s[i] < '0' || s[i] > '9' { return false }
+        i += 1
+    }
+    return true
+}
+
+// The regular file `rel` (decoded) names below `dir` (D260): 200, its body
+// sent from the file (`Response.file`) with a content type by its
+// extension; 404 when `served_segments` refuses the path, or when one of
+// its parts below `dir` isn't what the path makes it, a directory and then
+// a regular file: a FIFO, a device, a socket or nothing. A symbolic link
+// is followed when where it leads (`fs.canonical`) is under where `dir`
+// leads and `served_segments` takes the path from there (MYLA-841: a link
+// to `.env` is refused as `.env` is), and the walk goes on from there;
+// any other link is 404. A FIFO is never opened here, so it can't hold a
+// worker.
+fun file_response(dir: str, rel: Option<str>, dot_files: bool) -> Response {
+    let not_found = response(404, "not found")
+    let p = match rel {
+        Some(x) => x,
+        None => { return not_found }
+    }
+    let segs = match served_segments(p, style_m.WINDOWS, dot_files) {
+        Some(s) => s,
+        None => { return not_found }
+    }
+    if segs.len() == 0 {
+        return not_found
+    }
+    var at = dir
+    // where `dir` leads, once a link needs it
+    var root = ""
+    var i = 0
+    while i < segs.len() {
+        at = at + "/" + segs[i]
+        var kind = match fs_m.symlink_metadata(at) {
+            Ok(m) => m.kind,
+            Err(_) => { return not_found }
+        }
+        if kind == fs_m.FileKind.Symlink {
+            if root == "" {
+                root = match fs_m.canonical(dir) {
+                    Ok(c) => c,
+                    Err(_) => { return not_found }
+                }
+            }
+            let led = match fs_m.canonical(at) {
+                Ok(c) => c,
+                Err(_) => { return not_found }
+            }
+            if !served_under(led, root, dot_files, style_m.WINDOWS) {
+                return not_found
+            }
+            kind = match fs_m.metadata(led) {
+                Ok(m) => m.kind,
+                Err(_) => { return not_found }
+            }
+            at = led
+        }
+        let want = if i == segs.len() - 1 { fs_m.FileKind.File } else { fs_m.FileKind.Dir }
+        if kind != want {
+            return not_found
+        }
+        i += 1
+    }
+    var r = response(200, "").with_header("Content-Type", content_type(segs[^1]))
+    r.file = at
+    return r
+}
+
+// Whether the path `led`, without links (`fs.canonical`), is the served
+// directory `root` (one too) or below it, by its parts below it as
+// `served_segments` takes them (MYLA-841): not out of it, not a dot file's
+// unless `dot_files`, on Windows (`windows`) no device's name. Its
+// spelling must be the root's: on Windows a link that names the directory
+// in another case is refused.
+#test("/www/app.css", "/www", false, false)[true]
+#test("/www", "/www", false, false)[true]
+#test("/www2/app.css", "/www", false, false)[false]
+#test("/top.txt", "/www", false, false)[false]
+#test("/www/.env", "/www", false, false)[false]
+#test("/www/.env", "/www", true, false)[true]
+#test("/www/a/b.css", "/", false, false)[true]
+#test("/.git/x", "/", false, false)[false]
+#test("C:\\www\\a\\b.css", "C:\\www", false, true)[true]
+#test("C:\\www\\nul.txt", "C:\\www", false, true)[false]
+#test("C:\\WWW\\b.css", "C:\\www", false, true)[false]
+#test("C:\\b.css", "C:\\", false, true)[true]
+fun served_under(led: str, root: str, dot_files: bool, windows: bool) -> bool {
+    if led == root {
+        return true
+    }
+    let sep = if windows { "\\" } else { "/" }
+    let base = if root.ends_with(sep) { root } else { root + sep }
+    if !led.starts_with(base) {
+        return false
+    }
+    return match served_segments(led[base.len():], windows, dot_files) {
+        Some(s) => s.len() > 0,
+        None => false,
+    }
+}
+
+// The segments of the path `rel` below a served directory (D260): split on
+// each separator of the target (`windows`: `\` as `/`), an empty segment or
+// `.` dropped, `..` taking the one before it off; none when that would
+// leave the directory, or when a segment is refused: a dot file's (`.env`)
+// unless `dot_files`, one with a control character; on Windows one with
+// `<>:"|?*` (a drive, a stream: `app.css::$DATA`), one ending in a dot or
+// a space (Windows drops them, so `app.css.` would be `app.css`), a
+// device's name (`nul`, `CON.txt`, `com1`: the name up to its first dot),
+// and a short name's (`~` and a digit, as `TOPSEC~1.TXT` may name a dot
+// file).
+#test("a/b.css", false, false)[Some(["a", "b.css"])]
+#test("a//./b/../c.css", false, false)[Some(["a", "c.css"])]
+#test("../top.txt", false, false)[None]
+#test("a/../../top.txt", false, false)[None]
+#test("..\\top.txt", false, false)[None]
+#test("..\\top.txt", false, true)[Some(["..\\top.txt"])]
+#test("..\\top.txt", true, false)[None]
+#test("sub\\..\\..\\top.txt", true, false)[None]
+#test("sub\\a.txt", true, false)[Some(["sub", "a.txt"])]
+#test(".env", false, false)[None]
+#test("a/.git/config", false, false)[None]
+#test(".well-known/x", false, true)[Some([".well-known", "x"])]
+#test("../x", false, true)[None]
+#test("a\u{0}.png", false, false)[None]
+#test("C:\\windows\\win.ini", true, false)[None]
+#test("c:/windows/win.ini", true, false)[None]
+#test("c:/windows/win.ini", false, false)[Some(["c:", "windows", "win.ini"])]
+#test("app.css::$DATA", true, false)[None]
+#test("app.css.", true, false)[None]
+#test("app.css ", true, false)[None]
+#test("app.css.", false, false)[Some(["app.css."])]
+#test("nul", true, false)[None]
+#test("CON.txt", true, false)[None]
+#test("a/Com1", true, false)[None]
+#test("lpt9.log", true, false)[None]
+#test("conin$", true, false)[None]
+#test("aux .txt", true, false)[None]
+#test("nul", false, false)[Some(["nul"])]
+#test("console.txt", true, false)[Some(["console.txt"])]
+#test("com10", true, false)[Some(["com10"])]
+#test("TOPSEC~1.TXT", true, false)[None]
+#test("a~b.txt", true, false)[Some(["a~b.txt"])]
+#test("APP.CSS", true, false)[Some(["APP.CSS"])]
+fun served_segments(rel: str, windows: bool, dot_files: bool) -> Option<[str]> {
+    var out: [str] = []
+    let unified = if windows { rel.replace("\\", "/") } else { rel }
+    for seg in unified.split("/") {
+        if seg == "" || seg == "." {
+            continue
+        }
+        if seg == ".." {
+            if out.len() == 0 {
+                return None
+            }
+            let dropped = out.pop()
+            continue
+        }
+        if (seg.starts_with(".") && !dot_files) || !served_name(seg, windows) {
+            return None
+        }
+        out.push(seg)
+    }
+    return Some(out)
+}
+
+// Whether the segment `seg` may name a served file (`served_segments`):
+// no control character; on Windows none of `<>:"|?*`, no dot or space at
+// its end, no device's name, no short name's `~` and digit.
+fun served_name(seg: str, windows: bool) -> bool {
+    var i = 0
+    while i < seg.len() {
+        let c = seg[i]
+        if c < 32u8 || c == 127u8 {
+            return false
+        }
+        if windows {
+            if c == '<' || c == '>' || c == ':' || c == '"' || c == '|' || c == '?' || c == '*' {
+                return false
+            }
+            if c == '~' && i + 1 < seg.len() && seg[i + 1] >= '0' && seg[i + 1] <= '9' {
+                return false
+            }
+        }
+        i += 1
+    }
+    if !windows {
+        return true
+    }
+    if seg.ends_with(".") || seg.ends_with(" ") {
+        return false
+    }
+    let stem = match seg.find(".") {
+        Some(k) => seg[:k],
+        None => seg,
+    }
+    return !windows_device(stem.trim_end().to_lower())
+}
+
+// Whether `name` (lower case) is one of Windows' device names, which name
+// the device in every directory and with any extension.
+#test("nul")[true]
+#test("com\u{B9}")[true]
+#test("lpt0")[true]
+#test("conout$")[true]
+#test("nulx")[false]
+fun windows_device(name: str) -> bool {
+    if name == "con" || name == "prn" || name == "aux" || name == "nul" || name == "conin$" || name == "conout$" || name == "clock$" {
+        return true
+    }
+    if name.starts_with("com") || name.starts_with("lpt") {
+        let n = name[3:]
+        return (n.len() == 1 && n[0] >= '0' && n[0] <= '9') || n == "\u{B9}" || n == "\u{B2}" || n == "\u{B3}"
+    }
+    return false
+}
+
+// A file a response's body is sent from, open, and its size then.
+struct BodyFile {
+    f: fs_m.File,
+    size: int64,
+}
+
+// `r`, whose body is the file `r.file`, as the server sends it (D260): the
+// file opened, `Content-Length` its size; 404 when it is no longer a
+// regular file or can't be read. It is opened first and what was opened
+// looked at (MYLA-842, as nginx does): without waiting, so a FIFO swapped
+// in since `file_response` looked is opened at once and refused, not
+// waited on with a worker held, and without following a link at the end,
+// so a link swapped in is refused too (`file_response` gives a link's
+// target, not the link).
+fun opened_file(r: Response) -> (Response, Option<BodyFile>) {
+    var f = match fs_m.options().read(true).nonblocking(true).no_follow(true).open(r.file) {
+        Ok(f) => f,
+        Err(_) => { return (response(404, "not found"), None) }
+    }
+    let size = match f.metadata() {
+        Ok(m) => if m.is_file() { m.size } else { -1i64 },
+        Err(_) => -1i64,
+    }
+    if size < 0 {
+        let shut = f.close()
+        return (response(404, "not found"), None)
+    }
+    var c = r
+    c.headers.set("Content-Length", f"{size}")
+    return (c, Some(BodyFile { f: f, size: size }))
+}
+
+impl Link {
+    // The `size` bytes of the file `bf` sent after a response's head
+    // (D260), read and sent 64 KiB at a time, so that a file is never held
+    // whole; within `write_ms` as `send`. A file that ends sooner (cut
+    // while it was sent) is `Truncated`, and the connection closes.
+    async fun send_file(var self, bf: BodyFile, write_ms: int) -> Result<(), HttpError> {
+        var f = bf.f
+        var left = bf.size
+        while left > 0 {
+            let n = if left > WRITE_STEP as int64 { WRITE_STEP } else { left as int }
+            let chunk = match f.read(n) {
+                Ok(b) => b,
+                Err(e) => { return Err(io_error(e)) }
+            }
+            if chunk.len() == 0 {
+                return Err(HttpError.Truncated)
+            }
+            let sent = await self.send(bytes_m.to_str(chunk), write_ms)
+            sent?
+            left -= chunk.len() as int64
+        }
+        return Ok(())
+    }
+}
+
+// The content type of a file by its name's extension.
+#test("app.css")["text/css; charset=utf-8"]
+#test("blob")["application/octet-stream"]
+pub fun content_type(name: str) -> str {
+    let dot = match name.rfind(".") {
+        Some(i) => name[i + 1:].to_lower(),
+        None => "",
+    }
+    if dot == "html" || dot == "htm" { return "text/html; charset=utf-8" }
+    if dot == "css" { return "text/css; charset=utf-8" }
+    if dot == "js" || dot == "mjs" { return "text/javascript; charset=utf-8" }
+    if dot == "json" { return "application/json" }
+    if dot == "txt" { return "text/plain; charset=utf-8" }
+    if dot == "svg" { return "image/svg+xml" }
+    if dot == "png" { return "image/png" }
+    if dot == "jpg" || dot == "jpeg" { return "image/jpeg" }
+    if dot == "gif" { return "image/gif" }
+    if dot == "webp" { return "image/webp" }
+    if dot == "ico" { return "image/x-icon" }
+    if dot == "wasm" { return "application/wasm" }
+    if dot == "pdf" { return "application/pdf" }
+    return "application/octet-stream"
+}
+
+// --- typed endpoints ----------------------------------------------------------
+
+// A response of the JSON text `body`, with its content type.
+pub fun json_response(status: int, body: str) -> Response {
+    return response(status, body).with_header("Content-Type", "application/json")
+}
+
+// A JSON error response: `{"error": message}` with the status `status`.
+pub fun json_error(status: int, message: str) -> Response {
+    return json_response(status, json_m.to_string(json_m.obj([("error", json_m.text(message))])))
+}
+
+// A handler answering with `f`'s value as JSON (200), or with the response
+// of its `Err` as it is: `f` a typed endpoint, its result a `#derive(Json)`
+// type.
+pub fun json<O: json_m.ToJson>(f: (Request) -> Result<O, Response>) -> (Request) -> Response {
+    return (req: Request) => {
+        return match f(req) {
+            Ok(v) => json_response(200, json_m.encode(v)),
+            Err(r) => r,
+        }
+    }
+}
+
+// `json`, with the request's body decoded to an `I` first: a body that
+// isn't one is 422, the decoder's error (`$.name: missing field`) the
+// message.
+pub fun json_body<I: json_m.FromJson, O: json_m.ToJson>(f: (Request, I) -> Result<O, Response>) -> (Request) -> Response {
+    return (req: Request) => {
+        return match json_m.decode<I>(req.body) {
+            Ok(input) => match f(req, input) {
+                Ok(v) => json_response(200, json_m.encode(v)),
+                Err(r) => r,
+            },
+            Err(e) => json_error(422, f"{e}"),
+        }
+    }
 }
 
 // --- tests of the pure parts ---------------------------------------------------------
@@ -3310,6 +4973,24 @@ fun requests_formatted() {
     assert(formatted_request(request("GET", "https://h/")) == "error: unsupported: https", "https")
     let origin = request("GET", "/only/a/path").with_decompress(false)
     assert(formatted_request(origin) == "GET /only/a/path HTTP/1.1\r\nHost: \r\n\r\n", "a target as it is")
+    // the framing is the body's, and one Host (MYLA-549): two of the
+    // caller's are refused as the server refuses them, a length of the
+    // caller's that isn't the body's is replaced, and one beside chunked
+    // left out (RFC 9112, section 6.2)
+    let hosts = request("GET", "http://h/").with_header("Host", "a").with_header("Host", "b")
+    assert(formatted_request(hosts) == "error: malformed header", "two Host fields")
+    assert(formatted_request(request("GET", "http://h/").with_header("Host", "a b")) == "error: malformed header", "a Host that isn't one")
+    let own_length = request("POST", "http://h/").with_header("Content-Length", "1").with_header("X", "y").with_body("abc").with_decompress(false)
+    assert(formatted_request(own_length) == "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nX: y\r\n\r\nabc", "a length of its own replaced")
+    let no_body = request("GET", "http://h/").with_header("Content-Length", "5").with_decompress(false)
+    assert(formatted_request(no_body) == "GET / HTTP/1.1\r\nHost: h\r\n\r\n", "a length without a body left out")
+    let both = request("POST", "http://h/").with_header("Content-Length", "3").with_header("Transfer-Encoding", "chunked").with_body("abc").with_decompress(false)
+    assert(formatted_request(both) == "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n", "a length beside chunked left out")
+    let twice = request("POST", "http://h/").with_header("Transfer-Encoding", "chunked").with_header("transfer-encoding", "chunked").with_body("abc").with_decompress(false)
+    assert(formatted_request(twice) == "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n", "chunked once")
+    assert(formatted_request(request("POST", "http://h/").with_header("Transfer-Encoding", "gzip, chunked").with_body("abc")) == "error: unsupported: transfer coding gzip", "a coding it doesn't apply")
+    let no_coding = request("POST", "http://h/").with_header("Transfer-Encoding", "").with_body("abc").with_decompress(false)
+    assert(formatted_request(no_coding) == "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nabc", "an empty coding")
     // and back: what is formatted parses to the same request
     match parse_request(formatted_request(post)) {
         Ok(back) => {
@@ -3486,6 +5167,10 @@ fun limits() {
     var w = parser(true, "", 1000, 2147483647)
     let at8 = w.advance("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n7ffffffe\r\n", 0)
     assert(!w.failed && w.left == 2147483646, "a chunk up to the largest int")
+    // a body is an `int` of bytes at most, whatever the limit (MYLA-549)
+    var y = parser(false, "GET", 1000, 2147483647)
+    let at10 = y.advance("HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\n", 0)
+    assert(y.failed && y.err == HttpError.BodyTooLarge, "a length past the largest int")
     var x = parser(true, "", 1000, 100)
     let at9 = x.advance("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1;" + "a".repeat(5000) + "\r\n", 0)
     assert(x.failed && x.err == HttpError.BadChunk, "a chunk line past its limit")
@@ -3505,6 +5190,17 @@ fun framing() {
     var both = parser(true, "", MAX_HEAD, 100)
     let x = both.advance("POST / HTTP/1.1\r\nContent-Length: 99\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
     assert(both.done() && both.close_after && both.to_request().body == "a", "chunked wins, and the connection closes")
+    // the length beside it must still be one (MYLA-549): a request whose
+    // framing can't be read whole is refused
+    var bad_both = parser(true, "", MAX_HEAD, 100)
+    let w = bad_both.advance("POST / HTTP/1.1\r\nContent-Length: zz\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
+    assert(bad_both.failed && bad_both.err == HttpError.BadLength, "a malformed length beside chunked")
+    var odd_both = parser(true, "", MAX_HEAD, 100)
+    let v = odd_both.advance("POST / HTTP/1.1\r\nContent-Length: 1, 2\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
+    assert(odd_both.failed && odd_both.err == HttpError.BadLength, "two lengths beside chunked")
+    var resp_both = parser(false, "GET", MAX_HEAD, 100)
+    let u = resp_both.advance("HTTP/1.1 200 OK\r\nContent-Length: zz\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\n", 0)
+    assert(resp_both.done() && resp_both.close_after && resp_both.to_response().body == "a", "a response's is ignored")
     var ask = parser(true, "", MAX_HEAD, 100)
     let y = ask.advance("PUT / HTTP/1.1\r\nExpect: 100-Continue\r\nContent-Length: 2\r\n\r\n", 0)
     assert(ask.expect_continue && !ask.done(), "100-continue asked")
@@ -3584,9 +5280,27 @@ fun redirects() {
             None => assert(false, f"{c.0}: a redirect")
         }
     }
-    match redirected(request("GET", "http://a/").with_header("Authorization", "s"), response(302, "").with_header("Location", "http://b/")) {
-        Some(next) => assert(!next.headers.has("Authorization") && next.url == "http://b/", "another host")
+    match redirected(request("GET", "http://a/").with_header("Authorization", "s").with_header("Proxy-Authorization", "p").with_header("Cookie", "c"), response(302, "").with_header("Location", "http://b/")) {
+        Some(next) => {
+            assert(!next.headers.has("Authorization") && next.url == "http://b/", "another host")
+            // the credentials of every kind stay with their host (MYLA-549)
+            assert(!next.headers.has("Proxy-Authorization") && !next.headers.has("Cookie"), "another host's credentials")
+        }
         None => assert(false, "another host")
+    }
+    // a Location without a fragment inherits the request's (RFC 9110,
+    // section 10.2.2; MYLA-549); one with its own keeps it
+    match redirected(request("GET", "http://a/x#top"), response(302, "").with_header("Location", "/y")) {
+        Some(next) => assert(next.url == "http://a/y#top", f"the fragment inherited: {next.url}")
+        None => assert(false, "the fragment inherited")
+    }
+    match redirected(request("GET", "http://a/x#top"), response(302, "").with_header("Location", "http://b/y?q#end")) {
+        Some(next) => assert(next.url == "http://b/y?q#end", f"a fragment of its own: {next.url}")
+        None => assert(false, "a fragment of its own")
+    }
+    match redirected(request("GET", "http://a/x"), response(302, "").with_header("Location", "/y?z")) {
+        Some(next) => assert(next.url == "http://a/y?z", f"no fragment: {next.url}")
+        None => assert(false, "no fragment")
     }
     match redirected(post, response(200, "").with_header("Location", "/x")) {
         Some(_) => assert(false, "200 isn't a redirect")

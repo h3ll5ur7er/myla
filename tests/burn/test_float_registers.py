@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, READS_X86, X86_REASON
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 _MANDEL = """fun inside(cr: float64, ci: float64) -> bool {
@@ -101,6 +101,7 @@ def _function(asm: str, name: str) -> str:
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(READS_X86, X86_REASON)
 class FloatRegisters(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -135,9 +136,9 @@ class FloatRegisters(unittest.TestCase):
                              check=True).stdout
         body = _function(asm, "inside")
         self.assertNotIn("movabsq", body, body)
-        self.assertRegex(body, r"movsd \.Lfc\d+\(%rip\), %xmm\d+")
+        self.assertRegex(body, r"movsd \.Lfc[0-9a-f]+\(%rip\), %xmm\d+")
         self.assertRegex(body, r"xorpd (%xmm\d+), \1")
-        self.assertRegex(asm, r"\.Lfc\d+:\n\t\.quad 4611686018427387904\n")   # 2.0
+        self.assertRegex(asm, r"\.Lfc4000000000000000:\n\t\.quad 4611686018427387904\n")   # 2.0, named by its bits (MYLA-552)
         myla = selfhost_tool("main")
         exe = os.path.join(self.tmp.name, "mandel")
         subprocess.run([myla, "build", path, "-o", exe, "--stdlib", STDLIB_ROOT], check=True)

@@ -1,0 +1,21 @@
+import std.json as json
+
+#derive(Json)
+struct Entry {
+    planet: str,
+    harmless: bool,
+    towels: int,
+}
+
+#test()["{\"planet\":\"Earth\",\"harmless\":true,\"towels\":1}"]
+fun to_text() -> str {
+    return json.encode(Entry { planet: "Earth", harmless: true, towels: 1 })
+}
+
+#test("{\"planet\": \"Vogsphere\", \"harmless\": false, \"towels\": 0}")["Vogsphere"]
+fun from_text(text: str) -> str {
+    return match json.decode<Entry>(text) {
+        Ok(e) => e.planet,
+        Err(err) => f"{err}",
+    }
+}

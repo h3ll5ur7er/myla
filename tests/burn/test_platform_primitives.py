@@ -11,7 +11,11 @@ Each program runs in the self-hosted interpreter and natively, which must
 agree; `scripts/test-target.py` runs the suite for aarch64 (qemu) and wasm32
 (Node), where WASI has no processes and the pipes' programs are excused
 (`_targets.py`): `PipesOnWasm` checks that each of their primitives is
-`Unsupported` (ENOSYS) there instead. A program's call of one is the
+`Unsupported` there instead. What a primitive leaves for `__io_errno` is a
+cause code (std.ioerror's, D209): 1 not found, 3 already exists, 5 a
+directory, 11 invalid input, 34 a handle that isn't open, and from 256 on
+256 plus the system's own code (285 ESPIPE, 266 ECHILD, 259 ESRCH); a kind
+is std.platform's (1 a file, 2 a directory, 3 a link). A program's call of one is the
 primitive warning (D100, D161), as the others' is."""
 import os
 import subprocess
@@ -86,7 +90,7 @@ fun main() {
     print(e(__random_bytes(-1).len()))
 }
 """
-ENTROPY_OUT = "32 0\ntrue\n0 0\n100000 0\n256\n0 22\n"
+ENTROPY_OUT = "32 0\ntrue\n0 0\n100000 0\n256\n0 11\n"
 
 # the open flags: 1 read, 2 write, 4 create, 8 truncate, 16 append, 32 exclusive
 FILES = HELPERS + """from std.process import args
@@ -118,9 +122,9 @@ fun main() {
     let st = __fstat(r)
     print(e(st.len()))
     print(st[0])
-    print(st[1] & 61440)
-    print(st[2] > 1600000000000000000)
-    // the descriptor reads, it doesn't write: EBADF
+    print(st[1])
+    print(st[3] > 1600000000000000000)
+    // the descriptor reads, it doesn't write: BAD_HANDLE
     print(write(r, "x"))
     __close(r)
 
@@ -154,7 +158,7 @@ fun main() {
     print(e(__open(args()[1], 2, 0)))
     print(e(__open(args()[1] + "/a\\0b", 1, 0)))
     print(e(__open(path, 0, 0)))
-    print(e(__open(path, 1 | 64, 0)))
+    print(e(__open(path, 1 | 256, 0)))
     // before the start, another whence: EINVAL
     let d = __open(path, 1, 0)
     print(e64(__seek(d, -1, 0)))
@@ -179,11 +183,11 @@ world 0
 0 0
 1 0
 ello
-3 0
+4 0
 11
-32768
+1
 true
-9
+34
 0 0
 0
 6 0
@@ -192,20 +196,20 @@ true
 hello WORLD!
 0
 Jello WORLD!
--1 17
+-1 3
 true
 0
--1 2
--1 21
--1 22
--1 22
--1 22
--1 22
--1 22
--1 9
-0 9
-0 9
--1 29
+-1 1
+-1 5
+-1 11
+-1 11
+-1 11
+-1 11
+-1 11
+-1 34
+0 34
+0 34
+-1 285
 """
 
 MODE = """from std.process import args
@@ -213,7 +217,7 @@ MODE = """from std.process import args
 #allow(primitive)
 fun main() {
     let fd = __open(args()[1] + "/private", 2 | 4, 384)
-    print(__fstat(fd)[1] & 4095)
+    print(__fstat(fd)[2])
     __close(fd)
     let st = __fstat(0)
     print(st.len())
@@ -243,44 +247,73 @@ fun main() {
     let st = __path_stat(f, true)
     print(e(st.len()))
     print(st[0])
-    print(st[1] & 61440)
-    print(st[2] > 1600000000000000000)
-    print(__fstat(__open(f, 1, 0))[2] == st[2])
+    print(st[1])
+    print(st[3] > 1600000000000000000)
+    print(__fstat(__open(f, 1, 0))[3] == st[3])
     let l = __path_stat(dir + "/link", false)
     print(e(l.len()))
-    print(l[1] & 61440)
+    print(l[1])
     let lf = __path_stat(dir + "/link", true)
-    print(lf[1] & 61440)
-    print(lf[4] == st[4] && lf[3] == st[3])
+    print(lf[1])
+    print(lf[5] == st[5] && lf[4] == st[4])
     let d = __path_stat(dir + "/sub", false)
-    print(d[1] & 61440)
-    print(d[4] != st[4])
+    print(d[1])
+    print(d[5] != st[5])
     print(e(__path_stat(dir + "/dangling", true).len()))
-    print(__path_stat(dir + "/dangling", false)[1] & 61440)
+    print(__path_stat(dir + "/dangling", false)[1])
     print(e(__path_stat(dir + "/missing", false).len()))
     print(e(__path_stat(dir + "/a\\0b", true).len()))
     print(e(__path_stat("", true).len()))
 }
 """
 PATHS_OUT = """0
-9
-9
-5 0
+34
+34
+6 0
 5
-32768
+1
 true
 true
-5 0
-40960
-32768
+6 0
+3
+1
 true
-16384
+2
 true
-0 2
-40960
-0 2
-0 22
-0 2
+0 1
+3
+0 1
+0 11
+0 1
+"""
+
+# MYLA-841: what a symbolic link holds, as written in it, without following
+# it: relative, dangling, one up, one longer than its first room
+# (argv[2]); a file, nothing and a NUL in the path give "" with the cause.
+READ_LINK = HELPERS + """from std.process import args
+
+#allow(primitive)
+fun main() {
+    let dir = args()[1]
+    print(es(__read_link(dir + "/link")))
+    print(es(__read_link(dir + "/dangling")))
+    print(es(__read_link(dir + "/sub/up")))
+    print(es(__read_link(dir + "/f.txt")))
+    print(es(__read_link(dir + "/missing")))
+    print(es(__read_link(dir + "/a\\0b")))
+    let long = __read_link(dir + "/long")
+    print(e(long.len()))
+    print(long == args()[2])
+}
+"""
+READ_LINK_OUT = """f.txt 0
+nothing 0
+../f.txt 0
+ 11
+ 1
+ 11
+4001 0
+true
 """
 
 # MYLA-369: a string's bytes as a list and back in one copy, and a builder
@@ -356,7 +389,7 @@ fun main() {
     __write_bytes(1, [111u8, 107u8, 10u8])
 }
 """
-BYTES_IO_OUT = "0\n0\n3 0 2 0\n253 3 255\n254 253\n0 0\n0 0\n0 0\n0 9\n9\nok\n"
+BYTES_IO_OUT = "0\n0\n3 0 2 0\n253 3 255\n254 253\n0 0\n0 0\n0 0\n0 34\n34\nok\n"
 
 # S1 (MYLA-420): a short read gives a list, or a string, of its own size,
 # not the cell its request asked for: 80 reads each of `__read_bytes` and
@@ -495,15 +528,15 @@ oops
 256 0
 0 0
 -15
-256 10
-0 3
+256 266
+0 259
 /
 hi
 
 0
 0
-0 32
-2 0 -1 -1 -1 -1
+0 10
+1 0 -1 -1 -1 -1
 """
 
 PIPES_WASM = HELPERS + """fun show(h: [int]) -> str {
@@ -568,7 +601,7 @@ class Descriptors(unittest.TestCase):
                     native = build_and_run_full(Program(path), args=[b], argv0=path)
                 finally:
                     os.umask(old)
-            self.assertEqual(interp, ("384\n3\n", "", 0))
+            self.assertEqual(interp, ("384\n4\n", "", 0))
             self.assertEqual(native, interp)
 
 
@@ -586,6 +619,23 @@ class Paths(unittest.TestCase):
                 interp = selfhost_run(path, [a])
                 native = build_and_run_full(Program(path), args=[b], argv0=path)
             self.assertEqual(interp, (PATHS_OUT, "", 0))
+            self.assertEqual(native, interp)
+
+    def test_read_link(self):
+        long = "x" * 3995 + "/f.txt"
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "f.txt"), "w") as f:
+                f.write("hello")
+            os.mkdir(os.path.join(d, "sub"))
+            os.symlink("f.txt", os.path.join(d, "link"))
+            os.symlink("nothing", os.path.join(d, "dangling"))
+            os.symlink("../f.txt", os.path.join(d, "sub", "up"))
+            os.symlink(long, os.path.join(d, "long"))
+            with tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, READ_LINK)
+                interp = selfhost_run(path, [d, long])
+                native = build_and_run_full(Program(path), args=[d, long], argv0=path)
+            self.assertEqual(interp, (READ_LINK_OUT, "", 0))
             self.assertEqual(native, interp)
 
 
@@ -620,13 +670,13 @@ class Pipes(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-@unittest.skipUnless(TEST_TARGET == "wasm32-wasi", "the wasm32 suite's (scripts/test-target.py wasm32-wasi)")
+@unittest.skipUnless(TEST_TARGET == "wasm32-wasi", "the suites of a target without processes (wasm32)")
 class PipesOnWasm(unittest.TestCase):
     def test_no_processes_is_enosys(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, PIPES_WASM)
             out = build_and_run_full(Program(path), argv0=path)
-        self.assertEqual(out, ("38 0 -1 -1 -1 -1\n256 38\n0 38\n", "", 0))
+        self.assertEqual(out, ("9 0 -1 -1 -1 -1\n256 9\n0 9\n", "", 0))
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -640,6 +690,7 @@ class Warnings(unittest.TestCase):
         "__seek": "print(__seek(0, 0, 1))",
         "__fstat": "print(__fstat(0).len())",
         "__path_stat": "print(__path_stat(\"/\", true).len())",
+        "__read_link": "print(__read_link(\"/\").len())",
         "__spawn_piped": "print(__spawn_piped(\"/bin/true\", [\"true\"], none).len())",
         "__try_reap": "print(__try_reap(1))",
         "__str_to_bytes": "print(__str_to_bytes(\"ab\").len())",
@@ -671,6 +722,7 @@ class Warnings(unittest.TestCase):
             "fun main() {\n    print(__spawn_piped(\"x\", [\"x\"]).len())\n}\n": "__spawn_piped() takes",
             "fun main() {\n    print(__path_stat(\"/\").len())\n}\n": "__path_stat() takes (path: str, follow: bool)",
             "fun main() {\n    print(__path_stat(\"/\", 1).len())\n}\n": "__path_stat() takes",
+            "fun main() {\n    print(__read_link(1).len())\n}\n": "__read_link() takes (path: str)",
             "fun main() {\n    print(__str_to_bytes([1u8]).len())\n}\n": "__str_to_bytes() takes (s: str)",
             "fun main() {\n    print(__bytes_to_str(\"x\"))\n}\n": "__bytes_to_str() takes (b: [uint8])",
         }

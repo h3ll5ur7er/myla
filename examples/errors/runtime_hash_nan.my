@@ -1,0 +1,8 @@
+//~ runtime error: cannot hash NaN
+//~ native: runtime error: cannot hash NaN
+// A NaN map key is the runtime error D198 asks for, at the map operation's
+// key, not in std.hash (MYLA-850).
+fun main() {
+    var m: [float: int] = [:]
+    m[0.0 / 0.0] = 1
+}

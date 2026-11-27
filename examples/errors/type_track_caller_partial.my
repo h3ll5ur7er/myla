@@ -1,0 +1,15 @@
+//~ type error: 'clamp_to' reports its caller's position ('#track_caller'): it can only be called
+//~ help: call it in a lambda: '(…) => clamp_to(…)'
+// A partial application of a `#track_caller` function would be a function
+// value (MYLA-435).
+#track_caller
+fun clamp_to(x: int, hi: int) -> int {
+    assert(hi >= 0, "a negative bound")
+    if x > hi { return hi }
+    return x
+}
+
+fun main() {
+    let f = clamp_to(_, 10)
+    print(f(30))
+}

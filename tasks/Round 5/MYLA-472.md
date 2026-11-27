@@ -2,7 +2,7 @@
 id: MYLA-472
 title: "std.http: a gzip or deflate body is decoded without a limit"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [std, http, compress, round-5]
 ---
@@ -21,3 +21,6 @@ Taken into [[MYLA-422]] (lane P8), on P9's `max_output` (commit c3dc460 cherry-p
 - Test first: `content_codings` gained 64 KiB of zeros as gzip, zlib, raw deflate and `gzip, gzip` (each under 4 KiB) decoded with a limit of 4 KiB: before, with the limit passed but not used, `FAIL content_codings: runtime error: gzip: 65536 bytes decoded past the limit`; after, `BodyTooLarge` for each, and each decodes whole at a limit of 64 KiB. `build/myla test lib/std/http.my --stdlib lib`: 221/221.
 - `tests.burn.test_http.MylaClient`: a Python endpoint sends 64 MiB of zeros gzipped (65 KB); the Myla client with `with_limits(65536, 1048576)` prints `error: body too large`, interpreted and built. A first version of the test also fetched it with the default limit: the interpreted client grew past 6.4 GB and ran 12 minutes before it was stopped — what a bomb does with a 1 GiB limit in the interpreter, so that line was dropped.
 
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

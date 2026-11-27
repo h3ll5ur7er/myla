@@ -48,7 +48,7 @@ It needs gcc, and ideally clang and valgrind. Each benchmark is a directory unde
 
 ## Results (2026-11-03)
 
-All twelve programs, after [[MYLA-246]], on the development container (4 cores of an Intel Xeon at 2.3 GHz). Times are the median of 5 runs; instructions are at each program's smaller `profile_size`.
+All twelve programs, after [[MYLA-246]], at `9a17dc1`, on the development container (4 cores of an Intel Xeon at 2.3 GHz). Times are the median of 5 runs; instructions are at each program's smaller `profile_size`.
 
 **This is the baseline** for the optimisations that follow, saved as `benchmarks/results/2026-11-03-baseline.json`. `run.py --compare benchmarks/results/2026-11-03-baseline.json` shows each Myla program's change against it. Timings only compare on the same kind of machine; the file records which.
 

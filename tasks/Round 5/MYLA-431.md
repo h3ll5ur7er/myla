@@ -2,7 +2,7 @@
 id: MYLA-431
 title: "P17 Seed size"
 type: improvement
-status: review
+status: done
 priority: high
 labels: [bootstrap, seed, repository, round-5]
 ---
@@ -23,3 +23,7 @@ Stage 0 is only ever run by the bootstrap scripts and `tests/burn/_tools.py`, ea
 - **aarch64:** `MYLA_ARCH=aarch64 AS=aarch64-linux-gnu-as LD=aarch64-linux-gnu-ld MYLA_RUN=qemu-aarch64 scripts/bootstrap.sh` from the new `seed-aarch64.s`: byte-identical fixed point (32,123,554 bytes).
 - **Seeds current:** `scripts/check-seed.sh` with a build directory and on its own bootstrap: both seeds are the current compiler; `selfhost/embedded_std.my` is left as committed.
 - **Suites:** `scripts/test.sh fast`: 779 tests, OK (3 skipped), the burn tests' tools built from the new seed.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-552]]: the seeds are 10.9 MB and 25.3 MB, but an update still costs the pack about 2.9 MB, as the labels renumber.

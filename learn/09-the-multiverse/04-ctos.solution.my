@@ -1,0 +1,6 @@
+#test(48879)["ctOS-0000BEEF"]
+#test(3735928559)["ctOS-DEADBEEF"]
+#test(1)["ctOS-00000001"]
+fun profile(id: uint32) -> str {
+    return f"ctOS-{id:08X}"
+}

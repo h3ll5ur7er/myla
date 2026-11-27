@@ -8,7 +8,7 @@ labels: [concurrency, checker, runtime, selfhost, stdlib]
 ---
 From the concurrency stress tests ([[MYLA-144]], tests 7 and 9), after [[MYLA-147]] (D94 (4): programs couldn't cancel). The user's choices: a cooperative flag, as `std.task` functions. D96.
 
-- [x] `task.cancel(a)` and `task.cancelled()` in [[src/myla/std/task.my]]; both checkers take the call (`async let` names only, not from a lambda), error corpus cases
+- [x] `task.cancel(a)` and `task.cancelled()` in [[lib/std/task.my]]; both checkers take the call (`async let` names only, not from a lambda), error corpus cases
 - [x] Both interpreters: a flag per task, seen by its children, those started later too
 - [x] Native code: bit 2 of the frame flags (word 48) of the child's first frame, looked for up the chain of parents
 - [x] Stress tests 7 (the resource given back at every point of cancelling) and 9 (the old request cancelled) on every implementation and on 1 to 16 workers

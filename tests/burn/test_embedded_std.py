@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, shown
 from tests.burn._tools import _REPO, STDLIB_ROOT, myla_tool
 
 _MODULE = os.path.join(_REPO, "selfhost", "embedded_std.my")
@@ -33,7 +33,8 @@ class EmbeddedStd(unittest.TestCase):
             shutil.copytree(STDLIB_ROOT, lib)
             module = os.path.join(tmp, "embedded_std.my")
             shutil.copy(_MODULE, module)
-            with open(os.path.join(lib, "std", "io.my"), "a", encoding="utf-8") as fh:
+            # (newline="": the line ends in "\n" on Windows too, as lib's files do)
+            with open(os.path.join(lib, "std", "io.my"), "a", encoding="utf-8", newline="") as fh:
                 fh.write("// a change\n")
             checked = subprocess.run([self.embed, lib, module, "--check"], capture_output=True, text=True)
             self.assertEqual(checked.returncode, 1)
@@ -62,7 +63,7 @@ class StdlibRoot(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write("import std.json as json\n\nfun main() {\n    print(1)\n}\n")
             missing = os.path.join(tmp, "no-such-lib")
-            want = (f"cannot resolve import 'std.json': the standard library root '{missing}' "
+            want = (f"cannot resolve import 'std.json': the standard library root '{shown(missing)}' "
                     "(from --stdlib or MYLA_STDLIB) is not a directory")
             for args, env in ((["--stdlib", missing], {}), ([], {"MYLA_STDLIB": missing})):
                 with self.subTest(args=args, env=env):

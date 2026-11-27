@@ -20,20 +20,24 @@ socket programs are excused (`_targets.py`) and `NetOnWasm` checks that each
 operation is `Unsupported` instead. A program's call of a `__sock_*`
 primitive is the primitive warning (D100, D161)."""
 import os
+import select
 import socket
 import struct
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
-from ._native import (
+from ._native import (BUILD_TARGET,
     CAN_BUILD_NATIVE,
+    ON_WINDOWS,
     SKIP_REASON,
     TEST_TARGET,
     Program,
     build_and_run_full,
+    linux_only,
     native_build,
     run_argv,
     selfhost_run,
@@ -586,7 +590,9 @@ ERRORS = PRELUDE + """fun main() {
         Ok(s) => print("connected")
         Err(e) => print(cause(e))
     }
-    match net.connect_timeout(net.addr(net.loopback(), port), 1000) {
+    // (refused well within its time: Windows tries a refused SYN again
+    // for about 2 s before it says so, Linux says so at once)
+    match net.connect_timeout(net.addr(net.loopback(), port), 10000) {
         Ok(s) => print("connected")
         Err(e) => print(cause(e))
     }
@@ -661,7 +667,7 @@ AddrNotAvailable
 TimedOut
 TimedOut
 read 0 bytes
-closed twice
+Other(9)
 Other(9)
 """
 
@@ -742,6 +748,8 @@ fun main() {
     let x = a_srv.close()
     let y = b.close()
     let z = b_srv.close()
+    // a second close through the value itself (MYLA-548: it was Ok)
+    print(f"second closes: {closed(a.close())} {closed(u.close())} {closed(l.close())}")
 }
 """
 STALE_OUT = """stale write: Other(9)
@@ -753,6 +761,7 @@ forged write: Other(9)
 forged accept: Other(9)
 stale send: Other(9)
 stale accept: Other(9)
+second closes: Other(9) Other(9) Other(9)
 """
 
 # D180: lines of text over sockets in tasks, without blocking a worker
@@ -845,6 +854,140 @@ async fun main() {
 """
 LINES_OUT = "clients ok 1040\nserver lines 1020\n"
 
+# MYLA-548: a line reader's limit (`line_reader_with`): a line of the
+# limit's length is taken, a longer one is `InvalidData`, before its end
+# has come and on every read after it; and a last line the peer's close
+# cut off is told apart (`cut_off`)
+LINE_LIMITS = """import std.net as net
+import std.bytes as bytes
+from std.net import TcpListener, SocketAddr
+from std.fs import IoError
+
+async fun feed(at: SocketAddr, parts: [str], close: bool) -> int {
+    var s = net.connect(at).expect("connect")
+    for p in parts {
+        let w = await s.write_async(bytes.from_str(p))
+    }
+    if close {
+        let c = s.close()
+    } else {
+        // the rest of the long line never comes
+        let n = await s.read_async(1)
+    }
+    return 0
+}
+
+fun shown(r: Result<Option<str>, IoError>) -> str {
+    return match r {
+        Ok(Some(l)) => f"line of {l.len()}"
+        Ok(None) => "end"
+        Err(e) => f"{e}"
+    }
+}
+
+#main
+async fun main() {
+    var l = net.listen(net.addr(net.loopback(), 0)).expect("listen")
+    let at = l.local_addr().expect("addr")
+    let long = "x".repeat(1000)
+    async let fed = feed(at, ["short\\n", long + "\\n", long, "y".repeat(3000)], false)
+    var s = (await l.accept_async()).expect("accept")
+    var r = net.line_reader_with(s, 1000)
+    for i in 0..4 { print(shown(await r.read_line_async())) }
+    let c = s.close()
+    let z = await fed
+    async let fed2 = feed(at, ["abc\\nla", "st"], true)
+    var s2 = (await l.accept_async()).expect("accept")
+    var r2 = net.line_reader(s2)
+    for i in 0..3 {
+        let got = shown(await r2.read_line_async())
+        print(f"{got} cut off {r2.cut_off()}")
+    }
+    let z2 = await fed2
+}
+"""
+LINE_LIMITS_OUT = ("line of 5\nline of 1000\ninvalid data (InvalidData)\ninvalid data (InvalidData)\n"
+                   "line of 3 cut off false\nline of 4 cut off true\nend cut off false\n")
+
+# MYLA-548: `listen_with(a, backlog)`: a listener that accepts nothing
+# until its input ends, its backlog the argument's (`default`: `listen`'s)
+BACKLOG = """import std.net as net
+import std.num as num
+import std.io as io
+from std.process import args
+
+fun main() {
+    let a = args()
+    let at = net.addr(net.loopback(), 0)
+    var l = if a[1] == "default" { net.listen(at) } else { net.listen_with(at, num.parse_int(a[1]).unwrap_or(0) as int) }
+    match l {
+        Ok(ls) => {
+            print(ls.local_addr().expect("addr").port)
+            print("")
+            var r = io.stdin()
+            let x = r.read_line()
+            var lv = ls
+            let c = lv.close()
+        }
+        Err(e) => print(f"{e}")
+    }
+}
+"""
+
+# MYLA-548 (C15): the descriptors used up before the first wait on one
+# worker (run under a limit of 64): the reactor's poller, made at the start,
+# still waits (made at the first wait, it got none and the read hung)
+USED_UP = """import std.fs as fs
+import std.net as net
+import std.task as task
+from std.io import println, Read, Write
+
+async fun later(s0: net.TcpStream) -> int {
+    var s = s0
+    await task.sleep(50)
+    let w = s.write([7u8])
+    return 0
+}
+
+#main
+async fun main() {
+    var l = net.listen(net.addr(net.loopback(), 0)).expect("listen")
+    let at = l.local_addr().expect("addr")
+    var s = net.connect(at).expect("connect")
+    var t = l.accept().expect("accept")
+    var files: [fs.File] = []
+    while files.len() < 5000 {
+        match fs.open("/dev/null") { Ok(f) => { files.push(f) }, Err(e) => { break } }
+    }
+    println(f"descriptors used up ({files.len() > 20})")
+    async let w = later(s)
+    match await t.read_async(1) {
+        Ok(b) => println(f"read {b.len()} byte")
+        Err(e) => println(f"read: {e}")
+    }
+    let z = await w
+    println("done")
+}
+"""
+
+# MYLA-548: no descriptor for the poller even at the start (a limit of 3):
+# a sleep is kept without it, a wait for input is a runtime error that says
+# why, not a hang
+NO_POLLER = """import std.io as io
+import std.task as task
+
+#main
+async fun main() {
+    await task.sleep(30)
+    print("slept")
+    var r = io.buffered(io.fd_stream(0))
+    match await r.read_line_async() {
+        Ok(l) => print("a line")
+        Err(e) => print(f"{e}")
+    }
+}
+"""
+
 NET_WASM = PRELUDE + """fun main() {
     match net.listen(net.addr(net.loopback(), 0)) {
         Ok(l) => print("listening")
@@ -867,6 +1010,62 @@ NET_WASM = PRELUDE + """fun main() {
 }
 """
 NET_WASM_OUT = "Unsupported\nUnsupported\nUnsupported\nUnsupported\nNotFound\n127.0.0.1\n127.0.0.1 ::1\n127.0.0.1 ::1\n"
+
+
+# MYLA-548: a blocking read of a socket in a task (`io.buffered(s)` over a
+# TcpStream) holds its worker; on one worker the task that would send the
+# line never runs. The program still hangs, but says so on stderr after a
+# second of it. The sender sleeps after its connect, so that the reader has
+# accepted and reads first wherever the accept comes after the connect
+# (MYLA-926: on Windows' loopback the sender woke first, wrote and ended).
+HELD = """import std.net as net
+import std.io as io
+import std.bytes as bytes
+import std.task as task
+from std.net import TcpListener
+
+async fun lines(l: TcpListener) -> int {
+    var s = match await l.accept_async() {
+        Ok(s) => s
+        Err(e) => { return -1 }
+    }
+    var r = io.buffered(s)
+    var n = 0
+    while let Ok(Some(line)) = r.read_line() {
+        n += 1
+    }
+    return n
+}
+
+#main
+async fun main() {
+    var l = net.listen(net.addr(net.loopback(), 0)).expect("listen")
+    let at = l.local_addr().expect("address")
+    async let served = lines(l)
+    var s = (await net.connect_async(at)).expect("connect")
+    await task.sleep(200)
+    let w = await s.write_async(bytes.from_str("ping\\n"))
+    let sh = s.shutdown(net.Shutdown.Write)
+    print(await served)
+}
+"""
+
+# MYLA-548: a blocking read with no other task waiting (a program without
+# tasks, and one whose only task reads, on the executor: it has slept)
+# waits as long as it takes, quietly.
+QUIET_BODY = """    var l = net.listen(net.addr(net.loopback(), 0)).expect("listen")
+    print(l.local_addr().expect("address").port)
+    var s = l.accept().expect("accept")
+    var r = io.buffered(s)
+    match r.read_line() {
+        Ok(Some(line)) => print(line)
+        _ => print("no line")
+    }
+}
+"""
+QUIET = "import std.net as net\nimport std.io as io\n\nfun main() {\n" + QUIET_BODY
+QUIET_TASK = ("import std.net as net\nimport std.io as io\nimport std.task as task\n\n#main\nasync fun main() {\n"
+              "    await task.sleep(1)\n" + QUIET_BODY)
 
 
 def run_both(source: str, args=()) -> tuple[str, str, int]:
@@ -907,6 +1106,166 @@ class Tcp(unittest.TestCase):
         self.assertEqual(run_both(LINES), (LINES_OUT, "", 0))
         with mock.patch.dict(os.environ, {"MYLA_THREADS": "1"}):
             self.assertEqual(run_both(LINES), (LINES_OUT, "", 0))
+
+    def test_a_line_readers_limit_and_a_line_cut_off(self):
+        self.assertEqual(run_both(LINE_LIMITS), (LINE_LIMITS_OUT, "", 0))
+
+    def test_a_listeners_backlog(self):
+        """MYLA-548: `listen` lets 128 connections wait to be accepted (the
+        kernel queues one more); `listen_with(a, 300)` lets 200 connects at
+        once complete without an accept; a backlog below 1 is an error.
+
+        Windows takes a backlog as a hint (MYLA-926: 164 to 200 of the 200
+        connects came through `listen`'s 128 there, seen through WSL's
+        mirrored loopback), so there the default lets at least 128 wait, at
+        most the 200 tried, and the connects have longer to complete (a
+        refused one is tried again for a while: none comes through later
+        without an accept)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, BACKLOG)
+            binary = os.path.join(tmp, "prog")
+            native_build(Program(path), binary)
+            runs = {"interpreted": ([selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None),
+                    "built": run_argv(binary, binary)}
+            for name, (argv, exe) in runs.items():
+                for backlog, want in (("default", range(128, 201) if ON_WINDOWS else 129), ("300", 200)):
+                    with self.subTest(run=name, backlog=backlog):
+                        proc = subprocess.Popen([*argv, backlog], executable=exe, stdin=subprocess.PIPE,
+                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        socks = []
+                        try:
+                            port = int(proc.stdout.readline())
+                            for i in range(200):
+                                c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                c.setblocking(False)
+                                c.connect_ex(("127.0.0.1", port))
+                                socks.append(c)
+                            deadline = time.time() + (2.0 if ON_WINDOWS else 0.8)
+                            done = set()
+                            while time.time() < deadline and len(done) < len(socks):
+                                _, ready, _ = select.select([], [c for c in socks if c not in done], [], 0.05)
+                                for c in ready:
+                                    if c.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == 0:
+                                        done.add(c)
+                            out, err = proc.communicate("\n", timeout=60)
+                        finally:
+                            proc.kill()
+                            for c in socks:
+                                c.close()
+                        self.assertEqual((err, proc.returncode), ("", 0))
+                        if isinstance(want, range):
+                            self.assertIn(len(done), want)
+                        else:
+                            self.assertEqual(len(done), want)
+                with self.subTest(run=name, backlog=0):
+                    p = subprocess.run([*argv, "0"], executable=exe, capture_output=True, text=True, timeout=60)
+                    self.assertEqual((p.returncode, p.stderr.split("\n")[0]),
+                                     (1, "runtime error: listen_with: backlog 0 is below 1"))
+
+    @linux_only("a limit of descriptors (RLIMIT_NOFILE) and /dev/null")
+    def test_a_wait_after_the_descriptors_are_used_up(self):
+        import resource
+
+        def limited():
+            resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, USED_UP)
+            binary = os.path.join(tmp, "prog")
+            native_build(Program(path), binary)
+            runs = {"interpreted": ([selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None),
+                    "built": run_argv(binary, binary)}
+            for name, (argv, exe) in runs.items():
+                for threads in ("1", "4"):
+                    with self.subTest(run=name, workers=threads):
+                        p = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=60,
+                                           env=dict(os.environ, MYLA_THREADS=threads), preexec_fn=limited)
+                        self.assertEqual((p.stdout, p.stderr, p.returncode),
+                                         ("descriptors used up (true)\nread 1 byte\ndone\n", "", 0))
+
+    @linux_only("a limit of descriptors (RLIMIT_NOFILE)")
+    @unittest.skipIf(TEST_TARGET != "", "the emulator needs descriptors of its own")
+    def test_no_descriptor_for_the_poller_at_all(self):
+        import resource
+
+        def limited():
+            resource.setrlimit(resource.RLIMIT_NOFILE, (3, 3))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, NO_POLLER)
+            binary = os.path.join(tmp, "prog")
+            native_build(Program(path), binary)
+            for threads in ("1", "4"):
+                with self.subTest(workers=threads):
+                    r, w = os.pipe()
+                    try:
+                        p = subprocess.run([binary], stdin=r, capture_output=True, text=True, timeout=60,
+                                           env=dict(os.environ, MYLA_THREADS=threads), preexec_fn=limited)
+                    finally:
+                        os.close(r)
+                        os.close(w)
+                    self.assertEqual((p.stdout, p.stderr, p.returncode),
+                                     ("slept\n", "runtime error: no descriptor left to wait for input or output on "
+                                      "(too many open files)\n", 1))
+
+    def test_a_blocking_read_that_holds_the_only_worker_says_so(self):
+        """MYLA-548: `io.buffered(s).read_line()` in a task on one worker,
+        whose line another task would send: a hang, said on stderr once the
+        read has held the worker for a second (it was silent)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, HELD)
+            binary = os.path.join(tmp, "prog")
+            native_build(Program(path), binary)
+            runs = {"interpreted": ([selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None),
+                    "built": run_argv(binary, binary)}
+            for name, (argv, exe) in runs.items():
+                with self.subTest(run=name):
+                    proc = subprocess.Popen(argv, executable=exe, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            text=True, env=dict(os.environ, MYLA_THREADS="1"))
+                    # (the line read by a thread: Windows' `select` takes no pipe)
+                    got: list[str] = []
+                    reader = threading.Thread(target=lambda: got.append(proc.stderr.readline()), daemon=True)
+                    try:
+                        start = time.time()
+                        reader.start()
+                        reader.join(30)
+                        line = got[0] if got else ""
+                        took = time.time() - start
+                        time.sleep(0.5)
+                        still = proc.poll() is None
+                    finally:
+                        proc.kill()
+                        reader.join()
+                        proc.communicate()
+                    self.assertTrue(line.startswith("warning: a blocking wait for a socket has held its worker "
+                                                    "for a second while other tasks wait for one;"), line)
+                    self.assertIn("'net.line_reader(s)'", line)
+                    self.assertGreaterEqual(took, 0.9)
+                    self.assertTrue(still)
+
+    def test_a_blocking_read_with_no_task_waiting_is_quiet(self):
+        """MYLA-548: the same read where no other task waits, without tasks
+        and in a program's only task, with the line sent after 1.5 s: read,
+        and nothing said."""
+        for kind, source in (("no tasks", QUIET), ("one task", QUIET_TASK)):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, source)
+                binary = os.path.join(tmp, "prog")
+                native_build(Program(path), binary)
+                runs = {"interpreted": ([selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None),
+                        "built": run_argv(binary, binary)}
+                for name, (argv, exe) in runs.items():
+                    with self.subTest(kind, run=name):
+                        proc = subprocess.Popen(argv, executable=exe, stdout=subprocess.PIPE,
+                                                stderr=subprocess.PIPE, text=True,
+                                                env=dict(os.environ, MYLA_THREADS="1"))
+                        try:
+                            port = int(proc.stdout.readline())
+                            with socket.create_connection(("127.0.0.1", port)) as c:
+                                time.sleep(1.5)
+                                c.sendall(b"late\n")
+                                out, err = proc.communicate(timeout=60)
+                        finally:
+                            proc.kill()
+                        self.assertEqual((out, err, proc.returncode), ("late\n", "", 0))
 
     def test_a_closed_or_made_up_handle_reaches_nothing(self):
         self.assertEqual(run_both(STALE), (STALE_OUT, "", 0))
@@ -1002,6 +1361,9 @@ class FakeDns:
         while True:
             try:
                 msg, peer = self.sock.recvfrom(512)
+            except ConnectionResetError:
+                # (Windows: an earlier reply's port was closed, WSAECONNRESET)
+                continue
             except OSError:
                 return
             qid, flags, qd = struct.unpack(">HHH", msg[:6])
@@ -1064,7 +1426,7 @@ class Errors(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-@unittest.skipUnless(TEST_TARGET == "wasm32-wasi", "the wasm32 suite's (scripts/test-target.py wasm32-wasi)")
+@unittest.skipUnless(TEST_TARGET == "wasm32-wasi", "the suites of a target without sockets (wasm32)")
 class NetOnWasm(unittest.TestCase):
     def test_every_operation_is_unsupported(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1133,7 +1495,13 @@ class Warnings(unittest.TestCase):
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class Primitives(unittest.TestCase):
     """The primitives directly: what a port to another system must give
-    (docs/Language/Standard-library/Net.md)."""
+    (docs/Language/Standard-library/Net.md). `__io_errno` gives the cause
+    codes of std.ioerror (D209): 32 would block, 33 a connect in progress, 11
+    invalid input, 9 unsupported, 34 a handle that isn't open. What the
+    program reads it waits for first, its listener's connection and its
+    datagram: on Windows' loopback an accept just after the connect
+    completed would block, and a datagram sent to itself wasn't there yet
+    when read at once (MYLA-926)."""
 
     PROGRAM = """#allow(primitive)
 fun e(r: int) -> str {
@@ -1154,9 +1522,10 @@ fun main() {
     let c = __sock_open(4, 1)
     print(e(__sock_set_nonblocking(c, 1)))
     let r = __sock_connect(c, me)
-    print(r == 0 || __io_errno() == 115)
+    print(r == 0 || __io_errno() == 33)
     print(__sock_poll(c, 2, 1000))
     print(e(__sock_error(c)))
+    print(__sock_poll(l, 1, 1000))
     let s = __sock_accept(l)
     print(s >= 0)
     print(e(__sock_send(c, "hello", 1)))
@@ -1183,6 +1552,7 @@ fun main() {
     print(e(__sock_set_nonblocking(u, 1)))
     print(e(__sock_recv_from(u, 10).len()))
     print(e(__sock_send_to(u, "dgram", __sock_addr(u, 0))))
+    print(__sock_poll(u, 1, 1000))
     let d = __sock_recv_from(u, 3)
     print(f"{d.len()} {d[0]} {d[19:]}")
     print(e(__sock_close(u)))
@@ -1193,36 +1563,38 @@ fun main() {
 0 0
 7 4 127 1
 0 0
--1 11
+-1 32
 0 0
 0 0
 true
 2
 0 0
+1
 true
 4 0
 1
 ello
 0 0
-0 11
+0 32
 7 0
 0 0
--1 22
+-1 11
 0 0
 1
 0 0
--1 22
+-1 11
 0 0
 0 0
 0 0
--1 97
--1 22
 -1 9
--1 22
+-1 11
+-1 34
+-1 11
 0 0
 0 0
-0 11
+0 32
 5 0
+1
 22 4 dgr
 0 0
 """
@@ -1231,8 +1603,21 @@ ello
         self.assertEqual(run_both(self.PROGRAM), (self.OUT, "", 0))
 
     def test_the_configuration(self):
-        out, err, code = run_both("#allow(primitive)\nfun main() {\n    print(__net_config(0))\n"
-                                  "    print(__net_config(7).len())\n}\n")
+        src = "#allow(primitive)\nfun main() {\n    print(__net_config(0))\n    print(__net_config(7).len())\n}\n"
+        if BUILD_TARGET == "x86_64-windows":
+            # MYLA-706: Windows keeps its hosts file under %SystemRoot%
+            # (under Wine the interpreter is Linux's; on Windows itself a
+            # Windows program too, MYLA-926)
+            if ON_WINDOWS:
+                out, err, code = run_both(src)
+            else:
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = write_program(tmp, src)
+                    out, err, code = build_and_run_full(Program(path), argv0=path)
+            self.assertEqual((err, code), ("", 0))
+            self.assertRegex(out, r"(?i)^[a-z]:\\windows\\system32\\drivers\\etc\\hosts\n0\n$")
+            return
+        out, err, code = run_both(src)
         self.assertEqual((out, err, code), ("/etc/hosts\n0\n", "", 0))
 
 

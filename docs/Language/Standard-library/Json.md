@@ -25,7 +25,7 @@ fun main() {
 | Item | Meaning |
 | --- | --- |
 | `enum Json { Null, Bool(bool), Int(int64), Float(float64), Str(str), Array([Json]), Object([(str, Json)]) }` | A number without fraction or exponent that fits in int64 is an `Int`, any other a `Float`; an object keeps its members in order, duplicates included |
-| `parse(text: str) -> Result<Json, JsonError>` | One value, with whitespace around it allowed |
+| `parse(text: str) -> Result<Json, JsonError>` | One value, with whitespace around it allowed. A number of any length reads in time linear in its length: past 800 significant digits the rest only count as whether one isn't 0, which rounds to the same float64 ([[MYLA-795]]; a number of 64,000 digits took 11 s, now under 1 ms, 2026-11-18 at e659342) |
 | `struct JsonError { kind: JsonErrorKind, msg: str, line: int32, col: int32, path: str }` | A `Syntax` error of `parse` has Python 3.13's message and position (the column counts characters) and an empty `path`; the others come from decoding ([below](#typed-values)). `e.message()` is `msg`; `{e}` writes `line:col: msg` for an error in the text, `path: msg` for the others |
 | `to_string(j: Json) -> str` | Compact text, as `json.dumps(j, ensure_ascii=False, separators=(",", ":"))` writes it: floats in their shortest form, control characters escaped, other characters as they are; but NaN and the infinities, which JSON has no form for, are `null` |
 | `field(j: Json, key: str) -> Option<Json>` | An object's member (the last one with that key, as Python keeps it) |
@@ -164,6 +164,7 @@ fun main() {
 | `members(j: Json, name: str) -> Result<[(str, Json)], JsonError>` | The members of an object; another value is an error naming the type `name` |
 | `member<T: FromJson>(fields: [(str, Json)], name: str) -> Result<T, JsonError>` | The member `name` (the last of that name, as `field` finds it) read as a `T`, its path step added to an error; a missing one is `MissingField` |
 | `optional_member<T: FromJson>(fields, name) -> Result<Option<T>, JsonError>` | The same, `None` when the member is absent or `null` |
+| `within<T>(r: Result<T, JsonError>, step: str) -> Result<T, JsonError>` | `r` with its error's path one step further in: `json.within(float64.from_json(item), "[2]")` reports `$[2]: …` (an array's element read by hand, as std.vector's `FromJson` does) |
 
 What the derive writes:
 
@@ -177,7 +178,7 @@ The built-in types:
 | --- | --- | --- |
 | `int8` … `int64`, `uint8` … `uint32` | a number | an `Int`, or a whole `Float` (`2.0`, `1e3`), in the type's range: `128` for an `int8` is `OutOfRange`, `1.5` `WrongType` |
 | `uint64` | a number; above `int64`'s range the nearest float, `1.8446744073709552e+19` | the same, or a whole `Float` below 2^64. Above 2^63 only a value a float64 holds (a multiple of 2048) comes back as itself: `decode` refuses an integer in the text that would lose its low bits, and the largest values, whose float is 2^64, are out of range; but `encode` of `9223372036854775809` writes the float `9.223372036854776e+18`, which reads back as `9223372036854775808` ([[MYLA-424]]) |
-| `float64`, `float32` | a number; NaN and the infinities `null` | a `Float` or an `Int`; `null` is `WrongType`, a finite number beyond `float32`'s range `OutOfRange`. A `float32` is written in its shortest form, `0.1` and not `0.10000000149011612` |
+| `float64`, `float32` | a number; NaN and the infinities `null` | a `Float` or an `Int`; `null` is NaN, so a NaN reads back and an infinity comes back as NaN ([[MYLA-851]], as a vector's component, D291); a finite number beyond `float32`'s range `OutOfRange`. A `float32` is written in its shortest form, `0.1` and not `0.10000000149011612` |
 | `bool`, `str` | `true`/`false`, a string | the same |
 | `char` | a string of the one character | a string of exactly one character |
 | `[T]` | an array | an array, each item's index in an error's path |

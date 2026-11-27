@@ -56,4 +56,4 @@ The error says what is wrong and where, as a byte position in the text.
 
 ## Speed
 
-On x86-64, best of three runs on 100 MB of random bytes: `base64_encode` takes 0.55 s (180 MB a second), `base64_decode` of its 133 MB of text 0.45 s (220 MB of bytes a second), `hex_encode` 0.61 s (160 MB a second) and `hex_decode` of its 200 MB of text 0.73 s (140 MB of bytes a second). The decoders look each digit up in a table, which is more than twice as fast as comparing ranges. The encoders spend most of their time in `StringBuilder.append_byte`, about 3 ns a byte.
+On x86-64, best of three runs on 100 MB of random bytes (2026-11-07, `5068dfb`): `base64_encode` takes 0.55 s (180 MB a second), `base64_decode` of its 133 MB of text 0.45 s (220 MB of bytes a second), `hex_encode` 0.61 s (160 MB a second) and `hex_decode` of its 200 MB of text 0.73 s (140 MB of bytes a second). The decoders look each digit up in a table, which is more than twice as fast as comparing ranges. The encoders spend most of their time in `StringBuilder.append_byte`, about 3 ns a byte.

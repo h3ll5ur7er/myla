@@ -5,16 +5,24 @@
 ## Requirements
 
 - **Linux on x86-64 or aarch64** (a PC, an ARM server, a Raspberry Pi 4 or 5 with a 64-bit OS) and its **GNU `as` and `ld`** (binutils: `sudo apt install binutils`): they build the toolchain from the machine's seed, and native programs. `just bootstrap` runs the same script as `scripts/bootstrap.sh` if `just` is installed.
-- **For the other targets** (optional): clang and `ld.lld` for `--target aarch64-linux`, clang and `wasm-ld` for `--target wasm32-wasi` (LLVM 18 or newer, with the `lld` package); to run their programs on an x86-64 machine, `qemu-aarch64` (`qemu-user`) and Node 22 or newer. The tests of those targets skip without them.
+- **Or x86-64 Windows** with **Git Bash** (Git for Windows) and **LLVM** (clang, llvm-dlltool and lld-link on `PATH`; LLVM's installer puts them in `C:\Program Files\LLVM\bin`): `scripts/bootstrap.sh` runs in Git Bash from the Windows seed and builds `build/myla.exe` and `build/myla-lsp.exe`, which build Windows programs with the same tools (D214, [[MYLA-709]], [[Development/Bootstrap#on-windows]]).
+- **For the other targets** (optional): LLVM 18 or newer with the `lld` package, and something to run their programs on this machine. The tests of those targets skip without them. Each target's tools, found on `PATH` (its record in [[selfhost/target.my]], [[MYLA-700]]; a missing one is named in the error, with the target that needs it):
+
+  | `--target` | Assembled by | Linked by | Its programs run on another machine under |
+  | --- | --- | --- | --- |
+  | `x86_64-linux` | GNU `as --64` on an x86-64 machine, else `clang --target=x86_64-linux-gnu` | `ld`, else `ld.lld -static` | (the machine) |
+  | `aarch64-linux` | GNU `as` on an aarch64 machine, else `clang --target=aarch64-linux-gnu` | `ld`, else `ld.lld -static` | `qemu-aarch64` (`qemu-user`) |
+  | `wasm32-wasi` | `clang --target=wasm32-wasi` | `wasm-ld` | Node 22 or newer (`MYLA_EMULATOR="node tools/wasm/run.mjs"` for `myla test`) |
+  | `x86_64-windows` | `clang --target=x86_64-pc-windows-msvc` | `llvm-dlltool` (an import library of each system DLL the program calls, kernel32's and others', from the `llvm` package) and `lld-link` (D211) | Wine (D213): Ubuntu's `wine64` package, which puts it at `/usr/lib/wine/wine64` (`MYLA_EMULATOR=/usr/lib/wine/wine64` for `myla test`; `scripts/test-target.py` finds it). A static console `.exe` with what [[MYLA-702]] gives ([[Language/Targets]]) |
 - **Python 3.12 or newer**, only to run the tests (standard library only; `uv` is optional).
 
 ## Build the toolchain
 
 ```bash
-scripts/bootstrap.sh            # output in ./build (gitignored); about 8 seconds
+scripts/bootstrap.sh            # output in ./build (gitignored); about 8 seconds (2026-10-25, 95c12aa)
 ```
 
-This builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly, so only `as` and `ld` are needed), checks that it compiles itself to a byte-identical fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server. Details, stages and timings: [[Development/Bootstrap]].
+This builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly, so only `as` and `ld` are needed; `bootstrap/seed-windows.s` on Windows), checks that it compiles itself to a byte-identical fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server. Details, stages and timings: [[Development/Bootstrap]].
 
 ## Run a program
 
@@ -41,8 +49,8 @@ A run reports up to 20 errors: after a syntax error the parser goes on at the ne
 | --- | --- |
 | `myla run <file> [args…]` | Load modules, type-check, interpret |
 | `myla test <file>` | Run every `#test(args)[expected]` case; prints `PASS`/`FAIL` per case and exits 1 on a failure |
-| `myla build <file> [-o out] [-g] [--checked] [--target t]` | Compile to a static ELF for this machine (`a.out` by default) through `as` and `ld`; `-g` adds DWARF debug information for gdb: line table, variables and types ([[Development/Debugging]], x86-64 only); `--checked` makes integer overflow the runtime error `integer overflow`, as `myla run` and `myla test` have it, where a plain build wraps (D175). `--target x86_64-linux` or `aarch64-linux` builds for the other machine (clang, `ld.lld`), `--target wasm32-wasi` a WebAssembly module (clang, `wasm-ld`), run with `node tools/wasm/run.mjs prog.wasm` ([[Architecture/Native-backend]]) |
-| `myla check <file>` | Type-check only, printing any warnings (D95), then `ok` |
+| `myla build <file> [-o out] [-g] [--checked] [--target t]` | Compile to a static ELF for this machine (`a.out` by default) through `as` and `ld`; `-g` adds DWARF debug information for gdb: line table, variables and types ([[Development/Debugging]], x86-64 Linux and Windows); `--checked` makes integer overflow the runtime error `integer overflow`, as `myla run` and `myla test` have it, where a plain build wraps (D175). `--target x86_64-linux` or `aarch64-linux` builds for the other machine (clang, `ld.lld`), `--target wasm32-wasi` a WebAssembly module (clang, `wasm-ld`), run with `node tools/wasm/run.mjs prog.wasm` ([[Architecture/Native-backend]]) |
+| `myla check <file> [--target t]` | Type-check only, printing any warnings (D95), then `ok`; `--target` checks with that target's platform modules (std.platform, std.path) |
 | `myla repl` | The interactive interpreter ([[MYLA-82]]); on a terminal its lines are edited, with a history ([[Language/Standard-library/Term#editing-a-line]]) |
 
 `run`, `test`, `build`, `check` and `repl` take `--package name=dir` (repeatable), before or after the file: a dependency whose modules `import name` and `from name.shapes import …` find in `dir`, as if it were a directory `name/` next to the entry file ([[Language/Modules]]). The project commands below pass these flags themselves. The standard library is built into `myla` ([[MYLA-243]]): an installed binary needs nothing else, on any platform, and errors in it name its files as `<myla>/std/io.my`. `--stdlib <dir>` or the environment variable `MYLA_STDLIB` name a folder holding `std/` to use instead, such as the repository's `lib` while changing the standard library (`scripts/bootstrap.sh` builds the current `lib` into the tools).
@@ -161,8 +169,8 @@ The second argument of the compiler is the folder that contains `std/` (by defau
 ## Run the tests
 
 ```bash
-scripts/test.sh fast        # the quick burn tests, about a minute once the tools are cached
-scripts/test.sh             # all of them (python3 -m unittest discover -s tests/burn -t .), about 5 minutes
+scripts/test.sh fast        # the quick burn tests, about a minute once the tools are cached (2026-11-06, bae1a7f)
+scripts/test.sh             # all of them (python3 -m unittest discover -s tests/burn -t .), about 5 minutes (2026-11-06, bae1a7f)
 ```
 
 What each suite guarantees and the current results: [[Development/Testing]].

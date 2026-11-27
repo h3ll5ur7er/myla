@@ -210,6 +210,13 @@ impl BitSet {
         unreachable()
     }
 
+    // An iterator over the integers in the set, ascending (D171): `for i in
+    // b.iter()`, or a pipeline of `std.iter`, without the list `items()`
+    // makes. It holds the set as it is now (MYLA-553).
+    fun iter(self) -> BitSetIter {
+        return BitSetIter { words: self.words, k: -1, w: 0u64 }
+    }
+
     // The integers of either set, in a set of this one's kind: a growable
     // set grows to hold them, and a fixed one fails if it can't, as
     // `insert` does.
@@ -367,6 +374,29 @@ impl BitSet {
             self.words.push(0)
         }
         self.bits = bits_of(self.words.len())
+    }
+}
+
+// What `BitSet.iter` gives: the set's words, the word it is in and that
+// word's bits not visited yet. A copy keeps its own position.
+pub struct BitSetIter {
+    words: [uint64],
+    k: int,
+    w: uint64,
+}
+
+impl Iterator<int> for BitSetIter {
+    fun next(var self) -> Option<int> {
+        while self.w == 0 {
+            if self.k >= self.words.len() - 1 {
+                return None
+            }
+            self.k += 1
+            self.w = self.words[self.k]
+        }
+        let i = self.k * 64 + self.w.trailing_zeros()
+        self.w = self.w & (self.w - 1)
+        return Some(i)
     }
 }
 
@@ -532,4 +562,26 @@ fun as_keys() {
     m[new()] = 5
     m[of([7]).intersection(of([8]))] = 6
     assert(m.len() == 3 && m[of([1, 2])] == 2 && m[f] == 4 && m[new()] == 6, "equal sets, one key")
+}
+
+// `iter()` visits what `items()` lists, at word boundaries and past
+// empty words too, and a copy keeps its own position (MYLA-553).
+#test
+fun iterating() {
+    var f = fixed(130)
+    for i in [0, 63, 64, 127, 129] {
+        f.insert(i)
+    }
+    for b in [new(), of([5]), of([0, 1, 63, 64, 65, 200, 1000]), f, fixed(70), of([4000])] {
+        var seen: [int] = []
+        for i in b.iter() {
+            seen.push(i)
+        }
+        assert(seen == b.items(), f"iter of a set of {b.popcount()}: {seen.len()}")
+    }
+    var it = of([3, 70, 9]).iter()
+    assert(it.next() == Some(3), "the least first")
+    var copy = it
+    assert(it.next() == Some(9) && it.next() == Some(70) && it.next() == None && it.next() == None, "then in order, then none")
+    assert(copy.next() == Some(9), "a copy keeps its own position")
 }

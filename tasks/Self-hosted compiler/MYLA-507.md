@@ -2,7 +2,7 @@
 id: MYLA-507
 title: "Checker: a derived `eq` that can't compare a field is reported in `std/hash.my`, with a fix that can't be written"
 type: bug
-status: review
+status: done
 priority: low
 labels: [checker, derive, diagnostics]
 ---
@@ -80,3 +80,7 @@ The error is reported at the struct or enum, like the other derive errors (`cann
 ## Found on the way
 
 - [[MYLA-538]]: an impl's bound that names a generic trait (`I: Iterator<int>`) isn't checked where the impl is used. `W<int> == W<int>` checks, then fails inside the interpreter.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

@@ -1,0 +1,5 @@
+type error: type 'W<int32>' does not satisfy the bound 'T: Eq' required by 'same': 'int32' isn't Iterator<int32>
+  --> examples/errors/type_impl_bound_generic_trait_argument.my:22:15
+   |
+22 |     print(same(W { v: 1 }, W { v: 2 }))
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

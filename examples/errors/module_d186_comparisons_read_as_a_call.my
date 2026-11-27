@@ -1,0 +1,13 @@
+//~ module error: unknown module 'p' in the type 'p.x'
+//~ note: in a call's arguments `a < p.x, c > (d)` is a call of 'a'
+//~ note span: a < p.x, c > (d)
+// D186 reads `a < p.x, c > (d)` in a call's arguments as a generic call of
+// `a`, so the error is about the type `p.x`; the note says so and how to
+// write two comparisons (MYLA-545).
+struct P { x: int }
+fun both(p: bool, q: bool) -> int { if p && q { return 2 }; return 0 }
+fun main() {
+    let a = 1; let c = 3; let d = 0
+    let p = P { x: 2 }
+    print(both(a < p.x, c > (d)))
+}

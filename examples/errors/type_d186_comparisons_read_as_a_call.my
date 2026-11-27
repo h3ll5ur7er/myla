@@ -1,0 +1,11 @@
+//~ type error: function 'both' expects 2 argument(s), got 1
+//~ note: in a call's arguments `a < b, c > (d)` is a call of 'a'
+//~ note span: a < b, c > (d)
+// D186: in a call's arguments `a < b, c > (d)` is one generic call, so
+// `both` gets one argument; the note says how to write two comparisons
+// (MYLA-545).
+fun both(p: bool, q: bool) -> int { if p && q { return 2 }; return 0 }
+fun main() {
+    let a = 1; let b = 2; let c = 3; let d = 0
+    print(both(a < b, c > (d)))
+}

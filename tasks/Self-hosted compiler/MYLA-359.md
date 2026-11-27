@@ -2,7 +2,7 @@
 id: MYLA-359
 title: "Check time of the implicit std modules: about 26 ms for every program"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [checker, performance, stdlib]
 ---
@@ -15,7 +15,7 @@ Options, cheapest first:
 
 - [x] std.hash's checksums (FNV-1a, CRC-32, Adler-32) moved to a module of their own, imported as any other (D166): std.hash keeps the `Hasher` and the `Hash` impls
 - [x] A profile of hello-world's check with the seven modules
-- [ ] The cheapest fix that brings it under 5 ms, measured (halved, 44.4 → 21.6 ms in round 3; in round 4 the bodies read only once called, 100.7 → 39.4 M instructions, 26.1 → 10.0 ms on the busier container: not under 5 ms, see "Round 4: what is left", [[MYLA-412]])
+- [x] The cheapest fix that brings it under 5 ms, measured (halved, 44.4 → 21.6 ms in round 3; in round 4 the bodies read only once called, 100.7 → 39.4 M instructions, 26.1 → 10.0 ms on the busier container: not under 5 ms, see "Round 4: what is left", [[MYLA-412]]) — not reached here: 6.1 ms and 21.2 M instructions on `547339a`; carried over to [[MYLA-552]] (review 2026-11-12)
 
 ## The profile
 
@@ -136,3 +136,15 @@ Not ready ([[Project/Review-2026-11-10]]): lazy parsing can load a different pro
 ## Round 5's follow-up: the parse the toolchain carries
 
 [[MYLA-412]] (2026-11-11): every module of `std` but std.rt is read from a parse written when the toolchain is built, wherever its text is the embedded one (the implicit modules' bodies parsed too). A hello world's check 40.7 → 20.9 M instructions, CPU time 9.1 → 5.8 ms (median of 31; min 8.4 → 5.3) on the shared container: not under 5 ms, so the last box stays open. What is left is mostly the checker's: registering the implicit modules' methods (`resolve_impls` 5.0 M), checking the 205 bodies (4.3 M), the globals, derives and signatures (2.8 M); and renaming the signatures (2.5 M). See MYLA-412's "What is left".
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]], with a follow-up in [[MYLA-552]]: a hello world checks in 21.2 M instructions and 6.1 ms on `547339a` (39.4 M and 8.7 ms before round 5); the last box, under 5 ms, moves there.
+
+## Round 6 ([[MYLA-552]])
+
+The reason it stays near 6 ms, measured on `dafd287` (20.7 M instructions): a third of the time is the kernel's, a page fault for each 4 KB of the 4.1 MB of fresh heap the check touches (1,109 faults, about 2.1 ms of system time); the instructions take about 4 ms. Huge pages for the heap bring the faults to 90 and the check under 5 ms, at 0.2 ms more for every small program with tasks: [[MYLA-608]] proposes them for the toolchain only.
+
+## Round 6's follow-up ([[MYLA-608]])
+
+Under 5 ms: the toolchain asks for huge pages for its heap at its start (std.rt's `heap_huge_pages`), so the check's 4 MB of fresh heap faults 2 MiB at a time. A hello world's `myla check` (`MYLA_THREADS=1`, 200 runs from a shell loop as above, the binaries alternating, four rounds): before 5.05, 5.72, 5.09, 5.24 ms, after 4.16, 3.81, 4.13, 4.45 ms; minor faults 1,199 → 179; instructions unchanged (20,701,695 → 20,701,739). Programs `myla build` builds don't ask and are unchanged. Evidence in [[MYLA-608]].

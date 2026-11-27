@@ -21,12 +21,18 @@
 // already in (one the device and file number of `__path_stat` name); a
 // component of a pattern that isn't `**` (`link/*`, `link/x`) follows a
 // link, as shells do.
+//
+// On Windows (D215, std.path) a path's `\` separates components as its `/`
+// does, and an absolute pattern starts at its anchor, a drive's (`C:/`) or
+// a UNC share's (`//srv/share/`), matched whatever the case of its letters;
+// a pattern's own separators are `/`, as its `\` makes a character literal.
 
 import std.fs as fs
 from std.fs import IoError
 import std.path as path
 import std.list as list_m // `sorted_by`, `dedup`, `join`
 import std.time as time  // for the tests' directory names
+import std.path_style as style // `WINDOWS`
 
 // A piece of a pattern component.
 enum Tok {
@@ -46,9 +52,12 @@ struct Comp {
     toks: [Tok],
 }
 
-// A compiled pattern, to match many paths with.
+// A compiled pattern, to match many paths with: where it starts (`root`,
+// std.path's anchor: `/`, on Windows also a drive or a UNC share; `""` for
+// a relative pattern) and its components after that.
 pub struct Pattern {
     absolute: bool,
+    root: str,
     comps: [Comp],
     globstars: int,
 }
@@ -181,13 +190,14 @@ fun is_star(t: Tok) -> bool {
     }
 }
 
-// The non-empty components of `p`, which the slashes separate: std.str's
-// `split` and a filter, in one pass (`matches` splits every path).
-fun split(p: str) -> [str] {
+// The non-empty components of `p`, which the slashes separate (and the
+// backslashes, when `back`: a path's on Windows): std.str's `split` and a
+// filter, in one pass (`matches` splits every path).
+fun split(p: str, back: bool) -> [str] {
     var out: [str] = []
     var start = 0
     for i in 0..p.len() + 1 {
-        if i == p.len() || p[i] == '/' {
+        if i == p.len() || p[i] == '/' || (back && p[i] == '\\') {
             if i > start {
                 out.push(p[start:i])
             }
@@ -201,7 +211,8 @@ fun split(p: str) -> [str] {
 pub fun compile(pattern: str) -> Pattern {
     var comps: [Comp] = []
     var globstars = 0
-    for c in split(pattern) {
+    let root = pattern_root(pattern)
+    for c in split(pattern[root.len():], false) {
         let comp = compile_comp(c)
         if comp.globstar {
             if comps.len() > 0 && comps[^1].globstar {
@@ -211,7 +222,48 @@ pub fun compile(pattern: str) -> Pattern {
         }
         comps.push(comp)
     }
-    return Pattern { absolute: path.is_absolute(pattern), comps: comps, globstars: globstars }
+    return Pattern { absolute: root != "", root: root, comps: comps, globstars: globstars }
+}
+
+// Where the pattern `pattern` starts: std.path's anchor, but read with `/`
+// alone (a `\` makes the character after it literal), so on Windows it
+// ends before its first `\`.
+fun pattern_root(pattern: str) -> str {
+    let a = path.anchor(pattern)
+    for i in 0..a.len() {
+        if a[i] == '\\' {
+            return a[:i]
+        }
+    }
+    return a
+}
+
+// Whether the anchors `a` and `b` are the same: on Windows a drive's letter
+// of either case and either separator alike.
+#test("/", "/")[true]
+#test("", "/")[false]
+#test("C:/", "c:\\")[true]
+#test("C:/", "D:/")[false]
+fun same_root(a: str, b: str) -> bool {
+    if a.len() != b.len() {
+        return false
+    }
+    for i in 0..a.len() {
+        let x = a[i]
+        let y = b[i]
+        if x != y && !((x == '/' || x == '\\') && (y == '/' || y == '\\')) && fold(x) != fold(y) {
+            return false
+        }
+    }
+    return true
+}
+
+// The ASCII letter `c` in lower case (another byte as it is).
+fun fold(c: uint8) -> uint8 {
+    if c >= 'A' && c <= 'Z' {
+        return c + 32
+    }
+    return c
 }
 
 // Whether `cp` is in the ranges `r`.
@@ -298,14 +350,17 @@ fun comp_matches(c: Comp, name: str) -> bool {
 }
 
 impl Pattern {
-    // Whether the path matches the pattern: both absolute or both relative,
-    // and the components matching. Empty components don't count, so `a//b/`
-    // is `a/b`; `.` and `..` are names like any other.
+    // Whether the path matches the pattern: both from the same anchor (both
+    // absolute, or both relative), and the components matching. Empty
+    // components don't count, so `a//b/` is `a/b`; `.` and `..` are names
+    // like any other.
     fun matches(self, p: str) -> bool {
-        if self.absolute != path.is_absolute(p) {
+        let root = path.anchor(p)
+        if !same_root(self.root, root) {
             return false
         }
-        let names = split(p)
+        // (on Linux the anchor is slashes, which `split` passes over)
+        let names = if style.WINDOWS { split(p[root.len():], true) } else { split(p, false) }
         let pc = self.comps
         let m = pc.len()
         let n = names.len()
@@ -379,7 +434,6 @@ impl Pattern {
 #test("[ab", "[ab")[true] // a `[` without its `]` is literal
 #test("\\*", "*")[true]
 #test("\\*", "a")[false]
-#test("a\\", "a\\")[true] // a trailing `\` is literal
 #test("**", "a/b/c")[true]
 #test("**", "")[true]
 #test("**/*.my", "main.my")[true] // `**` matches no directory too
@@ -451,8 +505,8 @@ pub fun walk_with(dir: str, follow_links: bool) -> Result<[str], IoError> {
             let st = __path_stat(full, true)
             // a file number 0 is none the host knows (a WASI host's memory
             // file system): such a directory can't be told, so it is gone into
-            if st.len() == 5 && ((st[1] as int32) & S_IFMT) == S_IFDIR && (st[4] == 0 || !chain.contains((st[3], st[4]))) {
-                chain.push((st[3], st[4]))
+            if st.len() == 6 && st[1] == KIND_DIR && (st[5] == 0 || !chain.contains((st[4], st[5]))) {
+                chain.push((st[4], st[5]))
                 into = true
             }
         } else {
@@ -470,8 +524,8 @@ pub fun walk_with(dir: str, follow_links: bool) -> Result<[str], IoError> {
     return Ok(out)
 }
 
-const S_IFMT: int32 = 0xF000
-const S_IFDIR: int32 = 0x4000
+// `__path_stat`'s kind of a directory: std.platform's KIND_DIR (D209).
+const KIND_DIR: int64 = 2
 
 // Whether `p` is a directory itself, not a symbolic link to one.
 fun dir_itself(p: str) -> bool {
@@ -485,10 +539,10 @@ fun dir_itself(p: str) -> bool {
 // `(-1, -1)` when it has none.
 fun dir_id(p: str) -> (int64, int64) {
     let st = __path_stat(p, true)
-    if st.len() != 5 {
+    if st.len() != 6 {
         return (-1i64, -1i64)
     }
-    return (st[3], st[4])
+    return (st[4], st[5])
 }
 
 // The paths that match `pattern`, found below the working directory (or
@@ -505,7 +559,7 @@ pub fun glob(pattern: str) -> Result<[str], IoError> {
 pub fun glob_in(dir: str, pattern: str) -> Result<[str], IoError> {
     let pat = compile(pattern)
     var g = Globber { dir: dir, pat: pat, out: [] }
-    g.expand(0, if pat.absolute { "/" } else { "" })?
+    g.expand(0, pat.root)?
     var out = g.out.sorted_by(path_before)
     out.dedup()
     return Ok(out)
@@ -665,6 +719,27 @@ fun tree(tag: str) -> Result<str, IoError> {
         fs.write_to_file(root + "/" + f, "")?
     }
     return Ok(root)
+}
+
+// What a path's backslash is: a name's on Linux, a separator on Windows
+// (D215), where an absolute path starts from a drive or a UNC share whatever
+// the case of its letters.
+#test
+fun backslashes() {
+    if !style.WINDOWS {
+        assert(matches("a\\", "a\\"), "a trailing `\\` is literal")
+        assert(!matches("a/*", "a\\b"), "a backslash is a name's")
+        return
+    }
+    assert(!matches("a\\", "a\\"), "a trailing `\\` is literal, a path's separates")
+    assert(matches("a/*", "a\\b"), "a backslash separates")
+    assert(matches("C:/src/*.my", "c:\\src\\main.my"), "a drive of either case")
+    assert(!matches("C:/src/*.my", "D:/src/main.my"), "another drive")
+    assert(!matches("C:/src/*.my", "/src/main.my"), "no drive")
+    assert(matches("/src/*.my", "\\src\\main.my"), "the root of the working directory's drive")
+    assert(matches("//srv/share/*", "\\\\srv\\share\\x"), "a UNC share")
+    assert(matches("\\*", "*"), "a pattern's backslash still escapes")
+    assert(compile("C:/a/*").root == "C:/" && compile("C:a").root == "C:", "a pattern's anchor")
 }
 
 #test

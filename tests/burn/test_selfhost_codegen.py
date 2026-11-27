@@ -40,9 +40,10 @@ import tempfile
 import unittest
 
 from ._golden import NoGolden, answered_or_recorded, golden, recorded_examples
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, assemble, run_argv, target_flags
+from ._native import (CAN_BUILD_NATIVE, ON_WINDOWS, READS_X86, SKIP_REASON, TEST_TARGET, X86_REASON, assemble,
+                      run_argv, shown, target_flags)
 from ._targets import program_excuse
-from ._tools import STDLIB_ROOT, selfhost_tool
+from ._tools import EXE, STDLIB_ROOT, measure_script, selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -439,14 +440,7 @@ MODULE_ERRORS = {
 # A child's peak RSS counts its parent's memory at fork time, so the program
 # is started from this minimal helper (a few MB) rather than from the test
 # process, and the helper reports the program's exit code and peak (KB).
-_MEASURE = (
-    "import os, shutil, sys\n"
-    "argv = sys.argv[1:]\n"
-    "path = argv[0] if '/' in argv[0] else shutil.which(argv[0])\n"
-    "pid = os.posix_spawn(path, argv, os.environ)\n"
-    "_, status, usage = os.wait4(pid, 0)\n"
-    "sys.stderr.write(f'{os.waitstatus_to_exitcode(status)} {usage.ru_maxrss}\\n')\n"
-)
+_MEASURE = measure_script(exe_first=False, newline_first=False)   # (Windows' own there, MYLA-926)
 
 
 # Diagnostics whose ranges are not plain one-line ASCII (MYLA-65).
@@ -731,6 +725,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             code, peak_kb = proc.stderr.split()[-2:]
             return proc.stdout, int(code), int(peak_kb) / 1024
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_derived_eq_on_a_plain_enum_compares_tags(self) -> None:
         # MYLA-87: a few instructions, however many variants
         with tempfile.TemporaryDirectory() as tmp:
@@ -781,7 +776,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 sh = subprocess.run(argv, executable=exe, capture_output=True, text=True)
                 self.assertEqual((sh.stdout, sh.returncode), (want_out, 1))
                 self.assertTrue(sh.stderr.startswith("runtime error: "), sh.stderr)
-                self.assertTrue(sh.stderr.endswith(f"\n  --> {path}:{line}:{column}\n"),
+                self.assertTrue(sh.stderr.endswith(f"\n  --> {shown(path)}:{line}:{column}\n"),
                                 sh.stderr)
 
     def test_module_programs_match_the_oracle(self) -> None:
@@ -807,7 +802,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         CLI's diagnostic, carets included (or the one pinned in SUPERSEDED);
         `modules` are the program's other files."""
         if name in SUPERSEDED:
-            expected = SUPERSEDED[name].replace("{dir}", os.path.dirname(entry))
+            expected = SUPERSEDED[name].replace("{dir}", shown(os.path.dirname(entry)))
         elif recorded_only:
             # a corpus file added since has no recording: test_error_corpus
             # holds it to the self-hosted CLI
@@ -876,6 +871,35 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         start = proc.stdout.index("fun myla_scale")
         self.assertEqual(proc.stdout[start:proc.stdout.index("}\n", start) + 2], IR_SAMPLE_TEXT)
+
+    def test_a_method_taking_self_writes_nothing(self) -> None:
+        # MYLA-542: `self.f(self.g(k))` in a `var self` method staged a copy
+        # of the receiver for `f`, `g` counting as a write of `self` though
+        # neither takes `var self`; now as `let j = self.g(k)` then
+        # `self.f(j)`. A `var self` method in the argument still stages one
+        source = (
+            "struct S { names: [str], n: int }\n"
+            "impl S {\n"
+            "    fun g(self, k: int) -> int { return k + self.names.len() }\n"
+            "    fun f(self, k: int) -> int { return k * 2 + self.n }\n"
+            "    fun bump(var self, k: int) -> int {\n        self.n += k\n        return k\n    }\n"
+            "    fun nested(var self, k: int) -> int {\n        self.n += 1\n        return self.f(self.g(k))\n    }\n"
+            "    fun writes(var self, k: int) -> int {\n        self.n += 1\n        return self.f(self.bump(k))\n    }\n"
+            "}\n"
+            "fun main() {\n    var s = S { names: [\"a\"], n: 1 }\n"
+            "    print(s.nested(3))\n    print(s.writes(3))\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            proc = subprocess.run([self._binary, path, "--emit-ir", "--no-inline"], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        def body(name: str) -> str:
+            start = proc.stdout.index(f"fun myla_S.{name}")
+            return proc.stdout[start:proc.stdout.index("\n}", start)]
+        self.assertNotIn("__staged", body("nested"))
+        self.assertIn("__staged", body("writes"))
 
     def test_lets_of_fixed_variables_borrow(self) -> None:
         # MYLA-122: a `let` of a part of a variable nothing writes while it
@@ -1002,7 +1026,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         """Ends the test, skipped, on another target than x86-64 (MYLA-268):
         what follows reads the x86-64 code, and what ran before holds there
         too."""
-        if target_flags():
+        if not READS_X86:
             self.skipTest("it reads the x86-64 assembly")
 
     def _function_asm(self, asm: str, name: str) -> str:
@@ -1019,10 +1043,11 @@ class SelfHostedCodegenParity(unittest.TestCase):
         """`myla_<name>`'s tail calls of itself jump back to its entry block
         (MYLA-250): no call of itself, no jump to its start."""
         body = self._function_asm(asm, name)
-        entry = re.search(r"^(\.L\d+):$", body, re.M).group(1)
+        entry = re.search(r"^(\.L[^\s:]+_\d+):$", body, re.M).group(1)
         self.assertIn(f"jmp {entry}\n", body)
         self.assertNotIn(f"call myla_{name}\n", body)
         self.assertNotIn(f"jmp myla_{name}\n", body)
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_a_comparison_feeding_a_branch_is_a_conditional_jump(self) -> None:
         # MYLA-120: no bool is made for an integer comparison whose only use
         # is the branch after it; each condition and operand kind still works
@@ -1091,6 +1116,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertNotIn("\tset", body, body)
         self.assertNotIn("$1, %", body, body)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_small_leaf_functions_are_inlined(self) -> None:
         # MYLA-162: a small function of the same module that calls nothing and
         # takes and gives scalars is copied into its callers: no call, the
@@ -1213,6 +1239,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         end = next((i for i in range(start + 1, len(lines)) if re.match(r"^[A-Za-z_][^ \t]*:$", lines[i])), len(lines))
         return "\n".join(lines[start:end])
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_constant_operands_fold(self) -> None:
         # MYLA-162: an operator on two constants (literals, `const`s) is one
         # constant, wrapped as at run time
@@ -1237,6 +1264,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertIn("$16777213", body, body)
         self.assertNotIn("subq $1,", body, body)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_the_branches_of_an_if_share_frame_cells(self) -> None:
         # MYLA-183 (D112): the locals of an `if`'s branches, an `else if`
         # chain's and a match's arms share cells, two 64-byte structs per
@@ -1271,6 +1299,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertLess(max(sizes.values()), 3 * 64, sizes)
         self.assertEqual(sizes["branches"], sizes["arms"], sizes)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_a_scaled_index_and_a_compare_with_memory(self) -> None:
         # MYLA-162: `p + ((i & 3) << 3)` loaded or stored is one addressing
         # mode with a scaled index; a value just loaded and compared once is
@@ -1306,6 +1335,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertRegex(body, r"movq %r\w+, 0\(%r\w+,%r\w+,8\)", body)
         self.assertRegex(body, r"cmpq 16\+0\(%r\w+\), %r\w+", body)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_a_runtime_variable_is_its_own_operand(self) -> None:
         # MYLA-162: the address of a runtime variable (`__rt_addr`) that only
         # loads and stores read is no instruction: they name the variable
@@ -1345,6 +1375,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertIn("myla_std$rt$alloc:", asm)
             self.assertEqual(self._build_and_run(asm), ("b1\n", 0))
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_a_float_rounds_to_the_nearest_integer(self) -> None:
         # MYLA-162: `__f64_round(x)` is one `cvtsd2si`: the nearest int64,
         # ties to even (the float formatting in std.rt rounds so)
@@ -1361,6 +1392,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertEqual(self._build_and_run(asm), ("2\n4\n-2\n1\n0\n1000000000000000\n7\n", 0))
         self.assertIn("cvtsd2si", self._function_asm(asm, "main"))
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_atomics_and_pause_are_inline(self) -> None:
         # MYLA-162: the runtime's atomics are single instructions in place,
         # without a call: `__cas64` a `lock cmpxchg`, `__xchg64` an `xchg`,
@@ -1395,6 +1427,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         # a compare-and-swap a branch tests: its flag, no value made of it
         self.assertRegex(body, r"lock cmpxchgq %rdx, \(%rcx\)\n\tj(n)?e ", body)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_a_product_by_a_constant_is_one_imul(self) -> None:
         # MYLA-162: `a * k` from a register is one three-operand `imul`, into
         # the result's register, into %rax, or in place for `x = x * k`; each
@@ -1427,6 +1460,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertRegex(body, r"imul[lq] \$" + k + r", %r[0-9a-z]+, %r[0-9a-z]+\n", body)
         self.assertNotIn(", %rax, %rax", body, body)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_shifts_widenings_and_sums_as_addresses(self) -> None:
         # MYLA-162: a shift by a constant is an immediate (not through %cl),
         # a widening cast of an unsigned value or to a signed type re-extends
@@ -1460,6 +1494,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         # (into the temporary's register when it has one, MYLA-263)
         self.assertRegex(chars, r"movzbl 0\(%r[0-9a-z]+,%r[0-9a-z]+\), %(eax|r[0-9]+d|e[a-z]{2})\n", chars)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_a_leaf_loop_keeps_six_values_in_caller_saved_registers(self) -> None:
         # MYLA-162: %rsi and %rdi hold values too (no call or copy in their
         # interval), so a loop of six values touches no frame cell
@@ -1492,7 +1527,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         body = self._function_asm(asm, "spin")
         # the loop: from its first block to the jump back to it
         loop = ""
-        for m in re.finditer(r"\tj[a-z]+ (\.L\d+)\n", body):
+        for m in re.finditer(r"\tj[a-z]+ (\.L[^\s:]+_\d+)\n", body):
             at = body.find(m.group(1) + ":")
             if 0 <= at < m.start():
                 loop = body[at:m.start()]
@@ -1621,6 +1656,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         body = self._function_asm(asm, "f")
         self.assertNotIn("%rbp", body, body)
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_scalars_live_in_callee_saved_registers(self) -> None:
         # MYLA-121: a loop's variables, a value kept across a call and a
         # parameter read in a loop live in %rbx and %r12-%r15, which each
@@ -1652,6 +1688,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertRegex(self._function_asm(asm, "Acc.run"), rf"movq {saved}, -\d+\(%rbp\)")
         self.assertEqual(self._unsaved_callee_saved(asm), [])
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_division_by_a_constant_tests_nothing(self) -> None:
         # MYLA-125: a divisor known not to be 0 or -1 needs neither test; an
         # unsigned power of two is a shift or a mask
@@ -1751,6 +1788,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                  and re.fullmatch(r"movq %rax, %(rbx|r12|r13|r14|r15)", b)]
         self.assertEqual(pairs, [])
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_calls_in_tail_position_reuse_the_frame(self) -> None:
         # MYLA-126: a call whose result is returned at once jumps, so deep
         # recursion runs in constant stack (ten million frames would overflow
@@ -1811,6 +1849,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertIn("call myla_sum", self._function_asm(asm, "via_local"))
         self.assertIn("call myla_label", self._function_asm(asm, "label"))
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_tail_calls_hand_over_owned_arguments(self) -> None:
         # MYLA-127, MYLA-126: a parameter passed owned lets a call in tail
         # position take a value the caller owns, and the caller's other owners
@@ -1865,6 +1904,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         # `rest` borrows from the match's value, dropped after the call
         self.assertIn("call myla_first_of", self._function_asm(asm, "through_match"))
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_become_replaces_the_frame(self) -> None:
         # MYLA-128, D87: every `become` of the parity program jumps, so it runs
         # a million calls deep in the default stack (a `return` of the same
@@ -1904,6 +1944,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertIn("moved $0", total_ir)
         self.assertNotIn("popq 16(%rbp)", self._function_asm(asm, "fib"))
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_become_passes_aggregates_by_value(self) -> None:
         # MYLA-131, D88: the parity program a million deep, with and without
         # -g; the parameters a `become` hands an aggregate over to hold it in
@@ -1943,6 +1984,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertRegex(ir, r"\$\d+ p: Pos \(argument 1, 16 bytes by value\)\n")
         self.assertRegex(ir, r"\$\d+ s: State \(argument 0, 16 bytes by value\) owns\n")
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_payload_free_enums_compare_tags(self) -> None:
         # MYLA-133: `==` on an enum without payloads whose `eq` is derived is
         # a compare of the tags, no call
@@ -1963,6 +2005,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertNotIn("call myla_Light.eq", self._function_asm(asm, "red"))
         self.assertIn("call myla_Shape.eq", self._function_asm(asm, "dot"))
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_partial_application_thunks_jump(self) -> None:
         # MYLA-130: a partial application's thunk jumps to its function (or
         # through its function value), so a `become` through one runs in
@@ -2060,6 +2103,42 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertEqual((out, code), ("8997000\n3000\n100000\n", 0))
             self.assertLess(peak, 64, f"peak {peak:.1f} MB")
 
+    def test_actor_calls_from_outside_run_in_bounded_memory(self) -> None:
+        """MYLA-576: a million calls of an actor's method from outside take
+        no more memory than the first few. Each call moved a worker's ready
+        queue a slot along its ring, so the ring's 8 MiB were touched in time
+        (7.9 MB more resident after 10^6 calls on one worker); a queue
+        emptied goes back to its ring's start. The program reads its own
+        resident size (a peak through the harness counts its parent's
+        memory before the exec); on wasm32 the ring is part of the linear
+        memory from the start, whose peak is bounded. Three callers at once
+        keep the queue from draining: a short queue that drifted is moved
+        back to its ring's start (MYLA-791)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "calls.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(ACTOR_CALLS)
+            asm = self._emit_asm(path, STDLIB_ROOT)
+            for threads in ("1", "4"):
+                with self.subTest(workers=threads):
+                    old = os.environ.get("MYLA_THREADS")
+                    os.environ["MYLA_THREADS"] = threads
+                    try:
+                        out, code, peak = self._build_and_measure(asm)
+                    finally:
+                        if old is None:
+                            del os.environ["MYLA_THREADS"]
+                        else:
+                            os.environ["MYLA_THREADS"] = old
+                    total, grown, three, grown3 = out.split()
+                    self.assertEqual((total, three, code), ("1000000", "1000000", 0))
+                    if TEST_TARGET == "wasm32-wasi":
+                        # (/proc there is Node's own)
+                        self.assertLess(peak, 64, f"peak {peak:.1f} MB")
+                    else:
+                        self.assertLess(int(grown), 1024, f"{threads} workers: {grown} kB more resident")
+                        self.assertLess(int(grown3), 1024, f"{threads} workers, 3 callers: {grown3} kB more resident")
+
     def test_deep_values_are_released_in_a_bounded_stack(self) -> None:
         """MYLA-389: a value nested 100,000 deep through an enum held in a
         list, a struct's list, recursive enums and a map is released without
@@ -2135,35 +2214,66 @@ class SelfHostedCodegenParity(unittest.TestCase):
                         self.assertEqual(got, want, f"{workers} workers")
 
     def test_children_run_in_parallel(self) -> None:
-        """Eight CPU-bound children on as many workers as CPUs: the process
-        uses well over one CPU's time per second of wall time (D89 (3))."""
+        """Eight CPU-bound children on as many workers as CPUs: several of
+        the process's threads did a share of the work, and they ended well
+        before they do on one worker (D89 (3))."""
         if (os.cpu_count() or 1) < 2:
             self.skipTest("one CPU")
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "par.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(PARALLEL_WORK)
-            exe = os.path.join(tmp, "par")
+            exe = os.path.join(tmp, "par" + EXE)
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(self._emit_asm(path, STDLIB_ROOT))
             assemble(exe + ".s", exe)
-            env = dict(os.environ)
-            env.pop("MYLA_THREADS", None)
-            # on a busy machine the children share the CPUs with other
-            # processes, so the ratio is taken from the best of three runs
-            ratios = []
+            many = dict(os.environ)
+            many.pop("MYLA_THREADS", None)
+            one = dict(os.environ, MYLA_THREADS="1")
+            # a count, whatever the load: the CPU time of each of the
+            # process's threads once the work is done (the program waits
+            # for a line then); a tenth of it at least on two of them
+            argv, bin_exe = run_argv(exe, exe, ["hold"])
+            held = subprocess.Popen(argv, executable=bin_exe, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    text=True, env=many)
+            try:
+                self.assertEqual(held.stdout.readline(), "1\n")
+                ticks = _thread_cpu_times(held.pid)
+            finally:
+                held.stdin.close()
+                held.wait(timeout=120)
+            busy = [t for t in ticks if t * 10 >= sum(ticks)]
+            self.assertGreaterEqual(len(busy), 2, f"the threads' CPU ticks: {sorted(ticks, reverse=True)}")
+            if TEST_TARGET == "aarch64-linux":
+                # (under qemu the times say little: its threads gave 1.3
+                # CPUs to the 8 children where one worker took 3.6 s,
+                # 2026-11-18 under load)
+                return
+            # its twin on one worker, the two run in turn, the best of three
+            # each, less the time of each with no work (its start: under
+            # Wine most of a run): a share of the CPU time beside the wall
+            # time failed when a full run's other processes took the CPUs
+            # (MYLA-745), while the children still ran on many workers
+            runs = {"one": (one, []), "many": (many, []), "one0": (one, ["0"]), "many0": (many, ["0"])}
+            walls: dict[str, list[float]] = {name: [] for name in runs}
+
+            def work(name: str) -> float:
+                return min(walls[name]) - min(walls[name + "0"])
+
             for _ in range(3):
-                proc = subprocess.run(
-                    [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, *run_argv(exe, exe)[0]],
-                    capture_output=True, text=True, env=env,
-                )
-                out, cpu, wall = proc.stdout, *map(float, proc.stderr.split()[-2:])
-                self.assertEqual(out, "1\n")
-                ratios.append((cpu, wall))
-                if cpu > 1.5 * wall:
+                for name, (env, args) in runs.items():
+                    proc = subprocess.run(
+                        [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, *run_argv(exe, exe, args)[0]],
+                        capture_output=True, text=True, env=env,
+                    )
+                    self.assertEqual(proc.stdout, "1\n")
+                    walls[name].append(float(proc.stderr.split()[-1]))
+                if work("one") > 1.5 * work("many"):
                     break
-            cpu, wall = max(ratios, key=lambda r: r[0] / max(r[1], 1e-9))
-            self.assertGreater(cpu, 1.5 * wall, f"cpu {cpu:.2f} s, wall {wall:.2f} s (best of {len(ratios)})")
+            self.assertGreater(work("one"), 1.5 * work("many"),
+                               f"{work('many'):.2f} s on every worker, {work('one'):.2f} s on one, each less its "
+                               f"start ({min(walls['many0']):.2f} s, {min(walls['one0']):.2f} s; best of "
+                               f"{len(walls['one'])})")
 
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PINNED, PROGRAMS
@@ -2321,12 +2431,14 @@ async fun main() {
 # agree with one another.
 PARALLEL_WORK = """\
 import std.task as task
+from std.process import args
+from std.io import stdin
 
-fun crunch(seed: int64) -> int64 {
+fun crunch(seed: int64, n: int) -> int64 {
     var x: int64 = seed
     var acc: int64 = 0
     var i = 0
-    while i < 15000000 {
+    while i < n {
         x = (x * 48271) % 2147483647
         acc = (acc + x % 7) % 1000000007
         i = i + 1
@@ -2336,29 +2448,96 @@ fun crunch(seed: int64) -> int64 {
 
 #main
 async fun main() {
+    // (`0`: no work, the start and the tasks alone; `hold`: the work, then
+    // a line of the input waited for, while the test looks at the threads)
+    let a = args()
+    let n = if a.len() > 1 && a[1] == "0" { 0 } else { 15000000 }
     var fs: [async () -> int64] = []
     for k in 0..8 {
         let seed: int64 = (k + 1) as int64
-        fs.push(async () => crunch(seed))
+        fs.push(async () => crunch(seed, n))
     }
     var ones: int64 = 0
     for r in await task.all(fs) {
         ones = ones + r
     }
     print(ones / 8)
+    if a.len() > 1 && a[1] == "hold" {
+        var r = stdin()
+        let line = r.read_line()
+    }
 }
 """
 
-# The program's CPU time (user and system) and wall time, on stderr.
+# The program's CPU time (user and system; -1 on Windows, which has no
+# getrusage) and wall time, on stderr.
 _CPU_AND_WALL = (
-    "import resource, subprocess, sys, time\n"
+    "import subprocess, sys, time\n"
     "t = time.time()\n"
     "p = subprocess.run(sys.argv[1:], capture_output=True, text=True)\n"
     "wall = time.time() - t\n"
-    "u = resource.getrusage(resource.RUSAGE_CHILDREN)\n"
+    "try:\n"
+    "    import resource\n"
+    "    u = resource.getrusage(resource.RUSAGE_CHILDREN)\n"
+    "    cpu = u.ru_utime + u.ru_stime\n"
+    "except ImportError:\n"
+    "    cpu = -1\n"
     "sys.stdout.write(p.stdout)\n"
-    "sys.stderr.write(f'{u.ru_utime + u.ru_stime} {wall}')\n"
+    "sys.stderr.write(f'{cpu} {wall}')\n"
 )
+
+
+def _thread_cpu_times(pid: int) -> list[int]:
+    """The CPU time (user and system) each thread of the process `pid` has
+    used so far, in the system's units: Linux's /proc clock ticks, or on
+    Windows (MYLA-926) GetThreadTimes' 100 ns of each thread a snapshot of
+    the system's threads names the process's."""
+    if not ON_WINDOWS:
+        ticks = []
+        for tid in os.listdir(f"/proc/{pid}/task"):
+            try:
+                with open(f"/proc/{pid}/task/{tid}/stat", encoding="ascii") as fh:
+                    fields = fh.read().rsplit(")", 1)[1].split()
+            except OSError:
+                continue
+            ticks.append(int(fields[11]) + int(fields[12]))
+        return ticks
+    import ctypes
+    from ctypes import wintypes
+
+    class ThreadEntry(ctypes.Structure):   # THREADENTRY32
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ThreadID", wintypes.DWORD),
+                    ("th32OwnerProcessID", wintypes.DWORD), ("tpBasePri", wintypes.LONG),
+                    ("tpDeltaPri", wintypes.LONG), ("dwFlags", wintypes.DWORD)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k32.Thread32First.argtypes = k32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+    k32.OpenThread.restype = wintypes.HANDLE
+    k32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetThreadTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    snap = k32.CreateToolhelp32Snapshot(0x4, 0)           # TH32CS_SNAPTHREAD
+    if snap is None or snap == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    times = []
+    try:
+        entry = ThreadEntry()
+        entry.dwSize = ctypes.sizeof(entry)
+        more = k32.Thread32First(snap, ctypes.byref(entry))
+        while more:
+            if entry.th32OwnerProcessID == pid:
+                thread = k32.OpenThread(0x0800, False, entry.th32ThreadID)   # THREAD_QUERY_LIMITED_INFORMATION
+                if thread:
+                    ft = [wintypes.FILETIME() for _ in range(4)]          # created, exited, kernel, user
+                    if k32.GetThreadTimes(thread, *(ctypes.byref(t) for t in ft)):
+                        times.append(sum(t.dwHighDateTime << 32 | t.dwLowDateTime for t in ft[2:]))
+                    k32.CloseHandle(thread)
+            more = k32.Thread32Next(snap, ctypes.byref(entry))
+    finally:
+        k32.CloseHandle(snap)
+    return times
 
 
 DEEP_TASKS = """\
@@ -2405,6 +2584,69 @@ async fun main() {
     print(sum)
     print(await c.get())
     print(await down(100000))
+}
+"""
+
+
+# MYLA-576: a million calls of an actor's method from outside, in one task,
+# and the resident size they added in kB (-1 without /proc/self/status)
+ACTOR_CALLS = """\
+import std.fs as fs
+import std.num as num
+
+fun resident_kb() -> int {
+    return match fs.read_to_string("/proc/self/status") {
+        Ok(s) => {
+            var kb = -1
+            for l in s.lines() {
+                if l.starts_with("VmRSS:") {
+                    kb = num.parse_int(l[6:].trim().split(" ")[0]).unwrap_or(-1) as int
+                }
+            }
+            kb
+        }
+        Err(e) => -1
+    }
+}
+
+actor Box {
+    n: int,
+}
+
+impl Box {
+    fun get(self) -> int {
+        return self.n
+    }
+}
+
+async fun calls(b: Box, n: int) -> int {
+    var t = 0
+    for i in 0..n {
+        t += await b.get()
+    }
+    return t
+}
+
+#main
+async fun main() {
+    let b = Box { n: 1 }
+    async let first = calls(b, 1000)
+    var t = await first
+    let before = resident_kb()
+    for i in 0..999000 {
+        t += await b.get()
+    }
+    let after = resident_kb()
+    print(t)
+    print(if before < 0 || after < 0 { -1 } else { after - before })
+    // three callers at once: the queue never drains (MYLA-791)
+    async let x = calls(b, 333000)
+    async let y = calls(b, 333000)
+    async let z = calls(b, 334000)
+    let three = await x + await y + await z
+    let after3 = resident_kb()
+    print(three)
+    print(if after < 0 || after3 < 0 { -1 } else { after3 - after })
 }
 """
 

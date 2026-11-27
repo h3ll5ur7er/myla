@@ -28,7 +28,7 @@ import tempfile
 import unittest
 import zlib
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -289,12 +289,15 @@ class CompressTest(unittest.TestCase):
         if CAN_BUILD_NATIVE:
             asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,
                                  check=True)
-            exe = os.path.join(cls.tmp, "driver")
+            exe = os.path.join(cls.tmp, "driver" + EXE)
             with open(exe + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm.stdout)
-            subprocess.run(["as", "--64", "-o", exe + ".o", exe + ".s"], check=True)
-            subprocess.run(["ld", "-o", exe, exe + ".o"], check=True)
+            assemble(exe + ".s", exe)   # for the machine (MYLA-926: Windows' too)
             cls.native = exe
+            # the same driver built checked, where an integer overflow is an error (D184, MYLA-550)
+            cls.checked = os.path.join(cls.tmp, "driver-checked" + EXE)
+            subprocess.run([selfhost_tool("main"), "build", path, "-o", cls.checked, "--stdlib", STDLIB_ROOT,
+                            "--checked"], capture_output=True, check=True)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -325,8 +328,10 @@ class CompressTest(unittest.TestCase):
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_large_natively(self) -> None:
         text = _repo_text(4_000_000)
-        cases = [("4 MB gzip -6", "gzip", _gzip_cli(text, 6, self.tmp, True), text),
-                 ("4 MB zlib 9", "zlib", zlib.compress(text, 9), text)]
+        # (Python's gzip where the gzip command isn't there, as on Windows without Git's tools on PATH)
+        gzipped = (("4 MB gzip -6", "gzip", _gzip_cli(text, 6, self.tmp, True), text) if shutil.which("gzip") else
+                   ("4 MB gzip 6 (Python's)", "gzip", gzip.compress(text, 6, mtime=1700000000), text))
+        cases = [gzipped, ("4 MB zlib 9", "zlib", zlib.compress(text, 9), text)]
         self.check_cases(True, cases)
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -338,6 +343,13 @@ class CompressTest(unittest.TestCase):
                 want = _python(fmt, data, mode != "whole")
                 with self.subTest(case=name, mode=mode):
                     proc = self.run_driver(True, fmt, mode, data)
+                    # the plain and the checked build answer the same (what a stream
+                    # gave before its error depends on how the pipe cut the input)
+                    checked = subprocess.run([self.checked, fmt, mode], input=data, capture_output=True, timeout=300)
+                    self.assertEqual((checked.returncode, checked.stderr), (proc.returncode, proc.stderr),
+                                     "the plain and the checked build differ")
+                    if proc.returncode == 0:
+                        self.assertTrue(checked.stdout == proc.stdout, "the plain and the checked build differ")
                     if want is None:
                         self.assertEqual(proc.returncode, 1, proc.stderr.decode(errors="replace"))
                         self.assertTrue(proc.stderr.startswith(b"error: "), proc.stderr)

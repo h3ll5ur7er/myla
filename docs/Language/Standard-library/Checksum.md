@@ -47,7 +47,7 @@ Natively on x86-64, the best of five runs over 100 MB (100,000,000 bytes), on a 
 | `crc32` | 1167 MB/s | 1084 MB/s |
 | `adler32` | 1329 MB/s | 1335 MB/s |
 
-A CRC-32 of a short string takes about 60 ns, most of it building the table, which Myla can't keep in a constant. Every byte is read with a bounds check, which bounds all of these: FNV-1a's chain of multiplications is the slowest. std.compress keeps its own CRC-32 and Adler-32 over a range of a list, as these take a whole one ([[MYLA-376]]).
+A CRC-32 of a short string takes about 60 ns (2026-11-09, `f9dd79f`), most of it building the table, which Myla can't keep in a constant. Every byte is read with a bounds check, which bounds all of these: FNV-1a's chain of multiplications is the slowest. std.compress keeps its own CRC-32 and Adler-32 over a range of a list, as these take a whole one ([[MYLA-376]]).
 
 ## Tests
 

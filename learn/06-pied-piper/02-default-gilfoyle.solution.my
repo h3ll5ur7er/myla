@@ -1,0 +1,5 @@
+#test(Some("Anton"))["Anton"]
+#test(None)["Gilfoyle"]
+fun server_name(nickname: Option<str>) -> str {
+    return nickname.unwrap_or("Gilfoyle")
+}

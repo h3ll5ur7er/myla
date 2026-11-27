@@ -1,0 +1,14 @@
+//~ type error: type 'net.TcpStream' does not satisfy the bound 'R: Pollable' required by 'Buffered.read_line_async'
+//~ help: in a task, read a TCP stream's lines with 'net.line_reader(s)'
+// A socket isn't a descriptor std.io's buffered reader can wait for: the
+// error points to std.net's line reader (MYLA-548, D180)
+import std.net as net
+import std.io as io
+
+#main
+async fun main() {
+    var l = net.listen(net.addr(net.loopback(), 0)).expect("listen")
+    var s = (await l.accept_async()).expect("accept")
+    var b = io.buffered(s)
+    let line = await b.read_line_async()
+}

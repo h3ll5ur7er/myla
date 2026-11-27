@@ -10,10 +10,13 @@ import unittest
 
 from ._native import (
     CAN_BUILD_NATIVE,
+    EXE,
     SKIP_REASON,
     build_and_run_checker,
     check_file,
     interpret_checker,
+    linux_only,
+    ON_WINDOWS,
     run_file_both_now,
     selfhost_run,
     write_program,
@@ -125,12 +128,173 @@ class TestModuleIdCollision(unittest.TestCase):
             write_program(os.path.join(tmp, "proj", "up"), "pub fun f() -> int {\n    return 2\n}\n", "a.my")
             write_program(os.path.join(tmp, "proj"),
                           "from .up.a import f\nfrom ..a import g\n\nfun main() {\n    print(f() + g())\n}\n")
-            proc = subprocess.run([selfhost_tool("main"), "check", os.path.join("proj", "main.my"),
+            # (the path as the error names it, so spelt with `/` on Windows too, MYLA-926)
+            proc = subprocess.run([selfhost_tool("main"), "check", "proj/main.my",
                                    "--stdlib", STDLIB_ROOT], capture_output=True, text=True, cwd=tmp)
             self.assertEqual(proc.returncode, 1)
             self.assertTrue(proc.stderr.startswith(
                 "module error: module id collision 'up$a' between proj/up/a.my and a.my\n"
                 "  --> proj/main.my:2:6\n"), proc.stderr)
+
+
+# D257 (MYLA-790): any module may implement any trait for any type, an
+# operator's included: `extra` gives `geo.V` a `Neg`, and the entry a
+# `Mul<str, str>` beside geo's own `Mul<int>`
+IMPLS_GEO = 'pub struct V {\n    x: int,\n}\n\nimpl Mul<int> for V {\n    fun mul(self, k: int) -> V {\n        return V { x: self.x * k }\n    }\n}\n'
+IMPLS_EXTRA = 'from .geo import V\n\n// any module may implement any trait for any type (D257)\nimpl Neg<int> for V {\n    fun neg(self) -> int {\n        return -self.x\n    }\n}\n\npub fun twice(n: int) -> int {\n    return -(V { x: n * 2 })\n}\n'
+IMPLS_MAIN = 'from .geo import V\nfrom .extra import twice\n\n// any module may implement any trait for any type (D257): the type\'s own\n// `Mul<int>` beside this one\nimpl Mul<str, str> for V {\n    fun mul(self, k: str) -> str {\n        return f"{self.x}{k}"\n    }\n}\n\nfun main() {\n    print((V { x: 2 } * 3).x)\n    print(V { x: 2 } * "a")\n    print(twice(1))\n}\n'
+
+
+class TestImplsAcrossModules(unittest.TestCase):
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_any_module_may_implement_a_trait(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_program(tmp, IMPLS_GEO, "geo.my")
+            write_program(tmp, IMPLS_EXTRA, "extra.my")
+            path = write_program(tmp, IMPLS_MAIN)
+            self.assertEqual(run_file_both_now(path), ("6\n2a\n-2\n", "", 0))
+
+    def test_two_impls_with_the_same_arguments_are_both_named(self):
+        # wherever they are: the error at one, a note naming the other, by
+        # its file when it is another's, by its module when it is the
+        # library's; the error is at the program's impl, not the library's
+        import subprocess
+        from ._tools import STDLIB_ROOT, selfhost_tool
+        again = IMPLS_MAIN.replace("impl Mul<str, str> for V {\n    fun mul(self, k: str) -> str {\n        return f\"{self.x}{k}\"",
+                                   "impl Mul<int> for V {\n    fun mul(self, k: int) -> V {\n        return self")
+        self.assertNotEqual(again, IMPLS_MAIN)
+        vec = ("from std.vector32 import Vec3\n\nimpl Mul<float32> for Vec3 {\n    fun mul(self, k: float32) -> Vec3 {\n"
+               "        return self\n    }\n}\n\nfun main() {\n}\n")
+        for main, want in (
+            (again, "type error: duplicate impl of trait 'Mul<int32, …>' for type 'geo.V' (one per type of the right "
+                    "operand or index)\n  --> geo.my:5:1\n"),
+            (vec, "type error: duplicate impl of trait 'Mul<float32, …>' for type 'vector32.Vec3' (one per type of the "
+                  "right operand or index)\n  --> main.my:3:1\n"),
+        ):
+            with self.subTest(want=want), tempfile.TemporaryDirectory() as tmp:
+                write_program(tmp, IMPLS_GEO, "geo.my")
+                write_program(tmp, IMPLS_EXTRA, "extra.my")
+                write_program(tmp, main)
+                proc = subprocess.run([selfhost_tool("main"), "check", "main.my", "--stdlib", STDLIB_ROOT],
+                                      capture_output=True, text=True, cwd=tmp)
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertTrue(proc.stderr.startswith(want), proc.stderr)
+                if main is again:
+                    self.assertIn("\nnote: the other impl is at main.my:6:1\n", proc.stderr + "\n")
+                else:
+                    self.assertRegex(proc.stderr, r"\nnote: the other impl is std\.vector32's, at \S*std/vector32\.my:\d+:1\n")
+
+
+class TestARootStdFolderIsRefused(unittest.TestCase):
+    def test_it_is_reported_at_the_import(self):
+        # D255 (MYLA-790, MYLA-584): a program's own `std/` folder (or
+        # `std.my`) at its root would be named as the library's modules
+        # are, `std$process`, and got their privileges: an empty `exit` of
+        # its `std/process.my` passed for one that never returns, and its
+        # `std/fmt.my` collided with std.fmt in a build. The loader refuses
+        # it at the import, for every command; a `std/` below the root is
+        # any folder
+        import subprocess
+        from ._tools import STDLIB_ROOT, selfhost_tool
+        cases = (
+            ("std/process.my", "pub fun exit(code: int) { }\n",
+             "from .std.process import exit\nfun f(n: int) -> str {\n    if n > 0 { return \"pos\" }\n    exit(1)\n}\n"
+             "fun main() {\n    print(f(0))\n}\n", ".std.process"),
+            ("std/task.my", "pub fun cancel(x: int) -> int {\n    return x + 1\n}\n",
+             "from .std.task import cancel\nfun main() {\n    print(cancel(1))\n}\n", ".std.task"),
+            ("std/fmt.my", "pub fun fmt_int(a: int) -> int {\n    return a + 1\n}\n",
+             "from .std.fmt import fmt_int\nfun main() {\n    let a = 5\n    print(f\"{a:>4}|{fmt_int(a)}\")\n}\n", ".std.fmt"),
+            ("std.my", "pub fun one() -> int {\n    return 1\n}\n",
+             "from .std import one\nfun main() {\n    print(one())\n}\n", ".std"),
+            # its `std/rt.my` checked and ran, and every build failed with
+            # `module id collision` (the review of 2026-11-17, MYLA-793)
+            ("std/rt.my", "pub fun rt_one() -> int {\n    return 1\n}\n",
+             "from .std.rt import rt_one\nfun main() {\n    print(rt_one())\n}\n", ".std.rt"),
+        )
+        for module, text, main, dotted in cases:
+            for cmd in ("check", "run", "build"):
+                with self.subTest(module=module, cmd=cmd), tempfile.TemporaryDirectory() as tmp:
+                    os.makedirs(os.path.join(tmp, "std"))
+                    write_program(tmp, text, module)
+                    write_program(tmp, main)
+                    argv = [selfhost_tool("main"), cmd, "main.my", "--stdlib", STDLIB_ROOT]
+                    if cmd == "build":
+                        argv += ["-o", "prog"]
+                    proc = subprocess.run(argv, capture_output=True, text=True, cwd=tmp)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertTrue(proc.stderr.startswith(
+                        f"module error: cannot import '{dotted}': a folder or file named 'std' at the program's "
+                        "root is refused, as 'std' is the standard library (rename it)\n"
+                        "  --> main.my:1:6\n"), proc.stderr)
+        # below the root, `std` is a folder like any other
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "sub", "std"))
+            write_program(os.path.join(tmp, "sub", "std"), "pub fun exit(code: int) { }\n", "process.my")
+            write_program(tmp, "from .sub.std.process import exit\nfun main() {\n    exit(1)\n    print(2)\n}\n")
+            proc = subprocess.run([selfhost_tool("main"), "run", "main.my", "--stdlib", STDLIB_ROOT],
+                                  capture_output=True, text=True, cwd=tmp)
+            self.assertEqual((proc.returncode, proc.stdout), (0, "2\n"), proc.stderr)
+        # and a `sub/std/rt.my` is built as any module
+        if CAN_BUILD_NATIVE:
+            with tempfile.TemporaryDirectory() as tmp:
+                os.makedirs(os.path.join(tmp, "sub", "std"))
+                write_program(os.path.join(tmp, "sub", "std"), "pub fun rt_one() -> int {\n    return 1\n}\n", "rt.my")
+                write_program(tmp, "from .sub.std.rt import rt_one\nfun main() {\n    print(rt_one())\n}\n")
+                proc = subprocess.run([selfhost_tool("main"), "build", "main.my", "-o", "prog" + EXE, "--stdlib",
+                                       STDLIB_ROOT], capture_output=True, text=True, cwd=tmp)
+                self.assertEqual((proc.returncode, proc.stderr), (0, ""))
+                proc = subprocess.run([os.path.join(tmp, "prog" + EXE)], capture_output=True, text=True)
+                self.assertEqual(proc.stdout, "1\n")
+
+
+@linux_only("'<' and '>' aren't allowed in Windows file names")
+class TestAProgramInADirectoryNamedAsTheCarriedLibrary(unittest.TestCase):
+    def test_it_is_the_programs(self):
+        # the review of 2026-11-17 (MYLA-793): `myla check '<myla>/main.my'`
+        # took the program's `<myla>/std/helper.my` for the carried
+        # library's (`<myla>` is its root's name), read it lazily and didn't
+        # refuse it (D255): `ok`, as `cd '<myla>' && myla check main.my` isn't
+        import subprocess
+        from ._tools import selfhost_tool
+        helper = "pub fun ok() -> int {\n    return 1\n}\n\npub fun broken() -> int {\n    return \"not an int\"\n}\n"
+        for d, want in (("std", "module error: cannot import '.std.helper': a folder or file named 'std'"),
+                        ("sub/std", "type error: return type mismatch: expected 'int32', found 'str'")):
+            with self.subTest(dir=d), tempfile.TemporaryDirectory() as tmp:
+                os.makedirs(os.path.join(tmp, "<myla>", d))
+                write_program(os.path.join(tmp, "<myla>", d), helper, "helper.my")
+                write_program(os.path.join(tmp, "<myla>"), f"from .{d.replace('/', '.')}.helper import ok\n\nfun main() {{\n    print(ok())\n}}\n")
+                for cwd, path in ((tmp, "<myla>/main.my"), (os.path.join(tmp, "<myla>"), "main.my")):
+                    proc = subprocess.run([selfhost_tool("main"), "check", path], capture_output=True, text=True, cwd=cwd)
+                    self.assertEqual(proc.returncode, 1, (cwd, proc.stdout))
+                    self.assertTrue(proc.stderr.startswith(want), proc.stderr)
+
+
+class TestALibraryRootThroughASymlink(unittest.TestCase):
+    def test_its_module_is_the_roots(self):
+        # the review of 2026-11-17 (MYLA-793): a module of the library named
+        # through one spelling of its root and `--stdlib` through another (a
+        # symbolic link) was a program's module beside the library's, its
+        # impls twice: 18 duplicate methods for std.option
+        import shutil
+        import subprocess
+        from ._tools import STDLIB_ROOT, selfhost_tool
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(STDLIB_ROOT, os.path.join(tmp, "libcopy"))
+            try:
+                os.symlink("libcopy", os.path.join(tmp, "liblink"), target_is_directory=True)
+            except OSError as err:
+                if not ON_WINDOWS:
+                    raise
+                self.skipTest(f"Windows makes no symbolic link without the privilege: {err}")   # (MYLA-926)
+            for entry, root in (("libcopy", "liblink"), ("liblink", "libcopy"), (os.path.join(tmp, "libcopy"), "liblink")):
+                with self.subTest(entry=entry, root=root):
+                    proc = subprocess.run([selfhost_tool("main"), "test", f"{entry}/std/option.my", "--stdlib", root],
+                                          capture_output=True, text=True, cwd=tmp)
+                    self.assertEqual(proc.returncode, 0, proc.stdout[-500:] + proc.stderr[-500:])
+                    self.assertRegex(proc.stdout, r"\n(\d+)/\1 passed\.\n$")
+                    proc = subprocess.run([selfhost_tool("main"), "check", f"{entry}/std/fs.my", "--stdlib", root],
+                                          capture_output=True, text=True, cwd=tmp)
+                    self.assertEqual((proc.stdout, proc.stderr), ("ok\n", ""))
 
 
 if __name__ == "__main__":

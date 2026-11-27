@@ -2,7 +2,7 @@
 id: MYLA-429
 title: "P15 Maps shrink, and iterate in their live size"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [maps, runtime, performance, round-5]
 ---
@@ -42,3 +42,7 @@ Recommendation: the eighth, as built.
 ## The owner's decision (2026-11-11)
 
 The proposals stand as built (D189).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

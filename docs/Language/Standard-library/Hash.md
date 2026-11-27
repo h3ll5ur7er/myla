@@ -73,7 +73,7 @@ fun main() {
 | a tuple of `Hash` elements | each element's `hash` in turn (the language's own, as no impl can name a tuple) |
 | `#derive(Hash)` | its fields in order; an enum's variant index as a `uint64`, then its payload |
 
-Floats aren't `Hash`. A map doesn't hash its keys through the `Hasher`: an integer, `char`, `bool` or `str` key has std.rt's own hash, and natively a compound key is hashed by its parts, a type's written `hash` called (the interpreter does the same); the order of a map is its insertion order (D105), so no hash shows.
+A float is `Hash` (D198, [[MYLA-586]]): it adds the bits of its value as a float64, `-0.0` as `0.0`, which it equals; hashing a NaN panics with `cannot hash NaN`, and a map with a float key calls that `hash` (natively too) for exactly that check and fold. A map operation finds a NaN key first, itself or in a tuple's or a derived struct's member, and reports `cannot hash NaN` at its key in the program, interpreted and natively alike ([[MYLA-850]]); std.map's `get`, `get_or`, `update` and `counts`, and std.set's `of`, `insert`, `remove` and `contains` report it at their call (`#track_caller`). A NaN inside a list or an enum key, and `x.hash(h)` that a program calls, panic in std.hash's `hash`. A map doesn't hash its keys through the `Hasher`: an integer, `char`, `bool` or `str` key has std.rt's own hash, and natively a compound key is hashed by its parts, a type's written `hash` called (the interpreter does the same); the order of a map is its insertion order (D105), so no hash shows.
 
 ## The Hasher
 
@@ -123,7 +123,7 @@ Natively on x86-64, the best of five runs over 100 MB (100,000,000 bytes), on a 
 | --- | --- | --- |
 | The Hasher, `add_str` / `add_bytes` (wyhash) | 1496 MB/s | 1496 MB/s |
 
-A key of two `int32`s takes 8.7 ns from `new()` to `finish()`, a 13-byte string 16.1 ns. Every byte is read with a bounds check. std.checksum's FNV-1a, measured the same way, runs at about 950 MB/s.
+A key of two `int32`s takes 8.7 ns from `new()` to `finish()`, a 13-byte string 16.1 ns (2026-11-07, `2583648`). Every byte is read with a bounds check. std.checksum's FNV-1a, measured the same way, runs at about 950 MB/s.
 
 ## Tests
 

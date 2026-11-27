@@ -1,0 +1,16 @@
+//~ type error: generic function 'pair' cannot be used as a value
+//~ note: in a list, map or tuple literal `pair<P, Q>(p, q)` is two comparisons
+//~ note span: pair<P, Q>(p, q)
+// D186: in a list literal a comma ends the type arguments, so
+// `pair<P, Q>(p, q)` is `pair < P` and `Q > (p, q)`; the note says so and
+// how to write the call (MYLA-545).
+struct P { x: int }
+struct Q { y: int }
+struct Pair<A, B> { a: A, b: B }
+fun pair<A, B>(a: A, b: B) -> Pair<A, B> { return Pair { a: a, b: b } }
+fun main() {
+    let p = P { x: 1 }
+    let q = Q { y: 2 }
+    let v = [pair<P, Q>(p, q)]
+    print(v[0].b.y)
+}

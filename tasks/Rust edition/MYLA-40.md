@@ -6,10 +6,10 @@ status: done
 priority: medium
 labels: [rust, concurrency]
 ---
-- [ ] `Value::Chan` holds both ends of the channel, so it never closes: `recv()` with no sender left hangs forever
-- [ ] Spawned tasks that nobody joins are killed when `main` returns, so `spawn { print(..) }` prints nothing; decide (join at exit, or document)
-- [ ] An actor method holds the actor's non-reentrant `std::sync::Mutex` for its whole body, so an actor calling a method on its own handle deadlocks
-- [ ] `async` on actor and impl methods is ignored; actor fields can't be read from outside ("type `C` has no field `n`")
-- [ ] `Channel::bounded` exists but nothing in Myla can create a bounded channel
+- [ ] `Value::Chan` holds both ends of the channel, so it never closes: `recv()` with no sender left hangs forever (dropped: the Rust edition was removed, [[MYLA-70]])
+- [ ] Spawned tasks that nobody joins are killed when `main` returns, so `spawn { print(..) }` prints nothing; decide (join at exit, or document) (dropped: the Rust edition was removed, [[MYLA-70]])
+- [ ] An actor method holds the actor's non-reentrant `std::sync::Mutex` for its whole body, so an actor calling a method on its own handle deadlocks (dropped: the Rust edition was removed, [[MYLA-70]])
+- [ ] `async` on actor and impl methods is ignored; actor fields can't be read from outside ("type `C` has no field `n`") (dropped: the Rust edition was removed, [[MYLA-70]])
+- [ ] `Channel::bounded` exists but nothing in Myla can create a bounded channel (dropped: the Rust edition was removed, [[MYLA-70]])
 
 **Closed without a fix:** the Rust edition was removed from the repository ([[MYLA-70]]); its code is in git history (commit `043acb9`). See [[Architecture/Rust-edition]].

@@ -1,0 +1,15 @@
+// title: Not Hotdog
+// xp: 20
+// hidden: find_hotdog #test(["hotdog"])[Some(0)]
+// hint: Lists have a method giving the index of the first value a function says `true` to, as an `Option`.
+// hint: It's `position`, with a lambda that compares a food with "hotdog".
+//
+// Jian-Yang's app finds the hotdog in a list of foods. `find_hotdog` should
+// give the index of the first `"hotdog"` as `Some(index)`, or `None` when
+// there is none. Not hotdog.
+#test(["pizza", "hotdog", "hotdog"])[Some(1)]
+#test(["salad", "octopus"])[None]
+#test([])[None]
+fun find_hotdog(foods: [str]) -> Option<int> {
+    return Some(0)
+}

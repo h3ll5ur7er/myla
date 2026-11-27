@@ -1,0 +1,23 @@
+//~ type error: type 'W<int32>' does not satisfy the bound 'T: Eq' required by 'same': 'int32' isn't Iterator<int32>
+//~ span: same(W { v: 1 }, W { v: 2 })
+// A generic impl's bound of a generic trait (MYLA-538) also holds where its
+// type meets another bound: `W<int32>` isn't `Eq`, as `int32` is no
+// `Iterator<int32>`, so it can't be the argument of a `T: Eq`.
+struct W<I> {
+    v: I,
+}
+
+impl<I: Iterator<int>> Eq for W<I> {
+    fun eq(self, other: W<I>) -> bool {
+        var a = self.v
+        return a.next() == None
+    }
+}
+
+fun same<T: Eq>(a: T, b: T) -> bool {
+    return a == b
+}
+
+fun main() {
+    print(same(W { v: 1 }, W { v: 2 }))
+}

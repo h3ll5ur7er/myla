@@ -1,0 +1,5 @@
+type error: the entry point has no caller: '#track_caller' can't stand on it
+  --> examples/errors/type_track_caller_on_the_entry_point.my:3:1
+  |
+3 | #track_caller
+  | ^^^^^^^^^^^^^

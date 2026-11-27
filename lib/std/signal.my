@@ -21,6 +21,7 @@
 // says what a port must provide.
 
 import .fmt as fmt
+from .ioerror import code_number, UNSUPPORTED
 
 // A signal a program can catch everywhere.
 #derive(Eq, Hash)
@@ -74,6 +75,9 @@ impl Format for SignalError {
 }
 
 // The interrupt and terminate signals being caught: what `listen` gives.
+// Its handle is the listener's, an entry of the runtime's table (D181): a
+// copy is the same listener, and one closed or built by hand reaches
+// nothing (no signal, no descriptor's byte, no other listener).
 pub struct Signals {
     handle: int,
 }
@@ -112,9 +116,17 @@ impl Signals {
     }
 
     // No longer listening: once nobody listens, the signals end the program
-    // again, and those not taken are dropped. Close a `Signals` once.
+    // again, and those not taken are dropped. A second close, through any
+    // copy, does nothing (MYLA-548: it stopped another listener's signals),
+    // and so does one of a value built by hand.
     fun close(self) {
-        let r = __signal_listen(0)
+        // (1 is no handle of the runtime's table, whose handles start at
+        // 8,388,608, but `__signal_listen`'s argument to begin listening:
+        // `Signals { handle: 1 }.close()` caught the signals for good,
+        // MYLA-794)
+        if self.handle != 1 {
+            let r = __signal_listen(self.handle)
+        }
     }
 }
 
@@ -128,12 +140,12 @@ pub async fun interrupted() -> Result<Signal, SignalError> {
     return got
 }
 
-// The signal `__signal_take` gave (2 or 15), or the error of its errno.
+// The signal `__signal_take` gave (2 or 15), or the error of its cause.
 #test(2, 0)[Ok(Signal.Interrupt)]
 #test(15, 0)[Ok(Signal.Terminate)]
-#test(-1, 38)[Err(SignalError.Unsupported)]
-#test(-1, 9)[Err(SignalError.Other(9))]
-fun signal_of(n: int, errno: int) -> Result<Signal, SignalError> {
+#test(-1, 9)[Err(SignalError.Unsupported)]
+#test(-1, 34)[Err(SignalError.Other(9))]
+fun signal_of(n: int, cause: int) -> Result<Signal, SignalError> {
     if n == 2 {
         return Ok(Signal.Interrupt)
     }
@@ -141,17 +153,18 @@ fun signal_of(n: int, errno: int) -> Result<Signal, SignalError> {
         return Ok(Signal.Terminate)
     }
     if n < 0 {
-        return Err(error_of(errno))
+        return Err(error_of(cause))
     }
     return Err(SignalError.Other(n))
 }
 
-// The error of the errno `e` (ENOSYS: the target has no signals).
-#test(38)[SignalError.Unsupported]
-#test(24)[SignalError.Other(24)]
+// The error of the cause code `e` (std.ioerror's, D209; UNSUPPORTED: the
+// target has no signals), `Other` of the number `code_number` gives.
+#test(9)[SignalError.Unsupported]
+#test(280)[SignalError.Other(24)]
 fun error_of(e: int) -> SignalError {
-    if e == 38 {
+    if e == UNSUPPORTED {
         return SignalError.Unsupported
     }
-    return SignalError.Other(e)
+    return SignalError.Other(code_number(e))
 }

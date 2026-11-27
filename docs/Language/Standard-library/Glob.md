@@ -43,7 +43,9 @@ As in shells, a name that starts with `.` is matched only by a component that st
 
 Both the pattern and the path must be absolute, or both relative. Empty components don't count, so `a//b/` is `a/b`; `.` and `..` are names like any other (normalize with `std.path` first if you need them resolved).
 
-The matching takes time proportional to the pattern's length times the path's at worst, never exponential: a component is matched with two pointers, where the last `*` takes one more character on a mismatch, and `**` with a table over the pattern's and the path's components. `a*a*a*a*a*b` against 10,000 `a`s takes 36 µs natively.
+On Windows ([[MYLA-704]], D215) a path's `\` separates components as its `/` does (`*/*.my` matches `src\main.my`), and the pattern and the path must start from the same anchor (std.path's `anchor`): the same drive, of either case, or UNC share, with a root or without (`C:/src/*` matches `c:\src\x` and not `D:/src/x` or `/src/x`); `glob` searches from it. A pattern's own separators are `/`, as its `\` makes the next character literal there too: write `C:/src/*.my`, not `C:\src\*.my`.
+
+The matching takes time proportional to the pattern's length times the path's at worst, never exponential: a component is matched with two pointers, where the last `*` takes one more character on a mismatch, and `**` with a table over the pattern's and the path's components. `a*a*a*a*a*b` against 10,000 `a`s takes 36 µs natively (2026-11-07, `f70137a`).
 
 | Function | Result |
 | --- | --- |

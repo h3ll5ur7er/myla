@@ -1,6 +1,6 @@
 # Generics
 
-Functions, structs, enums, actors, impls and traits may take type parameters. Generic code is checked once against opaque type parameters, then run by erasure in the interpreter and **monomorphized** (one concrete copy per instantiation) for native code (D13, [[Architecture/Monomorphization]]).
+Functions, structs, enums, actors, impls and traits may take type parameters. Generic code is checked once against opaque type parameters, then run in the interpreter with each call's type parameters bound to the types they stand for ([[MYLA-414]], [[Architecture/Interpreter]]) and **monomorphized** (one concrete copy per instantiation) for native code (D13, [[Architecture/Monomorphization]]).
 
 [TOC]
 
@@ -49,7 +49,7 @@ Type arguments are written in **type positions**: `Box<int>`, `Result<str, IoErr
 
 1. Arguments are typed left to right. Once a parameter's type is fully known from earlier arguments, it is used as the expected type of the next argument, so `prepend(x, List.Nil)` works.
    A lambda argument needs less: when its parameter's type is a function type whose parameter types are known (`(int) -> U` once `T` is `int`), the lambda takes them and its result is inferred from its body, which binds `U`. So `apply(3, (x) => x * 2)` and `opt.map((x) => x + 1)` need no annotation ([[MYLA-356]]).
-   A bound naming a generic trait with its arguments, `I: Iterator<T>`, fixes them once its parameter is known: the type an argument gives `I` has one impl of `Iterator` (D55), whose argument is `T` ([[Language/Methods-and-traits#bounds]], D171). So `fun count<I: Iterator<T>, T>(it: I) -> int` needs nothing else, and in `map(it, (x) => x * 3)` the lambda's `x` is the iterator's `T`. Native code solves the instance's `T` the same way.
+   A bound naming a generic trait with its arguments, `I: Iterator<T>`, fixes them once its parameter is known: the type an argument gives `I` has one impl of `Iterator` (D55), whose argument is `T` ([[Language/Methods-and-traits#bounds]], D171). So `fun count<I: Iterator<T>, T>(it: I) -> int` needs nothing else, and in `map(it, (x) => x * 3)` the lambda's `x` is the iterator's `T`. An operator trait's bound does the same once its right operand's (or index's) type is known, which picks the impl (D200, [[MYLA-802]]): `C: Index<int, T>` takes `T` from the result of `C`'s impl of `Index<int, …>` (a list's, map's or string's own indexing among them: an `[int64]` makes `T` an `int64`), `A: Mul<float, O>` `O` from `A`'s `Mul<float, …>`, and `N: Neg<O>` `O` from `N`'s `-`; a bound whose right operand is still open fixes nothing. Two bounds that would fix one parameter differently are the error of the second: `type 'B<str>' does not satisfy the bound 'D: Index<int32, int32>' required by 'first': it implements 'Index<int32, str>'`. Native code solves the instance's `T` the same way.
 2. The expected type of the whole expression (an annotation, a parameter, a return type, a field, a list's element) seeds struct literals and enum variants, and fixes the type parameters of a generic function's or method's call that its arguments leave open ([[MYLA-315]]): `let d: Deque<int> = deque.new()`, `return mk()` in a function that returns `B<str>`, `f(mk())` where `f` takes a `B<int>`, `Graph { todo: deque.new() }`. What the arguments fix comes first; the expected type only fills the rest, and hints the arguments whose parameter's type the earlier ones leave open, so `let b: B<int64> = of([5000000000])` makes the list an `[int64]`. An expected type that doesn't fit the result is not an error here: the call's type is compared where it is used.
    Inside generic code a type parameter of the enclosing function is a known type, so the return type `B<T>` gives the field `items: [T]` of `B { items: [] }` its type, as it does an empty map `[:]` or `None`.
 3. The branches of an `if` and the arms of a `match` used as a value are typed against each other when nothing is expected: one whose value can't say its whole type alone (`None`, `[]`, `[:]`, `Err(e)`, `Ok(x)`, a generic enum's variant that leaves a parameter out) is checked after the others, with the first one's type expected, so `let v = if n > 0 { Some(n) } else { None }` is an `Option<int>` ([[MYLA-290]]). When no branch says it (`if c { Ok(1) } else { Err("e") }`), annotate the binding.
@@ -128,9 +128,11 @@ fun main() {
 // 6
 ```
 
+Only a function may have one: an impl's type parameters are its type's own, in order (D55), so `impl<I: Iterator<T>, T> Eq for W<I>` is the error `the impl's type parameter 'T' is not one of 'W<I>'`, with a hint to make it a generic function's or a type parameter of `W` ([[MYLA-564]]).
+
 ### Explicit type arguments
 
-Where nothing fixes a type parameter, a call can name it: `mk<int>()`, `deque.new<str>()`, `m.f<A, B>(x)`, `xs.mapped<str>(f)` (D169, [[MYLA-373]]). They are written after the function's or method's name, before its `(`:
+Where nothing fixes a type parameter, a call can name it: `mk<int>()`, `deque.new<str>()`, `m.f<A, B>(x)`, `xs.map<str>(f)` (D169, [[MYLA-373]]). They are written after the function's or method's name, before its `(`:
 
 - They come first: the arguments and the expected type are typed with them, so `widen<int64>(5000000000)` takes an `int64`, and an argument that doesn't fit is a mismatch (`widen<str>(true)`: expected 'str', found 'bool').
 - There is one for each type parameter, in the declaration's order; another count is an error naming both (`function 'mk' expects 1 type argument(s), got 2`).
@@ -188,4 +190,11 @@ fun main() {
 
 Each instantiation gets its own name, whatever the type arguments are called ([[MYLA-9]], [[Architecture/Monomorphization]]).
 
-Polymorphic recursion, a generic function calling itself with a larger type (`grow<T>` calling `grow<[T]>`), runs in the interpreter, but native code would need an instance for every size: `myla build` refuses the call, `the instances of 'grow' nest without end: this call asks for one whose type arguments are 65 types deep (the limit is 64)`, as a type error ([[MYLA-415]]). The operators of a generic impl (`impl<T: Add> Add for Box<T>`) call its instance for the operands' types, as its methods do.
+Polymorphic recursion, a generic function calling itself with a larger type (`grow<T>` calling `grow<[T]>`), directly or through other functions, would need an instance for every size in native code, so it is a type error at the call that makes the type larger, for every command (`myla check`, `run` and `build`), whether the program calls the function or not ([[MYLA-543]]):
+
+```
+type error: the instances of 'grow' nest without end: this call, in 'grow<T>', asks for 'grow<[T]>'
+note: 'grow' calls itself with a larger type at each step (polymorphic recursion), which native code can't be built for
+```
+
+The checker sees the calls whose type arguments are written with the caller's type parameters. A recursion through a trait's method (`run<T: Tr>` calling `x.go()`, whose impl for `Box<U>` calls `run<Box<[U]>>`) it can't see, since which impl a call reaches depends on the type: the interpreter runs it and `myla build` refuses the call once the type arguments grow 65 types deep or past 4,096 parts ([[MYLA-415]]). A deep type the program writes, `id(x)` of a list 65 or 100 deep, is no recursion and builds, and so does a recursion that passes it on unchanged ([[MYLA-544]], [[MYLA-543]]). The operators of a generic impl (`impl<T: Add> Add for Box<T>`) call its instance for the operands' types, as its methods do.

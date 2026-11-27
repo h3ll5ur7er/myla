@@ -11,13 +11,17 @@ import tempfile
 import time
 import unittest
 
-from ._native import (
+from ._native import (BUILD_TARGET,
     CAN_BUILD_NATIVE,
+    EXE,
+    ON_WINDOWS,
     SKIP_REASON,
+    TEST_TARGET,
     Program,
     build_and_run_full,
     check_file,
     interpret_full,
+    linux_only,
     native_build,
     run_argv,
     run_source_both,
@@ -64,10 +68,19 @@ class TestStdioParity(unittest.TestCase):
         self.assertEqual((out, err, code), ("", "", 7))
 
     def test_exit_truncates_to_low_byte(self):
-        out, err, code = run_source_both(
-            "from std.process import exit\n"
-            "fun main() { exit(258) }\n"   # 258 & 0xFF == 2
-        )
+        source = ("from std.process import exit\n"
+                  "fun main() { exit(258) }\n")   # 258 & 0xFF == 2
+        if ON_WINDOWS:
+            # Windows passes the code with its 32 bits (D216): 258 to a
+            # parent there, its low byte the 2 a POSIX parent reads (MYLA-926)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, source)
+                interp = interpret_full(check_file(path), argv=["prog"])
+                native = build_and_run_full(check_file(path), argv0="prog")
+            self.assertEqual(interp, ("", "", 2))
+            self.assertEqual(native, ("", "", 258))
+            return
+        out, err, code = run_source_both(source)
         self.assertEqual(code, 2)
 
     def test_exit_short_circuits_remaining_output(self):
@@ -201,7 +214,7 @@ fun main() {
 def _argvs(tmp: str, source: str) -> list[tuple[str, list[str], str | None]]:
     """The interpreter's and the native binary's command lines for `source`."""
     path = write_program(tmp, source)
-    binary = os.path.join(tmp, "prog")
+    binary = os.path.join(tmp, "prog" + EXE)
     native_build(Program(path), binary)
     argv, exe = run_argv(binary, binary)
     return [("interpreter", [selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None),
@@ -223,9 +236,10 @@ class BrokenPipe(unittest.TestCase):
                     self.assertEqual(first, b"line 0\n")
                     self.assertEqual(err, b"")
                     # SIGPIPE natively; 141, the code a shell shows for it, on
-                    # a target without signals
-                    self.assertIn(code, (-signal.SIGPIPE, 141))
+                    # a target without signals (Windows, which has no SIGPIPE)
+                    self.assertIn(code, (141,) if ON_WINDOWS else (-signal.SIGPIPE, 141))
 
+    @linux_only("a descriptor beyond 0 to 2 passed to a child (pass_fds) is Unix's")
     def test_a_write_to_another_descriptor_reports_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             for name, argv, exe in _argvs(tmp, WRITES_TO_FD_3):
@@ -241,28 +255,32 @@ class BrokenPipe(unittest.TestCase):
                     self.assertEqual((p.stdout, p.stderr, p.returncode), ("broken pipe\nstill running\n", "", 0))
 
 
+    @linux_only("no /dev/full")
     def test_a_write_to_a_full_disk_ends_with_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             for name, argv, exe in _argvs(tmp, WRITES_TO_A_FULL_DISK):
+                # the target's words for its code (MYLA-716): Windows' for
+                # ERROR_DISK_FULL, which Wine gives a write to /dev/full
+                said = "no space left on device"
+                if BUILD_TARGET == "x86_64-windows" and name == "native":
+                    said = "there is not enough space on the disk"
                 with self.subTest(run=name, stream="stdout"):
                     with open("/dev/full", "w") as full:
                         p = subprocess.run(argv, executable=exe, stdout=full, stderr=subprocess.PIPE, text=True, timeout=60)
-                    self.assertEqual((p.stderr, p.returncode),
-                                     ("runtime error: write failed: no space left on device\n", 1))
+                    self.assertEqual((p.stderr, p.returncode), (f"runtime error: write failed: {said}\n", 1))
                 with self.subTest(run=name, stream="println"):
                     src = WRITES_TO_A_FULL_DISK.replace('    print("one")\n', "")
                     path = write_program(tmp, src, f"{name}2.my")
                     cmd = argv
                     if name == "native":
-                        binary = os.path.join(tmp, "prog2")
+                        binary = os.path.join(tmp, "prog2" + EXE)
                         native_build(Program(path), binary)
                         cmd, exe2 = run_argv(binary, binary)
                     else:
                         cmd, exe2 = [selfhost_tool("main"), "run", path, "--stdlib", STDLIB_ROOT], None
                     with open("/dev/full", "w") as full:
                         p = subprocess.run(cmd, executable=exe2, stdout=full, stderr=subprocess.PIPE, text=True, timeout=60)
-                    self.assertEqual((p.stderr, p.returncode),
-                                     ("runtime error: write failed: no space left on device\n", 1))
+                    self.assertEqual((p.stderr, p.returncode), (f"runtime error: write failed: {said}\n", 1))
                 with self.subTest(run=name, stream="stderr"):
                     with open("/dev/full", "w") as full:
                         p = subprocess.run(argv, executable=exe, stdout=subprocess.PIPE, stderr=full, text=True, timeout=60)
@@ -324,10 +342,10 @@ async fun main() {
 """
 
 
-def _drained_slowly(argv: list[str], exe: str | None) -> tuple[int, bytes, int, float, float]:
+def _drained_slowly(argv: list[str], exe: str | None, pause: float = 0.02) -> tuple[int, bytes, int, float, float]:
     """`argv` run with its standard output a non-blocking pipe read 64 KiB
-    every 20 ms: the bytes read, its stderr, its exit code, its CPU time and
-    the wall time, in seconds."""
+    every `pause` seconds: the bytes read, its stderr, its exit code, its CPU
+    time and the wall time, in seconds."""
     r, w = os.pipe()
     os.set_blocking(w, False)
     t0 = time.monotonic()
@@ -337,7 +355,7 @@ def _drained_slowly(argv: list[str], exe: str | None) -> tuple[int, bytes, int, 
     with os.fdopen(r, "rb", buffering=0) as reader:
         while chunk := reader.read(65536):
             got += len(chunk)
-            time.sleep(0.02)
+            time.sleep(pause)
     err = p.stderr.read()
     p.stderr.close()
     _, status, usage = os.wait4(p.pid, 0)
@@ -347,6 +365,7 @@ def _drained_slowly(argv: list[str], exe: str | None) -> tuple[int, bytes, int, 
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@linux_only("a non-blocking pipe (O_NONBLOCK) and the child's CPU time from wait4 are Unix's")
 class NonBlockingOutput(unittest.TestCase):
     def test_a_full_output_is_waited_for_not_spun_on(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -354,12 +373,85 @@ class NonBlockingOutput(unittest.TestCase):
                 os.makedirs(os.path.join(tmp, kind))
                 for name, argv, exe in _argvs(os.path.join(tmp, kind), source):
                     with self.subTest(writes=kind, run=name):
+                        # its twin, read as fast as it writes: the CPU its
+                        # start and its writes take, on the machine as
+                        # loaded now (MYLA-745: a share of the wall time
+                        # alone failed under a full run's load, and under an
+                        # emulator, whose start costs more)
+                        _, _, _, cpu0, wall0 = _drained_slowly(argv, exe, 0)
                         got, err, code, cpu, wall = _drained_slowly(argv, exe)
                         self.assertEqual((got, err, code), (2048 * 1024, b"", 0))
                         # the reader alone takes 0.64 s; the interpreter's
                         # start (reading the library) is most of what is left
                         self.assertGreater(wall, 0.6)
-                        self.assertLess(cpu, 0.4 * wall, f"{cpu:.2f} s of CPU in {wall:.2f} s")
+                        # a writer that spun would use the time it waited
+                        # (`wall - wall0`, about 0.6 s) on top of its twin's
+                        waited = max(wall - wall0, 0.5)
+                        self.assertLess(cpu - cpu0, 0.25 * waited,
+                                        f"{cpu:.2f} s of CPU in {wall:.2f} s, its twin {cpu0:.2f} s in {wall0:.2f} s")
+
+
+# MYLA-572: a read of two billion bytes of a short input, and how much the
+# peak of the process's address space grew meanwhile, in kB (-1 without
+# /proc/self/status)
+READS_A_HUGE_COUNT = """import std.io as io
+import std.fs as fs
+import std.num as num
+from std.io import Read
+
+fun peak_kb() -> int {
+    return match fs.read_to_string("/proc/self/status") {
+        Ok(s) => {
+            var kb = -1
+            for l in s.lines() {
+                if l.starts_with("VmPeak:") {
+                    kb = num.parse_int(l[7:].trim().split(" ")[0]).unwrap_or(-1) as int
+                }
+            }
+            kb
+        }
+        Err(e) => -1
+    }
+}
+
+fun main() {
+    let before = peak_kb()
+    var r = io.fd_stream(0)
+    match r.read(2000000000) {
+        Ok(b) => print(f"{b.len()} bytes")
+        Err(e) => print(f"error {e}")
+    }
+    let after = peak_kb()
+    print(if before < 0 || after < 0 { -1 } else { after - before })
+}
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class HugeReads(unittest.TestCase):
+    def test_a_huge_count_costs_the_room_of_a_few_mib(self):
+        """MYLA-572: `read(n)` may give fewer bytes than asked (D177), so its
+        room is capped (4 MiB): a read of 2,000,000,000 bytes of `abc` used
+        to ask for 2 GB first, `out of memory` under a 400 MB limit. The
+        program reports its own address space's growth; on wasm32 /proc is
+        Node's, and the linear memory's peak is the measure; on Windows
+        there is no /proc (the program says -1), only its read is checked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, argv, exe in _argvs(tmp, READS_A_HUGE_COUNT):
+                with self.subTest(run=name):
+                    mem = os.path.join(tmp, "memory")
+                    env = dict(os.environ, MYLA_WASM_MEMORY_OUT=mem)
+                    # (bytes: a text input's newline is CR LF on Windows)
+                    p = subprocess.run(argv, executable=exe, input=b"abc\n", capture_output=True,
+                                       env=env, timeout=120)
+                    self.assertEqual((p.stderr, p.returncode), (b"", 0))
+                    got, grown = p.stdout.decode().split("\n")[:2]
+                    self.assertEqual(got, "4 bytes")
+                    if name == "native" and TEST_TARGET == "wasm32-wasi":
+                        with open(mem, encoding="utf-8") as fh:
+                            self.assertLess(int(fh.read()), 64 << 20)
+                    else:
+                        self.assertLess(int(grown), 65536, f"{grown} kB more address space")
 
 
 if __name__ == "__main__":

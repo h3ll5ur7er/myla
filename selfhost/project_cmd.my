@@ -12,10 +12,11 @@
 
 from std.io import write, eprintln
 from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir, remove_dir_all, read_to_string
-from std.process import args, command, env, ExitStatus
-from std.time import now_ns
+from std.process import args, command
+from std.test import run_code
 from .loader import LoadOptions
-from .driver import cmd_build, cmd_interp, own_tests, native_tests, emulator, load_and_check, decode
+from .target import Target
+from .driver import cmd_build, cmd_interp, own_tests, native_tests, emulator, load_for_host, decode, scratch_dir, scratch_sep, test_in_own_job
 from .interp import TestOptions, selected
 from .stdroot import EMBEDDED_ROOT
 from .test_programs import test_program_of, test_program_report
@@ -98,8 +99,10 @@ fun with_program() -> Option<Here> {
     return Some(h)
 }
 
-// `myla build [-g] [--checked]`: `src/main.my` to `build/<name>`.
-pub fun project_build(base: LoadOptions, debug: bool, checked: bool, target: str) -> int32 {
+// `myla build [-g] [--checked] [--target <t>]`: `src/main.my` to
+// `build/<name>` (with the target's suffix: `build/<name>.exe` for
+// Windows, MYLA-700).
+pub fun project_build(base: LoadOptions, debug: bool, checked: bool, target: Target) -> int32 {
     let h = match with_program() {
         Some(h) => h
         None => { return 1 }
@@ -113,7 +116,7 @@ pub fun project_build(base: LoadOptions, debug: bool, checked: bool, target: str
         },
     }
     let entry = shown(h, h.project.root.dir + "/src/main.my")
-    return cmd_build(entry, shown(h, out_dir + "/" + h.project.root.name), options(h, base), debug, checked, target)
+    return cmd_build(entry, shown(h, out_dir + "/" + h.project.root.name + target.exe_suffix), options(h, base), debug, checked, target)
 }
 
 // `myla run [args…]`: interpret `src/main.my` with the arguments.
@@ -132,7 +135,9 @@ pub fun project_run(base: LoadOptions, prog_args: [str]) -> int32 {
 // the interpreter and compared, the others' cases as `src/`'s; and the
 // total. When the project has a program and a `tests/`, the program is
 // built first to `build/<name>`, which `std.test.program()` names.
-pub fun project_test(base: LoadOptions, sel: TestOptions, native: bool, target: str) -> int32 {
+pub fun project_test(base: LoadOptions, sel: TestOptions, native: bool, target: Target) -> int32 {
+    // (killed, it takes what it started along on Windows too, MYLA-819)
+    test_in_own_job()
     let h = match locate() {
         Ok(h) => h
         Err(msg) => {
@@ -147,7 +152,7 @@ pub fun project_test(base: LoadOptions, sel: TestOptions, native: bool, target: 
         // built checked, as everything `myla test` runs is (D175)
         let built = project_build(base, false, true, target)
         if built != 0 { return built }
-        options.program = h.project.root.dir + "/build/" + h.project.root.name
+        options.program = h.project.root.dir + "/build/" + h.project.root.name + target.exe_suffix
     }
     let run_natively = native && !sel.list
     var passed = 0
@@ -224,21 +229,19 @@ pub fun project_test(base: LoadOptions, sel: TestOptions, native: bool, target: 
 
 // The test program `path` built for `target` and run (under the emulator,
 // for another target), and compared as `run_test_program` compares.
-fun run_test_program_natively(h: Here, path: str, opts: LoadOptions, target: str) -> [str] {
+fun run_test_program_natively(h: Here, path: str, opts: LoadOptions, target: Target) -> [str] {
     let file = shown(h, path)
     let text = match read_to_string(path) { Ok(t) => t, Err(e) => "" }
     let tp = match test_program_of(text) {
         Some(tp) => tp,
         None => { return [format("FAIL  {}: not a test program\n", file)] },
     }
-    var base = match env("TMPDIR") { Some(d) => d, None => "" }
-    if base == "" { base = "/tmp" }
-    let dir = format("{}/myla-test-{}", base, now_ns())
+    let dir = scratch_dir()
     match make_dir_all(dir) {
         Ok(()) => {},
         Err(e) => { return [format("FAIL  {}: cannot create {}\n", file, dir)] },
     }
-    let out = dir + "/program"
+    let out = dir + scratch_sep() + "program" + target.exe_suffix
     // checked, as `myla test` runs everything (D175)
     if cmd_build(file, out, opts, false, true, target) != 0 {
         let gone = remove_dir_all(dir)
@@ -258,10 +261,7 @@ fun run_test_program_natively(h: Here, path: str, opts: LoadOptions, target: str
         Ok(o) => o,
         Err(e) => { return [format("FAIL  {}: cannot run it with '{}'\n", file, argv[0])] },
     }
-    let code = match o.status {
-        ExitStatus.Exited(c) => c,
-        ExitStatus.Signaled(sig) => -sig,
-    }
+    let code = run_code(o.status)   // (an exit past 255 on Windows read as Linux reads it, MYLA-943)
     return test_program_report(file, tp, decode(o.stdout), decode(o.stderr), code)
 }
 
@@ -287,10 +287,7 @@ fun run_test_program(h: Here, path: str, opts: LoadOptions) -> [str] {
         Ok(o) => o,
         Err(e) => { return [format("FAIL  {}: could not run '{}' to interpret it\n", file, args()[0])] },
     }
-    let code = match out.status {
-        ExitStatus.Exited(c) => c,
-        ExitStatus.Signaled(sig) => -sig,
-    }
+    let code = run_code(out.status)   // (an exit past 255 on Windows read as Linux reads it, MYLA-943)
     return test_program_report(file, tp, decode(out.stdout), decode(out.stderr), code)
 }
 
@@ -307,7 +304,7 @@ pub fun project_check(base: LoadOptions) -> int32 {
     let opts = options(h, base)
     var status = 0
     for path in source_files(h.project.root.dir + "/src") {
-        match load_and_check(shown(h, path), opts) {
+        match load_for_host(shown(h, path), opts) {
             Ok(ch) => {},
             Err(msg) => {
                 eprintln(msg)

@@ -1,0 +1,10 @@
+type error: duplicate impl of trait 'Mul<float64, …>' for type 'V' (one per type of the right operand or index)
+  --> examples/errors/type_op_impl_duplicate_right_operand.my:16:1
+   |
+16 | impl Mul<float, float> for V {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: the other impl is here
+  --> examples/errors/type_op_impl_duplicate_right_operand.my:10:1
+   |
+10 | impl Mul<float> for V {
+   | ^^^^^^^^^^^^^^^^^^^^^^^

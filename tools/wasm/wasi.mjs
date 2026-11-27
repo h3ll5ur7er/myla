@@ -15,7 +15,8 @@
 // read blocks the program as a blocking one would.
 //
 // A file system gives: `open(path, {create, trunc, excl, dir, read, write,
-// append})` a handle (`read` and `write` the access asked for, undefined
+// append, nofollow, nonblock})` a handle (`nofollow`: a link at the end is
+// ELOOP; `nonblock`: a FIFO opens at once, MYLA-842) (`read` and `write` the access asked for, undefined
 // when the program asked for every right, as its own reads and writes of
 // whole files do; MYLA-336), `read(handle, bytes)` and `write(handle,
 // bytes)` how many at the handle's cursor, `seek(handle, offset, whence)`
@@ -24,7 +25,8 @@
 // `fstat(handle)` and `stat(path, follow)` `{type, size, ino, nlink,
 // mtimeNs}` (type 3 a directory, 4 a regular file, 7 a symbolic link),
 // `readdir(path)` `[{name, type}]`, `mkdir`, `rmdir`, `unlink`,
-// `rename(from, to)`; a failure throws an error whose `code` is an errno's
+// `rename(from, to)`, `readlink(path)` the bytes a symbolic link holds
+// (EINVAL for a path that is no link, MYLA-841); a failure throws an error whose `code` is an errno's
 // name (`ENOENT`, …). The streams: `stdin(bytes)` how many it read (0 at the
 // end), `stdout(bytes)`, `stderr(bytes)`.
 
@@ -278,9 +280,10 @@ export class Wasi {
           this.view().setUint32(used, at, true);
           return 0;
         }),
-        path_open: g(function (dirfd, _dirflags, p, len, oflags, rights, _inherit, fdflags, out) {
+        path_open: g(function (dirfd, dirflags, p, len, oflags, rights, _inherit, fdflags, out) {
           const path = this.resolve(dirfd, p, len);
-          const want = { create: !!(oflags & 1), dir: !!(oflags & 2), excl: !!(oflags & 4), trunc: !!(oflags & 8) };
+          const want = { create: !!(oflags & 1), dir: !!(oflags & 2), excl: !!(oflags & 4), trunc: !!(oflags & 8),
+                         nofollow: !(dirflags & 1), nonblock: !!(fdflags & 4) };
           // the rights to read (bit 1) and write (bit 6) asked for, unless
           // all were
           if (rights !== -1n) {
@@ -309,6 +312,15 @@ export class Wasi {
         path_create_directory: g(function (dirfd, p, len) { this.fs.mkdir(this.resolve(dirfd, p, len)); return 0; }),
         path_remove_directory: g(function (dirfd, p, len) { this.fs.rmdir(this.resolve(dirfd, p, len)); return 0; }),
         path_unlink_file: g(function (dirfd, p, len) { this.fs.unlink(this.resolve(dirfd, p, len)); return 0; }),
+        path_readlink: g(function (dirfd, p, len, buf, room, used) {
+          // as much as fits, its length (a caller that gets `room` asks
+          // again with more)
+          const target = this.fs.readlink(this.resolve(dirfd, p, len));
+          const n = Math.min(target.length, room);
+          this.bytes(buf, n).set(target.subarray(0, n));
+          this.view().setUint32(used, n, true);
+          return 0;
+        }),
         path_rename: g(function (fd1, p1, l1, fd2, p2, l2) {
           this.fs.rename(this.resolve(fd1, p1, l1), this.resolve(fd2, p2, l2));
           return 0;

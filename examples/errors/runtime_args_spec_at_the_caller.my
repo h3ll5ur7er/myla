@@ -1,0 +1,11 @@
+//~ runtime error: args: the positional 'to' comes after 'many' ('from'), which takes the rest
+//~ native: runtime error: args: the positional 'to' comes after 'many' ('from'), which takes the rest
+//~ span: args.spec("cp", "copies files").flag("force", 'f').many("from").positional("to")
+// A spec std.args can't read panics where the program builds it, not
+// inside std.args (`#track_caller`, MYLA-553, MYLA-435).
+import std.args as args
+
+fun main() {
+    let spec = args.spec("cp", "copies files").flag("force", 'f').many("from").positional("to")
+    print(spec.usage())
+}

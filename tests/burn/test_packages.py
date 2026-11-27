@@ -20,7 +20,7 @@ import tempfile
 import unittest
 
 from ._golden import golden
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, SKIP_REASON, assemble, shown
 from ._tools import STDLIB_ROOT, selfhost_tool
 from .test_selfhost_cli import _Layout
 
@@ -172,7 +172,13 @@ def _recorded_python_diagnostic(files: dict[str, str], flags: list[str]) -> str:
 def _python_diagnostic(files: dict[str, str], flags, ws: str) -> str:
     """The Python loader's diagnostic (see `_recorded_python_diagnostic`) for
     the workspace `ws`."""
-    return _recorded_python_diagnostic(files, list(flags)).replace("{ws}", ws)
+    return _in_workspace(_recorded_python_diagnostic(files, list(flags)), ws)
+
+
+def _in_workspace(text: str, ws: str) -> str:
+    """`text` with `{ws}` the workspace `ws` as myla writes a path (with `/`
+    on Windows, D311)."""
+    return text.replace("{ws}", shown(ws))
 
 
 # Diagnostics that line continuation (D104 (3), MYLA-224) changed from the
@@ -224,18 +230,18 @@ class PackageParity(_Layout):
     def test_build(self):
         out = os.path.join(self.ws, "out")
         os.makedirs(out, exist_ok=True)
-        my = self.myla_cmd("build", self.main, *self.flags, "-o", os.path.join(out, "my"))
+        my = self.myla_cmd("build", self.main, *self.flags, "-o", os.path.join(out, "my" + EXE))
         self.assertEqual(my.returncode, 0, my.stderr)
         gen = subprocess.run([self.gen, self.main, STDLIB_ROOT, *self.flags], capture_output=True, text=True)
         self.assertEqual(gen.returncode, 0, gen.stderr)
         asm = os.path.join(out, "gen.s")
         with open(asm, "w", encoding="utf-8") as fh:
             fh.write(gen.stdout)
-        subprocess.run(["as", "--64", "-o", asm + ".o", asm], check=True)
-        subprocess.run(["ld", "-o", os.path.join(out, "gen"), asm + ".o"], check=True)
+        # (for the machine: on Windows its own linker's, MYLA-926)
+        assemble(asm, os.path.join(out, "gen" + EXE))
         for name in ("my", "gen"):
             with self.subTest(binary=name):
-                self.assertEqual(self.run_binary(os.path.join(out, name)), (EXPECTED_RUN, "", 0))
+                self.assertEqual(self.run_binary(os.path.join(out, name + EXE)), (EXPECTED_RUN, "", 0))
         # package module ids carry the package's name, not its directory
         self.assertIn("geo$shapes$area", gen.stdout)
         self.assertNotIn("geo$src", gen.stdout)
@@ -259,13 +265,13 @@ class PackageParity(_Layout):
                 _write(ws, files)
                 entry = os.path.join(ws, "app", "main.my")
                 if name in SUPERSEDED:
-                    expected = SUPERSEDED[name].replace("{ws}", ws)
+                    expected = _in_workspace(SUPERSEDED[name], ws)
                 else:
                     expected = _python_diagnostic({**PACKAGES, **files}, flags, ws)
                 args = _package_args(flags, ws)
                 gen = subprocess.run([self.gen, entry, STDLIB_ROOT, *args], capture_output=True, text=True)
                 self.assertEqual((gen.stderr, gen.returncode), (expected + "\n", 1))
-                my = self.myla_cmd("build", entry, *args, "-o", os.path.join(ws, "out"))
+                my = self.myla_cmd("build", entry, *args, "-o", os.path.join(ws, "out" + EXE))
                 self.assertEqual((my.stderr, my.returncode), (expected + "\n", 1))
 
 

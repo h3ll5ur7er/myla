@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml)
 
-Myla is a small, statically typed programming language with value semantics. It compiles to static x86-64 and aarch64 Linux binaries without libc and to WebAssembly modules for WASI (its checker and interpreter run in a web page too), and its compiler is written in Myla and compiles itself. It borrows from Swift, Rust and Python, but is none of them: newlines end statements, functions start with `fun`, collections are values, and everything is checked before anything runs.
+Myla is a small, statically typed programming language with value semantics. It compiles to static x86-64 and aarch64 Linux binaries without libc, to x86-64 Windows programs that link only the system's DLLs, and to WebAssembly modules for WASI (its checker and interpreter run in a web page too), and its compiler is written in Myla and compiles itself. It borrows from Swift, Rust and Python, but is none of them: newlines end statements, functions start with `fun`, collections are values, and everything is checked before anything runs.
 
 ```myla
 enum Shape {
@@ -102,9 +102,9 @@ The reference is the wiki, starting at [Language](docs/Language.md); the reasons
 
 ## Getting started
 
-You need Linux on x86-64 or aarch64 (a Raspberry Pi 4 or 5 with a 64-bit OS works) and GNU binutils (`as`, `ld`); for another target (`--target aarch64-linux`, `x86_64-linux` or `wasm32-wasi`) also clang and lld (and qemu-user or Node to run what they build). gdb is optional, for debugging; Python 3.12 or later only runs the tests.
+You need Linux on x86-64 or aarch64 (a Raspberry Pi 4 or 5 with a 64-bit OS works) and GNU binutils (`as`, `ld`), or x86-64 Windows with Git Bash and LLVM (clang, llvm-dlltool, lld-link); for another target (`--target aarch64-linux`, `x86_64-linux`, `wasm32-wasi` or `x86_64-windows`) also clang and lld, and llvm-dlltool for Windows (and qemu-user, Node or Wine to run what they build there). gdb is optional, for debugging; Python 3.12 or later only runs the tests.
 
-`scripts/bootstrap.sh` (or `just bootstrap`) builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly; only `as` and `ld` needed), checks the fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server:
+`scripts/bootstrap.sh` (or `just bootstrap`) builds the compiler from the committed seed for the machine (`bootstrap/seed.s` on x86-64, `bootstrap/seed-aarch64.s` on aarch64: its own assembly; only `as` and `ld` needed; on Windows, under Git Bash, `bootstrap/seed-windows.s` with LLVM's tools, and the programs are `.exe`), checks the fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server:
 
 ```bash
 scripts/bootstrap.sh
@@ -120,6 +120,10 @@ In a project, `build/myla` also has `build`, `test`, `check`, `fetch` (Git depen
 
 More in [Getting started](docs/Getting-started.md), including an examples reading order: every file in `examples/` is a runnable program.
 
+## The website
+
+[`website/`](website/) is Myla's home on the web: a landing page, the language docs and the standard library's reference generated from this repository, a playground, and a gamified course of 48 exercises in [`learn/`](learn/README.md), all running the real checker and interpreter in the browser (WebAssembly). CI deploys it to GitHub Pages from master. See [Website](docs/Architecture/Website.md).
+
 ## Editor support
 
 The VS Code extension in [`vscode-extension/myla`](vscode-extension/myla/README.md) starts the language server (diagnostics as you type, hover, go to definition, references, completion, semantic highlighting), runs and tests files, and debugs them with gdb through its own debug adapter; it uses the `build/myla` and `build/myla-lsp` of the repository that `scripts/bootstrap.sh` builds. A tree-sitter grammar, generated from [`grammar/myla.ebnf`](grammar/myla.ebnf), is in `editor/`. See [Editor tooling](docs/Architecture/Editor-tooling.md).
@@ -129,7 +133,7 @@ The VS Code extension in [`vscode-extension/myla`](vscode-extension/myla/README.
 | Part | Where | Role |
 | --- | --- | --- |
 | Self-hosted compiler | `selfhost/` | Written in Myla: lexer, parser, module loader, checker, a mid-level IR and its verifier, a native backend with the concurrency runtime, a tree-walking interpreter and the `#test` runner, the REPL and the project tool; `build/myla` |
-| Seed | `bootstrap/seed.s` | The compiler's own assembly, from which `scripts/bootstrap.sh` builds it with `as` and `ld` |
+| Seeds | `bootstrap/` | The compiler's own assembly for each machine (`seed.s`, `seed-aarch64.s`, `seed-windows.s`), from which `scripts/bootstrap.sh` builds it with `as` and `ld` (LLVM's tools on Windows) |
 | Tools in Myla | `tools/` | The language server (`tools/lsp/`) and the grammar generator (`tools/grammar/`) |
 | Standard library | `lib/` | Written in Myla (`lib/std/`), with the gdb pretty-printers (`lib/debug/`) |
 | Editor support | `vscode-extension/`, `editor/`, `grammar/` | The VS Code extension, the tree-sitter grammar, the grammar description |
@@ -138,17 +142,17 @@ The architecture, from the module loader to the native runtime, is described in 
 
 ## Status
 
-Version 1.0, self-hosting, was reached in June 2026. Since then: the mid-level IR, guaranteed tail calls, concurrency with actors and a work-stealing runtime, the project tool, the tools rewritten in Myla, and in November 2026 the bootstrap from a committed seed, which retired the Python toolchain (D101), the runtime rewritten in Myla, and backends of Myla's own for Linux on aarch64 and for WebAssembly (WASI, and a page API for the checker and interpreter). The review of October 2026 and what came of it are on [Review 2026-10](docs/Project/Review-2026-10.md); open bugs are on [Known issues](docs/Project/Known-issues.md).
+Version 1.0, self-hosting, was reached in June 2026. Since then: the mid-level IR, guaranteed tail calls, concurrency with actors and a work-stealing runtime, the project tool, the tools rewritten in Myla, and in November 2026 the bootstrap from a committed seed, which retired the Python toolchain (D101), the runtime rewritten in Myla, backends of Myla's own for Linux on aarch64 and for WebAssembly (WASI, and a page API for the checker and interpreter), x86-64 Windows as a target that also bootstraps on Windows itself (D209 to D216), and the website (D208). The review of October 2026 and what came of it are on [Review 2026-10](docs/Project/Review-2026-10.md); open bugs are on [Known issues](docs/Project/Known-issues.md).
 
-Next on the [Roadmap](docs/Project/Roadmap.md), from the [reflection on the two new backends](docs/Project/Reflection-2026-11.md): the IR and the targets' capabilities specified, the backend glue and the platform interface consolidated and every suite run on every target; then macOS, Windows and a C FFI.
+Next on the [Roadmap](docs/Project/Roadmap.md): a target description and one backend interface, an object model instead of assembly text and a register allocator for every target; then macOS and a C FFI.
 
 ## Working on Myla
 
 ```bash
-scripts/test.sh fast        # the quick burn tests, about a minute once the tools are cached
-scripts/test.sh             # every burn test, the self-hosting gates included (about 5 minutes)
+scripts/test.sh fast        # the quick burn tests, about 15 minutes on 4 cores (2026-11-18, 2a1a69c)
+scripts/test.sh             # every burn test, the self-hosting gates included (about 34 minutes, 2026-11-18, 2a1a69c)
 scripts/bootstrap.sh        # after changing selfhost/: the fixed point
-scripts/update-seed.sh      # after changing the compiler: a new seed (CI fails on a stale one)
+scripts/check-seed.sh       # the seed still bootstraps the sources; a new one only when it can't (D207)
 ```
 
 - **Tests.** Burn tests (Python `unittest` modules in `tests/burn/`) run every example in the interpreter and natively, pin the error corpus (`examples/errors/`, one rejected program per diagnostic, its message and, where no recording covers it, its whole rendered diagnostic), and compare the lexer, parser, checker, interpreter and native code with the answers the retired Python toolchain gave, recorded before it was removed, on the files those cover. See [Testing](docs/Development/Testing.md).

@@ -131,17 +131,28 @@ def _describe(arg, dirs: list[str]):
         path = os.path.abspath(arg)
         with open(path, "rb") as fh:
             data = fh.read()
+        if os.name == "nt":
+            # a program the test wrote in text mode has CRLF there: the same
+            # text as the recording's LF, so keyed as it (MYLA-926)
+            data = data.replace(b"\r\n", b"\n")
         for r in {_REPO, os.path.realpath(_REPO)}:   # as the recording checkout saw it
             data = data.replace(r.encode(), RECORDED_REPO.encode())
         digest = hashlib.sha256(data).hexdigest()
         if path.startswith(RECORDED_CORPUS + os.sep):
             # a corpus file as it was recorded, before a rewrite (MYLA-240)
-            where = os.path.relpath(path, RECORDED_CORPUS)
-        elif path.startswith(_REPO + os.sep) and "/build/" not in path:
-            where = os.path.relpath(path, _REPO)
+            where = os.path.relpath(path, RECORDED_CORPUS).replace(os.sep, "/")
+        elif path.startswith(_REPO + os.sep) and "/build/" not in "/" + os.path.relpath(path, _REPO).replace(os.sep, "/"):
+            # (the path below the repository: a checkout inside a directory
+            # named build is still the repository, MYLA-800)
+            # (keyed with `/`, as recorded, on Windows too: MYLA-926)
+            where = os.path.relpath(path, _REPO).replace(os.sep, "/")
         else:
             where = os.path.basename(path)
-            for d in {os.path.dirname(path), os.path.dirname(os.path.realpath(path))}:
+            # the directory as given first, then as resolved: a list, so the
+            # marks are numbered the same on every machine (on Windows the two
+            # differ, `RUNNER~1` and `runneradmin`, and a set's order isn't
+            # fixed, MYLA-926)
+            for d in (os.path.dirname(path), os.path.dirname(os.path.realpath(path))):
                 if d not in dirs:
                     dirs.append(d)
         return {"file": where, "sha256": digest}
@@ -407,6 +418,12 @@ def golden(name: str):
             named = [(d, f"\x00DIR{i}\x00") for i, d in enumerate(dirs)]
             named += [(r, "\x00REPO\x00") for r in {_REPO, os.path.realpath(_REPO)}]
             marks = sorted(named, key=lambda m: -len(m[0]))
+            # put back as myla's messages write a path, which is where the
+            # answers have them (`  --> \x00REPO\x00/examples/errors/x.my:2:5`):
+            # with `/` on Windows (MYLA-931), not as the half-`\` path
+            # `D:\a\myla\myla/examples/…` that nothing prints (MYLA-926)
+            from tests.burn._native import shown   # (here: _native imports this module)
+            back = [(m, shown(d)) for d, m in marks]
             if RECORD:
                 value = fn(*args, **kwargs)
                 store[key] = _swap(_encode(value), marks)
@@ -417,13 +434,13 @@ def golden(name: str):
                 # a question about a program rewritten since the recording
                 # (MYLA-240): the original's answer, its positions moved
                 alias = _aliases(name)[key]
-                value = _decode(_swap(store[alias["to"]], [(m, d) for d, m in marks]))
+                value = _decode(_swap(store[alias["to"]], back))
                 return translate(value, alias["lines"], name)
             if key not in store:
                 if _changing_file(list(args) + list(kwargs.values())):
                     raise unittest.SkipTest(f"{name}: {key_obj[0]!r:.120} changed after the Python toolchain was retired")
                 raise NoGolden(f"no recorded answer of the retired Python toolchain for {name}{tuple(key_obj[0])!r:.300}: "
                                "the question is new or its file changed; give the test an expectation of its own")
-            return _decode(_swap(store[key], [(m, d) for d, m in marks]))
+            return _decode(_swap(store[key], back))
         return answer
     return wrap

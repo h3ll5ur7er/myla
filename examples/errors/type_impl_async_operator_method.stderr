@@ -1,0 +1,5 @@
+type error: method 'add' in impl of trait 'Add' for 'V' can't be 'async': the trait's method isn't, and it is called without 'await'
+  --> examples/errors/type_impl_async_operator_method.my:15:5
+   |
+15 |     async fun add(self, k: V) -> V {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

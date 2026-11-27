@@ -1,0 +1,6 @@
+type error: 'clamp_to' reports its caller's position ('#track_caller'): it can only be called
+  --> examples/errors/type_track_caller_partial.my:13:21
+   |
+13 |     let f = clamp_to(_, 10)
+   |             ^^^^^^^^^^^^^^^
+help: call it in a lambda: '(…) => clamp_to(…)'

@@ -3,9 +3,16 @@
 # standard-library unittests. The Ubuntu runners have both; the burn job also
 # installs Node, for the
 # tree-sitter CLI of the editor-grammar tests and the VS Code extension's
-# server choice, and gdb for the debug-information tests. The runners are
+# server choice, gdb and lldb for the debug-information tests, and Go for the oracle
+# of test_regex. On a push to master the generated job runs the generated
+# tests at full size (D262). The runners are
 # pinned (ubuntu-24.04: its python3 is 3.12, which gdb embeds). The vscode-extension job typechecks, lints and tests the VS
-# Code extension and uploads its .vsix. See docs/Development/Testing.md.
+# Code extension and uploads its .vsix. On a push to master the bootstrap
+# jobs upload the commit's seeds and each machine's myla and myla-lsp (D207),
+# and the windows job, which runs on windows-latest what windows-build builds
+# for x86_64-windows on Linux (MYLA-708, D213), myla.exe and myla-lsp.exe.
+# bootstrap-windows bootstraps the toolchain on Windows itself, under Git
+# Bash with LLVM (MYLA-709, D214). See docs/Development/Testing.md.
 name: CI
 
 on:
@@ -14,15 +21,20 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A pull request's newer push cancels its older run. A push to master never
+# does: each master commit's run is a group of its own, so it keeps its seeds
+# and tools (D207), which a cancelled run wouldn't upload (MYLA-800)
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   burn:
     name: Burn tests (native builds, error corpus, self-hosting gates)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # the burn step takes about 22 minutes; the runner's apt took 18 to 37
+    # minutes to install the tools on 2026-11-18 (PR #81), past 30 in all
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
       # the runner's own python3 (3.12), not actions/setup-python: that sets
@@ -33,14 +45,22 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: editor/tree-sitter-myla/package-lock.json
-      - name: gdb for the debug-information tests (MYLA-156); clang, lld and qemu-user for the aarch64 ones (MYLA-163)
+      # the oracle of test_regex's Go half (MYLA-555): without go it skipped
+      # here unnoticed; test_regex.GoOracle now fails without it
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: gdb for the debug-information tests (MYLA-156), lldb for their Windows one (MYLA-757); clang, lld and qemu-user for the aarch64 ones (MYLA-163); llvm-dlltool and Wine for the Windows ones (MYLA-702)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gdb clang lld qemu-user
+          sudo apt-get install -y -qq gdb lldb clang lld llvm qemu-user wine64
           gdb --version | head -1
+          lldb --version | head -1
           clang --version | head -1
           ld.lld --version | head -1
           qemu-aarch64 --version | head -1
+          /usr/lib/wine/wine64 --version
       # the self-hosted tools the burn tests build, keyed on every source
       # that can change them (as tests/burn/_tools.py's own hash is)
       - uses: actions/cache@v6
@@ -56,6 +76,7 @@ jobs:
           python3 --version
           as --version | head -1
           ld --version | head -1
+          go version
           editor/tree-sitter-myla/node_modules/.bin/tree-sitter --version
       - name: Burn tests
         # a target whose tools are missing fails instead of skipping (MYLA-268)
@@ -63,17 +84,99 @@ jobs:
           MYLA_REQUIRE_TARGETS: "1"
         run: python3 -m unittest discover -s tests/burn -t . -v
 
+  burn-arm64:
+    # the burn suites natively on an aarch64 runner (MYLA-926 step 1, D296):
+    # tests run on a native runner, an emulator only for local experiments.
+    # Beside the targets job's aarch64-linux suites under qemu until this has
+    # been green a while, then those go. The tests that read x86-64 code key
+    # on the host (tests/burn/_native.py's READS_X86) and are skipped here;
+    # no MYLA_REQUIRE_TARGETS, which asks for qemu and Wine
+    name: Burn tests on aarch64 (native, ubuntu-24.04-arm)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editor/tree-sitter-myla/package-lock.json
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: gdb for the debug-information tests (MYLA-156); clang and lld for the wasm32 ones (MYLA-158), llvm-dlltool and lld-link for the Windows builds some read (MYLA-702)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gdb clang lld llvm
+          gdb --version | head -1
+          clang --version | head -1
+          ld.lld --version | head -1
+      - uses: actions/cache@v6
+        with:
+          path: build/test-tools
+          key: test-tools-${{ runner.arch }}-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed-aarch64.s') }}
+      - name: tree-sitter CLI for the editor-grammar tests (MYLA-77)
+        run: |
+          npm ci --no-audit --no-fund --ignore-scripts --prefix editor/tree-sitter-myla
+          cd editor/tree-sitter-myla/node_modules/tree-sitter-cli && node install.js
+      - name: Toolchain versions
+        run: |
+          uname -m
+          python3 --version
+          as --version | head -1
+          ld --version | head -1
+          go version
+          editor/tree-sitter-myla/node_modules/.bin/tree-sitter --version
+      # every suite of tests/burn, in parallel, each within its time limit,
+      # its failures printed as it ends (a hang fails its suite, named, rather
+      # than the job at its limit with nothing said)
+      - name: Burn tests
+        run: python3 scripts/test-target.py host
+
+  generated:
+    # the generated tests (MYLA-555) at full size on every push to master
+    # (D262): every case of each generator, where a pull request's burn job
+    # runs a sample drawn from the fixed seed 555. The seed is the run's
+    # number, named in the step and in a failure (MYLA_GENERATED_SEED=<n>
+    # with MYLA_GENERATED=full reproduces it)
+    name: The generated tests at full size (master only)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    # the five modules took 24 minutes at full size on a 4-core machine
+    # shared with another suite (21.5 of them extremes'; 2026-11-18,
+    # 1f0ddd8), the sample 74 seconds: 60 leaves room for a slower runner
+    # and a bootstrap of build/test-tools on a cache miss
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: build/test-tools
+          key: test-tools-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed.s') }}
+      - name: The generated tests, every case (seed ${{ github.run_number }})
+        env:
+          MYLA_GENERATED: full
+          MYLA_GENERATED_SEED: ${{ github.run_number }}
+        run: >-
+          python3 -m unittest -v tests.burn.test_generated_reads tests.burn.test_generated_writes
+          tests.burn.test_generated_widths tests.burn.test_generated_deep_copies tests.burn.test_generated_extremes
+
   targets:
     # the parity, runtime-error, error-corpus, I/O and feature suites built
-    # for each other target and run under qemu-aarch64 or Node, with the
-    # exceptions tests/burn/_targets.py lists (MYLA-268)
+    # for each other target and run under qemu-aarch64, Node or Wine
+    # (MYLA-702, D213), with the exceptions tests/burn/_targets.py lists
+    # (MYLA-268): on Windows what is still `Unsupported` (D210)
     name: Burn suites on ${{ matrix.target }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # about 10 minutes of suites; the runner's apt took up to 37 minutes to
+    # install Wine on 2026-11-18 (PR #81: cancelled at 45 eight minutes
+    # into its suites)
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        target: [aarch64-linux, wasm32-wasi]
+        target: [aarch64-linux, wasm32-wasi, x86_64-windows]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -83,6 +186,11 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld qemu-user
+      - name: llvm-dlltool and Wine (Ubuntu's wine64 puts it at /usr/lib/wine/wine64, which scripts/test-target.py finds)
+        if: matrix.target == 'x86_64-windows'
+        run: |
+          sudo apt-get install -y -qq llvm wine64
+          /usr/lib/wine/wine64 --version
       - uses: actions/cache@v6
         with:
           path: build/test-tools
@@ -132,7 +240,7 @@ jobs:
       # from the seed: as and ld only, no Python (MYLA-218)
       - name: Build stage 0–3 from bootstrap/seed.s and compare stage2.s with stage3.s
         run: scripts/bootstrap.sh build
-      - name: The seed is the current compiler (else run scripts/update-seed.sh and commit it)
+      - name: The seed bootstraps the sources and the embedded library is current (D207)
         run: scripts/check-seed.sh build
       - name: Self-hosted compiler builds and runs an example
         run: |
@@ -140,6 +248,30 @@ jobs:
           as --64 -o build/hello.o build/hello.s
           ld -o build/hello build/hello.o
           build/hello
+      # each master commit's seeds, for every target, and this machine's
+      # tools, as workflow artifacts (D207, MYLA-629): the seeds a commit
+      # bootstraps from stay committed, as artifacts expire; tagged releases
+      # can replace these later. The tools go in a tarball, which keeps
+      # their executable bit (an artifact's zip doesn't)
+      - name: The seeds of this commit and the x86-64 tools (master only)
+        if: github.event_name == 'push'
+        run: |
+          scripts/update-seed.sh --out build/artifacts/seeds
+          tar -czf build/artifacts/myla-x86_64-linux.tar.gz -C build myla myla-lsp
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: myla-seeds-${{ github.sha }}
+          path: build/artifacts/seeds/*.s
+          if-no-files-found: error
+          retention-days: 90
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: myla-x86_64-linux-${{ github.sha }}
+          path: build/artifacts/myla-x86_64-linux.tar.gz
+          if-no-files-found: error
+          retention-days: 90
 
   bootstrap-arm64:
     # what a Raspberry Pi 4 with a 64-bit OS does (MYLA-276, D127): `just
@@ -156,8 +288,20 @@ jobs:
           sudo apt-get install -y -qq just
       - name: just bootstrap (bootstrap/seed-aarch64.s, stages 0–3, the fixed point)
         run: just bootstrap
-      - name: The seeds are the current compiler (the x86-64 one written by this aarch64 compiler)
+      - name: The aarch64 seed bootstraps the sources and the embedded library is current (D207)
         run: scripts/check-seed.sh build
+      - name: This machine's tools (master only, D207)
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p build/artifacts
+          tar -czf build/artifacts/myla-aarch64-linux.tar.gz -C build myla myla-lsp
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: myla-aarch64-linux-${{ github.sha }}
+          path: build/artifacts/myla-aarch64-linux.tar.gz
+          if-no-files-found: error
+          retention-days: 90
       - name: Every example built for this machine gives what the interpreter gives
         run: |
           fail=0
@@ -184,6 +328,192 @@ jobs:
       # reorder (MYLA-297)
       - name: The runtime's litmus programs, 1,000 runs each on 4 and 16 workers
         run: python3 scripts/stress-native.py --runs 1000 --workers 4,16 --only t23_results_seen_by_their_awaiter --only t24_cancelled_sleepers --only t25_timers_fire --only t26_tasks_yield --only t27_children_read_as_they_write
+
+  burn-windows:
+    # the burn suites natively on Windows (MYLA-926 step 2, D296): every
+    # suite of tests/burn, run on windows-latest against Windows' own
+    # programs and tools (the toolchain bootstrapped from
+    # bootstrap/seed-windows.s with the image's LLVM), through
+    # `scripts/test-target.py host`; a test Windows can't run says so
+    # (`linux_only` with its reason). Beside the Wine job until this has
+    # been green a while
+    name: Burn suites on Windows (native, windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    # Python's UTF-8 mode: the tests' text pipes and files are UTF-8, as on
+    # Linux, not the ANSI code page (cp1252)
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: The checkout's line endings are LF
+        run: |
+          if grep -l $'\r' selfhost/*.my lib/std/*.my tests/burn/*.py bootstrap/seed-windows.s; then
+            echo "::error::CRLF line endings in the checkout (core.autocrlf against .gitattributes)"
+            exit 1
+          fi
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: LLVM's clang, llvm-dlltool and lld-link on PATH; Python
+        run: |
+          llvm="/c/Program Files/LLVM/bin"
+          if [ -d "$llvm" ]; then
+            cygpath -w "$llvm" >> "$GITHUB_PATH"
+            export PATH="$llvm:$PATH"
+          fi
+          for tool in clang llvm-dlltool lld-link python node; do
+            command -v "$tool"
+            version="$("$tool" --version 2>&1 || true)"
+            echo "${version%%$'\n'*}"
+          done
+      - uses: actions/cache@v6
+        with:
+          path: build/test-tools
+          key: test-tools-${{ runner.os }}-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed-windows.s') }}
+      - name: Every burn suite, natively
+        run: python scripts/test-target.py host
+
+  bootstrap-windows:
+    # the bootstrap on Windows itself (MYLA-709, D214), as bootstrap-arm64
+    # is on aarch64: Git Bash runs scripts/bootstrap.sh from
+    # bootstrap/seed-windows.s with the image's LLVM (clang, llvm-dlltool,
+    # lld-link, D211; GNU as and ld aren't there), to the fixed point and
+    # build/myla.exe and build/myla-lsp.exe; then check-seed.sh, and every
+    # example built by build/myla.exe against what its interpreter gives.
+    # The tools the windows job publishes stay those built on Linux (D233)
+    name: Bootstrap on Windows (Git Bash, LLVM)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      # .gitattributes checks text out with LF whatever core.autocrlf says;
+      # a CR would change what the compiler reads and writes
+      - name: The checkout's line endings are LF
+        run: |
+          if grep -l $'\r' selfhost/*.my lib/std/*.my scripts/*.sh bootstrap/seed-windows.s; then
+            echo "::error::CRLF line endings in the checkout (core.autocrlf against .gitattributes)"
+            exit 1
+          fi
+      # the image's LLVM, ahead of any other clang on PATH (C:\mingw64,
+      # Strawberry Perl)
+      - name: LLVM's clang, llvm-dlltool and lld-link on PATH
+        run: |
+          llvm="/c/Program Files/LLVM/bin"
+          if [ -d "$llvm" ]; then
+            cygpath -w "$llvm" >> "$GITHUB_PATH"
+            export PATH="$llvm:$PATH"
+          fi
+          uname -s
+          for tool in clang llvm-dlltool lld-link; do
+            command -v "$tool"
+            version="$("$tool" --version 2>&1 || true)"
+            echo "${version%%$'\n'*}"
+          done
+      - name: scripts/bootstrap.sh (bootstrap/seed-windows.s, stages 0–3, the fixed point)
+        run: scripts/bootstrap.sh build
+      - name: The Windows seed bootstraps the sources and the embedded library is current (D207)
+        run: scripts/check-seed.sh build
+      - name: Every example built by build/myla.exe gives what its interpreter gives
+        run: |
+          fail=0
+          for f in examples/*.my; do
+            name=$(basename "$f" .my)
+            build/myla.exe build "$f" -o "build/ex_$name.exe" || { echo "build failed: $f"; fail=1; continue; }
+            want=$(build/myla.exe run "$f" < /dev/null 2>&1; echo "exit $?")
+            got=$("build/ex_$name.exe" < /dev/null 2>&1; echo "exit $?")
+            [ "$want" = "$got" ] || { echo "differs: $f"; diff <(echo "$want") <(echo "$got") | head -20 || true; fail=1; }
+          done
+          exit $fail
+
+  windows-build:
+    # what the windows job runs, built here for x86_64-windows (D214):
+    # the examples, the concurrency stress programs, test_windows.py's
+    # programs (its process cases, FramesOnWindows' 64 KiB frame, MYLA-717),
+    # console cases, a read of the standard input with a time limit,
+    # myla.exe and myla-lsp.exe, and what each must print and exit with
+    # (the examples' from the interpreter here), in one artifact (MYLA-708)
+    name: Windows programs, built on Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: clang, lld (lld-link) and llvm (llvm-dlltool)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm
+      # the myla that builds them, the burn tests' own (no bootstrap when cached)
+      - uses: actions/cache@v6
+        with:
+          path: build/test-tools
+          key: test-tools-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed.s') }}
+      - name: The programs and their cases
+        run: python3 scripts/windows-runner.py build build/windows-bundle
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-bundle
+          path: build/windows-bundle
+          if-no-files-found: error
+          retention-days: 3
+
+  windows:
+    # what Wine can't prove (D213), as bootstrap-arm64 is for aarch64: the
+    # programs of windows-build run on Windows itself, each against what it
+    # must print and exit with (scripts/windows-runner.py run; the targets
+    # job runs the burn suites under Wine). Windows commits a stack as it
+    # grows (MYLA-717's probes), a pipe is a named pipe (a read with a time
+    # limit), processes and the console are Windows' own; and myla.exe
+    # builds a program here with the image's LLVM (clang, lld-link,
+    # llvm-dlltool; skipped, and said, where one is missing). On a push to
+    # master it uploads myla.exe and myla-lsp.exe (D207)
+    name: Windows (the programs built on Linux, myla.exe)
+    needs: windows-build
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: windows-bundle
+          path: windows-bundle
+      - name: Every case, the stress programs' 3 times on 1, 4 and 16 workers
+        run: python scripts/windows-runner.py run windows-bundle --runs 3
+      # rates, for the log (MYLA-798): process/many-children 10 times on 4
+      # and 16 workers, each run's result and the system's commit charge
+      # meanwhile, then "rate … N of 10 right" (H12: once 393 of 400 on 16
+      # workers, the real runner only); net/sockets-and-children's times on
+      # 1, 4 and 16 workers (MYLA-754's measurement). It reports and never
+      # fails the job: the step above is the verdict
+      - name: Rates (many-children, sockets-and-children), for the log
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 12
+        run: >-
+          python scripts/windows-runner.py run windows-bundle --runs 10 --tally
+          --only process/many-children --only process/a-child-s-commit --only net/sockets-and-children
+      # a failed case's directory is kept, with what its programs left there
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: windows-failed-cases
+          path: windows-bundle/work
+          if-no-files-found: ignore
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: myla-x86_64-windows-${{ github.sha }}
+          path: |
+            windows-bundle/tools/myla.exe
+            windows-bundle/tools/myla-lsp.exe
+          if-no-files-found: error
+          retention-days: 90
 
   vscode-extension:
     name: VS Code extension (typecheck, lint, tests, .vsix)
@@ -231,3 +561,94 @@ jobs:
           name: myla-vscode-extension
           path: vscode-extension/myla/*.vsix
           if-no-files-found: error
+
+  website:
+    # the website (D208, MYLA-159): play.wasm, the docs from the wiki, the
+    # reference from lib/std (tools/doc) and the course from learn/, built
+    # for GitHub Pages (/myla/); the content pipeline's and the app's unit
+    # tests; the built site in Chromium. On a push to master the pages job
+    # deploys it. The course's exercises are checked by the burn job
+    # (tests/burn/test_website.py).
+    name: Website (unit tests, build, the site in a browser)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v7
+      - name: clang and lld (wasm-ld, for play.wasm)
+        working-directory: .
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld
+      - name: Bootstrap build/myla
+        working-directory: .
+        run: scripts/bootstrap.sh build
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Unit tests (the content pipeline, the gamification, the editor's Myla mode)
+        run: npm test
+      - name: Build for GitHub Pages
+        run: npm run build:pages
+      - name: Every exercise in play.wasm, as the learner's browser runs it
+        run: npm run check-course
+      - name: Playwright's Chromium
+        run: npx playwright install --with-deps chromium
+      - name: The built site in Chromium
+        env:
+          CI: "1"
+        run: npm run e2e
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push'
+        with:
+          name: website
+          path: website/dist
+          retention-days: 7
+
+  pages:
+    # master only: the site of the website job, with the master build's tools
+    # and the VS Code extension under downloads/ (MYLA-635)
+    name: Deploy the website to GitHub Pages
+    if: github.event_name == 'push'
+    needs: [website, bootstrap, bootstrap-arm64, vscode-extension]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # master's runs aren't cancelled (above): one deploy at a time
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: website
+          path: site
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: myla-*-linux-${{ github.sha }}
+          path: artifacts
+      - uses: actions/download-artifact@v7
+        with:
+          name: myla-vscode-extension
+          path: artifacts
+      - name: The downloads and their manifest
+        run: node website/scripts/downloads.mjs artifacts site/downloads ${{ github.sha }}
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

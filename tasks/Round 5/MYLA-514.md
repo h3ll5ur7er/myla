@@ -2,7 +2,7 @@
 id: MYLA-514
 title: "`map key … not found` names an imported type with the loader's module id (`lib$Q { … }`)"
 type: bug
-status: review
+status: done
 priority: low
 labels: [interpreter, lowering, round-5]
 ---
@@ -44,3 +44,7 @@ fun main() {
 - Test first: `test_runtime_errors_name_imported_key_types_as_written` ([[tests/burn/test_compiler_parity.py]]) has a key of an imported struct, unit variant, variant with an imported struct and a list in its payload, a struct of the program's own holding an imported struct and a tuple with an imported variant, a list of an imported struct, an `Option` of an imported enum, and a string key `"lib$Q"`; each checks the interpreter's first line and that the binary's stderr is the interpreter's (D183). Before: 6 of 7 failed (`map key lib$Q { a: 1, s: "it's" } not found`, the string key passed); after: all pass on x86-64, aarch64 (`MYLA_TEST_TARGET=aarch64-linux`) and wasm32 (`MYLA_TEST_TARGET=wasm32-wasi`).
 - `#test` cases: `written_type_name` (3), `as_written` (2).
 - **Suites** (both tasks together, at the lane's tip): `scripts/test.sh fast` 855 tests OK (3 skipped); `tests.burn.test_compiler_parity`, `test_selfhost_interp`, `test_selfhost_cases`, `test_map_remove`, `test_overflow` 317 OK; on aarch64 and wasm32 (`scripts/test-target.py`) `test_compiler_parity`, `test_error_corpus`, `test_overflow`, `test_map_remove`, `test_selfhost_codegen` all pass; `scripts/test.sh` (all) 1,533 tests, one failure, `test_a_counting_loop_below_a_length_indexes_unchecked`, which counted three element addresses for `bs[i].x += bs[i].v` where [[MYLA-506]]'s single lookup leaves two (both still unchecked): its expectation updated, it passes. `scripts/bootstrap.sh`: byte-identical fixed point (23,758,785 bytes); `selfhost/embedded_std.my` unchanged (no `lib/` change).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

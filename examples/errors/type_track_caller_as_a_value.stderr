@@ -1,0 +1,6 @@
+type error: 'positive' reports its caller's position ('#track_caller'): it can only be called
+  --> examples/errors/type_track_caller_as_a_value.my:13:27
+   |
+13 |     let f: (int) -> int = positive
+   |                           ^^^^^^^^
+help: call it in a lambda: '(…) => positive(…)'

@@ -2,9 +2,11 @@
 
 Only the binaries are installed, in a prefix of their own, and found through
 a symbolic link on the PATH, the way the owner installed `myla` into
-/usr/bin: no repository, no `lib/`, no `--stdlib`. `myla new`, `run`, `test`,
-`build` and `build -g` work there, with the standard library the binary
-carries; `MYLA_STDLIB` and `--stdlib` replace it with a directory. The
+/usr/bin: no repository, no `lib/`, no `--stdlib` (on Windows the `.exe`s
+themselves are on the PATH, a link being a privilege there). `myla new`,
+`run`, `test`, `build` and `build -g` work there, with the standard library
+the binary carries; `MYLA_STDLIB` and `--stdlib` replace it with a
+directory. The
 language server finds the standard library too: hover and completion know
 `std.io`, and a definition in it opens as a `myla-std:` document whose text
 the server gives (`myla/stdSource`)."""
@@ -15,7 +17,7 @@ import tempfile
 import unittest
 
 from tests.burn._lsp_scenarios import _Client, _uri
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._native import CAN_BUILD_NATIVE, EXE, HOST_TARGET, ON_WINDOWS, SKIP_REASON
 from tests.burn._tools import STDLIB_ROOT, myla_tool, selfhost_tool
 
 _MAIN = """from std.io import println
@@ -52,23 +54,33 @@ class Installed(unittest.TestCase):
         # the binaries in a prefix of their own, linked into a bin/ on the PATH
         opt = os.path.join(cls.tmp, "opt", "myla")
         os.makedirs(opt)
-        shutil.copy(selfhost_tool("main"), os.path.join(opt, "myla"))
-        shutil.copy(myla_tool("tools/lsp/main.my", "lsp"), os.path.join(opt, "myla-lsp"))
-        cls.bin = os.path.join(cls.tmp, "bin")
-        os.makedirs(cls.bin)
-        for name in ("myla", "myla-lsp"):
-            os.symlink(os.path.join(opt, name), os.path.join(cls.bin, name))
+        shutil.copy(selfhost_tool("main"), os.path.join(opt, "myla" + EXE))
+        shutil.copy(myla_tool("tools/lsp/main.my", "lsp"), os.path.join(opt, "myla-lsp" + EXE))
+        if ON_WINDOWS:
+            # (the prefix itself on the PATH, which keeps the system's: the
+            # build's clang, llvm-dlltool and lld-link are on it, MYLA-926)
+            cls.bin = opt
+            path = os.environ.get("PATH", "")
+        else:
+            cls.bin = os.path.join(cls.tmp, "bin")
+            os.makedirs(cls.bin)
+            for name in ("myla", "myla-lsp"):
+                os.symlink(os.path.join(opt, name), os.path.join(cls.bin, name))
+            path = "/usr/bin" + os.pathsep + "/bin"
         cls.work = os.path.join(cls.tmp, "work")
         os.makedirs(cls.work)
         cls.env = {k: v for k, v in os.environ.items() if k not in ("MYLA_STDLIB", "HOME_OF_TEST")}
-        cls.env["PATH"] = cls.bin + os.pathsep + "/usr/bin" + os.pathsep + "/bin"
+        cls.env["PATH"] = cls.bin + os.pathsep + path
+        # `myla` as the PATH finds it: on Windows a child's PATH isn't searched
+        # for the program it runs, its parent's is
+        cls.found = shutil.which("myla", path=cls.env["PATH"]) if ON_WINDOWS else "myla"
 
     @classmethod
     def tearDownClass(cls) -> None:
         shutil.rmtree(cls.tmp, True)
 
     def myla(self, *argv, cwd=None, env=None):
-        return subprocess.run(["myla", *argv], cwd=cwd or self.work, env=env or self.env, capture_output=True,
+        return subprocess.run([self.found, *argv], cwd=cwd or self.work, env=env or self.env, capture_output=True,
                               text=True)
 
     def project(self, name):
@@ -88,13 +100,15 @@ class Installed(unittest.TestCase):
         self.assertIn("PASS  greeting #1", tested.stdout)
         built = self.myla("build", cwd=root)
         self.assertEqual(built.returncode, 0, built.stderr)
-        exe = subprocess.run([os.path.join(root, "build", "hi")], capture_output=True, text=True, env=self.env)
+        exe = subprocess.run([os.path.join(root, "build", "hi" + EXE)], capture_output=True, text=True, env=self.env)
         self.assertEqual((exe.stdout, exe.returncode), (_WANT, 0))
 
+    @unittest.skipUnless(HOST_TARGET in ("x86_64-linux", "x86_64-windows"),
+                         "-g is x86-64 Linux's and Windows' (Language/Targets, MYLA-259, MYLA-757)")
     def test_a_debug_build_carries_the_pretty_printers(self):
         root = self.project("dbg")
         path = os.path.join(root, "src", "main.my")
-        exe = os.path.join(self.work, "dbg_g")
+        exe = os.path.join(self.work, "dbg_g" + EXE)
         built = self.myla("build", "-g", path, "-o", exe)
         self.assertEqual(built.returncode, 0, built.stderr)
         with open(exe, "rb") as fh:
@@ -134,7 +148,7 @@ class Installed(unittest.TestCase):
         self.assertEqual(self.myla("run", path, env=dict(self.env, MYLA_STDLIB="")).stdout, "x\n")
 
     def test_the_language_server_knows_the_standard_library(self):
-        client = _Client([os.path.join(self.bin, "myla-lsp")])
+        client = _Client([os.path.join(self.bin, "myla-lsp" + EXE)])
         self.addCleanup(client.close)
         rid = client.send("initialize", {"processId": None, "rootUri": _uri(self.work), "capabilities": {}},
                           request=True)

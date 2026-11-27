@@ -1,0 +1,6 @@
+//~ type error: the entry point has no caller: '#track_caller' can't stand on it
+// Nothing calls `main` but the program's start (MYLA-435).
+#track_caller
+fun main() {
+    print(1)
+}

@@ -84,6 +84,9 @@ pub enum YamlErrorKind {
     Unexpected,
     // Collections nested more than 100 deep
     TooDeep,
+    // An integer in base 8 or 16 (`0o…`, `0x…`) outside int64's range, which
+    // a float would hold only roughly (D184)
+    OutOfRange,
 }
 
 // An error and where it is: line and column count from 1, the column in
@@ -121,6 +124,7 @@ impl YamlError {
             BlockScalarHeader => "an invalid block scalar header"
             Unexpected => "an unexpected character"
             TooDeep => "collections nested too deeply"
+            OutOfRange => "an integer in base 8 or 16 outside int64's range"
         }
     }
 }
@@ -153,12 +157,14 @@ struct Parser {
 }
 
 // A scalar or a flow collection: its value, and a scalar's text (a key is
-// its text, not its value).
+// its text, not its value). `range` is the offset of a plain scalar whose
+// value is out of range, an error only where it is a value; else -1.
 struct Item {
     v: Yaml,
     text: str,
     scalar: bool,
     quoted: bool,
+    range: int,
 }
 
 // The entries of a mapping, with an index of their keys once there are many.
@@ -209,6 +215,15 @@ fun new_entries() -> Entries {
 #test("a: b: c")[Err(YamlError { kind: YamlErrorKind.InlineCollection, line: 1, col: 5 })]
 #test("a:\n  b: [1]\n   c: 2\n")[Err(YamlError { kind: YamlErrorKind.Indentation, line: 3, col: 4 })]
 #test("é: \"ü")[Err(YamlError { kind: YamlErrorKind.UnclosedQuote, line: 1, col: 4 })] // columns count characters
+#test("mask: 0xFFFFFFFFFFFFFFFF\n")[Err(YamlError { kind: YamlErrorKind.OutOfRange, line: 1, col: 7 })] // the review's B5
+#test("mask: 0x7FFFFFFFFFFFFFFF\n")[Ok(Yaml.Map([("mask", Yaml.Int(9223372036854775807i64))]))]
+#test("- 0o7777777777777777777777")[Err(YamlError { kind: YamlErrorKind.OutOfRange, line: 1, col: 3 })]
+#test("[1, 0x10000000000000000]")[Err(YamlError { kind: YamlErrorKind.OutOfRange, line: 1, col: 5 })]
+#test("{a: 0x8000000000000000}")[Err(YamlError { kind: YamlErrorKind.OutOfRange, line: 1, col: 5 })]
+#test("0x8000000000000000")[Err(YamlError { kind: YamlErrorKind.OutOfRange, line: 1, col: 1 })]
+#test("0xFFFFFFFFFFFFFFFF: a")[Ok(Yaml.Map([("0xFFFFFFFFFFFFFFFF", Yaml.Str("a"))]))] // a key is its text
+#test("{0x10000000000000000: 1}")[Ok(Yaml.Map([("0x10000000000000000", Yaml.Int(1i64))]))]
+#test("n: 9223372036854775808")[Ok(Yaml.Map([("n", Yaml.Float(9223372036854775808.0))]))] // a decimal one is a float, as in std.json
 pub fun parse(text: str) -> Result<Yaml, YamlError> {
     var p = Parser { s: text, i: 0, line_start: 0, depth: 0 }
     let bad = control_at(text)
@@ -291,6 +306,12 @@ fun is_flow_indicator(c: uint8) -> bool {
 }
 
 impl Parser {
+    // The value of `item`, or the error of one out of range.
+    fun value(self, item: Item) -> Result<Yaml, YamlError> {
+        if item.range >= 0 { return Err(self.error(YamlErrorKind.OutOfRange, item.range)) }
+        return Ok(item.v)
+    }
+
     // An error at byte offset `at`.
     fun error(self, kind: YamlErrorKind, at: int) -> YamlError {
         var line = 1
@@ -448,7 +469,7 @@ impl Parser {
         }
         self.i = after
         self.rest_of_line()?
-        return Ok(item.v)
+        return self.value(item)
     }
 
     // A node whose first character is the current one, in a collection
@@ -480,7 +501,7 @@ impl Parser {
         }
         self.i = after
         self.rest_of_line()?
-        return Ok(item.v)
+        return self.value(item)
     }
 
     // A block sequence whose entries are indented `m`, the current position
@@ -556,22 +577,31 @@ impl Parser {
         }
         let c = self.ch(self.i)
         if c == '[' {
-            return Ok(Item { v: self.flow_seq(n)?, text: "", scalar: false, quoted: false })
+            return Ok(Item { v: self.flow_seq(n)?, text: "", scalar: false, quoted: false, range: -1 })
         }
         if c == '{' {
-            return Ok(Item { v: self.flow_map(n)?, text: "", scalar: false, quoted: false })
+            return Ok(Item { v: self.flow_map(n)?, text: "", scalar: false, quoted: false, range: -1 })
         }
         if c == '"' {
             let t = self.double_quoted(n)?
-            return Ok(Item { v: Yaml.Str(t), text: t, scalar: true, quoted: true })
+            return Ok(Item { v: Yaml.Str(t), text: t, scalar: true, quoted: true, range: -1 })
         }
         if c == '\'' {
             let t = self.single_quoted(n)?
-            return Ok(Item { v: Yaml.Str(t), text: t, scalar: true, quoted: true })
+            return Ok(Item { v: Yaml.Str(t), text: t, scalar: true, quoted: true, range: -1 })
         }
         if !self.plain_start(flow) { return Err(self.error(YamlErrorKind.Unexpected, self.i)) }
+        let at = self.i
         let t = self.plain(n, flow)
-        return Ok(Item { v: resolve(t), text: t, scalar: true, quoted: false })
+        let v = resolve(t)
+        var range = -1
+        match v {
+            Float(_) => {
+                if t[0] == '0' && (t[1] == 'o' || t[1] == 'x') { range = at }
+            }
+            _ => {}
+        }
+        return Ok(Item { v: v, text: t, scalar: true, quoted: false, range: range })
     }
 
     // --- Plain scalars --------------------------------------------------------
@@ -980,7 +1010,7 @@ impl Parser {
         let c = self.s[self.i]
         if c == ',' || c == close { return Ok(Yaml.Null) }
         let item = self.item(n, true)?
-        return Ok(item.v)
+        return self.value(item)
     }
 
     // A flow sequence, the current position at its `[`. An entry `k: v` is a
@@ -1014,7 +1044,7 @@ impl Parser {
                     let v = self.flow_value(n, open, ']')?
                     items.push(Yaml.Map([(item.text, v)]))
                 } else {
-                    items.push(item.v)
+                    items.push(self.value(item)?)
                 }
             }
             self.flow_skip(n, open)?
@@ -1097,6 +1127,9 @@ fun fold_text(breaks: int) -> str {
 #test("0o17")[Yaml.Int(15i64)]
 #test("0x1F")[Yaml.Int(31i64)]
 #test("0x")[Yaml.Str("0x")]
+#test("0x7FFFFFFFFFFFFFFF")[Yaml.Int(9223372036854775807i64)]
+#test("0xFFFFFFFFFFFFFFFF")[Yaml.Float(18446744073709551616.0)] // `parse` refuses it as a value
+#test("0o1000000000000000000000")[Yaml.Float(9223372036854775808.0)]
 #test("1_000")[Yaml.Str("1_000")] // YAML 1.1 read 1000
 #test("9223372036854775808")[Yaml.Float(9223372036854775808.0)]
 #test("1.5")[Yaml.Float(1.5)]
@@ -1136,7 +1169,7 @@ pub fun resolve(text: str) -> Yaml {
             let d = (text[k] as char).to_digit(base as int).unwrap_or(-1)
             if d < 0 { return Yaml.Str(text) }
             if v > (9223372036854775807i64 - d as int64) / base { big = true }
-            v = v * base + d as int64
+            if !big { v = v * base + d as int64 }
             f = f * base as float64 + d as float64
             k += 1
         }

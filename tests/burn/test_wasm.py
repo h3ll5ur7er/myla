@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._native import CAN_BUILD_NATIVE, EXE, ON_WINDOWS, SKIP_REASON, linux_only
 from ._tools import STDLIB_ROOT, native_compiler
 from . import test_time
 from .test_aarch64 import LIBRARY_WITHOUT_THE_RUNTIME, PROGRAMS, build_x86, run
@@ -49,6 +49,20 @@ class WasmTools(unittest.TestCase):
 NODE = ["node", "--stack-size=7000", RUNNER]
 
 
+def under_the_runner(path: str) -> str:
+    """`path` as a program run by run.mjs names it: as it is off Windows. The
+    runner gives the program the host's `/` as its root, and on Windows Node
+    takes a path from `/` on the drive of its working directory: `path` is
+    that drive's, without the drive and with `/` (`D:\\a\\x.my` is `/a/x.my`).
+    WASI knows `/` paths only, so a program given `D:\\a\\x.my` took it for a
+    relative name (MYLA-926). Node must run on `path`'s drive. (A relative
+    path goes through the runner's `PWD`, which is Windows' spelling there,
+    MYLA-940.)"""
+    if not ON_WINDOWS:
+        return path
+    return os.path.splitdrive(os.path.abspath(path))[1].replace("\\", "/")
+
+
 def build_wasm(src: str, out: str, stdlib: str = STDLIB_ROOT) -> None:
     with open(out + ".s", "wb") as fh:
         subprocess.run([native_compiler(), src, stdlib, "--target", "wasm32-wasi"], stdout=fh, check=True, cwd=_REPO)
@@ -62,7 +76,7 @@ def build_wasm(src: str, out: str, stdlib: str = STDLIB_ROOT) -> None:
 class WasmParity(unittest.TestCase):
     def same(self, src: str) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            xb, wb = os.path.join(tmp, "x86"), os.path.join(tmp, "prog.wasm")
+            xb, wb = os.path.join(tmp, "x86" + EXE), os.path.join(tmp, "prog.wasm")
             build_x86(src, xb)
             build_wasm(src, wb)
             self.assertEqual(run(NODE + [wb]), run([xb]))
@@ -177,6 +191,21 @@ class WasmParity(unittest.TestCase):
             build_wasm(path, wb)
             self.assertEqual(run(NODE + [wb]), ("150000000\n149999999\n", "", 0))
 
+    def test_a_list_literal_of_52000_elements(self):
+        # Node refused the module (`local count too large`): each temporary
+        # had a local of its own, past Node's 50,000; a block's temporaries
+        # share them now (MYLA-543)
+        elems = ", ".join(str(i) for i in range(52000))
+        source = (f"fun tbl() -> [int] {{\n    return [{elems}]\n}}\n\n"
+                  "fun main() {\n    let t = tbl()\n    print(t.len())\n    print(t[51999])\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "literal.my")
+            with open(path, "w") as fh:
+                fh.write(source)
+            wb = os.path.join(tmp, "literal.wasm")
+            build_wasm(path, wb)
+            self.assertEqual(run(NODE + [wb]), ("52000\n51999\n", "", 0))
+
     def test_files(self):
         # files and directories through WASI: written, read, listed, renamed
         # and removed, a relative path against the working directory
@@ -195,7 +224,7 @@ class WasmParity(unittest.TestCase):
             path = os.path.join(tmp, "files.my")
             with open(path, "w") as fh:
                 fh.write(source)
-            xb, wb = os.path.join(tmp, "x86"), os.path.join(tmp, "files.wasm")
+            xb, wb = os.path.join(tmp, "x86" + EXE), os.path.join(tmp, "files.wasm")
             build_x86(path, xb)
             build_wasm(path, wb)
             want = subprocess.run([xb], capture_output=True, text=True, cwd=tmp)
@@ -211,11 +240,16 @@ class WasmParity(unittest.TestCase):
             build_wasm("selfhost/gen_main.my", gen)
             for extra, ref in (([], ["--target", "wasm32-wasi"]),
                                (["--target", "wasm32-wasi"], ["--target", "wasm32-wasi"]),
-                               (["--target", "x86_64-linux"], [])):
+                               # (named on both: the native one's own is the machine's, MYLA-926)
+                               (["--target", "x86_64-linux"], ["--target", "x86_64-linux"])):
                 with self.subTest(target=extra):
-                    src = os.path.join(_REPO, "examples", "maps.my")
-                    want = run([native_compiler(), src, STDLIB_ROOT] + ref)
-                    got = run(NODE + [gen, src, STDLIB_ROOT] + extra)
+                    # (both named as the wasm one can read them: the paths of
+                    # the library's files are in the assembly; `run` runs in
+                    # the repository, on their drive)
+                    src = under_the_runner(os.path.join(_REPO, "examples", "maps.my"))
+                    lib = under_the_runner(STDLIB_ROOT)
+                    want = run([native_compiler(), src, lib] + ref)
+                    got = run(NODE + [gen, src, lib] + extra)
                     self.assertEqual(got[2], 0, got[1])
                     self.assertEqual(got, want)
 
@@ -226,11 +260,12 @@ class WasmParity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             gen = os.path.join(tmp, "gen.wasm")
             build_wasm("selfhost/gen_main.my", gen)
-            src = os.path.join(_REPO, "selfhost", "gen_main.my")
+            src = under_the_runner(os.path.join(_REPO, "selfhost", "gen_main.my"))
+            lib = under_the_runner(STDLIB_ROOT)
             for target in ["wasm32-wasi", "x86_64-linux"]:
                 with self.subTest(target=target):
-                    want = run([native_compiler(), src, STDLIB_ROOT, "--target", target])
-                    got = run(NODE + [gen, src, STDLIB_ROOT, "--target", target])
+                    want = run([native_compiler(), src, lib, "--target", target])
+                    got = run(NODE + [gen, src, lib, "--target", target])
                     self.assertEqual(got[1:], ("", 0))
                     self.assertEqual(len(got[0]), len(want[0]))
                     self.assertTrue(got[0] == want[0], "the assembly differs")
@@ -532,8 +567,8 @@ class WasmStack(unittest.TestCase):
             fh.write(source.lstrip())
         out = os.path.join(tmp, name + ".wasm")
         build_wasm(path, out)
-        build_x86(path, os.path.join(tmp, name))
-        want = run([os.path.join(tmp, name)])
+        build_x86(path, os.path.join(tmp, name + EXE))
+        want = run([os.path.join(tmp, name + EXE)])
         self.assertEqual(want[1:], ("runtime error: stack overflow\n", 1))
         self.assertEqual(run(NODE + [out]), want)
 
@@ -587,6 +622,7 @@ class WasmCapabilities(unittest.TestCase):
             build_wasm(path, out)
             self.assertEqual(run(NODE + [out]), ("unsupported\nnot found\n", "", 0))
 
+@linux_only("the program runs through a #!/bin/sh wrapper")
 @unittest.skipUnless(HAVE_WASM, WASM_SKIP)
 class WasmTime(test_time.Time):
     """test_time's programs built for wasm and run under Node (through a

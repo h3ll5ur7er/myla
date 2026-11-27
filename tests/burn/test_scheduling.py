@@ -11,44 +11,59 @@ import os
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
-from tests.burn._tools import STDLIB_ROOT, selfhost_tool
+from tests.burn._native import CAN_BUILD_NATIVE, ON_WINDOWS, SKIP_REASON
+from tests.burn._tools import EXE, STDLIB_ROOT, peak_memory, selfhost_tool
 
 _ORDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sched_order.my")
 
+# The program reports its own peak resident memory (`VmHWM`, kB): a child's
+# `ru_maxrss` counts the image `fork` copied from the test's process too
+# (Linux takes the old image's high-water mark at `exec`), so it read 234 MB
+# under the full suite, whose one process had grown that big (MYLA-611).
+# Windows has no /proc: there the peak is its peak working set, read by
+# `_tools.peak_memory`'s helper (MYLA-926).
 _WIDE = """import std.task as task
+import std.fs as fs
 
 #main
 async fun main() {
-    var fs: [async () -> int] = []
+    var fns: [async () -> int] = []
     for i in 0..300000 {
         let k = i
-        fs.push(async () => k)
+        fns.push(async () => k)
     }
-    let r = await task.all(fs)
+    let r = await task.all(fns)
     print(r.len())
+    if let Ok(s) = fs.read_to_string("/proc/self/status") {
+        for l in s.split("\\n") {
+            if l.starts_with("VmHWM:") {
+                print(l[6:].trim())
+            }
+        }
+    }
 }
 """
 
 
 def _peak_mb(cmd, env) -> tuple[str, float]:
-    """(stdout, peak resident memory in MB) of running `cmd`."""
-    with tempfile.TemporaryFile() as out:
-        pid = os.fork()
-        if pid == 0:
-            os.dup2(out.fileno(), 1)
-            os.execve(cmd[0], cmd, env)
-        _, status, usage = os.wait4(pid, 0)
-        out.seek(0)
-        assert os.waitstatus_to_exitcode(status) == 0
-        return out.read().decode(), usage.ru_maxrss / 1024
+    """(its first line, its peak resident memory in MB) of running `cmd`,
+    which prints them (`_WIDE`; on Windows the first alone)."""
+    if ON_WINDOWS:
+        with mock.patch.dict(os.environ, env, clear=True):
+            out, kb = peak_memory(cmd)
+        return out.split("\n")[0] + "\n", kb / 1024
+    out = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120, check=True).stdout
+    first, peak = out.split("\n")[:2]
+    assert peak.endswith(" kB"), out
+    return first + "\n", int(peak[:-3]) / 1024
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class Scheduling(unittest.TestCase):
     def build(self, src_path: str, tmp: str) -> str:
-        exe = os.path.join(tmp, "prog")
+        exe = os.path.join(tmp, "prog" + EXE)
         subprocess.run([selfhost_tool("main"), "build", src_path, "-o", exe, "--stdlib", STDLIB_ROOT],
                        check=True, capture_output=True)
         return exe

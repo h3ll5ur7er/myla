@@ -1,0 +1,6 @@
+type error: operator '*' is not defined for 'V' and 'int32': it needs 'impl Mul<int32, …> for V'
+  --> examples/errors/type_op_int_literal_for_float.my:18:15
+   |
+18 |     let w = v * 2
+   |             ^^^^^
+note: 'V' implements Mul<float64, V>

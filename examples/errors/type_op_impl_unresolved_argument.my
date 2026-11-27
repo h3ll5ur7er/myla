@@ -1,0 +1,22 @@
+//~ type error: unknown type 'Nope'
+//~ span: Nope
+//~ errors: 2
+//~ next: unknown type 'Nope'
+// An operator impl whose type argument doesn't resolve has its error and
+// is left out: it was compared with the type's other impls, and a second
+// one gave "duplicate impl of trait 'Mul<{error}, …>'".
+struct V {
+    x: float,
+}
+
+impl Mul<Nope> for V {
+    fun mul(self, k: float) -> V {
+        return self
+    }
+}
+
+impl Mul<Nope> for V {
+    fun mul(self, k: float) -> V {
+        return self
+    }
+}

@@ -5,9 +5,10 @@
 // with: the same values, the same error messages and positions (Python
 // 3.13's wording), and `to_string` writes what
 // `json.dumps(v, ensure_ascii=False, separators=(",", ":"))` writes. Like
-// Python, they accept and write `NaN`, `Infinity` and `-Infinity`. Unlike
-// Python, a `\u` escape of a lone surrogate is an error, since a Myla string
-// holds UTF-8.
+// Python, `parse` accepts `NaN`, `Infinity` and `-Infinity`; unlike it,
+// `to_string` writes them as `null`, which JSON has (MYLA-424), and a float
+// reads `null` as NaN (MYLA-851). Unlike Python, a `\u` escape of a lone
+// surrogate is an error, since a Myla string holds UTF-8.
 //
 // Typed values (D172, MYLA-385): `ToJson` and `FromJson`, their impls for
 // the built-in types, and `encode`/`decode<T>` over them; `#derive(Json)`
@@ -230,7 +231,7 @@ impl Parser {
                 None => {},                       // too large for int64
             }
         }
-        return match parse_float(text) {
+        return match parse_float(bounded_number(text)) {
             Some(f) => {
                 if integral && self.exact && !holds_exactly(f, text) {
                     var e = self.error(f"{text} can't be read exactly: beyond int64's range a number is a float64", start)
@@ -486,6 +487,134 @@ fun float_text(f: float64) -> str {
     if t == "inf" { return "Infinity" }
     if t == "-inf" { return "-Infinity" }
     return t
+}
+
+// The significant digits a number keeps when it is read (MYLA-795): a
+// point halfway between two float64s has at most 767, so the first 800 and
+// whether one after them isn't 0 round as all of them do.
+const KEPT_DIGITS: int32 = 800
+
+// The JSON number `text` with at most KEPT_DIGITS significant digits and a
+// sticky one, which `parse_float` reads to the same float64 (MYLA-795):
+// the digits past them dropped, a 1 in their place when one of them isn't
+// 0 (above a halfway point it was above, never on it), the exponent made
+// up for them. `parse_float`'s time grows with the square of the digits,
+// and `http.json_body` hands it what a client sends (64,000 digits took
+// 11 s, now 1 ms, 2026-11-18 at e659342). A text no longer than
+// KEPT_DIGITS is given back as it is.
+#test("-1.5e3")["-1.5e3"]
+#test("0." + repeated("0", 900) + "12")["12e-902"]
+#test("-" + repeated("9", 801) + ".5")["-" + repeated("9", 800) + "1e0"]
+#test("1" + repeated("0", 900) + "e-900")["1" + repeated("0", 799) + "e-799"]
+#test("2" + repeated("0", 900) + "e99999999999999999999")["2" + repeated("0", 799) + "e1000000"]
+#test("0." + repeated("0", 900) + "e5")["0"]
+#test("-0." + repeated("0", 900))["-0"]
+fun bounded_number(text: str) -> str {
+    if text.len() <= KEPT_DIGITS {
+        return text
+    }
+    var sb = StringBuilder()
+    var i = 0
+    if text[0] == '-' {
+        sb.append("-")
+        i = 1
+    }
+    var kept = 0
+    var sticky = false
+    var after_point = false
+    // the power of ten the kept digits are multiplied by, before the exponent
+    var shift: int64 = 0
+    while i < text.len() && text[i] != 'e' && text[i] != 'E' {
+        let c = text[i]
+        if c == '.' {
+            after_point = true
+        } else if kept == 0 && c == '0' {
+            if after_point { shift -= 1 }
+        } else if kept < KEPT_DIGITS {
+            sb.append(text, i, i + 1)
+            kept += 1
+            if after_point { shift -= 1 }
+        } else {
+            if c != '0' { sticky = true }
+            if !after_point { shift += 1 }
+        }
+        i += 1
+    }
+    if kept == 0 {
+        sb.append("0")
+        return sb.build()
+    }
+    if sticky {
+        sb.append("1")
+        shift -= 1
+    }
+    // the exponent, held within ±10^6: past it the kept digits are 0 or infinite anyway
+    var exp: int64 = 0
+    var negative = false
+    if i < text.len() {
+        i += 1
+        if text[i] == '+' || text[i] == '-' {
+            negative = text[i] == '-'
+            i += 1
+        }
+        while i < text.len() {
+            if exp < 1000000000i64 { exp = exp * 10 + (text[i] - '0') as int64 }
+            i += 1
+        }
+    }
+    if negative { exp = -exp }
+    var e = exp + shift
+    if e > 1000000i64 { e = 1000000i64 }
+    if e < -1000000i64 { e = -1000000i64 }
+    sb.append(f"e{e}")
+    return sb.build()
+}
+
+// A number past KEPT_DIGITS reads as all its digits do (MYLA-795): at a
+// halfway point and just past one, far past the digits kept; and numbers
+// of 20,000 digits in a moment.
+#test
+fun long_numbers() {
+    // 1 + 2^-53, halfway between 1.0 and the next float64: an even 1.0, and
+    // the next one when a digit past the kept ones says it is above
+    let half = "1.00000000000000011102230246251565404236316680908203125"
+    assert(parse_float(bounded_number(half + repeated("0", 900))) == Some(1.0), "a halfway point, to even")
+    assert(parse_float(bounded_number(half + repeated("0", 900) + "1")) == Some(1.0000000000000002), "just above a halfway point")
+    // 2^53 + 1, halfway between two integers
+    let big = "9007199254740993" + repeated("0", 1000) + "e-1000"
+    assert(parse_float(bounded_number(big)) == Some(9007199254740992.0), "an integer halfway, to even")
+    assert(parse_float(bounded_number("9007199254740993" + repeated("0", 1000) + "1e-1001")) == Some(9007199254740994.0), "an integer just above halfway")
+    let ones = "0." + repeated("1", 1200)
+    assert(parse_float(bounded_number(ones)) == parse_float(ones), "as every digit reads")
+    assert(parse_float(bounded_number(repeated("1", 900))) == Some(1.0 / 0.0), "too large")
+    match parse_float(bounded_number("-0." + repeated("0", 900) + "5")) {
+        Some(x) => assert(x == 0.0 && 1.0 / x < 0.0, "too small: a negative zero")
+        None => assert(false, "too small")
+    }
+    // (at 20,000 digits each, 1.0 s interpreted where all of them took
+    // minutes, 2026-11-18 at e659342)
+    match parse("[0." + repeated("1", 20000) + ", -" + repeated("7", 20000) + "]") {
+        Ok(v) => {
+            let second = match at(v, "[1]") {
+                Some(Float(f)) => f
+                _ => 0.0
+            }
+            assert(to_string(v) == "[0.1111111111111111,null]" && second == -1.0 / 0.0, "20,000 digits")
+        }
+        Err(e) => assert(false, f"20,000 digits: {e}")
+    }
+}
+
+// `s` `n` times over (for the tests).
+#test("ab", 3)["ababab"]
+fun repeated(s: str, n: int) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < n {
+        sb.append(s)
+        i += 1
+    }
+    return sb.build()
 }
 
 // Whether the float `f` read from the integer `text` (beyond int64) is that
@@ -806,8 +935,8 @@ fun pretty_round_trip() {
 // object of its fields, named as written, an `Option` field left out when it
 // is `None`) and for an enum (`"Red"` for a variant without payload,
 // `{"Dot": x}` for one with one, `{"Line": [a, b]}` for one with more).
-// Writing never fails: a non-finite float is `null`, a `uint64` beyond
-// `int64` a float.
+// Writing never fails: a non-finite float is `null` (which a float reads
+// as NaN, MYLA-851), a `uint64` beyond `int64` a float.
 pub trait ToJson {
     fun to_json(self) -> Json
 }
@@ -902,8 +1031,10 @@ fun last_member(fields: [(str, Json)], name: str) -> Option<Json> {
     return found
 }
 
-// `r`, its error one step further in: `step` (`.name`, `[2]`) after the `$`.
-fun within<T>(r: Result<T, JsonError>, step: str) -> Result<T, JsonError> {
+// `r`, its error one step further in: `step` (`.name`, `[2]`) after the `$`;
+// for a `FromJson` impl written by hand, reading the parts of a value:
+// `json.within(float64.from_json(item), "[2]")`.
+pub fun within<T>(r: Result<T, JsonError>, step: str) -> Result<T, JsonError> {
     return match r {
         Ok(v) => Ok(v)
         Err(e) => Err(JsonError { kind: e.kind, msg: e.msg, line: e.line, col: e.col, path: "$" + step + e.path[1:] })
@@ -1135,10 +1266,16 @@ impl ToJson for float64 {
 }
 
 impl FromJson for float64 {
+    // `null` is NaN, as `to_json` writes a NaN and the infinities, so that
+    // a float reads back (MYLA-851, as the linear algebra types' components
+    // do, D291); an `Option<float64>`'s `null` is still `None`
+    #test(Json.Int(2))[Ok(2.0)]
+    #test(Json.Bool(true))[Err(JsonError { kind: JsonErrorKind.WrongType, msg: "expected a number, found true", line: 0, col: 0, path: "$" })]
     fun from_json(j: Json) -> Result<float64, JsonError> {
         return match j {
             Json.Float(f) => Ok(f)
             Json.Int(n) => Ok(n as float64)
+            Json.Null => Ok(0.0 / 0.0)
             _ => Err(wrong_type("a number", j))
         }
     }
@@ -1308,6 +1445,30 @@ fun built_in_types_round_trip() {
         Ok(v) => assert(false, "40000 is no int16")
         Err(e) => assert(f"{e}" == "$[1]: 40000 is out of range for int16", f"{e}")
     }
+}
+
+// A NaN float goes to JSON and back (MYLA-851): written as `null`, read
+// as NaN, as the linear algebra types read a component (D291); an infinity
+// comes back as NaN.
+#test
+fun non_finite_floats_round_trip() {
+    let nan = 0.0 / 0.0
+    let text = encode([nan, 1.5, 1.0 / 0.0])
+    assert(text == "[null,1.5,null]", text)
+    match decode<[float64]>(text) {
+        Ok(xs) => assert(xs.len() == 3 && xs[0] != xs[0] && xs[1] == 1.5 && xs[2] != xs[2], encode(xs))
+        Err(e) => assert(false, f"{e}")
+    }
+    match decode<[float32]>(encode([nan as float32, 0.1f32])) {
+        Ok(ys) => assert(ys.len() == 2 && ys[0] != ys[0] && ys[1] == 0.1f32, encode(ys))
+        Err(e) => assert(false, f"{e}")
+    }
+    // an `Option`'s `null` stays `None`
+    match decode<[Option<float64>]>("[null, 2.5]") {
+        Ok(os) => assert(os.len() == 2 && os[0] == None && os[1] == Some(2.5), "options")
+        Err(e) => assert(false, f"{e}")
+    }
+    assert(outcome(decode<float64>("\"1.5\"")) == "$: expected a number, found a string", "a string")
 }
 
 // An error's text, or "ok" (for the test functions).

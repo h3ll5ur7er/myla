@@ -1,0 +1,17 @@
+struct Pirate {
+    name: str,
+    bounty: int64,
+}
+
+impl Pirate {
+    fun poster(self) -> str {
+        return f"WANTED: {self.name}, {self.bounty} berries"
+    }
+}
+
+#test("Luffy", 3_000_000_000)["WANTED: Luffy, 3000000000 berries"]
+#test("Usopp", 500_000_000)["WANTED: Usopp, 500000000 berries"]
+fun wanted(name: str, bounty: int64) -> str {
+    let p = Pirate { name: name, bounty: bounty }
+    return p.poster()
+}

@@ -99,7 +99,7 @@ fun main() {
 
 ### Keys
 
-A map's key type is any type that is `Eq` and `Hash` (D163, [[MYLA-313]]): the integers, `char`, `bool` and `str`; a tuple or a list whose elements are; a struct or enum with `#derive(Eq, Hash)` or with impls written for it ([[Language/Methods-and-traits]]). Floats aren't `Hash`, so neither is anything holding one. A key is a value, so a key in a map never changes.
+A map's key type is any type that is `Eq` and `Hash` (D163, [[MYLA-313]]): the integers, the floats (D198), `char`, `bool` and `str`; a tuple or a list whose elements are; a struct or enum with `#derive(Eq, Hash)` or with impls written for it ([[Language/Methods-and-traits]]). A float key is found by `==`, so `-0.0` and `0.0` are one key; a NaN, unequal to itself, would be a key no lookup finds, so hashing one is the runtime error `cannot hash NaN` ([[MYLA-586]]). A key is a value, so a key in a map never changes.
 
 ```myla
 #derive(Eq, Hash)
@@ -126,7 +126,7 @@ fun main() {
 
 - A generic `[K: V]` needs `K: Eq + Hash`, written where the type parameter is declared (D167): `fun counts<K: Eq + Hash>(xs: [K]) -> [K: int]`, `impl<K: Eq + Hash, V> [K: V]`, `fun distinct<T: Eq + Hash>(xs: [T]) -> int`. Without it, a map keyed by the type parameter, in the signature or the body, is the error `map key type must be Eq and Hash, found 'K': it needs the bound 'K: Eq + Hash'`; with it, a caller must give such a type (`type 'P' does not satisfy the bound 'K: Eq' required by 'counts'`).
 - A map finds a key among those of the same hash and compares them with `==`, so a type's own `Eq` decides which keys are the same; its `Hash` must give equal keys equal hashes.
-- The integers', `char`'s, `bool`'s and `str`'s maps keep their hash; any other key is hashed by its parts natively (a type's written `hash` called), and by its parts or that `hash` in the interpreter. Neither is the value `hash` gives, which a map doesn't show: the order is the order of insertion.
+- The integers', `char`'s, `bool`'s and `str`'s maps keep their hash; any other key is hashed by its parts natively (a type's written `hash` called), and by its parts or that `hash` in the interpreter. Neither is the value `hash` gives, which a map doesn't show: the order is the order of insertion. Keys whose hashes are equal are compared with `==` (a written `eq`) oldest first, on both runners, so a written `eq` runs as often and in the same order ([[MYLA-546]]).
 
 ## Methods of the builtin types
 
@@ -200,7 +200,7 @@ fun main() {
 | `.precision` | that many digits after the point, rounded on the exact binary value to nearest, ties to even: `2.675` (2.67499… in binary) gives `2.67`, `0.125` gives `0.12` | floats |
 | `kind` | `x` `X` hexadecimal, `b` binary, `o` octal; a negative signed value as its two's complement at its type's width (`{-1i8:x}` is `ff`) | integers |
 
-Anything else is a compile-time error at the value: `the format spec '.2' needs a float, found 'int32'`, `invalid format spec 'q'`. A hole's spec may not contain `{` or `}`.
+Anything else is a compile-time error at the value: `the format spec '.2' needs a float, found 'int32'`, `invalid format spec 'q'`. A hole's spec may not contain `{` or `}`. A spec known only when the program runs, `x.format(spec)` on a primitive `x: T` with `T: Format`, is checked there: one that isn't a spec is the runtime error `invalid format spec 'q'` at the call, on every runner (D183, [[MYLA-565]]), and so is one that doesn't fit the value's type, with the hole's message: `show(2.5, "x")` is `the format spec 'x' needs an integer, found 'float64'` ([[MYLA-792]]; it was ignored).
 
 A type of the program can give itself a form by implementing the prelude's `Format` trait: `{x}` calls `x.format("")`, `{x:spec}` passes the spec's text as it is, read when the program runs (it isn't checked before), and `std.fmt.pad(text, spec)` applies fill, alignment and width ([[Language/Standard-library]]).
 

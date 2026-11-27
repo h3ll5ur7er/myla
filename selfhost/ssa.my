@@ -516,6 +516,7 @@ fun term_reads(t: Term) -> [int32] {
             _ => [v]
         }
         Term.Panic(m, p) => [m]
+        Term.PanicAt(m, p) => [m, p]
         _ => []
     }
 }
@@ -599,6 +600,7 @@ pub fun rename_term(t: Term, to: [int32]) -> Term {
             _ => Term.Ret(rn(v, to))
         }
         Term.Panic(m, p) => Term.Panic(rn(m, to), p)
+        Term.PanicAt(m, p) => Term.PanicAt(rn(m, to), rn(p, to))
         _ => t
     }
 }

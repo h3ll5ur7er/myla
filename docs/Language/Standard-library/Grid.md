@@ -63,6 +63,7 @@ fun main() {
 | `g.neighbours8(p) -> [(int, int)]` | Across an edge or a corner, clockwise from up: up, up-right, right, down-right, down, down-left, left, up-left |
 | `g.index(p) -> int`, `g.pos(i: int) -> (int, int)` | A position's index in `cells`, `y * width + x`, and back: node numbers for `bfs_dense` and `dijkstra_dense`. A `p` or an `i` out of bounds is a failure |
 | `g.positions() -> [(int, int)]` | Every position, row by row |
+| `g.iter() -> ListIter<T>` | An iterator over the cells, row by row (D171, [[MYLA-553]]): `for c in g.iter()`, or a pipeline of [[Language/Standard-library/Iter|std.iter]]; the `i`th cell is at `g.pos(i)`. It is `g.cells.iter()`, holding the grid as it was |
 | `g.row(y: int) -> [T]`, `g.column(x: int) -> [T]` | The cells of a row, left to right; of a column, top to bottom. A `y` or an `x` out of bounds is a failure, for both alike ([[MYLA-425]]) |
 | `g.map<U>(f: (T) -> U) -> Grid<U>` | The grid of `f` of each cell |
 | `g.transposed() -> Grid<T>` | The cell at `(x, y)` moved to `(y, x)`: rows become columns |
@@ -93,4 +94,4 @@ A `#derive(Eq, Hash)` struct `Pos { x, y }` was the other choice. It gives names
 ## Limits
 
 - `print(g)` and `f"{g}"` aren't possible: a `Format` impl on the generic `Grid<T>` doesn't link natively ([[MYLA-367]]); write `print(g.text())`.
-- `for p in g` isn't possible ([[MYLA-353]]): write `for p in g.positions()`, or loop over `y` and `x`.
+- `for c in g` isn't possible: a grid isn't an iterator itself (D171), and the checker's message says to write `g.iter()` for the cells; `for p in g.positions()` visits the positions.

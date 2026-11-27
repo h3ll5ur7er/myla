@@ -9,11 +9,26 @@ function typeOf(st) {
   if (st.isFile()) return 4;
   if (st.isSymbolicLink()) return 7;
   if (st.isCharacterDevice()) return 2;
+  // a block device and a socket their WASI types too, as Linux gives their
+  // kinds (D254, MYLA-798); a FIFO has none in WASI
+  if (st.isBlockDevice()) return 1;
+  if (st.isSocket()) return 6;
   return 0;
 }
 
 function statOf(st) {
   return { type: typeOf(st), size: st.size, ino: st.ino, nlink: st.nlink, mtimeNs: Math.trunc(st.mtimeMs * 1e6) };
+}
+
+// A WASI path as Node names it on this host. On Windows a program's `/x` is
+// `x` on the working directory's drive, as Node reads a path from `/` there,
+// and `/C:/x` is `C:/x`, so that a file on another drive has a name too
+// (MYLA-944: a test harness's scratch directory under %TEMP% on C: beside a
+// checkout on D:); elsewhere a path is the host's as it is.
+const WINDOWS = process.platform === "win32";
+export function hostPath(p) {
+  if (!WINDOWS || !/^\/[A-Za-z]:(\/|$)/.test(p)) return p;
+  return p.length === 3 ? p.slice(1) + "/" : p.slice(1);
 }
 
 export class NodeFs {
@@ -22,15 +37,21 @@ export class NodeFs {
   // With the access asked for (MYLA-336), `read` and `write` give it, and
   // `append` writes at the end. A handle keeps its own cursor (Node has no
   // lseek): a regular file is read and written at it, anything else where
-  // the system's cursor is, and can't seek (ESPIPE).
-  open(path, { create, trunc, excl, read, write, append }) {
+  // the system's cursor is, and can't seek (ESPIPE). `nofollow` and
+  // `nonblock` are O_NOFOLLOW and O_NONBLOCK (MYLA-842).
+  open(path, { create, trunc, excl, read, write, append, nofollow, nonblock }) {
     const c = fs.constants;
     let flags = !create ? "r" : excl ? "wx" : trunc ? "w" : c.O_WRONLY | c.O_CREAT;
     if (read !== undefined) {
       flags = (read && write ? c.O_RDWR : write ? c.O_WRONLY : c.O_RDONLY) |
         (create ? c.O_CREAT : 0) | (trunc ? c.O_TRUNC : 0) | (excl ? c.O_EXCL : 0) | (append ? c.O_APPEND : 0);
     }
-    const fd = fs.openSync(path, flags);
+    const extra = (nofollow ? c.O_NOFOLLOW : 0) | (nonblock ? c.O_NONBLOCK : 0);
+    if (extra) {
+      const named = { r: c.O_RDONLY, w: c.O_TRUNC | c.O_CREAT | c.O_WRONLY, wx: c.O_TRUNC | c.O_CREAT | c.O_WRONLY | c.O_EXCL };
+      flags = (typeof flags === "string" ? named[flags] : flags) | extra;
+    }
+    const fd = fs.openSync(hostPath(path), flags);
     return { fd, pos: 0, seekable: fs.fstatSync(fd).isFile(), append: !!append };
   }
   read(h, u8) {
@@ -51,15 +72,16 @@ export class NodeFs {
   }
   close(h) { fs.closeSync(h.fd); }
   fstat(h) { return statOf(fs.fstatSync(h.fd)); }
-  stat(path, follow) { return statOf(follow ? fs.statSync(path) : fs.lstatSync(path)); }
+  stat(path, follow) { return statOf(follow ? fs.statSync(hostPath(path)) : fs.lstatSync(hostPath(path))); }
   readdir(path) {
-    return fs.readdirSync(path, { withFileTypes: true })
+    return fs.readdirSync(hostPath(path), { withFileTypes: true })
       .map((e) => ({ name: e.name, type: e.isDirectory() ? 3 : e.isFile() ? 4 : e.isSymbolicLink() ? 7 : 0 }));
   }
-  mkdir(path) { fs.mkdirSync(path); }
-  rmdir(path) { fs.rmdirSync(path); }
-  unlink(path) { fs.unlinkSync(path); }
-  rename(a, b) { fs.renameSync(a, b); }
+  mkdir(path) { fs.mkdirSync(hostPath(path)); }
+  rmdir(path) { fs.rmdirSync(hostPath(path)); }
+  unlink(path) { fs.unlinkSync(hostPath(path)); }
+  rename(a, b) { fs.renameSync(hostPath(a), hostPath(b)); }
+  readlink(path) { return new Uint8Array(fs.readlinkSync(hostPath(path), { encoding: "buffer" })); }
 }
 
 // A write of all of `u8` to the descriptor `fd`, again after EAGAIN (a

@@ -2,7 +2,7 @@
 id: MYLA-518
 title: "The reactor's watches are a list scanned at every wait, and an event wakes every frame watching its descriptor"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [runtime, concurrency, net, round-5]
 ---
@@ -50,3 +50,7 @@ Cost (lane D's benchmarks, interleaved with the base, 4 workers): 8 connections 
 Suites: `tests.burn.test_net`, `test_process`, `test_time`, `test_concurrency_stress`, `test_scheduling`, `test_task_yield`, `test_timer_scaling`, `test_http` natively (60 tests OK, 2 skipped); `lib/std/task.my` 36/36, `net.my` 98/98, `io.my` 30/30, `process.my` 48/48 natively and on aarch64, `task.my` and `net.my` on wasm32; `lib/std/rt.my` 17/17.
 
 `scripts/test.sh fast` (with MYLA-468's commits on top): 860 tests, the one failure `test_embedded_std` (the embedded library behind `lib/` until the seed commit); `scripts/test.sh`: 1,537 tests, 341 skipped, the same one failure. Filed: [[MYLA-531]] (the poller takes four events a wait).
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

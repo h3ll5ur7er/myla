@@ -1,0 +1,6 @@
+type error: the instances of 'pair_up' nest without end: this call, in 'halve<T>', asks for 'pair_up<(T, T)>'
+  --> examples/errors/type_polymorphic_recursion_mutual.my:10:19
+   |
+10 |     return pair_up(n - 1, (x, x))
+   |            ^^^^^^^^^^^^^^^^^^^^^^
+note: 'halve' calls itself through 'pair_up' with a larger type at each step (polymorphic recursion), which native code can't be built for

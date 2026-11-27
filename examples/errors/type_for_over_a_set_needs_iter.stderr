@@ -1,0 +1,6 @@
+type error: `for ... in` requires a list, a map, a string, a range or an Iterator, found 'set.Set<int32>' (it needs 'impl Iterator<T> for set.Set<int32>')
+  --> examples/errors/type_for_over_a_set_needs_iter.my:10:14
+   |
+10 |     for x in s {
+   |              ^
+help: 'set.Set<int32>' is not an Iterator: write 's.iter()'

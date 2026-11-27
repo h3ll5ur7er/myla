@@ -7,11 +7,138 @@ import tempfile
 import unittest
 
 from tests.burn._targets import program_excuse
-from tests.burn._tools import selfhost_tool
-from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, Program, build_and_run, build_and_run_full, interpret,
-                                run_file_both_now, selfhost_run, write_program)
+from tests.burn._tools import peak_memory, selfhost_tool
+from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, Program, build_and_run, build_and_run_full, interpret,
+                                native_build, run_argv, run_file_both_now, selfhost_run, shown, write_program)
 
 PROGRAMS = {
+    # H13 (MYLA-792, MYLA-715): a constant made of an imported constant, or of
+    # one declared after it, read unit interpreted
+    "consts_of_another_module": r"""// H13 (MYLA-715): a constant made of another module's constant, or of one
+// declared after it, is that constant's value on every runner
+from std.ioerror import BAD_HANDLE
+const A: int32 = 5
+const B: int32 = A
+const C: int32 = BAD_HANDLE
+const D: int32 = -BAD_HANDLE
+const E: int32 = F * 2 + C
+const F: int32 = G - 1
+const G: int32 = 4
+const S: str = T + "!"
+const T: str = "late"
+fun main() {
+    print(A)
+    print(B)
+    print(C + 1)
+    print(D)
+    print(E)
+    print(S)
+}
+""",
+    # H6 (MYLA-792, MYLA-435): a generic `#track_caller` function or method
+    # kept its caller's position where its type parameters' binding was
+    # looked for, so its operators on `T` were untyped interpreted
+    "track_caller_generic": r"""// H6: `#track_caller` on generic functions and a generic type's methods,
+// a lambda in one, and one calling another
+#track_caller
+fun lt<T: Ord>(a: T, b: T) -> bool {
+    return a < b
+}
+#track_caller
+fun add<T: Add>(a: T, b: T) -> T {
+    return a + b
+}
+#track_caller
+fun show<T: Format>(a: T) -> str {
+    return f"{a}"
+}
+#track_caller
+fun twice<T: Add + Format>(a: T) -> str {
+    let f = (x: T) => x + x
+    return show(f(a)) + " " + show(add(a, a))
+}
+struct Box<T> { v: T }
+impl<T: Ord + Add + Format> Box<T> {
+    #track_caller
+    fun less(self, k: T) -> bool { return self.v < k }
+    #track_caller
+    fun plus(self, k: T) -> T { return self.v + k }
+    #track_caller
+    fun text(self) -> str { return f"{self.v}" }
+}
+fun main() {
+    let big = 18446744073709551615u64
+    print(lt(big, 2u64))
+    print(show(big))
+    print(Box { v: big }.less(2u64))
+    print(Box { v: big }.text())
+    print(add(0.1f32, 0.2f32))
+    print(Box { v: 0.1f32 }.plus(0.2f32))
+    print(add(200u8, 50u8))
+    print(twice(9223372036854775807u64))
+    print(lt(-1i8, 1i8))
+}
+""",
+    # MYLA-553, MYLA-580, MYLA-546: containers' iter(), ldexp, padding in bulk
+    "iter_ldexp_and_padding_in_bulk": r"""// MYLA-553, MYLA-580, MYLA-546: `iter()` on a BitSet, an Lru and a Grid;
+// `ldexp` past ±2100 in three steps; long paddings and repeats in bulk
+import std.bitset as bitset
+import std.cache as cache
+import std.grid as grid
+import std.iter as iter
+import std.math as math
+import std.num as num
+import std.fmt as fmt
+
+fun ends(s: str) -> str {
+    return f"{s.len()} {s[:4]}|{s[s.len() - 4:]}"
+}
+
+fun main() {
+    var b = bitset.fixed(300)
+    for i in [0, 63, 64, 199, 299] {
+        b.insert(i)
+    }
+    var seen = ""
+    for i in b.iter() {
+        seen = seen + f"{i},"
+    }
+    print(f"{seen} {b.iter() |> iter.map((x) => x + 1) |> iter.sum(0)}")
+    var c: cache.Lru<str, int> = cache.new(3)
+    for k in ["a", "b", "c", "d"] {
+        c.put(k, k.len())
+    }
+    c.get("b")
+    var order = ""
+    for (k, v) in c.iter() {
+        order = order + f"{k}{v} "
+    }
+    print(order)
+    let g = grid.new(3, 2, 'x')
+    print(g.iter() |> iter.count())
+    print(f"{math.ldexp(1.5, 2147483647)} {math.ldexp(-1.5, -2147483647 - 1)} {math.ldexp(4.9406564584124654e-324, 2097)} {math.ldexp(1.7976931348623157e308, -2098)}")
+    print(ends(fmt.fmt_text("xy", ">1000000")))
+    print(ends(fmt.pad("xy", "é^999999")))
+    print(ends(fmt.fmt_int(-5i64, 32, true, "01000000")))
+    print(ends(f"{255:#0100x}"))
+    print(ends(num.to_hex(255u64, 1000003)))
+    print(ends(num.to_binary(5u64, 4097)))
+    print(ends("abc".repeat(333333)))
+    print(ends("ab".pad_start(70000, 'ß')))
+}
+""",
+    # MYLA-545: `v.0.0` is two tuple indexes, not `v.` and the float `0.0`
+    "tuple_index_chain": r"""fun main() {
+    let v = ((1, 2), (3, (4, 5)))
+    print(v.0.0)
+    print(v.1.1.0 + v.0.1)
+    let w = [(7, (8, 9.5))]
+    print(w[0].1.1)
+    print(w[0].1.0 * 2)
+    let x = 0.5
+    print(x + 1.25e1)
+}
+""",
     # MYLA-429: a map that removals leave with few keys shrinks
     "map_shrinks_on_remove": r"""// MYLA-429: a map that removals leave with few keys shrinks: its order, its
 // copies, a walk that removes, string, narrow and compound keys, values that
@@ -2136,6 +2263,64 @@ fun main() {
     print(f"{bump_first([A { n: 20 }])} {w.of_a_call()} {w.of_a_method()} {w.of_an_element()}")
 }
 """,
+    "generic_var_self_past_a_written_key": """// MYLA-414 (B6): a `var self` method of generic code called on a map's
+// element whose key has a written `eq` or `hash`: finding the key runs it,
+// and the method's frame still binds its type parameters
+trait Twice {
+    fun twice(self) -> Self
+}
+
+impl Twice for uint64 {
+    fun twice(self) -> uint64 { return self * 2 }
+}
+
+#derive(Eq)
+struct K {
+    v: int,
+}
+
+impl Hash for K {
+    fun hash(self, h: Hasher) -> Hasher { return h.add(self.v) }
+}
+
+#derive(Hash)
+struct E {
+    v: int,
+}
+
+impl Eq for E {
+    fun eq(self, other: E) -> bool { return self.v == other.v }
+}
+
+struct Cell<T> {
+    v: T,
+}
+
+impl<T: Twice + Ord> Cell<T> {
+    fun grow(var self) { self.v = self.v.twice() }
+    fun below(var self, w: T) -> bool { return self.v < w }
+}
+
+fun main() {
+    // a written `hash`
+    var m = [K { v: 1 }: Cell { v: 3u64 }]
+    m[K { v: 1 }].grow()
+    print(m[K { v: 1 }].v)
+    print(m[K { v: 1 }].below(18446744073709551615u64))
+    // a written `eq`: std.list's `sort` on a [uint64]
+    var n = [E { v: 1 }: [5u64, 18446744073709551615u64, 1u64]]
+    n[E { v: 1 }].sort()
+    for x in n[E { v: 1 }] { print(x) }
+    // two keys deep
+    var d = [K { v: 2 }: [E { v: 3 }: [9223372036854775808u64, 7u64]]]
+    d[K { v: 2 }][E { v: 3 }].sort()
+    for x in d[K { v: 2 }][E { v: 3 }] { print(x) }
+    // a plain key, for comparison
+    var p = ["a": Cell { v: 9223372036854775807u64 }]
+    p["a"].grow()
+    print(p["a"].v)
+}
+""",
     "generic_eq_and_hash_the_interpreter_calls": """// A written `eq` or `hash` of a generic impl, which the interpreter calls
 // itself (an element's `==`, a map's key), binds its type parameters
 // (MYLA-436): `<` on a uint64 compares unsigned, a uint64 formats unsigned
@@ -2347,6 +2532,77 @@ fun main() {
     print("-- remove")
     m.remove(k)
     print(m.contains(k))
+}
+""",
+    "written_hash_and_eq_run_alike": """// MYLA-546: a key's written `hash` and `eq` run in the same order and as
+// often on both runners: keys whose hashes collide are compared oldest
+// first, a key removed and another added leave that order, and a map
+// literal hashes each key after its value, in a nested literal too
+struct K {
+    v: int,
+}
+
+impl Eq for K {
+    fun eq(self, other: K) -> bool {
+        print(f"eq {self.v} {other.v}")
+        return self.v == other.v
+    }
+}
+
+impl Hash for K {
+    fun hash(self, h: Hasher) -> Hasher {
+        print(f"hash {self.v}")
+        return h.add(self.v % 3)
+    }
+}
+
+fun key(v: int) -> K {
+    print(f"key {v}")
+    return K { v: v }
+}
+
+fun val(v: int) -> int {
+    print(f"val {v}")
+    return v
+}
+
+fun show(m: [K: int]) {
+    var sb = StringBuilder()
+    for k in m { sb.append(f"{k.v} ") }
+    print(sb.build())
+}
+
+fun main() {
+    var m: [K: int] = [:]
+    for i in 0..7 {
+        m[K { v: i }] = i
+    }
+    show(m)
+    print("-- lookups")
+    print(m[K { v: 6 }])
+    print(m.contains(K { v: 9 }))
+    print("-- removed, then added")
+    m.remove(K { v: 3 })
+    m[K { v: 9 }] = 9
+    m[K { v: 12 }] = 12
+    show(m)
+    print(m[K { v: 12 }])
+    print(m.get_or(K { v: 15 }, -1))
+    print("-- many removed")
+    for i in 0..40 {
+        m[K { v: 100 + i }] = i
+    }
+    for i in 0..36 {
+        m.remove(K { v: 100 + i })
+    }
+    m[K { v: 30 }] = 30
+    show(m)
+    print(m[K { v: 30 }])
+    print("-- literals")
+    let n = [key(1): val(1), key(4): val(4), key(1): val(9)]
+    print(f"{n.len()} {n[K { v: 1 }]}")
+    let d = [key(2): [key(5): val(50), key(8): val(80)], key(11): [key(14): val(140)]]
+    print(d.len())
 }
 """,
     "actor_function_field": """// an actor's field that holds a function, called from the actor's own
@@ -8382,7 +8638,265 @@ fun main() {
     print(total)
 }
 """,
-    "values_nested_through_closures": r"""// M15 (MYLA-415): values nested through closures, as deep as they like, are
+    # MYLA-538: a generic impl's bounds of generic traits, met, at each use
+    "impl_bounds_of_generic_traits_met": r"""// MYLA-538: an impl's bound naming a generic trait is checked where the
+// impl is used, its arguments included; these meet theirs, directly, in
+// generic code, through another bound and a derive-free nesting
+import std.iter as iter
+
+trait Conv<T> {
+    fun conv(self) -> T
+}
+
+struct S {
+    n: int,
+}
+
+impl Conv<int> for S {
+    fun conv(self) -> int { return self.n }
+}
+
+struct V<I> {
+    v: I,
+}
+
+impl<I: Iterator<str>> Eq for V<I> {
+    fun eq(self, other: V<I>) -> bool {
+        var a = self.v
+        return a.next() == Some("x")
+    }
+}
+
+struct W<I, T> {
+    v: I,
+    d: [T],
+}
+
+impl<I: Iterator<T>, T: Eq> Eq for W<I, T> {
+    fun eq(self, other: W<I, T>) -> bool {
+        var a = self.v
+        var b = other.v
+        return a.next() == b.next()
+    }
+}
+
+struct C<I> {
+    v: I,
+}
+
+impl<I: Iterator<int>> Iterator<int> for C<I> {
+    fun next(var self) -> Option<int> {
+        return match self.v.next() {
+            Some(x) => Some(x * 2),
+            None => None,
+        }
+    }
+}
+
+struct K<X> {
+    c: X,
+}
+
+impl<X: Conv<int>> Eq for K<X> {
+    fun eq(self, other: K<X>) -> bool { return self.c.conv() == other.c.conv() }
+}
+
+struct P<I> {
+    w: V<I>,
+}
+
+impl<I: Iterator<str>> Eq for P<I> {
+    fun eq(self, other: P<I>) -> bool { return self.w == other.w }
+}
+
+fun g<J: Iterator<str>>(j: J) -> bool { return V { v: j } == V { v: j } }
+
+fun same<T: Eq>(a: T, b: T) -> bool { return a == b }
+
+fun h<J: Iterator<T>, T: Eq>(j: J, k: J) -> bool {
+    let e: [T] = []
+    return W { v: j, d: e } == W { v: k, d: e }
+}
+
+fun main() {
+    print(V { v: ["x"].iter() } == V { v: ["y"].iter() })
+    print(V { v: ["y"].iter() } == V { v: ["x"].iter() })
+    print(g(["x"].iter()))
+    print(same(V { v: ["x"].iter() }, V { v: ["y"].iter() }))
+    let e: [int] = []
+    print(W { v: [1].iter(), d: e } == W { v: [1].iter(), d: e })
+    print(h([1].iter(), [2].iter()))
+    print([V { v: ["x"].iter() }] == [V { v: ["x"].iter() }])
+    print(C { v: [1, 2, 3].iter() } |> iter.sum(0))
+    for x in (C { v: [4].iter() }) { print(x) }
+    print(C { v: C { v: [5].iter() } } |> iter.sum(0))
+    print(K { c: S { n: 1 } } == K { c: S { n: 1 } })
+    print(K { c: S { n: 1 } } != K { c: S { n: 2 } })
+    print(P { w: V { v: ["x"].iter() } } == P { w: V { v: ["z"].iter() } })
+}
+""",
+    # MYLA-544 (C8): x.format(spec) on a builtin T: Format
+    "format_method_on_a_builtin_type_parameter": r"""// MYLA-544 (C8): `x.format(spec)` on `x: T` with `T: Format` at a builtin
+// `T`: its print form by the spec, as a format hole gives it, on each runner
+struct P {
+    n: int,
+}
+
+impl Format for P {
+    fun format(self, spec: str) -> str { return "P" + spec }
+}
+
+struct V<T> {
+    v: T,
+}
+
+impl<T: Format> Format for V<T> {
+    fun format(self, spec: str) -> str { return "V(" + self.v.format(spec) + ")" }
+}
+
+fun show<T: Format>(x: T, spec: str) -> str {
+    return "[" + x.format(spec) + "]"
+}
+
+fun widths<T: Format>(xs: [T]) -> str {
+    var sb = StringBuilder()
+    var w = 1
+    for x in xs {
+        sb.append(x.format(f">{w}"))
+        w += 1
+    }
+    return sb.build()
+}
+
+fun main() {
+    print(show(5, ""))
+    print(show(-5i8, "04"))
+    print(show(255u8, "#06x"))
+    print(show(18446744073709551615u64, "x"))
+    print(show(-1i64, "b"))
+    print(show(3.14159f32, ".2"))
+    print(show(2.5, ">8.3"))
+    print(show('λ', "^3"))
+    print(show(true, ">6"))
+    print(show("ab", "*<5"))
+    print(show(P { n: 1 }, "!"))
+    print(f"{V { v: 7 }:+}")
+    print(show(V { v: V { v: 'c' } }, ">2"))
+    print(widths([1, 2, 3]))
+    print(widths(["a", "b"]))
+    let s = show(42, "08")
+    print(s.len())
+}
+""",
+    # MYLA-544: literals left of typed operands, the expected type through an operator
+    "literals_left_of_typed_operands": r"""// MYLA-544: a literal left of a typed operand is typed by it, as one on its
+// right is (a negated one, one past int32, a range's start and an arm's
+// too), and the type expected of an operator trait's result reaches its
+// operands, a struct of literals taking the other operand's type
+struct V<T> {
+    v: T,
+}
+
+impl<T: Add> Add for V<T> {
+    fun add(self, other: V<T>) -> V<T> { return V { v: self.v + other.v } }
+}
+
+impl<T: Eq> Eq for V<T> {
+    fun eq(self, other: V<T>) -> bool { return self.v == other.v }
+}
+
+fun main() {
+    let big: int64 = 5
+    let u: uint32 = 5
+    let f: float32 = 1.5f32
+    print(5000000000 + big)
+    print(-1 + big)
+    print(-1 == big)
+    print(3000000000 > u)
+    print(-2.5 * f)
+    var n = 0
+    for i in u..4294967295 {
+        n += 1
+        if n == 3 { break }
+    }
+    print(n)
+    for j in -2..big { n += 1 }
+    print(n)
+    let a = if big > 0 { -1 } else { big }
+    let b = match big { 0 => -1.5, _ => f }
+    print(a)
+    print(b)
+    let c: V<int64> = V { v: 2 } + V { v: 5000000000 }
+    print(c.v)
+    let d = V { v: 2 } + V { v: 1u8 }
+    print(d.v)
+    let x: V<uint8> = V { v: 250 }
+    print(V { v: 250 } == x)
+    let w: int8 = -'a'
+    print(w)
+}
+""",
+    # MYLA-609: an arm's literal past int32 takes another arm's type
+    "arm_literals_past_int32": r"""// MYLA-609: an unsuffixed integer literal past int32 in an arm of an `if`
+// or a `match` takes another arm's type, in either arm, negated or not, as
+// one beside a typed operand does
+fun pick(c: bool, big: int64) -> int64 {
+    let a = if c { big } else { 5000000000 }
+    let b = if c { -5000000000 } else { big }
+    let m = match c { true => 6000000000, false => big }
+    let n = match big {
+        0 => big,
+        1 => -7000000000,
+        _ => {
+            let k = big * 2
+            8000000000
+        },
+    }
+    print(f"{a} {b} {m} {n}")
+    return a + b + m + n
+}
+
+fun main() {
+    print(pick(true, 1))
+    print(pick(false, 0))
+    print(pick(false, 2))
+    let u: uint64 = 1
+    let v = if u > 0 { 10000000000000000000 } else { u }
+    print(v)
+    let w: int64 = if u > 0 { 5000000000 } else { 1 }
+    print(w + 1)
+}
+""",
+    # MYLA-417 (C1): a generic actor's getter called from outside
+    "actor_getter_of_a_field_s_name": r"""// MYLA-417 (C1): a generic actor's getter of a field's name, called from
+// outside, is the method: the actor's fields are its own methods' only, so
+// D178's call error has nothing to tell apart there
+actor Cell<T> {
+    value: T,
+}
+
+impl<T> Cell<T> {
+    fun value(self) -> T { return self.value }
+}
+
+struct Holder {
+    c: Cell<(int) -> int>,
+}
+
+async fun via(h: Holder) -> int {
+    let g = await h.c.value()
+    return g(10)
+}
+
+#main
+async fun main() {
+    let c = Cell { value: (x: int) => x + 1 }
+    let f = await c.value()
+    print(f(5))
+    print(await via(Holder { c: c }))
+}
+""",
+    "values_nested_through_closures":r"""// M15 (MYLA-415): values nested through closures, as deep as they like, are
 // released in a bounded stack on every target (wasm32 overflowed at about
 // 3,000 levels, aarch64 under qemu at 30,000), and copied to a child task
 // without recursion
@@ -8839,6 +9353,532 @@ async fun main() {
     print(count(l))
 }
 """,
+    "closures_capturing_recursive_enums_across_tasks": r"""// B1 (MYLA-415): a closure held in a variable that captures a recursive
+// enum crosses to a child task, an actor or a channel as a deep copy: its
+// environment holds the enum inline (its cell's contents), not as a box.
+// Also a partial, a struct holding the closure, nested closures, a list of
+// them to `task.all`, and a channel.
+import std.task as task
+
+enum Lst { Nil, Cons(int, Lst) }
+enum T { Leaf, Bin(T, int, T) }
+
+fun total(l: Lst) -> int {
+    return match l {
+        Cons(n, rest) => n + total(rest)
+        Nil => 0
+    }
+}
+
+fun size(t: T) -> int { return match t { Leaf => 0, Bin(l, _, r) => size(l) + 1 + size(r) } }
+
+fun add(l: Lst, k: int) -> int { return total(l) + k }
+
+struct Holder { name: str, f: () -> int }
+
+async fun run(f: () -> int) -> int { return f() }
+async fun run_held(h: Holder) -> int { return h.f() + h.name.len() }
+async fun run_partial(g: (int) -> int) -> int { return g(10) }
+async fun maker(n: int) -> () -> int {
+    var l = Lst.Nil
+    for i in 0..n { l = Lst.Cons(i, l) }
+    return () => total(l)
+}
+
+actor Keep { f: () -> int }
+impl Keep {
+    fun put(var self, f: () -> int) { self.f = f }
+    fun call(self) -> int { return self.f() }
+}
+
+#main
+async fun main() {
+    let cap = Lst.Cons(1, Lst.Cons(2, Lst.Nil))
+    let tr = T.Bin(T.Bin(T.Leaf, 1, T.Leaf), 2, T.Leaf)
+    let f = () => total(cap)
+    async let a = run(f)
+    print(await a)
+    // two recursive enums and a string beside them
+    let label = "tree"
+    let g = () => total(cap) * 100 + size(tr) * 10 + label.len()
+    async let b = run(g)
+    print(await b)
+    // a partial
+    let p = add(cap, _)
+    async let c = run_partial(p)
+    print(await c)
+    // a struct holding the closure
+    let h = Holder { name: "held", f: f }
+    async let d = run_held(h)
+    print(await d)
+    // nested closures
+    let outer = () => f() + g()
+    async let e = run(outer)
+    print(await e)
+    // a list of them to task.all
+    let jobs: [async () -> int] = [async () => f(), async () => g()]
+    let rs = await task.all(jobs)
+    print(rs[0] + rs[1])
+    // an actor keeps it
+    let k = Keep { f: () => 0 }
+    await k.put(f)
+    print(await k.call())
+    // through a channel
+    let ch: task.Channel<() -> int> = task.channel(2)
+    let s1 = await ch.send(f)
+    let s2 = await ch.send(g)
+    match await ch.recv() {
+        Some(x) => print(x())
+        None => print("none")
+    }
+    match await ch.recv() {
+        Some(x) => print(x())
+        None => print("none")
+    }
+    // a child's closure, which its siblings and the parent share (a clone)
+    async let m = maker(5)
+    async let s3 = run(await m)
+    async let s4 = run(await m)
+    let mine = await m
+    print(await s3 + await s4 + mine())
+    // the parent's copies are still whole
+    print(f() + g() + p(1) + total(cap) + size(tr))
+}
+""",
+    "operands_kept_when_a_later_operand_writes_their_variable": r"""// B2 (MYLA-543): an operator's left operand, read from a variable's
+// container, kept while the right one replaces that container (a `var self`
+// method); a compound assignment's old value too. Native code read freed
+// cells (`s121!`, `out of memory`)
+struct P { x: int, s: str }
+
+#derive(Eq)
+struct Q { name: str, n: int }
+
+impl Add for P {
+    fun add(self, other: P) -> P { return P { x: self.x + other.x, s: self.s + other.s } }
+}
+
+struct H {
+    xs: [str], m: [int: str], g: [[str]], ps: [P], qs: [Q], name: str,
+    t: [(str, int)], fs: [(int) -> str], n: int,
+}
+
+fun mk(n: int) -> str { return f"s{n}" }
+
+fun fresh() -> H {
+    return H {
+        xs: [mk(10), mk(11), mk(12)], m: [0: mk(20), 1: mk(21)], g: [[mk(30), mk(31)], [mk(32), mk(33)]],
+        ps: [P { x: 1, s: mk(40) }], qs: [Q { name: mk(41), n: 1 }], name: mk(50), t: [(mk(60), 6)],
+        fs: [(i: int) => mk(70 + i), (i: int) => mk(80 + i)], n: 0,
+    }
+}
+
+impl H {
+    // every container of `self` replaced: what was read from them released
+    fun repl(var self) {
+        self.xs = [mk(110), mk(111), mk(112)]
+        self.m = [0: mk(120), 1: mk(121)]
+        self.g = [[mk(130), mk(131)], [mk(132), mk(133)]]
+        self.ps = [P { x: 9, s: mk(140) }]
+        self.qs = [Q { name: mk(141), n: 9 }]
+        self.name = mk(150)
+        self.t = [(mk(160), 16)]
+        self.fs = [(i: int) => mk(170 + i), (i: int) => mk(180 + i)]
+        self.n += 1
+    }
+    fun s(var self) -> str { self.repl(); return "!" }
+    fun k(var self) -> int { self.repl(); return 1 }
+    fun l(var self) -> [str] { self.repl(); return [mk(10), mk(11), mk(12)] }
+    fun p(var self) -> P { self.repl(); return P { x: 2, s: "p" } }
+    fun q(var self) -> Q { self.repl(); return Q { name: mk(41), n: 1 } }
+    fun tu(var self) -> (str, int) { self.repl(); return (mk(60), 6) }
+    fun shrink(var self) -> str {
+        self.m.remove(1)
+        self.xs.truncate(1)
+        return "v"
+    }
+}
+
+fun shl(xs: [str]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(x + ",") }
+    return sb.build()
+}
+
+fun main() {
+    // operators
+    var h = fresh()
+    print(h.xs[0] + h.s())
+    h = fresh()
+    print(h.name + h.s())
+    h = fresh()
+    print(h.g[0][0] + (h.xs[1] + h.s()))
+    h = fresh()
+    print(h.m[0] + h.s())
+    h = fresh()
+    print(f"{h.xs[0] == h.s()} {h.xs[0] < h.s()}")
+    h = fresh()
+    print(f"{h.xs == h.l()}")
+    h = fresh()
+    print(f"{h.t[0] == h.tu()}")
+    h = fresh()
+    print(f"{h.qs[0] == h.q()}")
+    h = fresh()
+    let sum = h.ps[0] + h.p()
+    print(f"{sum.x} {sum.s}")
+    h = fresh()
+    print(h.xs[0] + (if h.k() > 0 { "T" } else { "F" }))
+    // compound assignments
+    h = fresh()
+    h.xs[0] += h.s()
+    print(shl(h.xs))
+    h = fresh()
+    h.m[1] += h.shrink()
+    print(f"{h.m[1]} {h.m.len()} {shl(h.xs)}")
+}
+""",
+    "bases_kept_when_their_index_writes_their_variable": r"""// B2 (MYLA-543): an index's or a slice's base kept while the index replaces
+// the container it is read from; and a function value called from a list.
+// Native code read freed cells (`list index 1 out of bounds (len 0)`)
+struct P { x: int, s: str }
+
+#derive(Eq)
+struct Q { name: str, n: int }
+
+impl Add for P {
+    fun add(self, other: P) -> P { return P { x: self.x + other.x, s: self.s + other.s } }
+}
+
+struct H {
+    xs: [str], m: [int: str], g: [[str]], ps: [P], qs: [Q], name: str,
+    t: [(str, int)], fs: [(int) -> str], n: int,
+}
+
+fun mk(n: int) -> str { return f"s{n}" }
+
+fun fresh() -> H {
+    return H {
+        xs: [mk(10), mk(11), mk(12)], m: [0: mk(20), 1: mk(21)], g: [[mk(30), mk(31)], [mk(32), mk(33)]],
+        ps: [P { x: 1, s: mk(40) }], qs: [Q { name: mk(41), n: 1 }], name: mk(50), t: [(mk(60), 6)],
+        fs: [(i: int) => mk(70 + i), (i: int) => mk(80 + i)], n: 0,
+    }
+}
+
+impl H {
+    // every container of `self` replaced: what was read from them released
+    fun repl(var self) {
+        self.xs = [mk(110), mk(111), mk(112)]
+        self.m = [0: mk(120), 1: mk(121)]
+        self.g = [[mk(130), mk(131)], [mk(132), mk(133)]]
+        self.ps = [P { x: 9, s: mk(140) }]
+        self.qs = [Q { name: mk(141), n: 9 }]
+        self.name = mk(150)
+        self.t = [(mk(160), 16)]
+        self.fs = [(i: int) => mk(170 + i), (i: int) => mk(180 + i)]
+        self.n += 1
+    }
+    fun s(var self) -> str { self.repl(); return "!" }
+    fun k(var self) -> int { self.repl(); return 1 }
+    fun l(var self) -> [str] { self.repl(); return [mk(10), mk(11), mk(12)] }
+    fun p(var self) -> P { self.repl(); return P { x: 2, s: "p" } }
+    fun q(var self) -> Q { self.repl(); return Q { name: mk(41), n: 1 } }
+    fun tu(var self) -> (str, int) { self.repl(); return (mk(60), 6) }
+    fun shrink(var self) -> str {
+        self.m.remove(1)
+        self.xs.truncate(1)
+        return "v"
+    }
+}
+
+fun shl(xs: [str]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(x + ",") }
+    return sb.build()
+}
+
+fun main() {
+    // an index's and a slice's base
+    var h = fresh()
+    print(h.xs[h.k()])
+    h = fresh()
+    print(h.g[0][h.k()])
+    h = fresh()
+    print(h.g[h.k()][0])
+    h = fresh()
+    print(h.m[h.k()])
+    h = fresh()
+    print(h.ps[h.k() - 1].s)
+    h = fresh()
+    print(f"{h.xs[0][h.k()]}")
+    h = fresh()
+    print(shl(h.xs[h.k():]))
+    h = fresh()
+    print(h.xs[0][h.k():])
+    // a function value called from a list
+    h = fresh()
+    print(h.fs[0](h.k()))
+    print(h.n)
+}
+""",
+    "holes_and_keys_kept_when_a_later_one_writes_their_variable": r"""// B2 (MYLA-543): an f-string's or `format`'s hole, a map literal's key and a
+// `match` scrutinee's operand kept while a later operand replaces the
+// container they are read from. Native code read freed cells
+struct P { x: int, s: str }
+
+#derive(Eq)
+struct Q { name: str, n: int }
+
+impl Add for P {
+    fun add(self, other: P) -> P { return P { x: self.x + other.x, s: self.s + other.s } }
+}
+
+struct H {
+    xs: [str], m: [int: str], g: [[str]], ps: [P], qs: [Q], name: str,
+    t: [(str, int)], fs: [(int) -> str], n: int,
+}
+
+fun mk(n: int) -> str { return f"s{n}" }
+
+fun fresh() -> H {
+    return H {
+        xs: [mk(10), mk(11), mk(12)], m: [0: mk(20), 1: mk(21)], g: [[mk(30), mk(31)], [mk(32), mk(33)]],
+        ps: [P { x: 1, s: mk(40) }], qs: [Q { name: mk(41), n: 1 }], name: mk(50), t: [(mk(60), 6)],
+        fs: [(i: int) => mk(70 + i), (i: int) => mk(80 + i)], n: 0,
+    }
+}
+
+impl H {
+    // every container of `self` replaced: what was read from them released
+    fun repl(var self) {
+        self.xs = [mk(110), mk(111), mk(112)]
+        self.m = [0: mk(120), 1: mk(121)]
+        self.g = [[mk(130), mk(131)], [mk(132), mk(133)]]
+        self.ps = [P { x: 9, s: mk(140) }]
+        self.qs = [Q { name: mk(141), n: 9 }]
+        self.name = mk(150)
+        self.t = [(mk(160), 16)]
+        self.fs = [(i: int) => mk(170 + i), (i: int) => mk(180 + i)]
+        self.n += 1
+    }
+    fun s(var self) -> str { self.repl(); return "!" }
+    fun k(var self) -> int { self.repl(); return 1 }
+    fun l(var self) -> [str] { self.repl(); return [mk(10), mk(11), mk(12)] }
+    fun p(var self) -> P { self.repl(); return P { x: 2, s: "p" } }
+    fun q(var self) -> Q { self.repl(); return Q { name: mk(41), n: 1 } }
+    fun tu(var self) -> (str, int) { self.repl(); return (mk(60), 6) }
+    fun shrink(var self) -> str {
+        self.m.remove(1)
+        self.xs.truncate(1)
+        return "v"
+    }
+}
+
+fun shl(xs: [str]) -> str {
+    var sb = StringBuilder()
+    for x in xs { sb.append(x + ",") }
+    return sb.build()
+}
+
+fun main() {
+    // holes
+    var h = fresh()
+    print(f"{h.xs[0]}{h.s()}{h.xs[0]}")
+    h = fresh()
+    print(format("{}-{}", h.g[0][0], h.s()))
+    // a map literal's key
+    h = fresh()
+    let m = [h.xs[0]: h.s()]
+    for k in m { print(k + m[k]) }
+    // a scrutinee
+    h = fresh()
+    print(match h.xs[0] + h.s() { "s10!" => "ok", _ => "bad" })
+}
+""",
+    "a_method_call_takes_its_receivers_place_first": r"""// C9, D193 (MYLA-543): `place[i()].push(v())` takes the receiver's place
+// (its indices and keys) before the argument, as every method call does and
+// as the interpreter did; native code ran the value first (`push: 21`)
+struct C { n: int, g: [[int]], m: [int: [int]] }
+
+impl C {
+    fun k(var self) -> int {
+        self.n = self.n * 10 + 1
+        return 0
+    }
+    fun v(var self) -> int {
+        self.n = self.n * 10 + 2
+        return 7
+    }
+}
+
+fun at(n: int) -> int {
+    print(f"index {n}")
+    return 0
+}
+
+fun val(n: int) -> int {
+    print(f"value {n}")
+    return n
+}
+
+fun main() {
+    // C9
+    var c = C { n: 0, g: [[1]], m: [0: [1]] }
+    c.g[c.k()].push(c.v())
+    print(f"push: {c.n} {c.g[0].len()}")
+    c.n = 0
+    c.m[c.k()].push(c.v())
+    print(f"map element push: {c.n} {c.m[0].len()}")
+    c.n = 0
+    c.g[c.n].push(c.v())
+    print(f"index read first: {c.n} {c.g[0].len()}")
+    var g: [[int]] = [[]]
+    g[at(1)].push(val(2))
+    var bs = [StringBuilder()]
+    bs[at(3)].append(f"{val(4)}")
+    print(f"{g[0].len()} {bs[0].build()}")
+}
+""",
+    "contains_keeps_its_map_while_the_key_replaces_it": r"""// H4 (MYLA-543): `m.contains(k())` where `k()` replaces the map: the map is
+// read first and kept (D193), so the lookup walks the old map. Native code
+// walked the freed one (`true false true`, and `5` once its cells were reused)
+struct H { m: [int: str], sm: [str: int], junk: [[int64]] }
+
+impl H {
+    fun k(var self) -> int {
+        self.m = [5: f"new{5}"]
+        return 1
+    }
+    fun sk(var self) -> str {
+        self.sm = [f"k{9}": 5]
+        return f"k{2}"
+    }
+    fun key(var self, i: int) -> str {
+        self.sm = [:]
+        // the old map's memory reused
+        for j in 0..64 {
+            var xs: [int64] = []
+            for q in 0..(16 + j % 48) { xs.push(0x7fffffff00000000 + (q as int64)) }
+            self.junk.push(xs)
+        }
+        return f"k{i}"
+    }
+}
+
+fun main() {
+    var h = H { m: [0: f"old{0}", 1: f"old{1}"], sm: [f"k{1}": 1, f"k{2}": 2], junk: [] }
+    print(h.m.contains(h.k()))
+    print(h.m.contains(1))
+    print(h.sm.contains(h.sk()))
+    print(h.sm.contains(f"k{2}"))
+    var hits = 0
+    for r in 0..50 {
+        h.sm = [:]
+        for i in 0..40 { h.sm[f"k{i}"] = i }
+        if h.sm.contains(h.key(r % 40)) { hits += 1 }
+        h.junk = []
+    }
+    print(hits)
+}
+""",
+    "places_counted_from_the_end_by_a_call": r"""// MYLA-811: a place's index counted from the end by a call, `g[^at(1)]`,
+// written by a method or an assignment. Native code held the `^n` as a
+// value of its own and wrote `g[0]`
+struct S { g: [[int]], n: int }
+
+impl S {
+    fun bump(var self) -> int {
+        self.n += 1
+        return 1
+    }
+}
+
+fun at(i: int) -> int { return i }
+
+fun lens(g: [[int]]) -> str {
+    var sb = StringBuilder()
+    for x in g { sb.append(f"{x.len()},") }
+    return sb.build()
+}
+
+fun main() {
+    var g = [[1], [2], [3]]
+    g[^at(1)].push(9)
+    g[^at(2)].push(at(8))
+    g[^at(3)].insert(0, 7)
+    print(lens(g))
+    g[^at(1)][0] = 5
+    g[^at(1)][^at(1)] += 1
+    print(f"{g[2][0]} {g[2][1]}")
+    var s = S { g: [[1], [2]], n: 0 }
+    s.g[^s.bump()].push(s.bump())
+    print(f"{lens(s.g)} {s.n} {s.g[1][1]}")
+    var gg = [[[1]], [[2], [3]]]
+    gg[^at(1)][^at(2)].push(4)
+    print(f"{gg[1][0].len()} {gg[1][1].len()}")
+}
+""",
+    "recursive_enums_as_map_keys": r"""// C11, D194 (MYLA-543): a recursive enum is a map key natively too, as
+// interpreted: written, read, updated, removed, iterated, copied, handed to
+// a child task, in a literal; natively `main can't be lowered to the IR`
+import std.task as task
+
+#derive(Eq, Hash)
+enum Lst { Nil, Cons(int, Lst) }
+
+#derive(Eq, Hash)
+enum T { Leaf(str), Bin(T, T) }
+
+fun upto(n: int) -> Lst {
+    var l = Lst.Nil
+    for i in 0..n { l = Lst.Cons(i, l) }
+    return l
+}
+
+fun total(l: Lst) -> int {
+    return match l {
+        Cons(n, rest) => n + total(rest)
+        Nil => 0
+    }
+}
+
+async fun count_in(m: [Lst: int], k: Lst) -> int { return m.get_or(k, -1) + m.len() }
+
+#main
+async fun main() {
+    var m: [Lst: int] = [:]
+    for i in 0..6 { m[upto(i)] = i * 10 }
+    print(m.len())
+    print(m[upto(3)])
+    print(m.contains(upto(5)))
+    print(m.contains(Lst.Cons(9, Lst.Nil)))
+    m[upto(2)] += 5
+    print(m[upto(2)])
+    m.remove(upto(4))
+    print(f"{m.len()} {m.contains(upto(4))}")
+    var s = 0
+    for k in m { s += total(k) * 100 + m[k] }
+    print(s)
+    let ks = m.keys()
+    print(f"{ks.len()} {total(ks[ks.len() - 1])}")
+    print(m.get(upto(1)) == Some(10))
+    print(m.get_or(upto(7), -1))
+    // a copy keeps its keys when the original changes
+    var c = m
+    c[Lst.Cons(42, Lst.Nil)] = 42
+    m.remove(upto(0))
+    print(f"{m.len()} {c.len()} {c[upto(0)]} {c[Lst.Cons(42, Lst.Nil)]}")
+    // to a child task, the parent keeping its own
+    async let a = count_in(c, upto(5))
+    print(await a)
+    print(c.len())
+    // a literal, and a key holding strings
+    let t: [T: str] = [T.Leaf("a"): "leaf", T.Bin(T.Leaf("a"), T.Leaf("b")): "bin"]
+    print(t[T.Bin(T.Leaf("a"), T.Leaf("b"))] + " " + t[T.Leaf("a")])
+    var many: [Lst: int] = [:]
+    for i in 0..2000 { many[upto(i % 50)] = i }
+    print(f"{many.len()} {many[upto(49)]}")
+}
+""",
     "actors_store_every_heap_type": r"""// H2 (MYLA-415): an actor's method keeps an argument of every heap type in
 // its state, in a program with tasks, the arguments temporaries or the
 // caller's own values, which the caller then changes
@@ -8918,6 +9958,225 @@ async fun main() {
     print(await st.put_two("pre-", mine))
     print(await st.report())
     print(f"{mine.len()} {tags.len()} {sb.build()}")
+}
+""",    "literals_left_of_operators_take_their_type": r"""// M15 and the left literals (MYLA-612, MYLA-544, MYLA-609): a literal on
+// the left of an operator takes its type from the impl or the other side
+import std.vector32 as v32
+
+struct B<T> {
+    v: T,
+}
+
+struct V {
+    x: int,
+}
+
+impl<T> Mul<B<str>, str> for B<T> {
+    fun mul(self, n: B<str>) -> str {
+        return "by " + n.v
+    }
+}
+
+impl<T> Mul<B<T>, B<T>> for B<T> {
+    fun mul(self, n: B<T>) -> B<T> {
+        return n
+    }
+}
+
+impl Mul<V, V> for int64 {
+    fun mul(self, k: V) -> V {
+        return V { x: k.x * (self as int) }
+    }
+}
+
+fun eqs(x: int64) -> str {
+    let a = Some(1) == Some(x)
+    let b = (1, 1) == (x, 1)
+    let c = [1] == [x]
+    let d = Some(5000000000) == Some(x)
+    let e = (Some(3), [1, 2]) != (Some(x), [1, 2])
+    return f"{a} {b} {c} {d} {e}"
+}
+
+fun main() {
+    let b = B { v: "b" }
+    print(B { v: 1 } * b)
+    print((B { v: 2 } * B { v: 3 }).v)
+    let w = v32.vec3(1.0, 2.0, 3.0)
+    let c = 2.0 * w
+    print(c.y)
+    let d = -0.5 * w
+    print(d.z)
+    let v = V { x: 3 }
+    print((2 * v).x)
+    print((-4 * v).x)
+    print(eqs(1))
+    print(eqs(3))
+    print(eqs(5000000000))
+}
+""",
+    "operator_impls_whose_bounds_hold": r"""// H1 (MYLA-612): operator impls with bounds, used where the bounds hold:
+// `*` by a type argument, `*=`, unary `-`, `x[i]`, `x[i] = v` and a
+// `T: Mul<float>` argument, on concrete types and in generic code
+trait Conv<T> {
+    fun conv(self) -> T
+}
+
+trait Name {
+    fun name(self) -> str
+}
+
+struct A {
+    n: int,
+}
+
+impl Conv<str> for A {
+    fun conv(self) -> str {
+        return f"a{self.n}"
+    }
+}
+
+impl Name for A {
+    fun name(self) -> str {
+        return f"A{self.n}"
+    }
+}
+
+struct W<C> {
+    v: C,
+    k: float,
+    s: str,
+}
+
+impl<C: Conv<str>> Index<int, str> for W<C> {
+    fun index(self, i: int) -> str {
+        return f"{self.v.conv()}[{i}]"
+    }
+}
+
+impl<C: Name> IndexSet<int, str> for W<C> {
+    fun set_index(var self, i: int, x: str) {
+        self.s = f"{self.v.name()}:{i}={x}"
+    }
+}
+
+impl<C: Name> Mul<int, str> for W<C> {
+    fun mul(self, k: int) -> str {
+        return f"{self.v.name()}*{k}"
+    }
+}
+
+impl<C: Conv<str>> Mul<float> for W<C> {
+    fun mul(self, k: float) -> W<C> {
+        return W { v: self.v, k: self.k * k, s: self.s + self.v.conv() }
+    }
+}
+
+impl<C: Name> Neg<str> for W<C> {
+    fun neg(self) -> str {
+        return "-" + self.v.name()
+    }
+}
+
+fun scale<T: Mul<float>>(x: T) -> T {
+    return x * 2.0
+}
+
+fun named<C: Name>(w: W<C>) -> str {
+    return (w * 3) + " " + (-w)
+}
+
+fun indexed<C: Conv<str> + Name>(w: W<C>) -> str {
+    var x = w
+    x[4] = "q"
+    return w[1] + " " + x.s
+}
+
+fun main() {
+    var w = W { v: A { n: 7 }, k: 1.5, s: "" }
+    print(w * 2)
+    print(-w)
+    print(w[3])
+    w[5] = "z"
+    print(w.s)
+    let d = scale(w)
+    print(d.k)
+    print(d.s)
+    w *= 4.0
+    print(w.k)
+    print(named(w))
+    print(indexed(w))
+}
+""",
+    "type_parameters_an_operator_bound_fixes": r"""// MYLA-802: a type parameter only an operator bound names is fixed by the
+// impl the argument's type has for the bound's trait and its known
+// arguments (D200), as `I: Iterator<T>` fixes `T` (D171)
+struct B<T> {
+    v: T,
+}
+
+impl<T> Index<int, T> for B<T> {
+    fun index(self, i: int) -> T {
+        return self.v
+    }
+}
+
+struct V {
+    x: float,
+}
+
+impl Mul<float, str> for V {
+    fun mul(self, k: float) -> str {
+        return f"V*{k}"
+    }
+}
+
+impl Mul<V, float> for V {
+    fun mul(self, o: V) -> float {
+        return self.x * o.x
+    }
+}
+
+impl Neg<int> for V {
+    fun neg(self) -> int {
+        return -(self.x as int)
+    }
+}
+
+fun sum3<C: Index<int, T>, T: Add>(c: C) -> T {
+    return c[0] + c[1] + c[2]
+}
+
+fun at<C: Index<K, T>, K, T>(c: C, k: K) -> T {
+    return c[k]
+}
+
+fun again<D: Index<int, U>, U: Add>(d: D) -> U {
+    return sum3(d)
+}
+
+fun times<A: Mul<R, O>, R, O>(a: A, r: R) -> O {
+    return a * r
+}
+
+fun negated<N: Neg<O>, O>(n: N) -> O {
+    return -n
+}
+
+fun main() {
+    print(sum3(B { v: 2 }))
+    print(sum3([1, 2, 3]))
+    print(sum3([0.5, 0.25, 2.0]))
+    print(sum3("ABC"))
+    print(at(["one": 1, "two": 2], "two"))
+    print(at(B { v: "b" }, 7))
+    print(again(B { v: 5i64 }))
+    print(again([4u8, 5, 6]))
+    print(times(V { x: 1.5 }, 2.0))
+    print(times(V { x: 1.5 }, V { x: 3.0 }))
+    print(times(6, 7))
+    print(negated(V { x: 4.0 }))
+    print(negated(2.5))
 }
 """,
 }
@@ -9460,8 +10719,8 @@ STRESS_FRAGMENTED_FREE_SRC = (
     # Leaves 8000 freed cells of 8000 different sizes behind (each `keys(m)` on
     # a growing map frees a list one slot longer than the last), then allocates
     # 30000 small lists that none of those cells fit. An allocator that scans
-    # one free list on every allocation does 240 million probes here (about
-    # 14 s); size-class free lists find "nothing free" at once (MYLA-16).
+    # one free list on every allocation does 240 million probes here;
+    # size-class free lists find "nothing free" at once (MYLA-16).
     "#main\nfun main() {\n"
     "    var m: [int: int] = [:]\n"
     "    var i = 0\n"
@@ -9962,6 +11221,77 @@ fun main() {
 """
 
 
+# C10 (MYLA-543): generic enums and structs nested in themselves, released
+# each round: the peak memory of 20,000 rounds and of 200,000 must be alike
+# (a round leaked some 700 bytes)
+NESTED_GENERICS_SRC = r"""// C10 (MYLA-543): a generic enum or struct nested in itself
+// (`Option<Option<Tree>>`, `Option<Option<[str]>>`, which a channel's
+// `recv` gives) is released: `owns_heap` saw the inner `Option` by its name
+// as the outer one and called it free of the heap
+import std.process as process
+import std.num as num
+import std.task as task
+
+enum Tree { Leaf, Node(Tree, int, Tree) }
+struct Wrap<T> { v: T, n: int }
+
+fun mk(n: int) -> Tree {
+    if n <= 0 { return Tree.Leaf }
+    return Tree.Node(mk(n - 1), n, Tree.Leaf)
+}
+
+async fun recv_n(ch: task.Channel<Option<[str]>>, n: int) -> int {
+    var s = 0
+    for i in 0..n {
+        match await ch.recv() {
+            Some(v) => { s += 1 }
+            None => { s += 100 }
+        }
+    }
+    return s
+}
+
+async fun job(j: Option<[str]>) -> Option<[str]> { return j }
+
+#main
+async fun main() {
+    let rounds = num.parse_int(process.args()[1]).unwrap_or(10) as int
+    var total = 0
+    for i in 0..rounds {
+        let o: Option<Option<Tree>> = Some(Some(mk(6)))
+        match o {
+            Some(v) => { total += 1 }
+            None => {}
+        }
+        let w = Wrap { v: Wrap { v: [f"a{i}", "b"], n: 1 }, n: 2 }
+        total += w.v.v.len()
+        let r: Result<Option<[str]>, Option<str>> = Ok(Some([f"r{i}"]))
+        match r {
+            Ok(Some(xs)) => { total += xs.len() }
+            _ => {}
+        }
+    }
+    for i in 0..rounds / 10 {
+        let ch: task.Channel<Option<[str]>> = task.channel(2)
+        async let r = recv_n(ch, 2)
+        let s1 = await ch.send(Some([f"a{i}", "b"]))
+        let s2 = await ch.send(Some([f"c{i}", "d"]))
+        total += await r
+        await ch.close()
+        let got = await task.pool(2, [Some([f"p{i}"]), None], job)
+        total += got.len()
+    }
+    print(total)
+}
+"""
+
+
+def _peak_kb(argv: list[str], exe: str | None) -> tuple[str, int]:
+    """(stdout, peak resident memory in KB) of running `argv`: the program's
+    own peak, not this process's (MYLA-611)."""
+    return peak_memory(argv, exe)
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
     def test_trait_functions_across_modules(self):
@@ -10038,42 +11368,128 @@ class TestCompilerParity(unittest.TestCase):
                 out, err, code = selfhost_run(path)
                 self.assertEqual((out, code), ("b\n", 1))
                 self.assertEqual(err.splitlines()[:2], [f"runtime error: invalid char: {value} is not a Unicode scalar value",
-                                                        f"  --> {path}:2:14"])
+                                                        f"  --> {shown(path)}:2:14"])
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path),
                                  ("b\n", f"runtime error: invalid char: {value} is not a Unicode scalar value\n"
-                                          f"  --> {path}:2:14\n", 1))
+                                          f"  --> {shown(path)}:2:14\n", 1))
 
     def test_polymorphic_recursion_is_refused_where_it_is_built(self):
         # MYLA-415 (H5): a generic function calling itself with a larger type
         # asks for instances without end, and `myla build` never ended; it is
-        # a type error at the call now, on every target, when the type
-        # arguments grow too deep or (a pair of pairs of ...) too large; the
-        # interpreter runs it
+        # a type error at the call now. MYLA-543: the checker sees it where
+        # the type arguments are written with the caller's type parameters,
+        # so `myla check`, `myla run` and `myla build` on every target say
+        # the same, at the call that makes the type larger (where the build
+        # refused it before)
         myla = selfhost_tool("main")
         cases = (
             ("grow", "fun grow<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n"
                      "    return 1 + grow<[T]>(n - 1, [x])\n}\nfun main() { print(grow(3, 1)) }\n",
-             "3:25", "65 types deep (the limit is 64)", "3\n"),
+             "3:25", "in 'grow<T>', asks for 'grow<[T]>'", "'grow' calls itself"),
             ("g", "fun f<T>(n: int, x: T) -> int {\n    if n == 0 { return 0 }\n    return g(n - 1, (x, x))\n}\n"
                   "fun g<T>(n: int, x: T) -> int {\n    return f(n, x)\n}\nfun main() { print(f(3, 1)) }\n",
-             "3:13", "more than 4096 types in all", "0\n"),
+             "3:13", "in 'f<T>', asks for 'g<(T, T)>'", "'f' calls itself through 'g'"),
             ("h", "fun h<T>(n: int, x: T) -> int {\n"
                   "    let k = (m: int) => if m == 0 { 0 } else { h(m - 1, Some(x)) }\n    return k(n)\n}\n"
                   "fun main() { print(h(3, 1)) }\n",
-             "2:49", "65 types deep (the limit is 64)", "0\n"),
+             "2:49", "in 'h<T>', asks for 'h<Option<T>>'", "'h' calls itself"),
+            ("Box.deep", "struct Box<T> { v: T }\nimpl<T> Box<T> {\n    fun deep(self, n: int) -> int {\n"
+                         "        if n == 0 { return 0 }\n        return 1 + Box { v: [self.v] }.deep(n - 1)\n    }\n}\n"
+                         "fun main() { print(Box { v: 1 }.deep(3)) }\n",
+             "5:44", "in 'Box.deep<T>', asks for 'Box.deep<[T]>'", "'Box.deep' calls itself"),
         )
-        for callee, src, at, why, out in cases:
+        for callee, src, at, what, how in cases:
             with self.subTest(callee=callee), tempfile.TemporaryDirectory() as tmp:
                 path = write_program(tmp, src)
+                checked = subprocess.run([myla, "check", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual(checked.returncode, 1, checked.stderr)
+                self.assertTrue(checked.stderr.startswith(f"type error: the instances of '{callee}' nest without end: "
+                                                          f"this call, {what}\n  --> {shown(path)}:{at}\n"), checked.stderr)
+                self.assertIn(f"note: {how} with a larger type at each step (polymorphic recursion), which native "
+                              "code can't be built for\n", checked.stderr)
                 ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
-                self.assertEqual((ran.stdout, ran.returncode), (out, 0), ran.stderr)
+                self.assertEqual((ran.stdout, ran.stderr, ran.returncode), ("", checked.stderr, 1))
+                for target in ("x86_64-linux", "aarch64-linux", "wasm32-wasi"):
+                    built = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--target", target],
+                                           capture_output=True, text=True, timeout=60)
+                    self.assertEqual((built.stderr, built.returncode), (checked.stderr, 1))
+
+    def test_polymorphic_recursion_through_a_trait_is_refused_by_the_build(self):
+        # MYLA-543: through a trait's method, which instance a call reaches
+        # depends on the type the instance gets, so the checker can't see the
+        # recursion (`run<T: Tr>` calls `x.go()`, `Box<U>`'s `go` calls
+        # `run<Box<[U]>>`); the build still refuses it where the type
+        # arguments grow too deep or (a pair of pairs of ...) too large, and
+        # the interpreter runs it
+        myla = selfhost_tool("main")
+        head = "trait Tr {\n    fun go(self, n: int) -> int\n}\nstruct Box<U> { v: U }\nimpl<U> Tr for Box<U> {\n"
+        tail = ("fun run<T: Tr>(x: T, n: int) -> int {\n    if n == 0 { return 0 }\n    return 1 + x.go(n - 1)\n}\n"
+                "fun main() { print(run(Box { v: 1 }, 3)) }\n")
+        cases = (
+            ("[self.v]", "66 types deep (the limit is 64)"),
+            ("(self.v, self.v)", "more than 4096 types in all"),
+        )
+        for grown, why in cases:
+            src = head + f"    fun go(self, n: int) -> int {{\n        return run(Box {{ v: {grown} }}, n)\n    }}\n}}\n" + tail
+            with self.subTest(grown=grown), tempfile.TemporaryDirectory() as tmp:
+                path = write_program(tmp, src)
+                checked = subprocess.run([myla, "check", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual((checked.stdout, checked.returncode), ("ok\n", 0), checked.stderr)
+                ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
+                self.assertEqual((ran.stdout, ran.returncode), ("3\n", 0), ran.stderr)
                 for target in ("x86_64-linux", "aarch64-linux", "wasm32-wasi"):
                     built = subprocess.run([myla, "build", path, "-o", os.path.join(tmp, "out"), "--target", target],
                                            capture_output=True, text=True, timeout=60)
                     self.assertEqual(built.returncode, 1, built.stderr)
-                    self.assertIn(f"type error: the instances of '{callee}' nest without end: this call asks for one "
-                                  f"whose type arguments are {why}\n  --> {path}:{at}\n", built.stderr)
+                    self.assertIn(f"type error: the instances of 'run' nest without end: this call asks for one "
+                                  f"whose type arguments are {why}\n  --> {shown(path)}:7:19\n", built.stderr)
                     self.assertIn("(polymorphic recursion)", built.stderr)
+
+    def test_a_deep_type_the_program_writes_is_no_recursion(self):
+        # MYLA-544: a type 65 or 100 deep that the program writes is no
+        # polymorphic recursion: native code builds its instance, which only
+        # an instance past the limit asking for a deeper one was refused
+        # for; the interpreter runs it. MYLA-543: `myla check` says `ok`, and
+        # a recursion that passes such a type on unchanged, or hands it to
+        # another generic function as it is, builds too (it was refused)
+        myla = selfhost_tool("main")
+        for depth in (65, 100):
+            t, v = "int", "5"
+            for _ in range(depth):
+                t, v = f"[{t}]", f"[{v}]"
+            src = (f"fun mk<T>(x: T) -> T {{\n    return x\n}}\n"
+                   f"fun count<T>(x: T, n: int) -> int {{\n    if n == 0 {{ return 0 }}\n    return 1 + count(x, n - 1)\n}}\n"
+                   f"fun wrap<U>(x: U) -> [U] {{\n    return [x]\n}}\n"
+                   f"fun outer<T>(x: T) -> int {{\n    return wrap(x).len()\n}}\n"
+                   f"fun main() {{\n    let x: {t} = {v}\n    print(mk(x) == x)\n    print(count(x, 3))\n"
+                   f"    print(outer(x))\n}}\n")
+            with self.subTest(depth=depth):
+                interp, native = _both(src)
+                self.assertEqual(native, interp)
+                self.assertEqual(native, ("true\n3\n1\n", "", 0))
+                with tempfile.TemporaryDirectory() as tmp:
+                    checked = subprocess.run([myla, "check", write_program(tmp, src)], capture_output=True, text=True,
+                                             timeout=60)
+                    self.assertEqual((checked.stdout, checked.stderr, checked.returncode), ("ok\n", "", 0))
+
+    def test_an_invalid_spec_of_a_builtin_format_is_a_runtime_error(self):
+        # MYLA-544 (C8): a spec known only when it runs, invalid, is the
+        # program's runtime error on both runners, and a case's under
+        # `myla test`; the interpreter failed in its own std.fmt, which
+        # ended `myla test` itself (the position differs: MYLA-565)
+        src = ('fun show<T: Format>(x: T, spec: str) -> str {\n    return x.format(spec)\n}\n'
+               '#test(5, "q")[panic("invalid format spec \'q\'")]\n#test(5, "x")["5"]\n'
+               'fun f(n: int, s: str) -> str {\n    return show(n, s)\n}\n'
+               'fun main() {\n    print(f(255, "x"))\n    print(f(1, "q"))\n}\n')
+        interp, native = _both(src)
+        for out, err, code in (interp, native):
+            self.assertEqual((out, code), ("ff\n", 1))
+            self.assertTrue(err.startswith("runtime error: invalid format spec 'q'\n"), err)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, src)
+            ran = subprocess.run([selfhost_tool("main"), "test", path], capture_output=True, text=True, timeout=60)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertIn("2/2 passed.", ran.stdout)
 
     def test_a_file_without_main_is_a_clean_error_for_build(self):
         # MYLA-415 (Z3): `CodeGen.sig_of` fell back on the first function, so
@@ -10086,7 +11502,7 @@ class TestCompilerParity(unittest.TestCase):
             ran = subprocess.run([myla, "run", path], capture_output=True, text=True, timeout=60)
             self.assertEqual((ran.returncode, ran.stderr),
                              (1, "runtime error: no entry point: define '#main' or a function named 'main'\n"))
-            for flags in (["--target", "x86_64-linux"], ["-g"], ["--checked"], ["--target", "aarch64-linux"],
+            for flags in (["--target", "x86_64-linux"], ["--target", "x86_64-linux", "-g"], ["--checked"], ["--target", "aarch64-linux"],
                           ["--target", "wasm32-wasi"]):
                 with self.subTest(flags=flags):
                     out = os.path.join(tmp, "out")
@@ -10226,6 +11642,72 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertTrue(lines[1].startswith("  --> "), err)
                 self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(lines[:2]) + "\n", 1))
 
+    def test_track_caller_reports_the_callers_position(self):
+        # MYLA-435: a `#track_caller` function's `panic`, `assert` and
+        # `unreachable` report where it was called, on every runner (a
+        # call from one such function to another passes its caller's on);
+        # std.option's `expect`s and std.args' spec checks are such. Each
+        # case: its program's `main`, the call or index its error points
+        # at (at its first bracket, as every runtime error at a call does)
+        # and its message
+        tracked = ("#track_caller\nfun must(ok: bool, why: str) {\n    if !ok { panic(why) }\n}\n"
+                   "#track_caller\nfun never() -> int {\n    unreachable()\n}\n"
+                   "#track_caller\nfun outer(x: Option<int>) -> int {\n    must(true, \"\")\n    return x.expect(\"outer\")\n}\n"
+                   "fun middle(x: Option<int>) -> int {\n    return x.expect(\"middle\")\n}\n"
+                   "#track_caller\nfun via_middle(x: Option<int>) -> int {\n    return middle(x)\n}\n"
+                   "#track_caller\nfun first(xs: [int]) -> int {\n    return xs[0]\n}\n"
+                   "#track_caller\nfun in_lambda(x: int) -> int {\n    let f = (y: int) => {\n"
+                   "        assert(y < 10, \"big\")\n        return y\n    }\n    return f(x)\n}\n"
+                   "struct Box<T> {\n    v: Option<T>,\n}\n"
+                   "impl<T> Box<T> {\n    #track_caller\n    fun get(self) -> T {\n        return self.v.expect(\"an empty box\")\n    }\n}\n"
+                   "#track_caller\nfun pick<T>(xs: [T], i: int) -> T {\n    assert(i < xs.len(), f\"no {i}\")\n    return xs[i]\n}\n")
+        lib = "#track_caller\npub fun checked_half(n: int) -> int {\n    assert(n % 2 == 0, \"odd\")\n    return n / 2\n}\n"
+        main = "from .lib import checked_half\n" + tracked + "fun main() {\n    print(1)\n    {body}\n}\n"
+        cases = {
+            "option_expect": ("let o: Option<int> = None\n    print(o.expect(\"none here\"))", "expect(\"none here\")", "none here"),
+            "result_expect": ("let r: Result<int, str> = Err(\"e\")\n    print(r.expect(\"an error\"))", "expect(\"an error\")", "an error"),
+            "panic": ("must(1 > 2, \"no\")", "must(1 > 2", "no"),
+            "unreachable": ("print(never())", "never())", "reached unreachable code"),
+            "through_a_tracked_function": ("print(outer(None))", "outer(None)", "outer"),
+            "through_an_untracked_one": ("print(via_middle(None))", "expect(\"middle\")", "middle"),
+            "a_method_of_a_generic_type": ("let b: Box<str> = Box { v: None }\n    print(b.get())", "get())", "an empty box"),
+            "a_generic_function": ("print(pick([\"a\"], 3))", "pick([\"a\"]", "no 3"),
+            "a_module_of_its_own": ("print(checked_half(4))\n    print(checked_half(7))", "checked_half(7)", "odd"),
+            # an index's error is the function's own, and a lambda's
+            # failure its own position
+            "an_index": ("let xs: [int] = []\n    print(first(xs))", "xs[0]", "list index 0 out of bounds (len 0)"),
+            "a_lambda_inside": ("print(in_lambda(12))", "assert(y < 10", "big"),
+            # a whole program
+            "in_a_task": ("async fun work(o: Option<int>) -> int {\n    return o.expect(\"in a task\")\n}\n\n"
+                          "#main\nasync fun main() {\n    print(await work(Some(1)))\n    print(await work(None))\n}\n",
+                          "expect(\"in a task\")", "in a task"),
+            # std.args: a spec it can't read, an argument the spec doesn't
+            # declare (through `get_or`, which calls `get`; MYLA-553)
+            "an_args_spec": ("import std.args as args\n\nfun main() {\n    let s = args.spec(\"t\").option(\"out\", 'o')\n"
+                             "    print(s.flag(\"verbose\", 'o').usage())\n}\n",
+                             "flag(\"verbose\"", "args: '-o' is declared twice (--out and --verbose)"),
+            "an_undeclared_argument": ("import std.args as args\n\nfun main() {\n    let s = args.spec(\"t\").option(\"out\", 'o')\n"
+                                       "    let a = args.parse(s, [\"-o\", \"x\"]).expect(\"parsed\")\n"
+                                       "    print(a.get_or(\"out\", \"\"))\n    print(a.get_or(\"in\", \"\"))\n}\n",
+                                       "get_or(\"in\"", "args: 'in' is not an argument of the spec"),
+        }
+        for name, (body, needle, message) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                write_program(tmp, lib, "lib.my")
+                source = body if "fun main" in body else main.replace("{body}", body)
+                path = write_program(tmp, source)
+                lines = source.splitlines()
+                bracket = min(needle.index(c) for c in "([" if c in needle)
+                at = [(i + 1, line.index(needle) + bracket + 1) for i, line in enumerate(lines) if needle in line]
+                self.assertEqual(len(at), 1, needle)
+                out, err, code = selfhost_run(path)
+                self.assertEqual(code, 1, err)
+                self.assertEqual(err.splitlines()[:2], [f"runtime error: {message}", f"  --> {shown(path)}:{at[0][0]}:{at[0][1]}"])
+                self.assertEqual(build_and_run_full(Program(path), entry_path=path), (out, "\n".join(err.splitlines()[:2]) + "\n", 1))
+                if name in ("option_expect", "through_a_tracked_function", "in_a_task"):
+                    self.assertEqual(build_and_run_full(Program(path), entry_path=path, checked=True),
+                                     (out, "\n".join(err.splitlines()[:2]) + "\n", 1))
+
     def test_become_runs_a_million_deep(self):
         # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so
         # they run a million calls deep in the default stack
@@ -10300,8 +11782,12 @@ class TestCompilerParity(unittest.TestCase):
 
     def test_allocation_does_not_scan_unusable_free_cells(self):
         # Must finish far below the 5 s limit: the linear free-list scan took
-        # about 14 s, size-class free lists take milliseconds.
-        out, code = build_and_run(STRESS_FRAGMENTED_FREE_SRC, timeout=5)
+        # about 14 s, size-class free lists take milliseconds. Under an
+        # emulator the program alone takes seconds (qemu-aarch64: 2.1 s
+        # here on master and this branch alike, past 5 s on CI's runner,
+        # 2026-11-18), so the limit there is 30 s, still far below what the
+        # scan would take under it.
+        out, code = build_and_run(STRESS_FRAGMENTED_FREE_SRC, timeout=5 if TEST_TARGET == "" else 30)
         self.assertEqual(code, 0)
         self.assertEqual(out.strip(), "38000")
 
@@ -10376,6 +11862,46 @@ class TestCompilerParity(unittest.TestCase):
                 self.assertEqual((native[0], native[2]), (interp[0], interp[2]))
                 self.assertEqual(native[1], _without_snippets(interp[1]))
 
+    def test_a_uint64_index_is_reported_unsigned(self):
+        # MYLA-546: 2^64-1 was `list index -1 out of bounds`
+        for name, text in (("uint64_list_index", "list index 18446744073709551615 out of bounds (len 2)"),
+                           ("uint64_index_assigned", "list index 9223372036854775808 out of bounds (len 2)"),
+                           ("uint64_string_index", "string index 18446744073709551614 out of bounds (len 2)")):
+            with self.subTest(program=name):
+                interp, native = _both(RUNTIME_ERRORS[name])
+                self.assertTrue(interp[1].startswith(f"runtime error: {text}\n"), interp[1])
+                self.assertTrue(native[1].startswith(f"runtime error: {text}\n"), native[1])
+
+    def test_a_missing_receiver_element_is_reported_after_the_arguments(self):
+        # D193's timing (MYLA-791): a method on `g[5]` takes the place's
+        # indices, runs its arguments, then finds the element, as the
+        # interpreter does; natively a `var self` method of a program or of
+        # std (`insert`, a builder's `append`) found it first. An element
+        # before the last index is found when the place is taken
+        for name, out in (("missing_receiver_element", "index 5\nvalue 7\n"),
+                          ("missing_receiver_key", "value 7\n"), ("missing_builder_element", "value 7\n"),
+                          ("missing_inner_receiver_element", "")):
+            with self.subTest(program=name):
+                interp, native = _both(RUNTIME_ERRORS[name])
+                self.assertEqual(interp[0], out)
+                self.assertEqual(native[0], out)
+
+    def test_a_runtime_spec_is_reported_at_the_call(self):
+        # MYLA-565: at `x.format(spec)`, on every runner, not in std.fmt
+        for name, text in (("runtime_spec_of_an_int", "invalid format spec 'q'"),
+                           ("runtime_spec_of_a_float", "invalid format spec '9999999': a width above 1000000"),
+                           ("runtime_spec_of_text", "invalid format spec '.x'"),
+                           ("runtime_spec_misfit_of_a_float", "the format spec 'x' needs an integer, found 'float64'"),
+                           ("runtime_spec_misfit_of_an_int", "the format spec '.3' needs a float, found 'int32'"),
+                           ("runtime_spec_misfit_of_text", "the format spec '+5' needs a number, found 'str'"),
+                           ("runtime_spec_with_std_fmt", "invalid format spec '<<<'")):
+            with self.subTest(program=name):
+                at = ":3:62\n" if name == "runtime_spec_with_std_fmt" else ":1:62\n"
+                for runner, (out, err, code) in zip(("interpreted", "native"), _both(RUNTIME_ERRORS[name])):
+                    self.assertTrue(err.startswith(f"runtime error: {text}\n"), (runner, err))
+                    self.assertTrue(err.splitlines(True)[1].endswith(at), (runner, err))
+                    self.assertNotIn("std/fmt.my", err, runner)
+
     def test_divide_by_zero_traps_nonzero(self):
         src = "#main\nfun main() {\n    var z = 0\n    print(1 / z)\n}\n"
         out, code = build_and_run(src)
@@ -10409,6 +11935,17 @@ class TestCompilerParity(unittest.TestCase):
         out, code = build_and_run(STRESS_LOOPCTL_SRC)
         self.assertEqual(code, 0, "arena exhausted — break/continue leaked locals")
         self.assertEqual(out.strip(), "200001\n133333")
+
+    def test_nested_generic_enums_are_released(self):
+        # C10 (MYLA-543): `Option<Option<Tree>>`, `Wrap<Wrap<[str]>>`, a
+        # channel's `Option<Option<[str]>>` in a child, `task.pool`'s jobs
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = os.path.join(tmp, "prog")
+            native_build(Program(write_program(tmp, NESTED_GENERICS_SRC)), binary)
+            small = _peak_kb(*run_argv(binary, "prog", ["20000"]))
+            large = _peak_kb(*run_argv(binary, "prog", ["200000"]))
+        self.assertEqual((small[0], large[0]), ("88000\n", "880000\n"))
+        self.assertLess(large[1] - small[1], 8 * 1024, "the rounds leaked")
 
     def test_boxed_members_are_released(self):
         # MYLA-105: the recursive-enum stress program the IR gate also runs
@@ -10470,6 +12007,14 @@ class TestCompilerParity(unittest.TestCase):
 # longer holds (a later decision changed its meaning) or there is none (a
 # program added or changed since): its output, pinned here.
 PINNED = {
+    # H13: interpreted 5 5 1 0 0 0 before the change
+    "consts_of_another_module": "5\n5\n35\n-34\n40\nlate!\n",
+    # H6: interpreted `true`, `-1`, `true`, `-1` and `-2 -2` before the change
+    "track_caller_generic": "false\n18446744073709551615\nfalse\n18446744073709551615\n0.3\n0.3\n250\n18446744073709551614 18446744073709551614\ntrue\n",
+    # MYLA-553, MYLA-580, MYLA-546: new; native code gives the same
+    "iter_ldexp_and_padding_in_bulk": '0,63,64,199,299, 630\nb1 d1 c1 \n6\ninf -0 8.98846567431158e307 5e-324\n1000000     |  xy\n1999996 éé|éé\n1000000 -000|0005\n100 0x00|00ff\n1000003 0000|00ff\n4097 0000|0101\n999999 abca|cabc\n139998 ßß|ßab\n',
+    # MYLA-545: new; failed to parse before (`expected field name or tuple index after '.'`)
+    "tuple_index_chain": "1\n6\n9.5\n16\n13\n",
     # MYLA-496: new; native code gives the same, before the change and after
     "for_over_a_map_walks_its_slots": '3003 4504497\n0,1,2,3,4,5,6,7,8,9, 15\n0=0 2=4 4=16 6=36 8=64 100=0 101=1 102=2 103=3 104=4 105=5 106=6 107=7 108=8 109=9 \n1=1 3=3 4=4 6=6 7=7 2=20 9=90 5=50 \n4 9 -1\n12\nk3 k43 k83 k123 k163 \n415 0 16,0,\np1:1 p2:2 p4:4 p5:5 p0:9 \n2b 0c 1d \n250=true 252=true 253=false 254=true \n1a 2b 11a 12b \n0 415\n',
     # MYLA-429: new; native code gives the same, before the change and after
@@ -10545,10 +12090,15 @@ PINNED = {
     "generic_code_per_width": 'int8: 126 -127 63 1 2 true false -128 127 127 S127 true\nint16: 32766 -32767 16383 1 2 true false -32768 32767 32767 S32767 true\nint32: 2147483646 -2147483647 1073741823 1 2 true false -2147483648 2147483647 2147483647 S2147483647 true\nint64: 9223372036854775806 -9223372036854775807 4611686018427387903 1 2 true false -9223372036854775808 9223372036854775807 9223372036854775807 S9223372036854775807 true\nuint8: 254 1 127 1 2 true false 0 255 255 S255 true\nuint16: 65534 1 32767 1 2 true false 0 65535 65535 S65535 true\nuint32: 4294967294 1 2147483647 1 2 true false 0 4294967295 4294967295 S4294967295 true\nuint64: 18446744073709551614 1 9223372036854775807 1 2 true false 0 18446744073709551615 18446744073709551615 S18446744073709551615 true\n18446744073709551614\n18446744073709551614\n255\ntrue\ntrue\n0.010000000707805157\n0.6000000238418579\n0.6000000238418579\n0.33333334\n0.3333333333333333\n<18446744073709551615>\ntrue\n<-128>\n',
     # MYLA-414 (H6, M4): new; the interpreter lost the mutations and printed 'ERR: VUnit'
     "receivers_of_type_parameter_type": '4 11 31\n22 31 31 4\n',
+    # MYLA-414 (B6): new; the interpreter sorted signed and lost 'twice' (an internal error)
+    "generic_var_self_past_a_written_key": '6\ntrue\n1\n5\n18446744073709551615\n7\n9223372036854775808\n18446744073709551614\n',
     # MYLA-436: new; the interpreter called an element's or a key's written
     # generic `eq` or `hash` without binding its type parameters
     "generic_eq_and_hash_the_interpreter_calls": 'false\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nfalse\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nhash 18446744073709551615\nhash 18446744073709551615\ntrue\nfalse\nfalse\nfalse\n2\n5\n1\n1\nfalse\ntrue\ntrue\n',
     "map_keys_hashed_once": 'hash\n-- set\nhash\n-- get\nhash\neq\n2\n-- +=\nhash\neq\n-- += of a computed key\nhash\neq\n-- += of a call\nhash\neq\nhash\neq\n-- contains, get_or\nhash\neq\ntrue\nhash\neq\nhash\neq\n7\nhash\n-- += of a string\nhash\neq\nhash\neq\nab\nhash\n-- nested set\nhash\neq\n-- push\nhash\neq\n-- nested get\nhash\neq\n3\n-- nested +=\nhash\neq\n-- var self\nhash\neq\nhash\neq\n4\nhash\n-- field set\nhash\neq\n-- field +=\nhash\neq\nhash\neq\nhash\neq\n7\nhash\neq\ncd\nhash\nhash\n-- map in a map\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\n6\nhash\n-- tuple key\nhash\neq\nhash\neq\n5\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\nhash\n-- keys moved by the argument\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\nhash\neq\n17\n-- remove\nhash\neq\nhash\nfalse\n',
+    # MYLA-546: new; the runners compared colliding keys in other orders, and the
+    # interpreter hashed a literal's key before its value
+    "written_hash_and_eq_run_alike": 'hash 0\nhash 1\nhash 2\nhash 3\neq 0 3\nhash 4\neq 1 4\nhash 5\neq 2 5\nhash 6\neq 0 6\neq 3 6\n0 1 2 3 4 5 6 \n-- lookups\nhash 6\neq 0 6\neq 3 6\neq 6 6\n6\nhash 9\neq 0 9\neq 3 9\neq 6 9\nfalse\n-- removed, then added\nhash 3\neq 0 3\neq 3 3\nhash 9\neq 0 9\neq 6 9\nhash 12\neq 0 12\neq 6 12\neq 9 12\n0 1 2 4 5 6 9 12 \nhash 12\neq 0 12\neq 6 12\neq 9 12\neq 12 12\n12\nhash 15\neq 0 15\neq 6 15\neq 9 15\neq 12 15\n-1\n-- many removed\nhash 100\neq 1 100\neq 4 100\nhash 101\neq 2 101\neq 5 101\nhash 102\neq 0 102\neq 6 102\neq 9 102\neq 12 102\nhash 103\neq 1 103\neq 4 103\neq 100 103\nhash 104\neq 2 104\neq 5 104\neq 101 104\nhash 105\neq 0 105\neq 6 105\neq 9 105\neq 12 105\neq 102 105\nhash 106\neq 1 106\neq 4 106\neq 100 106\neq 103 106\nhash 107\neq 2 107\neq 5 107\neq 101 107\neq 104 107\nhash 108\neq 0 108\neq 6 108\neq 9 108\neq 12 108\neq 102 108\neq 105 108\nhash 109\neq 1 109\neq 4 109\neq 100 109\neq 103 109\neq 106 109\nhash 110\neq 2 110\neq 5 110\neq 101 110\neq 104 110\neq 107 110\nhash 111\neq 0 111\neq 6 111\neq 9 111\neq 12 111\neq 102 111\neq 105 111\neq 108 111\nhash 112\neq 1 112\neq 4 112\neq 100 112\neq 103 112\neq 106 112\neq 109 112\nhash 113\neq 2 113\neq 5 113\neq 101 113\neq 104 113\neq 107 113\neq 110 113\nhash 114\neq 0 114\neq 6 114\neq 9 114\neq 12 114\neq 102 114\neq 105 114\neq 108 114\neq 111 114\nhash 115\neq 1 115\neq 4 115\neq 100 115\neq 103 115\neq 106 115\neq 109 115\neq 112 115\nhash 116\neq 2 116\neq 5 116\neq 101 116\neq 104 116\neq 107 116\neq 110 116\neq 113 116\nhash 117\neq 0 117\neq 6 117\neq 9 117\neq 12 117\neq 102 117\neq 105 117\neq 108 117\neq 111 117\neq 114 117\nhash 118\neq 1 118\neq 4 118\neq 100 118\neq 103 118\neq 106 118\neq 109 118\neq 112 118\neq 115 118\nhash 119\neq 2 119\neq 5 119\neq 101 119\neq 104 119\neq 107 119\neq 110 119\neq 113 119\neq 116 119\nhash 120\neq 0 120\neq 6 120\neq 9 120\neq 12 120\neq 102 120\neq 105 120\neq 108 120\neq 111 120\neq 114 120\neq 117 120\nhash 121\neq 1 121\neq 4 121\neq 100 121\neq 103 121\neq 106 121\neq 109 121\neq 112 121\neq 115 121\neq 118 121\nhash 122\neq 2 122\neq 5 122\neq 101 122\neq 104 122\neq 107 122\neq 110 122\neq 113 122\neq 116 122\neq 119 122\nhash 123\neq 0 123\neq 6 123\neq 9 123\neq 12 123\neq 102 123\neq 105 123\neq 108 123\neq 111 123\neq 114 123\neq 117 123\neq 120 123\nhash 124\neq 1 124\neq 4 124\neq 100 124\neq 103 124\neq 106 124\neq 109 124\neq 112 124\neq 115 124\neq 118 124\neq 121 124\nhash 125\neq 2 125\neq 5 125\neq 101 125\neq 104 125\neq 107 125\neq 110 125\neq 113 125\neq 116 125\neq 119 125\neq 122 125\nhash 126\neq 0 126\neq 6 126\neq 9 126\neq 12 126\neq 102 126\neq 105 126\neq 108 126\neq 111 126\neq 114 126\neq 117 126\neq 120 126\neq 123 126\nhash 127\neq 1 127\neq 4 127\neq 100 127\neq 103 127\neq 106 127\neq 109 127\neq 112 127\neq 115 127\neq 118 127\neq 121 127\neq 124 127\nhash 128\neq 2 128\neq 5 128\neq 101 128\neq 104 128\neq 107 128\neq 110 128\neq 113 128\neq 116 128\neq 119 128\neq 122 128\neq 125 128\nhash 129\neq 0 129\neq 6 129\neq 9 129\neq 12 129\neq 102 129\neq 105 129\neq 108 129\neq 111 129\neq 114 129\neq 117 129\neq 120 129\neq 123 129\neq 126 129\nhash 130\neq 1 130\neq 4 130\neq 100 130\neq 103 130\neq 106 130\neq 109 130\neq 112 130\neq 115 130\neq 118 130\neq 121 130\neq 124 130\neq 127 130\nhash 131\neq 2 131\neq 5 131\neq 101 131\neq 104 131\neq 107 131\neq 110 131\neq 113 131\neq 116 131\neq 119 131\neq 122 131\neq 125 131\neq 128 131\nhash 132\neq 0 132\neq 6 132\neq 9 132\neq 12 132\neq 102 132\neq 105 132\neq 108 132\neq 111 132\neq 114 132\neq 117 132\neq 120 132\neq 123 132\neq 126 132\neq 129 132\nhash 133\neq 1 133\neq 4 133\neq 100 133\neq 103 133\neq 106 133\neq 109 133\neq 112 133\neq 115 133\neq 118 133\neq 121 133\neq 124 133\neq 127 133\neq 130 133\nhash 134\neq 2 134\neq 5 134\neq 101 134\neq 104 134\neq 107 134\neq 110 134\neq 113 134\neq 116 134\neq 119 134\neq 122 134\neq 125 134\neq 128 134\neq 131 134\nhash 135\neq 0 135\neq 6 135\neq 9 135\neq 12 135\neq 102 135\neq 105 135\neq 108 135\neq 111 135\neq 114 135\neq 117 135\neq 120 135\neq 123 135\neq 126 135\neq 129 135\neq 132 135\nhash 136\neq 1 136\neq 4 136\neq 100 136\neq 103 136\neq 106 136\neq 109 136\neq 112 136\neq 115 136\neq 118 136\neq 121 136\neq 124 136\neq 127 136\neq 130 136\neq 133 136\nhash 137\neq 2 137\neq 5 137\neq 101 137\neq 104 137\neq 107 137\neq 110 137\neq 113 137\neq 116 137\neq 119 137\neq 122 137\neq 125 137\neq 128 137\neq 131 137\neq 134 137\nhash 138\neq 0 138\neq 6 138\neq 9 138\neq 12 138\neq 102 138\neq 105 138\neq 108 138\neq 111 138\neq 114 138\neq 117 138\neq 120 138\neq 123 138\neq 126 138\neq 129 138\neq 132 138\neq 135 138\nhash 139\neq 1 139\neq 4 139\neq 100 139\neq 103 139\neq 106 139\neq 109 139\neq 112 139\neq 115 139\neq 118 139\neq 121 139\neq 124 139\neq 127 139\neq 130 139\neq 133 139\neq 136 139\nhash 100\neq 1 100\neq 4 100\neq 100 100\nhash 101\neq 2 101\neq 5 101\neq 101 101\nhash 102\neq 0 102\neq 6 102\neq 9 102\neq 12 102\neq 102 102\nhash 103\neq 1 103\neq 4 103\neq 103 103\nhash 104\neq 2 104\neq 5 104\neq 104 104\nhash 105\neq 0 105\neq 6 105\neq 9 105\neq 12 105\neq 105 105\nhash 106\neq 1 106\neq 4 106\neq 106 106\nhash 107\neq 2 107\neq 5 107\neq 107 107\nhash 108\neq 0 108\neq 6 108\neq 9 108\neq 12 108\neq 108 108\nhash 109\neq 1 109\neq 4 109\neq 109 109\nhash 110\neq 2 110\neq 5 110\neq 110 110\nhash 111\neq 0 111\neq 6 111\neq 9 111\neq 12 111\neq 111 111\nhash 112\neq 1 112\neq 4 112\neq 112 112\nhash 113\neq 2 113\neq 5 113\neq 113 113\nhash 114\neq 0 114\neq 6 114\neq 9 114\neq 12 114\neq 114 114\nhash 115\neq 1 115\neq 4 115\neq 115 115\nhash 116\neq 2 116\neq 5 116\neq 116 116\nhash 117\neq 0 117\neq 6 117\neq 9 117\neq 12 117\neq 117 117\nhash 118\neq 1 118\neq 4 118\neq 118 118\nhash 119\neq 2 119\neq 5 119\neq 119 119\nhash 120\neq 0 120\neq 6 120\neq 9 120\neq 12 120\neq 120 120\nhash 121\neq 1 121\neq 4 121\neq 121 121\nhash 122\neq 2 122\neq 5 122\neq 122 122\nhash 123\neq 0 123\neq 6 123\neq 9 123\neq 12 123\neq 123 123\nhash 124\neq 1 124\neq 4 124\neq 124 124\nhash 125\neq 2 125\neq 5 125\neq 125 125\nhash 126\neq 0 126\neq 6 126\neq 9 126\neq 12 126\neq 126 126\nhash 127\neq 1 127\neq 4 127\neq 127 127\nhash 128\neq 2 128\neq 5 128\neq 128 128\nhash 129\neq 0 129\neq 6 129\neq 9 129\neq 12 129\neq 129 129\nhash 130\neq 1 130\neq 4 130\neq 130 130\nhash 131\neq 2 131\neq 5 131\neq 131 131\nhash 132\neq 0 132\neq 6 132\neq 9 132\neq 12 132\neq 132 132\nhash 133\neq 1 133\neq 4 133\neq 133 133\nhash 134\neq 2 134\neq 5 134\neq 134 134\nhash 135\neq 0 135\neq 6 135\neq 9 135\neq 12 135\neq 135 135\nhash 30\neq 0 30\neq 6 30\neq 9 30\neq 12 30\neq 138 30\n0 1 2 4 5 6 9 12 136 137 138 139 30 \nhash 30\neq 0 30\neq 6 30\neq 9 30\neq 12 30\neq 138 30\neq 30 30\n30\n-- literals\nkey 1\nval 1\nhash 1\nkey 4\nval 4\nhash 4\neq 1 4\nkey 1\nval 9\nhash 1\neq 1 1\nhash 1\neq 1 1\n2 9\nkey 2\nkey 5\nval 50\nhash 5\nkey 8\nval 80\nhash 8\neq 5 8\nhash 2\nkey 11\nkey 14\nval 140\nhash 14\nhash 11\neq 2 11\n2\n',
     # MYLA-414 (L3): new; the interpreter printed 'ERR: VUnit'
     "actor_function_field": '1205\n',
     # MYLA-414 (L4): new; the interpreter printed 'a' for the numbers
@@ -10631,6 +12181,32 @@ PINNED = {
     "inference_through_lambdas_try_and_variants": 'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n',
     # MYLA-417: new ("cannot reassign 'self'" before); native, aarch64 and wasm32 give the same
     "enum_var_self_assigns_self": '3\n2\n1\n0\nabbccc|\namber\namber green\n10\n',
+    # MYLA-538: new; the same before the change and after, on both runners
+    "impl_bounds_of_generic_traits_met": 'true\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\n12\n8\n20\ntrue\ntrue\ntrue\n',
+    # MYLA-544 (C8): new; the same on both runners
+    "format_method_on_a_builtin_type_parameter": '[5]\n[-005]\n[0x00ff]\n[ffffffffffffffff]\n[1111111111111111111111111111111111111111111111111111111111111111]\n[3.14]\n[   2.500]\n[ λ ]\n[  true]\n[ab***]\n[P!]\nV(+7)\n[V(V( c))]\n1 2  3\na b\n10\n',
+    # MYLA-544: new; the same on both runners
+    "literals_left_of_typed_operands": '5000000005\n4\nfalse\ntrue\n-3.75\n3\n10\n-1\n1.5\n5000000002\n3\ntrue\n-97\n',
+    # MYLA-609: new (a type error before); the same on both runners
+    "arm_literals_past_int32": '1 -5000000000 6000000000 -7000000000\n-5999999999\n5000000000 0 0 0\n5000000000\n5000000000 2 2 8000000000\n13000000004\n10000000000000000000\n5000000001\n',
+    # MYLA-417 (C1): new; the same on both runners
+    "actor_getter_of_a_field_s_name": '6\n11\n',
+    # MYLA-415 (B1): native code segfaulted (the captured enum deep-copied as a box)
+    "closures_capturing_recursive_enums_across_tasks": '3\n324\n13\n7\n327\n327\n3\n3\n324\n30\n336\n',
+    # MYLA-543: native code read freed cells (B2)
+    "operands_kept_when_a_later_operand_writes_their_variable": 's10!\ns50!\ns30s11!\ns20!\nfalse false\ntrue\ntrue\ntrue\n3 s40p\ns10T\ns10!,s111,s112,\ns21v 2 s10,\n',
+    # MYLA-543: native code read freed cells (B2)
+    "bases_kept_when_their_index_writes_their_variable": 's11\ns31\ns32\ns21\ns40\n49\ns11,s12,\n10\ns71\n1\n',
+    # MYLA-543: native code read freed cells (B2)
+    "holes_and_keys_kept_when_a_later_one_writes_their_variable": 's10!s110\ns30-!\ns10!\nok\n',
+    # MYLA-543: native code ran the value first
+    "a_method_call_takes_its_receivers_place_first": 'push: 12 2\nmap element push: 12 2\nindex read first: 2 3\nindex 1\nvalue 2\nindex 3\nvalue 4\n1 4\n',
+    # MYLA-543 (H4): native code read the freed map (`true false false false 1` before)
+    "contains_keeps_its_map_while_the_key_replaces_it": 'true\nfalse\ntrue\nfalse\n50\n',
+    # MYLA-811: native code wrote `g[0]` (`4,1,1,`, then an index out of bounds)
+    "places_counted_from_the_end_by_a_call": '2,2,2,\n5 10\n1,2, 2 1\n2 1\n',
+    # MYLA-543 (C11, D194): native code was `main can't be lowered to the IR`
+    "recursive_enums_as_map_keys": '6\n30\ntrue\nfalse\n25\n5 false\n1515\n5 10\ntrue\n-1\n4 6 0 42\n56\n6\nbin leaf\n50 1999\n',
     # MYLA-415 (H2): native code segfaulted (a string, list or map argument kept)
     "actors_store_every_heap_type": '1\n7\n3\n2\n2\n2\nvalue 7 2 1 built! rec/2 t4 some 7 5 42 2\n14\npre-value 7 3 1 built! rec/2 t4 some 7 5 42 2\n3 3 built more\n',
     # MYLA-415 (H3): native code segfaulted in __deepb_ and on a child's result
@@ -10643,6 +12219,15 @@ PINNED = {
     "arithmetic_operators_of_generic_impls": '3\n5\n42\n4\n1\n3.75\nabcd\nababab\n15000000000\n3\n3 xy\nlinked\n',
     # MYLA-415 (M15): stack overflow on aarch64 and wasm32 (release and deep copy recursed)
     "values_nested_through_closures": '7\n1\n1\n2\n5\n50001 100000 50000 100000\nreleased\n',
+    # MYLA-612 (H1): new; the bounds are checked where an operator picks its
+    # impl, and a program that meets them runs as before
+    # MYLA-612 (M15), MYLA-544, MYLA-609: new; a type error before (the
+    # struct literal took the right operand's type, the others stayed
+    # `float64`, `int32` and `Option<int32>`)
+    "literals_left_of_operators_take_their_type": 'by b\n3\n4\n-1.5\n6\n-12\ntrue true true false true\nfalse false false false false\nfalse false false true true\n',
+    "operator_impls_whose_bounds_hold": 'A7*2\n-A7\na7[3]\nA7:5=z\n3\nA7:5=za7\n6\nA7*3 -A7\na7[1] A7:4=q\n',
+    # MYLA-802: new; `cannot infer type parameter(s) T for 'sum3'` before
+    "type_parameters_an_operator_bound_fixes": '6\n6\n2.75\n198\n2\nb\n15\n15\nV*2\n4.5\n42\n-4\n-2.5\n',
 }
 
 
@@ -10687,8 +12272,49 @@ RUNTIME_ERRORS = {
                                            "fun look<K: Eq + Hash, V>(m: [K: V], k: K) -> V {\n    return m[k]\n}\n\n"
                                            "fun main() {\n    let t = Table { m: [1: \"a\"] }\n    print(look(t.m, 1))\n"
                                            "    print(look(t.m, 18446744073709551615))\n}\n"),
+    # MYLA-543: float fields as Python's `repr` writes them (`3.0`, `1e+300`), natively `3`, `1e300`
+    "missing_key_with_float_fields": 'struct Fl { a: float, b: float, c: float, d: float32, e: float }\n\nimpl Eq for Fl {\n    fun eq(self, o: Fl) -> bool { return self.a == o.a }\n}\n\nimpl Hash for Fl {\n    fun hash(self, h: Hasher) -> Hasher { return h.add(1) }\n}\n\nfun main() {\n    var m: [Fl: int] = [:]\n    var z = 0.0\n    print(m[Fl { a: 3.0, b: -z, c: 1e300, d: 1e10f32, e: 1.5e-7 }])\n}\n',
     "string_index": 'fun main() {\n    let s = "ab"\n    var i = 9\n    print(s[i])\n}\n',
+    # MYLA-546: a uint64 index of 2^63 or more was reported signed, on both runners
+    "uint64_list_index": "fun main() {\n    let xs = [1, 2]\n    var i: uint64 = 18446744073709551615\n    print(xs[i])\n}\n",
+    "uint64_index_assigned": "fun main() {\n    var xs = [[1], [2]]\n    var i: uint64 = 9223372036854775808\n    xs[i].push(3)\n}\n",
+    "uint64_string_index": ('fun main() {\n    let s = "ab"\n    let i: [uint64] = [18446744073709551614]\n'
+                            '    print(s[i[0]])\n}\n'),
     "error_after_stderr": 'from std.io import eprint\n\nfun main() {\n    eprint("before\\n")\n    panic("then")\n}\n',
+    # MYLA-565: a spec given at run time to `x.format(spec)` on a builtin
+    # `T: Format` is the caller's mistake, reported at the call (D183);
+    # natively it was inside std.fmt, interpreted too once std.fmt is loaded
+    "runtime_spec_of_an_int": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                               'fun main() {\n    print(show(5, ">4"))\n    print(show(5, "q"))\n}\n'),
+    "runtime_spec_of_a_float": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                'fun main() {\n    print(show(2.5, ".1"))\n    print(show(2.5, "9999999"))\n}\n'),
+    "runtime_spec_of_text": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                             'fun main() {\n    print(show("ab", "^4"))\n    print(show(true, ".x"))\n}\n'),
+    # MYLA-792 (the 2026-11-17 review's follow-up of MYLA-565): a spec that
+    # doesn't fit the value's type, ignored on every runner before
+    "runtime_spec_misfit_of_a_float": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                       'fun main() {\n    print(show(2.5, ">5"))\n    print(show(2.5, "x"))\n}\n'),
+    "runtime_spec_misfit_of_an_int": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                      'fun main() {\n    print(show(5, "x"))\n    print(show(5, ".3"))\n}\n'),
+    "runtime_spec_misfit_of_text": ('fun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                    'fun main() {\n    print(show(true, "^6"))\n    print(show("s", "+5"))\n}\n'),
+    "runtime_spec_with_std_fmt": ('import std.fmt as fmt\n\nfun show<T: Format>(x: T, spec: str) -> str { return x.format(spec) }\n'
+                                  'fun main() {\n    print(fmt.pad("a", ">2"))\n    print(show(\'c\', "<<<"))\n}\n'),
+    # D193's timing (MYLA-791): the arguments run before the missing element
+    # (natively it was reported first); an element before the last index is
+    # found with the place
+    "missing_receiver_element": ('impl [int] {\n    fun put(var self, v: int) { self.push(v) }\n}\n'
+                                 'fun at(i: int) -> int {\n    print(f"index {i}")\n    return i\n}\n'
+                                 'fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                                 'fun main() {\n    var g = [[1], [2]]\n    g[at(5)].put(val(7))\n}\n'),
+    "missing_receiver_key": ('impl [int] {\n    fun put(var self, v: int) { self.push(v) }\n}\n'
+                             'fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                             'fun main() {\n    var m = [0: [1]]\n    m[9].insert(0, val(7))\n}\n'),
+    "missing_builder_element": ('fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                                'fun main() {\n    var sbs = [StringBuilder()]\n    sbs[5].append(f"{val(7)}")\n}\n'),
+    "missing_inner_receiver_element": ('impl [int] {\n    fun put(var self, v: int) { self.push(v) }\n}\n'
+                                       'fun val(v: int) -> int {\n    print(f"value {v}")\n    return v\n}\n'
+                                       'fun main() {\n    var gg = [[[1]]]\n    gg[5][0].put(val(7))\n}\n'),
 }
 
 

@@ -1,0 +1,12 @@
+// std.path_style: how the target spells a path (MYLA-704, D215), which
+// std.path, std.fs and std.glob read: Linux's and WASI's here. A target
+// whose paths differ has a copy of its own beside its platform module
+// (`path_style_windows.my` beside `platform_windows.my`), which the loader
+// takes for this one, as it takes `std/platform.my`'s (`for_target`). A
+// module this small, so that knowing the target costs a check nothing:
+// std.platform's constant made checking a program that imports std.path
+// 26.2 M → 40.4 M instructions (2026-11-15, against 194c9dc).
+
+// Whether `\` separates a path's components as `/` does, and a path may
+// start with a drive or a UNC share before its root (Windows'): no.
+pub const WINDOWS: bool = false

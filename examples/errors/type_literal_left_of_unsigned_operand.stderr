@@ -1,0 +1,5 @@
+type error: integer literal -1 does not fit in 'uint64'
+  --> examples/errors/type_literal_left_of_unsigned_operand.my:8:11
+  |
+8 |     print(-1 == u)
+  |           ^^

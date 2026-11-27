@@ -1,0 +1,17 @@
+// title: Write the Test
+// xp: 25
+// hidden: question #test(3, 5)[15]
+// hidden: question #test(-2, 21)[-42]
+// own-tests: 2
+// hint: A test case sits right above its function: `#test(args)[expected]`.
+// hint: Each case calls `question` with its arguments and says what it gives. Write at least two, one of them for 6 and 7.
+//
+// This time the code is right and the tests are missing: the exercise passes
+// when `question` has test cases, and they all pass.
+//
+// `question(a, b)` multiplies its arguments. Write at least two `#test`
+// cases for it, one of them `question(6, 7)` giving `42`. (Run **Test** to
+// see them run.)
+fun question(a: int, b: int) -> int {
+    return a * b
+}

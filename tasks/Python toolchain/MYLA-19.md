@@ -6,13 +6,13 @@ status: done
 priority: low
 labels: [cli]
 ---
-`myla repl` is still the "planned for v0.0.2" stub ([[src/myla/cli.py#L202-L203]]), and the README lists it as planned.
+`myla repl` is still the "planned for v0.0.2" stub (`src/myla/cli.py#L202-L203` (removed with the Python toolchain, D101)), and the README lists it as planned.
 
 ## Done when
 
-- [ ] Line-by-line input with multi-line blocks (open braces continue the input)
-- [ ] Declarations accumulate; expressions print their value
-- [ ] Errors are reported without ending the session
+- [x] Line-by-line input with multi-line blocks (open braces continue the input) (done in Myla by [[MYLA-82]]: `myla repl`)
+- [x] Declarations accumulate; expressions print their value (done in Myla by [[MYLA-82]]: `myla repl`)
+- [x] Errors are reported without ending the session (done in Myla by [[MYLA-82]]: `myla repl`)
 
 ## Superseded
 

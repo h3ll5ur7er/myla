@@ -11,6 +11,11 @@ the back ends' sources write.
 
 An imported module's bodies are read so (MYLA-413), a program's own modules
 whole; a body read late has the eager check's error at its place.
+
+What is built must not depend on which bodies were read (MYLA-552): with
+MYLA_EAGER_BODIES=1 the loader reads every body it left for later before the
+check (`eager_bodies`), and the parity programs and the compiler build to the
+same assembly, on x86-64 and aarch64, as when only the called ones are read.
 """
 from __future__ import annotations
 
@@ -20,8 +25,9 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
-from ._native import CAN_BUILD_NATIVE
+from ._native import CAN_BUILD_NATIVE, EXE, ON_WINDOWS
 from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
@@ -86,6 +92,17 @@ class BackEndNames(unittest.TestCase):
         self.assertNotIn("std$list$sum", names)  # only in a `#test` case of `checked_code`
 
 
+def _head(stderr: str) -> list[str]:
+    """An error's first five lines: its message, place and source line. On
+    Windows the place's `\\` as `/`: a file checked itself is named as given
+    (`lib\\std\\text.my`), one imported by the library's root and `/`
+    (`lib/std/text.my`, MYLA-926)."""
+    lines = stderr.split("\n")[:5]
+    if ON_WINDOWS:
+        lines = [line.replace("\\", "/") if line.lstrip().startswith("--> ") else line for line in lines]
+    return lines
+
+
 class ImportedStdBodies(unittest.TestCase):
     """MYLA-413, D179 (2): an imported module of `std` has its functions'
     bodies read once called, with the error of one read at the place and in
@@ -134,7 +151,7 @@ class ImportedStdBodies(unittest.TestCase):
                 proc = self.myla_cmd(cmd, path, lib=lib)
                 self.assertEqual((proc.stderr, proc.returncode), ("", 0), (cmd, lib))
             if CAN_BUILD_NATIVE:
-                exe = os.path.join(self.work, "uncalled")
+                exe = os.path.join(self.work, "uncalled" + EXE)
                 proc = self.myla_cmd("build", path, "-o", exe, lib=lib)
                 self.assertEqual((proc.stderr, proc.returncode), ("", 0))
                 self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, "a b\nc\n")
@@ -144,21 +161,72 @@ class ImportedStdBodies(unittest.TestCase):
         # read late gives the same error, place and source line
         eager = self.myla_cmd("check", os.path.join(self.lib, "std", "text.my"))
         self.assertEqual(eager.returncode, 1)
-        first = eager.stderr.split("\n")[:5]
+        first = _head(eager.stderr)
         self.assertEqual(first[0], "type error: return type mismatch: expected 'int32', found 'str'", eager.stderr)
         for call in ("text.broken_413()", "text.calls_broken_413()"):
             proc = self.myla_cmd("check", self.calling(call))
             self.assertEqual(proc.returncode, 1, call)
-            self.assertEqual(proc.stderr.split("\n")[:5], first, call)
+            self.assertEqual(_head(proc.stderr), first, call)
 
     def test_a_called_body_has_the_eager_parse_error(self) -> None:
         eager = self.myla_cmd("check", os.path.join(self.plib, "std", "text.my"), lib=self.plib)
         self.assertEqual(eager.returncode, 1)
-        first = eager.stderr.split("\n")[:5]
+        first = _head(eager.stderr)
         self.assertEqual(first[0], "parse error: expected variable name, found '='", eager.stderr)
         proc = self.myla_cmd("check", self.calling("text.garbled_413()"), lib=self.plib)
         self.assertEqual(proc.returncode, 1)
-        self.assertEqual(proc.stderr.split("\n")[:5], first)
+        self.assertEqual(_head(proc.stderr), first)
+
+    # a body with a brace too many or missing: the skipped body ends short or
+    # long, and what is left reads as declarations (MYLA-413's follow-up in
+    # the review of 2026-11-17, 116 of its 3,000 mutants)
+    BRACES = (
+        ("extra_close", "pub fun f_793(x: int) -> int {\n    if x > 0 }{\n        return 1\n    }\n    return 0\n}\n"),
+        ("missing_open", "pub fun f_793(x: int) -> int {\n    var t = 0\n    for y in [x]\n        t += y\n    }\n    return t\n}\n"),
+        ("extra_open", "pub struct P { a: int }\n\nimpl P {\n    fun get(self) -> int {\n        while self.a < 0 {{\n        }\n        return self.a\n    }\n}\n\npub fun f_793(x: int) -> int {\n    let p = P { a: x }\n    return p.get()\n}\n"),
+    )
+
+    def test_a_brace_too_many_or_missing_has_the_eager_error(self) -> None:
+        for name, text in self.BRACES:
+            with self.subTest(name=name):
+                with open(os.path.join(self.lib, "std", f"brace_{name}.my"), "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                eager = self.myla_cmd("check", os.path.join(self.lib, "std", f"brace_{name}.my"))
+                self.assertEqual(eager.returncode, 1)
+                self.assertTrue(eager.stderr.startswith("parse error: "), eager.stderr)
+                path = self.write("braces.my", f"import std.brace_{name} as b\n\nfun main() {{\n    print(b.f_793(1))\n}}\n")
+                proc = self.myla_cmd("check", path)
+                self.assertEqual(_head(proc.stderr), _head(eager.stderr))
+
+    def test_a_test_attribute_in_a_body_is_an_error(self) -> None:
+        # M9 of the review of 2026-11-17: a `#test` in a function's body is
+        # lexed, and an error, in an imported module of std and in a
+        # program's own module as in the module checked itself; it was
+        # skipped unparsed, with the statements in its brackets (D179)
+        text = ("pub fun twice_793(x: int) -> int {\n    let y = x + x\n    #test(1)[2]\n"
+                "    #test(\"the next statement never runs\")[\n    let z = y + 1000\n    ]\n    return y\n}\n")
+        with open(os.path.join(self.lib, "std", "attr_793.my"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        eager = self.myla_cmd("check", os.path.join(self.lib, "std", "attr_793.my"))
+        first = eager.stderr.split("\n")[:5]
+        self.assertEqual(first[0], "parse error: expected an expression, found '#'", eager.stderr)
+        self.assertTrue(first[1].endswith("attr_793.my:3:5"), first)
+        os.makedirs(os.path.join(self.work, "own_attr"), exist_ok=True)
+        self.write("own_attr/attr_793.my", text)
+        for path in (self.write("attr.my", "import std.attr_793 as a\n\nfun main() {\n    print(a.twice_793(21))\n}\n"),
+                     self.write("own_attr/main.my", "from .attr_793 import twice_793\n\nfun main() {\n    print(twice_793(21))\n}\n")):
+            for cmd in ("check", "run"):
+                with self.subTest(path=path, cmd=cmd):
+                    proc = self.myla_cmd(cmd, path)
+                    self.assertEqual((proc.stdout, proc.returncode), ("", 1))
+                    self.assertEqual(proc.stderr.split("\n")[0], first[0])
+                    self.assertTrue(proc.stderr.split("\n")[1].endswith("attr_793.my:3:5"), proc.stderr)
+        # one above a method in an impl, and at the top level, is still skipped
+        self.write("own_attr/ok_793.my", "pub struct P { a: int }\n\nimpl P {\n    #test(P { a: 1 })[1]\n    fun get(self) -> int {\n"
+                   "        return self.a\n    }\n}\n\n#test(2)[4]\npub fun twice(x: int) -> int {\n    return x + x\n}\n")
+        path = self.write("own_attr/ok.my", "from .ok_793 import twice\n\nfun main() {\n    print(twice(21))\n}\n")
+        proc = self.myla_cmd("run", path)
+        self.assertEqual((proc.stdout, proc.stderr), ("42\n", ""))
 
     def test_a_programs_own_module_is_read_whole(self) -> None:
         # D179 (3): `myla check` means every function of the program's own
@@ -170,6 +238,78 @@ class ImportedStdBodies(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("type error: return type mismatch", proc.stderr)
         self.assertIn("helper.my:6:", proc.stderr)
+
+    def test_a_programs_own_std_directory_is_read_whole(self) -> None:
+        # MYLA-413 (C4 of the review of 2026-11-12): laziness goes by the
+        # file's root, not by a module id that starts `std$`: a program's own
+        # `std/helper.my` is read whole, its type error and its parse error
+        # reported as those of `other/helper.my` are. Since D255 a `std/` at
+        # the program's root is refused, so `sub/std/` stands for it
+        bad_type = "pub fun ok() -> int {\n    return 1\n}\n\npub fun broken() -> int {\n    return \"no\"\n}\n"
+        bad_parse = "pub fun ok() -> int {\n    return 1\n}\n\npub fun garbled() -> int {\n    let = 1\n    return 2\n}\n"
+        for text, want in ((bad_type, "type error: return type mismatch"), (bad_parse, "parse error: expected variable name")):
+            for d in ("sub/std", "other"):
+                with self.subTest(dir=d, want=want):
+                    own = "own_" + d.replace("/", "_")
+                    root = os.path.join(self.work, own)
+                    os.makedirs(os.path.join(root, d), exist_ok=True)
+                    self.write(f"{own}/{d}/helper.my", text)
+                    path = self.write(f"{own}/main.my", f"from .{d.replace('/', '.')}.helper import ok\n\nfun main() {{\n    print(ok())\n}}\n")
+                    for cmd in ("check", "run"):
+                        proc = self.myla_cmd(cmd, path)
+                        self.assertEqual(proc.returncode, 1, (cmd, proc.stdout))
+                        self.assertTrue(proc.stderr.startswith(want), proc.stderr)
+                        self.assertIn(f"{d}/helper.my:", proc.stderr)
+
+
+class EagerOracle(unittest.TestCase):
+    """MYLA-552: the parity programs and the compiler build to the same
+    assembly with every body read (MYLA_EAGER_BODIES=1) as with those read
+    once called. The owned parameters' vote (`find_kept_params`) counted the
+    calls in every body loaded, so a body read changed how others were
+    built (`packed_byte_lists` did, with output equal)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.gen = selfhost_tool("gen_main")
+        cls._tmp = tempfile.TemporaryDirectory(prefix="myla_eager_")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def assembly(self, path: str, target: str, eager: bool) -> str:
+        env = dict(os.environ, MYLA_EAGER_BODIES="1" if eager else "")
+        proc = subprocess.run([self.gen, path, STDLIB_ROOT, "--target", target], capture_output=True, text=True,
+                              cwd=_REPO, env=env, timeout=600)
+        self.assertEqual(proc.returncode, 0, f"{path} {target} eager={eager}: {proc.stderr[-2000:]}")
+        return proc.stdout
+
+    def differing(self, paths: list[str], target: str) -> list[str]:
+        def one(path: str) -> str:
+            return "" if self.assembly(path, target, False) == self.assembly(path, target, True) else path
+        with ThreadPoolExecutor(max(1, min(4, os.cpu_count() or 1))) as pool:
+            return [os.path.basename(p) for p in pool.map(one, paths) if p]
+
+    def parity_programs(self) -> list[str]:
+        from .test_compiler_parity import PROGRAMS
+        out = []
+        for name, src in PROGRAMS.items():
+            path = os.path.join(self._tmp.name, name + ".my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src)
+            out.append(path)
+        return out
+
+    def test_the_parity_programs_build_the_same(self) -> None:
+        paths = self.parity_programs()
+        self.assertGreater(len(paths), 100)
+        for target in ("x86_64-linux", "aarch64-linux"):
+            with self.subTest(target=target):
+                self.assertEqual(self.differing(paths, target), [])
+
+    def test_the_compiler_builds_the_same(self) -> None:
+        self.assertEqual(self.differing([os.path.join(_SELFHOST, "main.my")], "x86_64-linux"), [])
 
 
 if __name__ == "__main__":

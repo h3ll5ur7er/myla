@@ -1,0 +1,50 @@
+//~ type error: '#track_caller' can't stand on a method of a trait's impl
+//~ errors: 5
+//~ next: '#track_caller' can't stand on an async function
+//~ next: '#track_caller' takes no arguments
+//~ next: attribute '#track_caller' may only be applied to functions
+//~ next: '#track_caller' can't stand on an actor's method
+// Where a `#track_caller` function couldn't be given its caller's position
+// (MYLA-435): an async function's call may be a task's start, a trait's
+// method is called through a bound, an actor's method through its queue.
+#track_caller
+async fun later(x: int) -> int {
+    return x
+}
+
+#track_caller(1)
+fun twice(x: int) -> int {
+    return 2 * x
+}
+
+struct P {
+    x: int,
+}
+
+impl Eq for P {
+    #track_caller
+    fun eq(self, other: P) -> bool {
+        return self.x == other.x
+    }
+}
+
+actor Counter {
+    n: int,
+}
+
+impl Counter {
+    #track_caller
+    fun add(var self, k: int) -> int {
+        self.n = self.n + k
+        return self.n
+    }
+}
+
+#track_caller
+struct Q {
+    y: int,
+}
+
+fun main() {
+    print(twice(2))
+}

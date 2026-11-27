@@ -2,7 +2,7 @@
 id: MYLA-526
 title: "A method of a built-in type doesn't inline its module's small functions"
 type: bug
-status: review
+status: done
 priority: low
 labels: [ir, optimisation, inlining]
 ---
@@ -76,3 +76,7 @@ The cost where it matters: std.list's sorts are such methods. A helper call in `
 
 **Suites.** `scripts/test.sh fast`: `Ran 855 tests … FAILED (failures=1, skipped=3)`, the failure `test_embedded_std.test_the_module_is_what_lib_gives` (expected: the comment in `lib/std/list.my` is ahead of `selfhost/embedded_std.my` until the integrator's seed commit). `tests.burn.test_selfhost_codegen` and `tests.burn.test_compiler_parity`: `Ran 300 tests … OK`. `build/myla test lib/std/list.my --stdlib lib`: `24/24 passed.` interpreted, `--native`, `--native --target aarch64-linux` and `--native --target wasm32-wasi`. `build/myla test selfhost/codegen.my --only module_of` 2/2, `--only decl_of` 1/1, `selfhost/inline.my` 5/5.
 The full `scripts/test.sh` (on the final source, after its bootstrap): `Ran 1532 tests … FAILED (failures=1, skipped=341)`, the same expected `test_embedded_std` failure.
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].

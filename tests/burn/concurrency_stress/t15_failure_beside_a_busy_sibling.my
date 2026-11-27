@@ -1,8 +1,14 @@
 // 8. A failure while a sibling computes without a suspension point
 // (MYLA-170): the failure is reported when it happens; the program ends once
-// the sibling reaches its next suspension point (D94 (2), D97), here after
-// its loop (whether the sibling has started by then depends on timing, so it
-// prints nothing before it)
+// the sibling reaches its next suspension point (D94 (2), D97), here the
+// call of the actor after its loop. The failure happens in that actor's
+// method, which holds it: a sibling that comes to the actor after it can't
+// go on, and one that came before has passed its suspension point before
+// the failure and goes on legitimately (on many workers the sibling may
+// start and finish its loop before the failing task starts, MYLA-781), so
+// it prints only what came after the failure: nothing, ever. Whether the
+// sibling has started by then depends on timing, so it prints nothing
+// before it.
 actor Log {
     n: int,
 }
@@ -10,6 +16,12 @@ actor Log {
 impl Log {
     fun note(var self) -> int {
         self.n = self.n + 1
+        return self.n
+    }
+
+    fun fail(var self) -> int {
+        self.n = self.n + 1
+        panic("failure beside a busy sibling")
         return self.n
     }
 }
@@ -20,13 +32,14 @@ async fun busy(log: Log) -> int {
         x = (x * 17 + 5) % 1009
     }
     let n = await log.note()
-    print("never")
+    if n > 1 {
+        print("never")
+    }
     return x
 }
 
 async fun fail_soon(log: Log) -> int {
-    panic("failure beside a busy sibling")
-    return 0
+    return await log.fail()
 }
 
 #main

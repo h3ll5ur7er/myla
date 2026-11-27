@@ -1,0 +1,31 @@
+import std.task as task
+
+actor Lab {
+    questions: int,
+}
+
+impl Lab {
+    fun ask(var self) {
+        self.questions += 1
+    }
+
+    fun total(self) -> int {
+        return self.questions
+    }
+}
+
+async fun experiment(lab: Lab, n: int) {
+    for i in 0..n {
+        await lab.ask()
+    }
+}
+
+#main
+async fun main() {
+    let lab = Lab { questions: 0 }
+    async let a = experiment(lab, 20)
+    async let b = experiment(lab, 22)
+    await a
+    await b
+    print(f"The mice counted {await lab.total()} questions")
+}

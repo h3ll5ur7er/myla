@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from tests.burn._native import (CAN_BUILD_NATIVE, SKIP_REASON, TEST_TARGET, run_argv, selfhost_run, target_flags,
-                                write_program)
+                                shown, write_program, READS_X86, X86_REASON)
 from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 _RUN_MJS = os.path.join(os.path.dirname(STDLIB_ROOT), "tools", "wasm", "run.mjs")
@@ -116,8 +116,16 @@ SUMS = {
     "iter_sum": ("import std.iter as iter\n\nfun main() {\n    let xs = [2000000000, 2000000000]\n"
                  "    print(xs.iter() |> iter.sum(0))\n}\n"),
     "fold": "fun main() {\n    let xs: [uint8] = [200, 100]\n    print(xs.fold(0u8, (a, b) => a + b))\n}\n",
+    # MYLA-414 (B6): a `var self` call on a map's element whose key's
+    # written `hash` runs first printed 200 interpreted
+    "var_self_past_a_written_key": ("#derive(Eq)\nstruct K {\n    v: int,\n}\n\n"
+                                    "impl Hash for K {\n    fun hash(self, h: Hasher) -> Hasher { return h.add(self.v) }\n}\n\n"
+                                    "struct Cell<T> {\n    v: T,\n}\n\n"
+                                    "impl<T: Add> Cell<T> {\n    fun bump(var self, w: T) { self.v = self.v + w }\n}\n\n"
+                                    "fun main() {\n    var m = [K { v: 1 }: Cell { v: 100i8 }]\n"
+                                    "    m[K { v: 1 }].bump(100i8)\n    print(m[K { v: 1 }].v)\n}\n"),
 }
-SUMS_WRAPPED = {"list_sum": "-294967296", "iter_sum": "-294967296", "fold": "44"}
+SUMS_WRAPPED = {"list_sum": "-294967296", "iter_sum": "-294967296", "fold": "44", "var_self_past_a_written_key": "-56"}
 
 
 def build_and_run(path: str, checked: bool) -> tuple[str, str, int]:
@@ -264,6 +272,16 @@ fun main() {
 """
 
 
+# A checked loop of `int64` arithmetic (MYLA-551, the review's `hot1`).
+HOT = """fun main() {
+    var s: int64 = 0
+    var i: int64 = 0
+    while i < 100000 { s += i * 3 - (i >> 1); i += 1 }
+    print(s)
+}
+"""
+
+
 def function_body(asm: str, name: str) -> str:
     """The lines of the function `myla_<name>` in a target's assembly."""
     lines = asm.splitlines()
@@ -303,6 +321,7 @@ class TestOverflow(unittest.TestCase):
                 self.assertEqual((code, err.split("\n")[0]), (1, f"runtime error: {OVER}"))
                 k += 1
 
+    @unittest.skipUnless(READS_X86, X86_REASON)
     def test_64_bit_checks_take_the_flags(self):
         # MYLA-430 (M27): a checked 64-bit `*` divided to find an overflow
         # (std.rt's `mul_overflows_i64`); now the target's flags, or on
@@ -315,17 +334,55 @@ class TestOverflow(unittest.TestCase):
         self.assertFalse("mul_overflows" in proc.stdout, "std.rt's division by the operand is called")
         body = {name: function_body(proc.stdout, name) for name in ["mul", "mulu", "add", "subu"]}
         if TEST_TARGET == "aarch64-linux":
-            want = {"mul": ["smulh"], "mulu": ["umulh"], "add": ["adds", "cset x12, vc"], "subu": ["subs", "cset x12, cs"]}
+            want = {"mul": ["smulh", "b.ne"], "mulu": ["umulh", "b.ne"], "add": ["adds", "b.vs"], "subu": ["subs", "b.cc"]}
         elif TEST_TARGET == "wasm32-wasi":
             want = {"mul": ["i64.shr_u", "i64.div_s"], "mulu": ["i64.shr_u", "i64.div_u"], "add": ["i64.ge_s"],
                     "subu": ["i64.ge_u"]}
         else:
-            want = {"mul": ["imulq", "jno"], "mulu": ["mulq", "jno"], "add": ["addq", "jno"], "subu": ["subq", "jnc"]}
+            # a jump to the trap after the return when the flag is set (MYLA-551)
+            want = {"mul": ["imulq", "\tjo "], "mulu": ["mulq", "\tjo "], "add": ["addq", "\tjo "], "subu": ["subq", "\tjc "]}
         for name, needles in want.items():
             for needle in needles:
                 self.assertIn(needle, body[name], f"{name}:\n{body[name]}")
             if TEST_TARGET != "wasm32-wasi":
                 self.assertNotIn("div", body[name], f"{name}:\n{body[name]}")
+
+    def test_the_traps_are_out_of_line(self):
+        # MYLA-551: a check is a conditional jump to its trap, which follows
+        # the function's return, not a jump over an inline call; a constant
+        # shift count below the width is checked by none at run time
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, HOT)
+            proc = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT, "--checked", "--no-inline",
+                                   *target_flags()], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            body = function_body(proc.stdout, "main")
+            self.assertNotIn("__trap_shift", body)
+            if TEST_TARGET != "wasm32-wasi":
+                lines = body.splitlines()
+                traps = [k for k, line in enumerate(lines) if "__trap_overflow" in line]
+                # `i * 3`, `-`, `s +=`, `i += 1`, each its own position
+                self.assertEqual(len(traps), 4, body)
+                self.assertTrue(all(k > lines.index(".Lmain_ret:") for k in traps), body)
+            self.assertEqual(selfhost_run(path), ("12499900000\n", "", 0))
+            if CAN_BUILD_NATIVE:
+                self.assertEqual(build_and_run(path, True), ("12499900000\n", "", 0))
+
+    def test_a_function_past_a_branchs_reach_builds_checked(self):
+        # M3 (MYLA-551): aarch64's branch to an out-of-line trap reaches
+        # 1 MiB; the traps of a function past that (5,000 checked
+        # statements) go in islands in its code, or it doesn't assemble
+        # (`fixup value out of range: b.vs`)
+        src = ("fun big(a: int64, b: int64) -> int64 {\n    var s: int64 = 0\n" + "    s = s + a - b\n" * 5000
+               + "    return s + a\n}\nfun main() {\n    print(big(3, 2))\n    print(big(9223372036854775807, 0))\n}\n")
+        want = ("5003\n", "runtime error: integer overflow\n  --> {}:4:11\n", 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_program(tmp, src)
+            out, err, code = selfhost_run(path)
+            self.assertEqual((out, err.splitlines(True)[:2], code), (want[0], want[1].format(shown(path)).splitlines(True), 1))
+            if CAN_BUILD_NATIVE:
+                out, err, code = build_and_run(path, True)
+                self.assertEqual((out, err.splitlines(True)[:2], code), (want[0], want[1].format(shown(path)).splitlines(True), 1))
 
     def test_what_fits_is_the_same_everywhere(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -343,10 +400,10 @@ class TestOverflow(unittest.TestCase):
             path = write_program(tmp, src)
             out, err, code = selfhost_run(path)
             self.assertEqual((out, code), ("", 1))
-            self.assertTrue(err.startswith(f"runtime error: {OVER}\n  --> {path}:2:29\n"), err)
+            self.assertTrue(err.startswith(f"runtime error: {OVER}\n  --> {shown(path)}:2:29\n"), err)
             if CAN_BUILD_NATIVE:
                 self.assertEqual(build_and_run(path, False), ("-2147483648\n", "", 0))
-                self.assertEqual(build_and_run(path, True), ("", f"runtime error: {OVER}\n  --> {path}:2:29\n", 1))
+                self.assertEqual(build_and_run(path, True), ("", f"runtime error: {OVER}\n  --> {shown(path)}:2:29\n", 1))
 
     def test_compound_assignment_traps(self):
         src = ("fun main() {\n    var x: uint8 = 250\n    var i = 0\n    while i < 10 {\n"
@@ -355,7 +412,7 @@ class TestOverflow(unittest.TestCase):
             path = write_program(tmp, src)
             out, err, code = selfhost_run(path)
             self.assertEqual((out, code), ("", 1))
-            self.assertTrue(err.startswith(f"runtime error: {OVER}\n  --> {path}:5:"), err)
+            self.assertTrue(err.startswith(f"runtime error: {OVER}\n  --> {shown(path)}:5:"), err)
             if CAN_BUILD_NATIVE:
                 self.assertEqual(build_and_run(path, False), ("4\n", "", 0))
                 nout, nerr, ncode = build_and_run(path, True)
@@ -420,7 +477,7 @@ def _make_generic(name: str, case):
     def test(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, generic_program(ty, expr, args))
-            where = f"  --> {path}:2:{12 + col}"
+            where = f"  --> {shown(path)}:2:{12 + col}"
             out, err, code = selfhost_run(path)
             self.assertEqual((out, code), ("", 1), err)
             self.assertTrue(err.startswith(f"runtime error: {msg}\n{where}\n"), err)
@@ -437,7 +494,7 @@ def _make(name: str, case):
     def test(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_program(tmp, program(ty, expr, args))
-            where = f"  --> {path}:2:{12 + col}"
+            where = f"  --> {shown(path)}:2:{12 + col}"
             out, err, code = selfhost_run(path)
             self.assertEqual((out, code), ("", 1), err)
             self.assertTrue(err.startswith(f"runtime error: {msg}\n{where}\n"), err)

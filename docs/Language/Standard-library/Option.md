@@ -35,7 +35,7 @@ fun main() {
 | `o.unwrap_or_else(f: () -> T) -> T` | The value, or `f()` for a `None`: for a fallback that costs |
 | `o.ok_or(err: E) -> Result<T, E>` | `Ok(v)` for a `Some(v)`, `Err(err)` for a `None` |
 | `o.is_some() -> bool`, `o.is_none() -> bool` | Which of the two it is |
-| `o.expect(msg: str) -> T` | The value; a `None` fails with `msg`, as `panic(msg)` does |
+| `o.expect(msg: str) -> T` | The value; a `None` fails with `msg`, as `panic(msg)` does, at the call: the error's position is the program's `expect(` (`#track_caller`, [[Language/Attributes-and-testing#track_caller]], [[MYLA-435]]) |
 
 ## Result
 
@@ -47,7 +47,7 @@ fun main() {
 | `r.unwrap_or(default: T) -> T` | The `Ok`'s value, or `default` for an `Err` |
 | `r.ok() -> Option<T>`, `r.err() -> Option<E>` | The `Ok`'s value or the `Err`'s error, as an `Option` |
 | `r.is_ok() -> bool`, `r.is_err() -> bool` | Which of the two it is |
-| `r.expect(msg: str) -> T` | The `Ok`'s value; an `Err` fails with `msg`. Unlike Rust's, the message doesn't show the error, which may have no `Format` |
+| `r.expect(msg: str) -> T` | The `Ok`'s value; an `Err` fails with `msg`, at the call, as `o.expect` does. Unlike Rust's, the message doesn't show the error, which may have no `Format` |
 
 ## Notes
 

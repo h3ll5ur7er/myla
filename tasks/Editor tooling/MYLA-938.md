@@ -1,0 +1,16 @@
+---
+id: MYLA-938
+title: "The language server can't read a Windows file URI: `file:///C:/w/a.my` was the path `/C:/w/a.my`"
+type: bug
+status: review
+priority: high
+labels: [lsp, windows]
+---
+Found by [[MYLA-926]] step 2's port of the burn suites to native Windows (run 277, group C): test_lsp had 76 failures and 3 errors there. `tools/lsp/text.my`'s `uri_path` only stripped `file://` and decoded escapes, so the URI of a Windows file, `file:///C:/w/a.my`, became the path `/C:/w/a.my`, which no file call can open: a document's imports, its project (`myla.toml`), the workspace's files and the modules after `from .` were never found (`cannot resolve import 'geo'`, definitions `None`, diagnostics of a second file that never came, which the tests saw as "no message from the language server"). `path_uri` then wrote that path back as `file:///C%3A/w/a.my`, even for the open document the client had named `file:///C:/w/a.my`. VS Code on Windows names a file `file:///c%3A/w/a.my` (the drive lower-case, its colon escaped), so every spelling has to be one file.
+
+- [x] `uri_path_on(uri, windows)`: on Windows a drive's URI is the loader's path (`C:/w/a.my`, [[MYLA-931]]) with the drive's letter upper-case, whether written `C:` or `c%3A`; a share's (`file://server/share/a.my`) is `//server/share/a.my`. `path_uri_on(path, windows)`: a drive's path is `file:///C:/w/a.my` (RFC 8089's spelling, as Python's `pathlib` writes it), `\` read as `/`, a share's `file://server/share/a.my`. Elsewhere both are as they were. `#test` cases for both machines' rules.
+- [x] What the server sends: the client's own URI of an open document (diagnostics did already; locations of definition and references now too, `Server.spellings`), else the canonical one made from the path. `--stdlib` and `rootPath` take the upper-case drive as well, since the server compares paths as text (VS Code's extension passes `--stdlib c:\…\lib`).
+- [x] A scenario that opens a document under another valid spelling of its URI (`_another_spelling`: VS Code's on Windows, `_` escaped elsewhere) and gets its import resolved, its own locations in that spelling and another file's in the canonical one (`test_any_spelling_of_a_uri`); failed on Linux before the change (the document's own location came back canonical).
+- [x] The tests' Windows assumptions: the project scenarios' manifest wrote the dependency's relative path with `\` into a TOML string (an invalid escape, so the manifest didn't load); the `--resolve` corpus tests compared myla's printed paths (`/`) with Python's (`\`), now through `_native.shown`.
+- [x] [[Architecture/Editor-tooling]] says how the server reads and writes URIs.
+- [ ] test_lsp on the `burn-windows` job (no Windows machine here). Under Wine, a Windows-built server given VS Code's `file:///z%3A/…` URIs now finds definitions in a path dependency, an imported module and the workspace, references across them and the modules after `from .`, the open document's in the client's spelling and the others' as `file:///Z:/…` (before: `None`, `[]`, and only the document's own). Wine can't show the diagnostics: there its `Reader.ready` never says that no message is waiting, so a check doesn't start (Wine's, not Windows': the diagnostics scenarios passed on Windows in run 277).

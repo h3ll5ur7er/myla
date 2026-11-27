@@ -1,0 +1,5 @@
+runtime error: the port is a number
+  --> examples/errors/runtime_result_expect_at_the_caller.my:9:45
+  |
+9 |     let port = num.parse_int32("80a").expect("the port is a number")
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

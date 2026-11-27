@@ -1,0 +1,10 @@
+type error: generic function 'pair' cannot be used as a value (its type parameters are unresolved)
+  --> examples/errors/type_d186_call_read_as_comparisons.my:14:14
+   |
+14 |     let v = [pair<P, Q>(p, q)]
+   |              ^^^^
+note: in a list, map or tuple literal `pair<P, Q>(p, q)` is two comparisons, `pair < P` and `Q > (p, q)` (D186); for a call with type arguments, give it a `let` of its own: `let v = pair<P, Q>(p, q)`
+  --> examples/errors/type_d186_call_read_as_comparisons.my:14:14
+   |
+14 |     let v = [pair<P, Q>(p, q)]
+   |              ^^^^^^^^^^^^^^^^

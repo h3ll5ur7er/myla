@@ -1,0 +1,10 @@
+module error: unknown module 'p' in the type 'p.x': a type of another module is named through its 'import … as p'
+  --> examples/errors/module_d186_comparisons_read_as_a_call.my:12:20
+   |
+12 |     print(both(a < p.x, c > (d)))
+   |                    ^^^
+note: in a call's arguments `a < p.x, c > (d)` is a call of 'a' with the type arguments `p.x, c` (D186); for two comparisons, write `(a < p.x), c > (d)`
+  --> examples/errors/module_d186_comparisons_read_as_a_call.my:12:16
+   |
+12 |     print(both(a < p.x, c > (d)))
+   |                ^^^^^^^^^^^^^^^^

@@ -1,0 +1,13 @@
+//~ type error: `for ... in` requires a list, a map, a string, a range or an Iterator, found 'set.Set<int32>' (it needs 'impl Iterator<T> for set.Set<int32>')
+//~ span: s
+//~ help: 'set.Set<int32>' is not an Iterator: write 's.iter()'
+// A type with an `iter()` method isn't an iterator itself (D171): the loop
+// says to call it, as a pipeline does for a list (MYLA-553).
+import std.set as set
+
+fun main() {
+    let s = set.of([1, 2])
+    for x in s {
+        print(x)
+    }
+}

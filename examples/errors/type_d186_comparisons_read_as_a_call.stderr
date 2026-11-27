@@ -1,0 +1,10 @@
+type error: function 'both' expects 2 argument(s), got 1
+  --> examples/errors/type_d186_comparisons_read_as_a_call.my:10:15
+   |
+10 |     print(both(a < b, c > (d)))
+   |           ^^^^^^^^^^^^^^^^^^^^
+note: in a call's arguments `a < b, c > (d)` is a call of 'a' with the type arguments `b, c` (D186); for two comparisons, write `(a < b), c > (d)`
+  --> examples/errors/type_d186_comparisons_read_as_a_call.my:10:16
+   |
+10 |     print(both(a < b, c > (d)))
+   |                ^^^^^^^^^^^^^^

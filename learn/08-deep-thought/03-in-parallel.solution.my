@@ -1,0 +1,21 @@
+import std.task as task
+import std.time as time
+
+async fun compute(n: int) -> int {
+    await task.sleep(200)
+    return n
+}
+
+#main
+async fun main() {
+    let start = time.now_ms()
+    async let a = compute(6)
+    async let b = compute(7)
+    let six = await a
+    let seven = await b
+    let ms = time.now_ms() - start
+    if ms > 350 {
+        panic(f"too slow: {ms} ms")
+    }
+    print(f"{six} x {seven} = {six * seven}")
+}

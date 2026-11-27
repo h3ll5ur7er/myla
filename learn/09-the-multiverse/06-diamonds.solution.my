@@ -1,0 +1,21 @@
+#test(["SDS", "SLS", "DSD"])[2]
+#test(["DDD"])[3]
+#test(["LDL", "SSS"])[0]
+fun safe_diamonds(rows: [str]) -> int {
+    var n = 0
+    for y in 0..rows.len() {
+        for x in 0..rows[y].len() {
+            if rows[y][x] == 'D' && !lava(rows, x - 1, y) && !lava(rows, x + 1, y) && !lava(rows, x, y - 1) && !lava(rows, x, y + 1) {
+                n += 1
+            }
+        }
+    }
+    return n
+}
+
+fun lava(rows: [str], x: int, y: int) -> bool {
+    if y < 0 || y >= rows.len() || x < 0 || x >= rows[y].len() {
+        return false
+    }
+    return rows[y][x] == 'L'
+}

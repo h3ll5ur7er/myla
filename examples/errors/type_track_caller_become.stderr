@@ -1,0 +1,5 @@
+type error: 'become' can't call 'countdown', which reports its caller's position ('#track_caller')
+  --> examples/errors/type_track_caller_become.my:8:21
+  |
+8 |     become countdown(n - 1)
+  |            ^^^^^^^^^^^^^^^^

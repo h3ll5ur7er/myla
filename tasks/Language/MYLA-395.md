@@ -2,7 +2,7 @@
 id: MYLA-395
 title: "Integer overflow traps in the interpreter, under myla test and in --checked builds (D175)"
 type: feature
-status: review
+status: done
 priority: medium
 labels: [language, integers, overflow, interpreter, codegen]
 ---
@@ -50,3 +50,7 @@ Not ready ([[Project/Review-2026-11-09]]): the interpreter neither traps nor wra
 - [x] The review's blocker, fixed with [[MYLA-414]]
 
 The interpreter binds every generic call's type parameters in its frame now, so `xs.sum(0)`, `iter.sum` and a `T: Add` function trap as a function of the concrete type does, interpreted and under `myla test` (`test_overflow`'s generic cases and sums, the parity program `generic_code_per_width`); evidence in [[MYLA-414]].
+
+## Review 2026-11-12
+
+Signed off in [[Project/Review-2026-11-12]].
