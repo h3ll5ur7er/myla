@@ -148,9 +148,9 @@ pub fun stroke_style(width: float32) -> Stroke   // miter joins (limit 4), butt 
 
 A stroke is turned into an outline and filled by the non-zero rule. Each subpath is flattened and, with a dash pattern, cut into dashes. Then it is widened by half the width on each side. On the outer side of a turn go the join's points: the miter's tip, which becomes a bevel past `miter_limit` times the width as SVG says, an arc for a round join, or nothing for a bevel. On the inner side the two offset edges meet at their crossing, so the outline doesn't overlap itself there. Where the segments are too short for that, the outline goes through the vertex itself, as Skia's stroker does, and the non-zero rule fills the small loop this makes. An open subpath gets caps. A closed one gets an outer and an inner outline in opposite directions. A zero-length subpath with round or square caps is a dot.
 
-A dash pattern alternates the lengths drawn and left out. A list of odd length counts twice, and `dash_offset` starts that far into the pattern. A pattern that is empty, negative or adds up to nothing draws the path whole, and so does one that would make more than a million dashes.
+A dash pattern alternates the lengths drawn and left out. A list of odd length counts twice, and `dash_offset` starts that far into the pattern. A pattern that is empty, negative or adds up to nothing draws the path whole, and so does one that would make more than a million dashes. An offset that isn't finite, or is so far past the pattern's length that float32 can't place it within the pattern, starts at the pattern's beginning.
 
-The canvas strokes in user space and flattens to a quarter pixel after the transform, so a scale scales the width too.
+The canvas strokes in user space and flattens to a quarter pixel after the transform, along its largest scale when it stretches one way more than another, so a scale scales the width too.
 
 ## Pixel art and the bitmap font
 

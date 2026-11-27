@@ -888,9 +888,9 @@ class TestResolutionCorpus(unittest.TestCase):
             path = os.path.join(tmp, "aliases.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(source)
-            lines = self._resolve(path)[path]
+            lines = self._resolve(path)[shown(path)]
             self.assertTrue(any(line.startswith("use 0:21-27 option -> ") and line.endswith(" module") for line in lines), lines)
-            self.assertIn("use 9:24-28 Mode -> " + path + " 2:5 global", lines)    # the default's type name
+            self.assertIn("use 9:24-28 Mode -> " + shown(path) + " 2:5 global", lines)    # the default's type name
             self.assertFalse([line for line in lines if line.split()[-1] == "_"], lines)
             self._resolves(path, lines)
 
