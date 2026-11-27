@@ -37,3 +37,9 @@ Measured on 2026-11-25 in the lane's worktree (branch `stdlib/MYLA-969` over `08
 - **Docs**: [[Language/Standard-library/Font]]'s doc block checks, runs and prints its output interpreted and natively (checked as `test_doc_blocks` does, for this page); the row on [[Language/Standard-library]]; the section `std.font` in both copies of the skill's `reference/stdlib.md` (identical).
 - **Outside the owned files**: the corpus notes above (`manifest.json`, `_images_vendor.py`, `_images.py`, `docs/Development/Testing.md`), the `MYLA-969` slot of `benchmarks/images_std.my` filled, the driver `tests/burn/drivers/font_driver.my` and `tests/burn/test_font.py`.
 - **Toolchain bug found**: in a std module, a map keyed by a tuple holding a `float32` builds in programs but its `myla test --native` harness fails to link (`undefined reference to myla_float64.hash`); the cache keys the size by its bits (`px.to_bits()`) instead. No private helpers of other lanes.
+
+## Review (2026-11-27)
+
+- A composite's `SCALED_COMPONENT_OFFSET` scaled x by the length of the matrix's column (xx, yx) and y by (xy, yy); FreeType scales x by its row (xx, xy) and y by (yx, yy). With a 2 by 2 that isn't symmetric, the component was hundreds of units off: FreeType 2.14 (through Pillow) puts the test's first composite at x 524, std.font put it at 400. `scaled_component_offsets` failed before.
+- `kerning(a, b)` with a glyph number past the font's could find another pair, its key `(a << 16) | b` shared (`kerning(0, 131075)` gave `(2, 3)`'s -50). Glyphs past the font now kern by 0.
+- Module cases 55/55 interpreted and `--native`.

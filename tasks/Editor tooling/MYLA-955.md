@@ -14,3 +14,4 @@ Found by the full suite after D313's image modules merged: `tests.burn.test_lsp.
 
 - [x] `test_aliases_defaults_and_wildcards` in `tests/burn/test_lsp.py`: all three on one small file
 - [x] `python3 -m unittest tests.burn.test_lsp`: 171 tests OK (2026-11-25); the corpus check over every std module, example and tool passes again
+- [x] Review (2026-11-27): after the merge of master (MYLA-926's `shown(path)` for Windows paths), `test_aliases_defaults_and_wildcards` looks its file up as `shown(path)` too, as the other corpus tests do

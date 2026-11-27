@@ -594,8 +594,9 @@ impl Font {
     #test(tiny(), 2, 3)[-50]
     #test(tiny(), 3, 2)[20]
     #test(tiny(), 3, 3)[0]
+    #test(tiny(), 0, 131075)[0] // past the glyphs: not the pair (2, 3), whose key it would share
     fun kerning(self, a: int, b: int) -> int {
-        if self.kern_pairs == 0 || a < 0 || b < 0 {
+        if self.kern_pairs == 0 || a < 0 || b < 0 || a >= self.glyph_count || b >= self.glyph_count {
             return 0
         }
         let key = ((a as int64) << 16) | (b as int64)
@@ -878,9 +879,11 @@ impl Loader {
             if (flags & 2) != 0 {
                 ox = e1 as float64
                 oy = e2 as float64
+                // scaled offsets: x by the length of the matrix's row
+                // (xx, xy), y by that of (yx, yy), as FreeType does
                 if (flags & 0x800) != 0 && (flags & 0x1000) == 0 {
-                    ox = ox * (xx * xx + yx * yx).sqrt()
-                    oy = oy * (xy * xy + yy * yy).sqrt()
+                    ox = ox * (xx * xx + xy * xy).sqrt()
+                    oy = oy * (yx * yx + yy * yy).sqrt()
                 }
             } else {
                 // point matching: the component's point e2 onto the glyph's point e1
@@ -1783,6 +1786,45 @@ fun outlines() {
     let c = f.outline(5).expect("C")
     assert(c.segs[3] == Seg.Move(vec2(1000.0, 0.0)) && c.segs[5] == Seg.Line(vec2(1400.0, 700.0)))
     assert(f.outline(1).is_none() && f.outline(6).is_none() && f.outline(-1).is_none())
+}
+
+// Components moved by offsets that are scaled (SCALED_COMPONENT_OFFSET)
+// through a 2 by 2 matrix: x by the length of the matrix's row (xx, xy), y
+// by that of (yx, yy), as FreeType does. FreeType 2.14 (through Pillow)
+// puts the first at (524, 100) to (1624, 800), the second at (400, 241) to
+// (800, 1341).
+#test
+fun scaled_component_offsets() {
+    var glyf = bytes_of()
+    // glyph 0, the rectangle from (100, 0) to (500, 700)
+    glyf.add(tiny_glyphs()[0])
+    glyf.pad(2)
+    var at = [0, glyf.b.len()]
+    // glyph 1: x' = x + y, moved by (300, 100); glyph 2: y' = x + y, the same
+    for m in [[0x4000, 0, 0x4000, 0x4000], [0x4000, 0x4000, 0, 0x4000]] {
+        for v in [-1, 0, 0, 0, 0, 0x883, 0, 300, 100] {
+            glyf.u16(v)
+        }
+        for v in m {
+            glyf.u16(v)
+        }
+        at.push(glyf.b.len())
+    }
+    let end = glyf.b.len()
+    for o in at {
+        glyf.u32(o)
+    }
+    let f = Font { family: "", style: "", units_per_em: 1000, ascender: 800, descender: -200, line_gap: 0,
+        glyph_count: 3, data: glyf.b, loca: end, long_loca: true, glyf: 0, glyf_end: end, hmtx: 0, hmtx_end: 0,
+        hmetrics: 1, cmap: 0, cmap_end: 0, cmap_format: 4, kern: 0, kern_pairs: 0 }
+    let r2 = 1.41421356f32
+    let want = [(vec2(100.0 + 300.0 * r2, 100.0), vec2(1200.0 + 300.0 * r2, 800.0)),
+        (vec2(400.0, 100.0 * r2 + 100.0), vec2(800.0, 100.0 * r2 + 1200.0))]
+    for g in 1..3 {
+        let (lo, hi) = f.outline(g).expect("a composite").bounds().expect("points")
+        let (wlo, whi) = want[g - 1]
+        assert(lo.distance(wlo) < 0.01f32 && hi.distance(whi) < 0.01f32)
+    }
 }
 
 #test
