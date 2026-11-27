@@ -1853,17 +1853,46 @@ fun rendered_glyphs() {
     assert(render_glyph(f, 2, -3.0, 0.0).image.width == 0)
 }
 
+// Every glyph of a broken font `f` outlines, and every glyph the breakage
+// changed renders; the number rendered. A glyph with the unbroken font's
+// points (`base`) at its scale (`units_per_em`) renders as there, since
+// `render_glyph` reads nothing else: rasterizing those again took
+// `broken_fonts` past its time limit interpreted on aarch64 (70 s, 12 s on
+// x86-64; MYLA-929, MYLA-956).
+fun renders_broken(f: Font, base: [Option<Outline>], units_per_em: int) -> int {
+    var rendered = 0
+    for g in 0..f.glyph_count {
+        let o = f.points(g)
+        if f.units_per_em == units_per_em && g < base.len() {
+            if let (Some(a), Some(b)) = (o, base[g]) {
+                if a.xs == b.xs && a.ys == b.ys && a.on == b.on && a.ends == b.ends {
+                    continue
+                }
+            }
+        }
+        let m = render_glyph(f, g, 4.0, 0.25)
+        assert(m.image.data.len() == m.image.width * m.image.height)
+        rendered += 1
+    }
+    return rendered
+}
+
 // Every prefix of the test font, and every byte of it inverted, parses or
-// fails, and what parses outlines and renders every glyph.
+// fails, and what parses outlines every glyph and renders those it changed.
 #test
 fun broken_fonts() {
     let b = tiny_bytes()
+    let t = tiny()
+    var base: [Option<Outline>] = []
+    for g in 0..t.glyph_count {
+        base.push(t.points(g))
+        let m = render_glyph(t, g, 4.0, 0.25)
+        assert(m.image.data.len() == m.image.width * m.image.height)
+    }
+    var rendered = 0
     for n in 0..b.len() {
         if let Ok(f) = parse(b[:n], 0) {
-            for g in 0..f.glyph_count {
-                let m = render_glyph(f, g, 4.0, 0.25)
-                assert(m.image.data.len() == m.image.width * m.image.height)
-            }
+            rendered += renders_broken(f, base, t.units_per_em)
         }
     }
     var flipped = 0
@@ -1872,15 +1901,12 @@ fun broken_fonts() {
         c[i] = c[i] ^ 0xFFu8
         if let Ok(f) = parse(c, 0) {
             flipped += 1
-            for g in 0..f.glyph_count {
-                let m = render_glyph(f, g, 4.0, 0.25)
-                assert(m.image.data.len() == m.image.width * m.image.height)
-            }
+            rendered += renders_broken(f, base, t.units_per_em)
             let l = layout(f, "AB C\tO\n A", 4.0, layout_options().with_max_width(5.0))
             assert(l.lines >= 2)
         }
     }
-    assert(flipped > 0)
+    assert(flipped > 0 && rendered > 0)
 }
 
 #test
