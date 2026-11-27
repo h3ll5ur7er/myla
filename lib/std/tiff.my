@@ -14,7 +14,8 @@
 // gray (BlackIsZero, WhiteIsZero), RGB and palette images, and an extra
 // sample as alpha (associated alpha is unpremultiplied, as Pillow does).
 // Every offset and count is checked against the file before it is used, and
-// the IFD chain is walked with a guard against loops. JPEG (old and new),
+// the IFD chain is walked with a guard against loops and IFDs that overlap
+// (`info` and the decoders skip the IFDs before a page unread). JPEG (old and new),
 // CCITT, BigTIFF, YCbCr, CMYK and the rest are `Unsupported`, by name.
 //
 // The encoder writes little-endian files of one page: strips of about
@@ -205,8 +206,9 @@ fun open(b: [uint8]) -> Result<(Src, int64), ImageError> {
     return Ok((s, s.u32(4)))
 }
 
-// The IFD at `off`.
-fun read_ifd(s: Src, off: int64) -> Result<Ifd, ImageError> {
+// Where the IFD at `off` ends (past its entries and the next IFD's offset)
+// and that offset (0: none), checked against the file.
+fun ifd_span(s: Src, off: int64) -> Result<(int64, int64), ImageError> {
     let n = s.b.len() as int64
     if off < 8 || off >= n {
         return Err(ImageError.Corrupt(f"an IFD at {off}, outside the file of {n} bytes"))
@@ -214,17 +216,31 @@ fun read_ifd(s: Src, off: int64) -> Result<Ifd, ImageError> {
     if off + 2 > n {
         return Err(ImageError.Truncated)
     }
-    let p = off as int
-    let count = s.u16(p)
-    let end = off + 2 + 12 * (count as int64)
+    let end = off + 2 + 12 * (s.u16(off as int) as int64)
     if end > n {
         return Err(ImageError.Truncated)
     }
     // a file that ends right after its last IFD's entries has no more
-    var next = 0i64
     if end + 4 <= n {
-        next = s.u32(end as int)
+        return Ok((end + 4, s.u32(end as int)))
     }
+    return Ok((end, 0i64))
+}
+
+// Whether IFDs of `used` bytes in all fit the file `s`. Those of a file
+// don't overlap, so they always do; a chain of IFDs that overlap, each
+// read in full, would take time quadratic in the file's size, and it ends
+// where they no longer fit.
+fun ifds_fit(s: Src, used: int64) -> bool {
+    return used <= (s.b.len() as int64)
+}
+
+// The IFD at `off`.
+fun read_ifd(s: Src, off: int64) -> Result<Ifd, ImageError> {
+    let (_, next) = ifd_span(s, off)?
+    let p = off as int
+    let count = s.u16(p)
+    let n = s.b.len() as int64
     var entries: [int: Entry] = [:]
     var order: [int] = []
     for i in 0..count {
@@ -256,23 +272,29 @@ fun nth_ifd(s: Src, first: int64, page: int) -> Result<Ifd, ImageError> {
     if first == 0 {
         return Err(ImageError.Corrupt("no IFD"))
     }
+    // the IFDs before it only for where the next one is
     var seen: [int64: bool] = [:]
     var off = first
+    var used = 0i64
     var i = 0
     while true {
-        let ifd = read_ifd(s, off)?
+        let (end, next) = ifd_span(s, off)?
+        used += end - off
+        if !ifds_fit(s, used) {
+            break
+        }
         if i == page {
-            return Ok(ifd)
+            return read_ifd(s, off)
         }
         seen[off] = true
-        off = ifd.next
+        off = next
         i += 1
         if off == 0 || seen.contains(off) {
-            let pages = if i == 1 { "1 page" } else { f"{i} pages" }
-            return Err(ImageError.Mismatch(f"no page {page}: the file has {pages}"))
+            break
         }
     }
-    unreachable()
+    let pages = if i == 1 { "1 page" } else { f"{i} pages" }
+    return Err(ImageError.Mismatch(f"no page {page}: the file has {pages}"))
 }
 
 // The integers of the entry `e`.
@@ -839,11 +861,16 @@ fun load_raw(b: [uint8], page: int, max_pixels: int64) -> Result<Raw, ImageError
         let down = ceil_div(h as int64, th as int64) as int
         let per = across * down
         for pl in 0..planes {
-            var buf = list_m.filled(h * rb, 0u8)
+            var buf: [uint8] = []
             for k in 0..per {
                 let tx = (k % across) * tw
                 let ty = (k / across) * th
                 let d = block(s, p, pl * per + k, th, trb, pspp)?
+                if k == 0 {
+                    // only once a tile has come: a few bytes may claim a
+                    // plane of gigabytes, and their tile then fails
+                    buf = list_m.filled(h * rb, 0u8)
+                }
                 let cw = if w - tx < tw { w - tx } else { tw }
                 let ch = if h - ty < th { h - ty } else { th }
                 let cb = ceil_div((cw as int64) * (pspp as int64) * (p.bits as int64), 8i64) as int
@@ -1175,7 +1202,8 @@ pub fun decode_f32(b: [uint8], page: int = 0, max_pixels: int64 = image.MAX_PIXE
 
 // Every page of `b`, in order: its size, the layout `decode` gives, the
 // bits of a sample as stored (32 for floats). A loop in the chain of IFDs
-// ends it; a page this module can't decode is an error.
+// ends it, and so do IFDs that overlap (`ifds_fit`); a page this module
+// can't decode is an error.
 pub fun pages(b: [uint8]) -> Result<[ImageInfo], ImageError> {
     let (s, first) = open(b)?
     if first == 0 {
@@ -1184,8 +1212,14 @@ pub fun pages(b: [uint8]) -> Result<[ImageInfo], ImageError> {
     var out: [ImageInfo] = []
     var seen: [int64: bool] = [:]
     var off = first
+    var used = 0i64
     while off != 0 && !seen.contains(off) {
         seen[off] = true
+        let (end, _) = ifd_span(s, off)?
+        used += end - off
+        if !ifds_fit(s, used) {
+            break
+        }
         let ifd = read_ifd(s, off)?
         out.push(info_of(page_of(s, ifd)?))
         off = ifd.next
@@ -1194,20 +1228,28 @@ pub fun pages(b: [uint8]) -> Result<[ImageInfo], ImageError> {
 }
 
 // The first page of `b` as `pages` describes it, `frames` the number of
-// pages (counted until the chain of IFDs ends, loops or breaks).
+// pages (counted until the chain of IFDs ends, loops, overlaps or breaks).
 pub fun info(b: [uint8]) -> Result<ImageInfo, ImageError> {
     let (s, first) = open(b)?
     let ifd = nth_ifd(s, first, 0)?
     let one = info_of(page_of(s, ifd)?)
+    // the later IFDs only for where the next one is
     var count = 1
     var seen: [int64: bool] = [first: true]
+    let (end0, _) = ifd_span(s, first)?
+    var used = end0 - first
     var off = ifd.next
     while off != 0 && !seen.contains(off) {
         seen[off] = true
-        match read_ifd(s, off) {
-            Ok(next) => {
-                count += 1
-                off = next.next
+        match ifd_span(s, off) {
+            Ok((end, next)) => {
+                used += end - off
+                if ifds_fit(s, used) {
+                    count += 1
+                    off = next
+                } else {
+                    off = 0
+                }
             }
             Err(_) => {
                 off = 0
@@ -1624,6 +1666,32 @@ fun a_loop_in_the_ifd_chain() {
     assert(info(b).expect("info").frames == 1)
     assert(decode(b, 0, image.MAX_PIXELS).expect("page 0").data == pattern8(4, 3, 1))
     assert(decode(b, 1, image.MAX_PIXELS) == Err(ImageError.Mismatch("no page 1: the file has 1 page")))
+}
+
+// GRAY8, its IFD's next one a chain of three IFDs of 20 entries each, 4
+// bytes after the one before: IFDs that overlap, which no file has, end the
+// chain once their bytes add up past the file's (each of a long chain of
+// them read in full would take time quadratic in the file's size: 20,000
+// of 20,000 entries in 320 KB took 9 s).
+#test
+fun overlapping_ifds_end_the_chain() {
+    var b = unhex(GRAY8)
+    let s = Src { b: b, le: true }
+    let ifd = s.u32(4) as int
+    let next = ifd + 2 + 12 * s.u16(ifd)
+    let at = b.len()
+    for k in 0..4 { b[next + k] = ((at >> (8 * k)) & 255) as uint8 }
+    let entries = 20
+    b.extend(list_m.filled(8 + 12 * entries + 6, 0u8))
+    for i in 0..3 {
+        let o = at + 4 * i
+        b[o] = entries as uint8
+        let to = if i < 2 { o + 4 } else { 0 }
+        for k in 0..4 { b[o + 2 + 12 * entries + k] = ((to >> (8 * k)) & 255) as uint8 }
+    }
+    assert(info(b).expect("info").frames == 2)
+    assert(decode(b, 2, image.MAX_PIXELS) == Err(ImageError.Mismatch("no page 2: the file has 2 pages")))
+    assert(decode(b, 0, image.MAX_PIXELS).expect("page 0").data == pattern8(4, 3, 1))
 }
 
 // What doesn't decode, and why.
