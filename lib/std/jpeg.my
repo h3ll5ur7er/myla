@@ -26,7 +26,9 @@
 // arithmetic can't overflow (the IDCT works in int64), so a broken file is
 // an `Err` (or, where libjpeg would go on, an image), never a runtime error.
 // Like libjpeg, a scan whose data ends early is decoded on as if zero bits
-// followed.
+// followed, to the end of the MCU that ran out; the interval's other MCUs
+// are left as they are (gray in a sequential scan), and a restart marker out
+// of turn is resynchronised as libjpeg does.
 //
 // The encoder (`encode`, near the end) writes a baseline JFIF file, byte for
 // byte the one libjpeg writes with the same settings (so Pillow with
@@ -544,6 +546,10 @@ struct Decoder {
     coef: [int16],
     scans: int,
     br: MsbBitReader,
+    // the zero bits `fill` put in the scan's bit buffer past the end of the
+    // data since the last restart: the data has run out once fewer bits than
+    // these are left
+    zeros: int,
     // what the markers say
     jfif: bool,
     density_unit: int,
@@ -568,7 +574,7 @@ fun new_decoder(b: [uint8], max_pixels: int64, header_only: bool) -> Decoder {
         hlook: list_m.filled(8 * 512, 0), hmaxc: list_m.filled(8 * 18, -1),
         hoff: list_m.filled(8 * 18, 0), hvals: list_m.filled(8 * 256, 0),
         hdef: list_m.filled(8, false), restart: 0, nat: natural_order(),
-        pix: [], coef: [], scans: 0, br: bytes_m.msb_reader([]),
+        pix: [], coef: [], scans: 0, br: bytes_m.msb_reader([]), zeros: 0,
         jfif: false, density_unit: 0, density_x: 0, density_y: 0, adobe: -1,
         exif_start: 0, exif_end: 0, icc_seq: [], icc_count: [], icc_start: [], icc_end: [],
     }
@@ -834,7 +840,8 @@ impl Decoder {
         if total > image.MAX_SAMPLES {
             return Err(ImageError.TooLarge((width as int64) * (height as int64)))
         }
-        self.pix = list_m.filled(total as int, 0u8)
+        // gray where no scan reaches (libjpeg's IDCT of a block of zeros)
+        self.pix = list_m.filled(total as int, 128u8)
         if progressive {
             self.coef = list_m.filled(coefs as int, 0i16)
         }
@@ -1032,26 +1039,57 @@ impl Decoder {
 
     // The bit buffer `acc` (its low `n` bits not read yet) filled up through
     // the scan's reader to at least 32 bits: when the data ends, with zero
-    // bits, as libjpeg goes on (the reader's buffer is the hot loops' locals,
-    // given back only here).
+    // bits, counted in `zeros`, as libjpeg goes on (the reader's buffer is
+    // the hot loops' locals, given back only here).
     fun fill(var self, acc: uint64, n: int) -> (uint64, int) {
         self.br.acc = acc
         self.br.n = n
         self.br.refill()
         if self.br.n < 32 {
+            self.zeros += 32 - self.br.n
             return (self.br.acc << ((32 - self.br.n) as uint64), 32)
         }
         return (self.br.acc, self.br.n)
     }
 
-    // At a restart boundary: past the RSTn marker if that is where the data
-    // ends (else the data ran out and zero bits go on).
-    fun next_restart(var self) {
-        if let Some(m) = self.br.marker() {
-            if m >= 0xD0u8 && m <= 0xD7u8 {
-                let _ = self.br.skip_marker()
+    // At a restart boundary, as libjpeg's `read_restart_marker`: past the
+    // marker the interval's data ends at (the bits and bytes before it
+    // dropped) if it is RSTn with n `want`, else resynchronised as
+    // `jpeg_resync_to_restart` does. Gives whether it passed a restart
+    // marker; if not, the reader is left at a marker, so the next interval
+    // has no data.
+    fun next_restart(var self, want: int) -> bool {
+        while true {
+            let Some(mk) = self.br.marker() else {
+                // the data ends without a marker: nothing more to read
+                self.br = bytes_m.jpeg_reader(self.data, self.data.len())
+                return false
+            }
+            // libjpeg's actions: 1 pass the marker and go on, 2 pass it and
+            // look at the next one, 3 leave it (any marker from SOF0 on but
+            // RSTn, and the next two RSTn: an interval was lost)
+            let m = mk as int
+            var action = if m < 0xC0 { 2 } else { 3 }
+            if m >= 0xD0 && m <= 0xD7 {
+                let k = m - 0xD0
+                if k == ((want + 1) & 7) || k == ((want + 2) & 7) {
+                    action = 3
+                } else if k == ((want + 7) & 7) || k == ((want + 6) & 7) {
+                    action = 2
+                } else {
+                    action = 1
+                }
+            }
+            if action == 3 {
+                self.br = bytes_m.jpeg_reader(self.data, self.br.marker_pos())
+                return false
+            }
+            let _ = self.br.skip_marker()
+            if action == 1 {
+                return true
             }
         }
+        unreachable()
     }
 
     // The MCU layout of a scan: for each block of an MCU its component, its
@@ -1123,18 +1161,29 @@ impl Decoder {
         var blk = list_m.filled(64, 0)
         var preds = [0, 0, 0, 0]
         self.br = bytes_m.jpeg_reader(self.data, self.pos)
+        self.zeros = 0
         var acc = 0u64
         var n = 0
         var mcu = 0
+        var rst = 0
+        // the data ran out in this interval: its other MCUs are left gray
+        var starved = false
         for my in 0..down {
             for mx in 0..across {
                 if ri > 0 && mcu > 0 && mcu % ri == 0 {
-                    self.next_restart()
+                    if self.next_restart(rst) {
+                        starved = false
+                    }
+                    rst = (rst + 1) & 7
                     acc = 0
                     n = 0
+                    self.zeros = 0
                     for i in 0..4 { preds[i] = 0 }
                 }
                 mcu += 1
+                if starved {
+                    continue
+                }
                 for b in 0..nb {
                     let ci = bc[b]
                     let qo = ci * 64
@@ -1215,6 +1264,7 @@ impl Decoder {
                         blk[nat[i]] = 0
                     }
                 }
+                starved = n < self.zeros
             }
         }
         self.pix = idct.out
@@ -1262,20 +1312,32 @@ impl Decoder {
         self.coef = []
         var preds: [int64] = [0, 0, 0, 0]
         self.br = bytes_m.jpeg_reader(self.data, self.pos)
+        self.zeros = 0
         var eobrun = 0
         var acc = 0u64
         var n = 0
         var mcu = 0
+        var rst = 0
+        // the data ran out in this interval: its other MCUs are left as
+        // they are
+        var starved = false
         for my in 0..down {
             for mx in 0..across {
                 if ri > 0 && mcu > 0 && mcu % ri == 0 {
-                    self.next_restart()
+                    if self.next_restart(rst) {
+                        starved = false
+                    }
+                    rst = (rst + 1) & 7
                     acc = 0
                     n = 0
+                    self.zeros = 0
                     eobrun = 0
                     for i in 0..4 { preds[i] = 0 }
                 }
                 mcu += 1
+                if starved {
+                    continue
+                }
                 for b in 0..nb {
                     let o = base[b] + my * ym[b] + mx * xm[b]
                     let t = tl[b]
@@ -1466,6 +1528,7 @@ impl Decoder {
                         eobrun -= 1
                     }
                 }
+                starved = n < self.zeros
             }
         }
         self.coef = coef
@@ -2538,6 +2601,12 @@ pub fun encode(img: Image8, quality: int = 85, subsampling: Subsampling = Subsam
 // MCUs); the 16x16 one progressive; 16x8 4:4:4 with a restart marker a
 // block; 8x8 Adobe CMYK; 2x1 4:2:0 (too narrow for the triangle filter);
 // 8x8 gray with JFIF at 72x96 dpi, EXIF orientation 6 and an ICC "profile".
+// And broken ones, each decoded by Pillow too: the 16x16 gray one cut in
+// its scan, with EOI put back; 64x8 gray with a restart marker every 2
+// blocks, an interval cut to a third ("short_interval") or left out with its
+// marker ("lost_interval"); 8x8 YCbCr with a scan a component, Cr's left
+// out; and 64x16 gray progressive with a restart every 2 blocks, an
+// interval of its first AC scan cut to a quarter.
 fun test_jpeg(name: str) -> [uint8] {
     let hex = match name {
         "gray8" => "ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080008000801011100ffc40014000100000000000000000000000000000001ffc40017100003010000000000000000000000000000074481ffda0008010100003f00121361ffd9"
@@ -2548,6 +2617,11 @@ fun test_jpeg(name: str) -> [uint8] {
         "cmyk" => "ffd8ffee000e41646f626500640000000000ffdb00430006040506050406060506070706080a100a0a09090a140e0f0c1017141818171416161a1d251f1a1b231c1616202c20232627292a29191f2d302d283025282928ffc000140800080008044311004d11005911004b1100ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffda000e0443004d0059004b00003f004fd967fe5d3f0a4ff867affa74ff00c76bce3c37a0614ac8acefc96c1dbc9c7e4303fce315f54d7fffd9"
         "tiny" => "ffd8ffe000104a46494600010100000100010000ffdb0043000302020302020303030304030304050805050404050a070706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb00430103040405040509050509140d0b0d1414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414ffc00011080001000203012200021101031101ffc4001500010100000000000000000000000000000004ffc4001b100100000700000000000000000000000000010305063674b2ffc40014010100000000000000000000000000000008ffc4001f110000030900000000000000000000000000010402030533357173b1b2ffda000c03010002110311003f00a2ddc7e99ab2b88003b2a9ef2e7b02b8f5595e46fa31ffd9"
         "meta" => "ffd8ffe000104a46494600010101004800600000ffe100224578696600004d4d002a00000008000101120003000000010006000000000000ffe200244943435f50524f46494c450001016e6f74207265616c6c7920612070726f66696c65ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080008000801011100ffc40014000100000000000000000000000000000001ffc400171000030100000000000000000000000000001764a2ffda0008010100003f001212e4ffd9"
+        "cut" => "ffd8ffe000104a46494600010100000100010000ffdb004300100b0c0e0c0a100e0d0e1211101318281a181616183123251d283a333d3c3933383740485c4e404457453738506d51575f626768673e4d71797064785c656763ffc0000b080010001001011100ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffda0008010100003f00af34fe524692cdfbcde3ca4917cc5ced077a0181dc1cf218e7fde6b36a6482254ddb0ac8599565dcd31c31ffd9"
+        "short_interval" => "ffd8ffe000104a46494600010100000100010000ffdb004300100b0c0e0c0a100e0d0e1211101318281a181616183123251d283a333d3c3933383740485c4e404457453738506d51575f626768673e4d71797064785c656763ffc0000b080008004001011100ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffdd00040002ffda0008010100003f00a81164867d97332858834b733b36c7919b6e7819dbc9e47276af6049b723bdb14453e5dd48c2404c413185e9c1dc080e38393d403d057fffd061b6674591423bf1e64b20055898f693bcffd17c7989a56923bf9093e6abb4e8802649dc307a124e48ec383ce2aaf9304c2596658413bf695d8be5e1c027200c90189e98e7248e2bffd25b98dae0db99372da4120733246bb5982e4f0cc413920601393bc8dc4fca4fb458ce96ad6ee8ac163320f28a86cb28206dcb600c120f56c9ea2bffd9"
+        "lost_interval" => "ffd8ffe000104a46494600010100000100010000ffdb004300100b0c0e0c0a100e0d0e1211101318281a181616183123251d283a333d3c3933383740485c4e404457453738506d51575f626768673e4d71797064785c656763ffc0000b080008004001011100ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffdd00040002ffda0008010100003f00a81164867d97332858834b733b36c7919b6e7819dbc9e47276af6049b723bdb14453e5dd48c2404c413185e9c1dc080e38393d403d057fffd061b6674591423bf1e64b20055898f693bc3027a3750c7a91c9c121b8586d956da195045e63b12e41e98cf24601de30727a1181cb1fffd25b98dae0db99372da4120733246bb5982e4f0cc413920601393bc8dc4fca4fb458ce96ad6ee8ac163320f28a86cb28206dcb600c120f56c9ea2bffd9"
+        "no_cr_scan" => "ffd8ffe000104a46494600010100000100010000ffdb00430024272a262c2e362d3636302c3438282924243333244824423c3042422b4e4e474e2b474034543c443c24245a513f2d36484c42382e603a5b5045546c484b3140ffc00011080008000803011100021100031100ffc4003a0000010501010101010100000000000000000102030405060708090a0b100100020202030000000000000000000001021112210031224151ffda0008010100003f00d218972b5ef7232f1f9d68ca49b42cf74bcfffc400390000010501010101010100000000000000000102030405060708090a0b1001000202030100000000000000000000011121022212314161ffda0008010200003f00cb492140e5b6b43f3d60c6c0ac7a6e5fffd9"
+        "prog_short" => "ffd8ffe000104a46494600010100000100010000ffdb0043000d090a0b0a080d0b0a0b0e0e0d0f13201513121213271c1e17202e2931302e292d2c333a4a3e333646372c2d405741464c4e525352323e5a615a50604a51524fffc2000b080010004001011100ffc40017000003010000000000000000000000000000010203ffdd00040002ffda000801010000000117ffd09cbfffd123ffd267ffd3cabfffd483ffd579ff00ffd6aaffc4001c1001010002030101000000000000000000010211120003210422ffda0008010100010502db126ef3ffd0f2ffd136d6436fffd2ed58bcbcffd31a3a3c1fffd49fd258fd1fffd5d4c6b59fffd6072b04ff00ffc4002310000104020104030100000000000000000100021121123122415171d13281e1f0ffda0008010100063f0287720deda2b13cae2ac2ffd005cec89a395852f680244f885fffd105c2cea1b10a2da1bd5bad2fffd20e3f11e294888b88b5ffd307169fa8433716b1a6847f765fffd4194913d2e550d3afdfeaffd5711da8a97926b2875d4cafffd669e0608d0f683e24883e42ffc40021100002020201040300000000000000000001112131005141618191f071b1d1ffda0008010100013f2132025472ec181d6ba0b63088828d5a7a474f4cff00ffd0bad11133641356964c470007641f53cfffd14d420b201b9113f79b0cba8a676e7eb3ffd21c0ca07201c8f9a3f9908026ea015e7e33ffd310476b82793e456b018584177694781e6f3fffd44e2e00356e553d9dac464c092797e43b167fffd502416714c46e08ae40d019c4050683dd67ffd6256483a1fe35df19822c9268240e3dd67fffda0008010100000010bfffd0ff00ffd1ff00ffd23fffd3ff00ffd4ff00ffd5ff00ffd63fffc4001b10010101010101010100000000000000000111213100415171ffda0008010100013f1058b91740ec7ec5430b483d774003d626f00c38051208f3ffd0a646901138827a06571b7cd18d991db062541de1937fffd196d170169609d129359f4d9bb144297376bb51941cf7ffd2490e60604928c2d1bafc55ecb54b0f4a1452954381b3ffd3e184740e22a45c2245b03cac796561506a5860c5549effd450f3d8e31488a5d28d20becb81e38020c5b0b0315bbeffd50ded2980c81d94e8236553aedc62aa2b4d0b828bfc07ffd65269b295346aadec768b6c31c5c3155bf25a27f60bffd9"
         _ => ""
     }
     return encoding_m.hex_decode(hex).unwrap_or([])
@@ -2572,6 +2646,20 @@ fun decodes_as_libjpeg_does() {
     assert(decodes_to(test_jpeg("cmyk"), 8, 8, Layout.Rgb, 0x679c96a0u32), "Adobe CMYK")
     assert(decodes_to(test_jpeg("tiny"), 2, 1, Layout.Rgb, 0x0edd6215u32), "2x1")
     assert(decodes_to(test_jpeg("meta"), 8, 8, Layout.Gray, 0xca7ed650u32), "with metadata")
+}
+
+// As libjpeg does with what its scans lack (jdhuff.c, jdphuff.c,
+// jdmarker.c): once an interval's data has run out, the rest of its MCUs
+// are left as they are (a sequential block gray), until a restart marker;
+// a restart marker out of turn resynchronised as `jpeg_resync_to_restart`
+// does; a component no scan reached gray.
+#test
+fun decodes_what_is_left_as_libjpeg_does() {
+    assert(decodes_to(test_jpeg("cut"), 16, 16, Layout.Gray, 0x7f549828u32), "cut in the scan")
+    assert(decodes_to(test_jpeg("short_interval"), 64, 8, Layout.Gray, 0xfcc78238u32), "an interval cut short")
+    assert(decodes_to(test_jpeg("lost_interval"), 64, 8, Layout.Gray, 0xe7c81b86u32), "an interval left out")
+    assert(decodes_to(test_jpeg("no_cr_scan"), 8, 8, Layout.Rgb, 0x2a954746u32), "no scan of Cr")
+    assert(decodes_to(test_jpeg("prog_short"), 64, 16, Layout.Gray, 0x9a18764au32), "progressive, an interval cut short")
 }
 
 #test
