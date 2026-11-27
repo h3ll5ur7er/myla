@@ -756,6 +756,11 @@ impl<S: Sample> Image<S> {
 
     // The image mirrored left to right.
     fun flip_h(self) -> Image<S> {
+        // no samples: nothing to move, however many rows (a 0 by 2^31 - 1
+        // image would loop that often)
+        if self.data.len() == 0 {
+            return self
+        }
         let ch = self.layout.channels()
         let stride = self.width * ch
         var p = Pixels { out: list_m.filled(self.data.len(), S.from_unorm8(0u8)) }
@@ -767,6 +772,9 @@ impl<S: Sample> Image<S> {
 
     // The image mirrored top to bottom.
     fun flip_v(self) -> Image<S> {
+        if self.data.len() == 0 {
+            return self
+        }
         let stride = self.width * self.layout.channels()
         let d = self.data
         var out = list_m.filled(d.len(), S.from_unorm8(0u8))
@@ -863,6 +871,9 @@ fun alpha_scaled<S: Sample>(img: Image<S>, times: bool) -> Image<S> {
 fun turned<S: Sample>(img: Image<S>, ry: int, dy: int, cx: int, dx: int) -> Image<S> {
     let ch = img.layout.channels()
     let h = img.height
+    if img.data.len() == 0 {
+        return Image { width: h, height: img.width, layout: img.layout, data: img.data }
+    }
     var p = Pixels { out: list_m.filled(img.data.len(), S.from_unorm8(0u8)) }
     // a row of the source is a column of the output, whose rows are `h`
     // pixels long
@@ -1730,6 +1741,13 @@ fun flips_and_rotations() {
     assert(two.flip_h().data == [3u8, 4u8, 1u8, 2u8])
     assert(two.rotate90().data == [1u8, 2u8, 3u8, 4u8] && two.rotate90().height == 2)
     assert(two.rotate270().data == [3u8, 4u8, 1u8, 2u8])
+    // no pixels but 2^31 - 1 rows (which `check_size` lets through): no
+    // loop over the rows
+    let tall: Image8 = new(0, 2147483647, Layout.Rgb, 0u8)
+    assert(tall.flip_h() == tall && tall.flip_v() == tall && tall.rotate180() == tall)
+    let turned = tall.rotate90()
+    assert(turned.width == 2147483647 && turned.height == 0 && turned.data.len() == 0)
+    assert(tall.rotate270() == turned && tall.transpose() == turned)
 }
 
 #test

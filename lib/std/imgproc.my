@@ -158,7 +158,8 @@ pub struct Extremes {
 }
 
 // A summed-area table: `sums[y * (width + 1) + x]` is the sum of the
-// pixels above and left of (x, y), so any rectangle sums in four reads.
+// pixels above and left of (x, y), so any rectangle sums in four reads
+// (none for an image without pixels, whose sums are all 0).
 #derive(Eq)
 pub struct Integral {
     width: int,
@@ -168,14 +169,19 @@ pub struct Integral {
 
 impl Integral {
     // The sum of the pixels of `r`, clipped to the image.
+    #test(Integral { width: 1, height: 1, sums: [0.0, 0.0, 0.0, 5.0] }, Rect { x: -3, y: 0, w: 9, h: 1 })[5.0]
+    #test(Integral { width: 1, height: 1, sums: [0.0, 0.0, 0.0, 5.0] }, Rect { x: 2147483000, y: 0, w: 1000, h: 1 })[0.0] // a corner past int32
+    #test(Integral { width: 1, height: 1, sums: [0.0, 0.0, 0.0, 5.0] }, Rect { x: -2147483000, y: -2147483000, w: 2147483000, h: 2147483001 })[0.0]
     fun sum(self, r: Rect) -> float64 {
-        let x0 = clampi(r.x, 0, self.width)
-        let y0 = clampi(r.y, 0, self.height)
-        let x1 = clampi(r.x + r.w, 0, self.width)
-        let y1 = clampi(r.y + r.h, 0, self.height)
-        if x1 <= x0 || y1 <= y0 {
+        // `intersect` works in int64, so a far corner doesn't overflow
+        let k = r.intersect(Rect { x: 0, y: 0, w: self.width, h: self.height })
+        if k.w <= 0 || k.h <= 0 {
             return 0.0
         }
+        let x0 = k.x
+        let y0 = k.y
+        let x1 = k.x + k.w
+        let y1 = k.y + k.h
         let s = self.width + 1
         return self.sums[y1 * s + x1] - self.sums[y0 * s + x1] - self.sums[y1 * s + x0] + self.sums[y0 * s + x0]
     }
@@ -326,6 +332,18 @@ fun border_at(i: int, n: int, b: Border) -> int {
             j
         }
     }
+}
+
+// A side of a result, `n` pixels: a failure if it doesn't fit an int
+// (a side of an image without pixels can be 2^31 - 1, which
+// `image.check_size` lets through).
+#test(5i64, "pad")[5]
+#test(2147483648i64, "pyr_up")[panic("pyr_up: a side of 2147483648 pixels")]
+fun side(n: int64, what: str) -> int {
+    if n > 2147483647i64 {
+        panic(f"{what}: a side of {n} pixels")
+    }
+    return n as int
 }
 
 // A constant border's value, 0 for the others.
@@ -547,6 +565,11 @@ fun sum_f(xs: [float64]) -> float64 {
 // `src` correlated with `kx` along the rows, then `ky` along the columns,
 // each anchored at its middle.
 fun sep_f(src: [float64], w: int, h: int, c: int, kx: [float64], ky: [float64], b: Border) -> [float64] {
+    if w == 0 || h == 0 {
+        // nothing to filter, and the rows or columns of an image without
+        // pixels may number 2^31 - 1: the same for every pass below
+        return []
+    }
     var cur = src
     if kx.len() > 1 || (kx.len() == 1 && kx[0] != 1.0) {
         let rx = kx.len() / 2
@@ -568,6 +591,9 @@ fun sep_f(src: [float64], w: int, h: int, c: int, kx: [float64], ky: [float64], 
 
 // `src` correlated with the 2D kernel `k`, anchored at its middle.
 fun corr2d(src: [float64], w: int, h: int, c: int, k: Kernel, b: Border) -> [float64] {
+    if w == 0 || h == 0 {
+        return []
+    }
     let ax = k.w / 2
     let ay = k.h / 2
     let p = pad_f(src, w, h, c, ay, k.w - 1 - ax, k.h - 1 - ay, ax, b)
@@ -676,6 +702,9 @@ fun symmetry(k: [int32]) -> int {
 // along the columns, exactly: the row pass in int32 (so
 // |sample| · Σ|kx| must fit), the column pass in int64.
 fun sep_i(src: [int32], w: int, h: int, c: int, kx: [int32], ky: [int32], b: Border) -> [int64] {
+    if w == 0 || h == 0 {
+        return []
+    }
     let rw = w * c
     let nx = kx.len()
     let rx = nx / 2
@@ -1695,7 +1724,8 @@ fun nearest_table(in_size: int, out_size: int) -> [int] {
 // `Image.resize` pixel for pixel (without its premultiplied alpha: RGBA
 // is resized channel by channel); other sample types are resampled in
 // float64 with the same coefficients. Each pass is skipped when its size
-// doesn't change.
+// doesn't change, and they run in Pillow's order: vertical first when the
+// height shrinks by more than twice the width, else horizontal first.
 pub fun resize<S: Sample>(img: Image<S>, w: int, h: int, filter: Filter = Filter.Bilinear) -> Image<S> {
     if w <= 0 || h <= 0 {
         panic(f"resize to {w}x{h}")
@@ -1724,27 +1754,43 @@ pub fun resize<S: Sample>(img: Image<S>, w: int, h: int, filter: Filter = Filter
         }
         return Image { width: w, height: h, layout: img.layout, data: data }
     }
-    let fixed = bytes_samples<S>()
-    if fixed {
+    // Pillow's order: the vertical pass first when the height shrinks by
+    // more than twice what the width does (which tells in the 8 bits the
+    // first pass is rounded to), else the horizontal pass first
+    let dh = img.height - h
+    let v_first = dh > 0 && (dh as int64) > ((img.width - w) as int64) * 2i64
+    let ch = coeffs_for(img.width, w, filter)
+    let cv = coeffs_for(img.height, h, filter)
+    if bytes_samples<S>() {
         var cur = to_i32(img)
-        var cw = img.width
+        if v_first {
+            cur = resample_v_fixed(cur, img.width, c, h, cv)
+            if w != img.width {
+                cur = resample_h_fixed(cur, img.width, h, c, w, ch)
+            }
+            return from_i32(cur, w, h, img.layout)
+        }
         if w != img.width {
-            cur = resample_h_fixed(cur, img.width, img.height, c, w, coeffs_for(img.width, w, filter))
-            cw = w
+            cur = resample_h_fixed(cur, img.width, img.height, c, w, ch)
         }
         if h != img.height {
-            cur = resample_v_fixed(cur, cw, c, h, coeffs_for(img.height, h, filter))
+            cur = resample_v_fixed(cur, w, c, h, cv)
         }
         return from_i32(cur, w, h, img.layout)
     }
     var cur = to_f64(img)
-    var cw = img.width
+    if v_first {
+        cur = resample_v_float(cur, img.width, c, h, cv)
+        if w != img.width {
+            cur = resample_h_float(cur, img.width, h, c, w, ch)
+        }
+        return from_f64(cur, w, h, img.layout)
+    }
     if w != img.width {
-        cur = resample_h_float(cur, img.width, img.height, c, w, coeffs_for(img.width, w, filter))
-        cw = w
+        cur = resample_h_float(cur, img.width, img.height, c, w, ch)
     }
     if h != img.height {
-        cur = resample_v_float(cur, cw, c, h, coeffs_for(img.height, h, filter))
+        cur = resample_v_float(cur, w, c, h, cv)
     }
     return from_f64(cur, w, h, img.layout)
 }
@@ -1786,6 +1832,9 @@ fun warp_weight(filter: Filter, d: float64) -> float64 {
 // `perspective`), through `filter` and the border, `fill` the samples of
 // a constant border.
 fun warp_core<S: Sample>(img: Image<S>, inv: [float64], perspective: bool, ow: int, oh: int, filter: Filter, border: Border, fill: [float64]) -> Image<S> {
+    if ow == 0 || oh == 0 {
+        return Image { width: ow, height: oh, layout: img.layout, data: [] }
+    }
     let c = img.layout.channels()
     let w = img.width
     let h = img.height
@@ -2088,8 +2137,10 @@ pub fun pad<S: Sample>(img: Image<S>, top: int, right: int, bottom: int, left: i
         panic("pad by a negative size")
     }
     let c = img.layout.channels()
+    let pw = side((img.width as int64) + (left as int64) + (right as int64), "pad")
+    let ph = side((img.height as int64) + (top as int64) + (bottom as int64), "pad")
     let p = pad_f(to_f64(img), img.width, img.height, c, top, right, bottom, left, border)
-    return from_f64(p, img.width + left + right, img.height + top + bottom, img.layout)
+    return from_f64(p, pw, ph, img.layout)
 }
 
 // The 5-tap binomial kernel of the pyramids, [1 4 6 4 1] / 16.
@@ -2102,9 +2153,13 @@ fun pyr_kernel(k: float64) -> [float64] {
 pub fun pyr_down<S: Sample>(img: Image<S>, border: Border = Border.Reflect101) -> Image<S> {
     let c = img.layout.channels()
     let k = pyr_kernel(1.0 / 16.0)
+    // (w + 1) / 2, which doesn't overflow for 2^31 - 1
+    let ow = img.width / 2 + img.width % 2
+    let oh = img.height / 2 + img.height % 2
+    if ow == 0 || oh == 0 {
+        return Image { width: ow, height: oh, layout: img.layout, data: [] }
+    }
     let f = sep_f(to_f64(img), img.width, img.height, c, k, k, border)
-    let ow = (img.width + 1) / 2
-    let oh = (img.height + 1) / 2
     var out = list_m.filled(ow * oh * c, 0.0)
     for y in 0..oh {
         for x in 0..ow {
@@ -2119,24 +2174,55 @@ pub fun pyr_down<S: Sample>(img: Image<S>, border: Border = Border.Reflect101) -
 }
 
 // The image doubled (OpenCV's `pyrUp`): zeros put between the pixels,
-// then blurred with the binomial kernel times 4; 2w by 2h.
+// then blurred with the binomial kernel times 4; 2w by 2h. `Reflect101`
+// and `Wrap` reflect or wrap the doubled image, as OpenCV does; the other
+// borders extend the image before zeros go between its pixels, so that
+// the zeros alternate past the edge too (a flat image stays flat).
 pub fun pyr_up<S: Sample>(img: Image<S>, border: Border = Border.Reflect101) -> Image<S> {
     let c = img.layout.channels()
-    let ow = 2 * img.width
-    let oh = 2 * img.height
-    let src = to_f64(img)
-    var z = list_m.filled(ow * oh * c, 0.0)
-    for y in 0..img.height {
-        for x in 0..img.width {
-            let s = (y * img.width + x) * c
-            let o = ((2 * y) * ow + 2 * x) * c
+    let w = img.width
+    let h = img.height
+    let ow = side(2i64 * (w as int64), "pyr_up")
+    let oh = side(2i64 * (h as int64), "pyr_up")
+    if w == 0 || h == 0 {
+        return Image { width: ow, height: oh, layout: img.layout, data: [] }
+    }
+    let k = pyr_kernel(1.0 / 8.0)
+    let parity_kept = match border {
+        Reflect101 | Wrap => true
+        _ => false
+    }
+    if parity_kept {
+        let src = to_f64(img)
+        var z = list_m.filled(ow * oh * c, 0.0)
+        for y in 0..h {
+            for x in 0..w {
+                let s = (y * w + x) * c
+                let o = ((2 * y) * ow + 2 * x) * c
+                for ch in 0..c {
+                    z[o + ch] = src[s + ch]
+                }
+            }
+        }
+        return from_f64(sep_f(z, ow, oh, c, k, k, border), ow, oh, img.layout)
+    }
+    // the image and a pixel of border around it, zeros between: the
+    // doubled image with two pixels of border, filtered without one
+    let p = pad_f(to_f64(img), w, h, c, 1, 1, 1, 1, border)
+    let zw = ow + 4
+    let zh = oh + 4
+    var z = list_m.filled(zw * zh * c, 0.0)
+    for y in 0..h + 2 {
+        for x in 0..w + 2 {
+            let s = (y * (w + 2) + x) * c
+            let o = ((2 * y) * zw + 2 * x) * c
             for ch in 0..c {
-                z[o + ch] = src[s + ch]
+                z[o + ch] = p[s + ch]
             }
         }
     }
-    let k = pyr_kernel(1.0 / 8.0)
-    return from_f64(sep_f(z, ow, oh, c, k, k, border), ow, oh, img.layout)
+    let rows = corr_h(z, ow, zh, c, k)
+    return from_f64(corr_v(rows, ow, oh, c, k), ow, oh, img.layout)
 }
 
 #test
@@ -2150,6 +2236,11 @@ fun geometry_generic() {
     let f: ImageF = Image { width: 2, height: 1, layout: Layout.Gray, data: [0.0f32, 1.0f32] }
     let up = resize(f, 4, 1, Filter.Bilinear)
     assert(up.data == [0.0f32, 0.25f32, 0.75f32, 1.0f32])
+    // Pillow 13 runs the vertical pass first when the height shrinks by
+    // more than twice the width: Image.frombytes("L", (2, 3), bytes([255,
+    // 201, 17, 245, 124, 206])).resize((3, 1), BILINEAR)
+    let tall: Image8 = Image { width: 2, height: 3, layout: Layout.Gray, data: [255u8, 201u8, 17u8, 245u8, 124u8, 206u8] }
+    assert(resize(tall, 3, 1, Filter.Bilinear).data == [116u8, 169u8, 221u8])
     let t = thumbnail(g, 2, 2)
     assert(t.width == 2 && t.height == 1)
     // a quarter turn counterclockwise: the right column goes to the top
@@ -2173,6 +2264,10 @@ fun geometry_generic() {
     assert(u.width == 8 && u.height == 2)
     let flat: Image8 = image.new(3, 3, Layout.Gray, 7u8)
     assert(pyr_up(pyr_down(flat)).data == list_m.filled(16, 7u8))
+    // every border keeps a flat image flat
+    for b in [Border.Constant(7.0f32), Border.Replicate, Border.Reflect, Border.Reflect101, Border.Wrap] {
+        assert(pyr_up(flat, b).data == list_m.filled(36, 7u8))
+    }
 }
 
 // ---- filters ----
@@ -2212,10 +2307,12 @@ pub fun box_blur<S: Sample>(img: Image<S>, r: int, border: Border = Border.Refle
     let c = img.layout.channels()
     let n = 2 * r + 1
     let rw = w * c
-    if integer_samples<S>() {
+    // the row sums in int32 while they fit (a radius past 16383 for 16
+    // bits goes the exact float64 way)
+    if integer_samples<S>() && (S.max_value().to_f32() as float64) * (n as float64) <= 2147483647.0 {
         let sums = box_sums_i(to_i32(img), w, h, c, r, border)
         let mx = S.max_value().to_f32() as int
-        return from_i32(div_round_i(sums, (n * n) as int64, mx), w, h, img.layout)
+        return from_i32(div_round_i(sums, (n as int64) * (n as int64), mx), w, h, img.layout)
     }
     let p = pad_f(to_f64(img), w, h, c, 0, r, 0, r, border)
     let prw = (w + 2 * r) * c
@@ -2250,7 +2347,7 @@ pub fun box_blur<S: Sample>(img: Image<S>, r: int, border: Border = Border.Refle
             acc[i] += q[qb + i]
         }
     }
-    let nn = (n * n) as float64
+    let nn = (n as float64) * (n as float64)
     var out = list_m.filled(rw * h, 0.0)
     for y in 0..h {
         let ob = y * rw
@@ -2574,6 +2671,9 @@ fun filters_generic() {
     assert(mag.data[1] == 80.0f32 && ang.data[1] == 0.0f32)
     let us = unsharp_mask(g, 1.0f32, 1.0f32, 0.0f32)
     assert(us.data[1] > 90u8)
+    // a radius whose row sums of 16-bit samples pass int32
+    let white16: image.Image16 = image.new(2, 1, Layout.Gray, 65535u16)
+    assert(box_blur(white16, 20000).data == [65535u16, 65535u16])
 }
 
 // ---- morphology ----
@@ -2629,6 +2729,9 @@ pub fun ellipse(w: int, h: int) -> Element {
 // runs take 30 ms at 3 by 3, 41 at 5 by 5 and 84 at 15 by 15), else
 // `morph_runs`.
 fun morph_core(img: Image8, se: Element, ax: int, ay: int, take_max: bool) -> Image8 {
+    if img.data.len() == 0 {
+        return img
+    }
     if se.w + se.h >= 8 && is_full(se) {
         return rect_morph(img, se.w, se.h, ax, ay, take_max)
     }
@@ -2801,7 +2904,8 @@ fun reflected(img: Image8, se: Element, take_max: bool) -> Image8 {
 // gradient): 3 by 3 Sobel derivatives (the border replicated), thinned to
 // the local maxima across the edge, then kept where the magnitude is above
 // `high` or joined (8-connected) to such a pixel through pixels above
-// `low`. 255 on an edge, else 0. Blur first: it doesn't.
+// `low` (the two swapped if `low` is the larger, as OpenCV does). 255 on
+// an edge, else 0. Blur first: it doesn't.
 #test(Image { width: 4, height: 3, layout: Layout.Gray, data: [0u8, 0u8, 200u8, 200u8, 0u8, 0u8, 200u8, 200u8, 0u8, 0u8, 200u8, 200u8] }, 100.0f32, 300.0f32)[Image { width: 4, height: 3, layout: Layout.Gray, data: [0u8, 255u8, 0u8, 0u8, 0u8, 255u8, 0u8, 0u8, 0u8, 255u8, 0u8, 0u8] }]
 pub fun canny(img: Image8, low: float32, high: float32) -> Image8 {
     let g = gray(img)
@@ -2836,8 +2940,10 @@ pub fun canny(img: Image8, low: float32, high: float32) -> Image8 {
             mag[b + x + 1] = dx * dx + dy * dy
         }
     }
-    let lo = if low > 0.0f32 { (low as float64) * (low as float64) } else { low as float64 }
-    let hi = if high > 0.0f32 { (high as float64) * (high as float64) } else { high as float64 }
+    // either way round, as OpenCV: linked through the smaller
+    let (low1, high1) = if low > high { (high, low) } else { (low, high) }
+    let lo = if low1 > 0.0f32 { (low1 as float64) * (low1 as float64) } else { low1 as float64 }
+    let hi = if high1 > 0.0f32 { (high1 as float64) * (high1 as float64) } else { high1 as float64 }
     // 0 a candidate, 1 none, 2 an edge; a frame of 1
     var map = list_m.filled(pw * (h + 2), 1)
     var stack: [int] = []
@@ -2897,6 +3003,28 @@ pub fun canny(img: Image8, low: float32, high: float32) -> Image8 {
     return image8(w, h, Layout.Gray, out)
 }
 
+// The thresholds given either way round are the same (as OpenCV's,
+// which links through the smaller and starts from the larger).
+#test
+fun canny_thresholds_either_way() {
+    var img: Image8 = image.new(6, 6, Layout.Gray, 0u8)
+    for y in 0..6 {
+        for x in 3..6 {
+            img[(x, y, 0)] = if y < 2 { 200u8 } else { 60u8 }
+        }
+    }
+    let e = canny(img, 100.0f32, 300.0f32)
+    assert(canny(img, 300.0f32, 100.0f32) == e)
+    // the weak rows are linked to the strong ones
+    var n = 0
+    for v in e.data {
+        if v > 0u8 {
+            n += 1
+        }
+    }
+    assert(n == 8)
+}
+
 // The structure tensor of the first channel: the sums over `block` by
 // `block` of gx², gx·gy and gy², the derivatives Sobel's divided by 8 and
 // by the sample maximum (so a step of full scale is 1).
@@ -2949,6 +3077,9 @@ pub fun harris<S: Sample>(img: Image<S>, block: int = 3, k: float32 = 0.04f32, b
 pub fun good_features<S: Sample>(img: Image<S>, max_corners: int, quality: float32 = 0.01f32, min_distance: float32 = 10.0f32, block: int = 3) -> [Vec2] {
     let w = img.width
     let h = img.height
+    if w == 0 || h == 0 {
+        return []
+    }
     let (a, b, c) = structure(img, block, Border.Reflect101)
     var e = list_m.filled(a.len(), 0.0)
     var best = 0.0
@@ -3016,6 +3147,10 @@ pub fun integral<S: Sample>(img: Image<S>, channel: int = 0) -> Integral {
     if channel < 0 || channel >= c {
         panic(f"channel {channel} of a {img.layout} image")
     }
+    if w == 0 || h == 0 {
+        // every sum is 0, and (w + 1) · (h + 1) may not fit
+        return Integral { width: w, height: h, sums: [] }
+    }
     let s = w + 1
     var sums = list_m.filled(s * (h + 1), 0.0)
     for y in 0..h {
@@ -3054,8 +3189,8 @@ fun window_sums(v: [float64], w: int, h: int, tw: int, th: int) -> [float64] {
 // How well the template `t` matches at each position of `img` (OpenCV's
 // `matchTemplate`): an `ImageF` of one channel, (W - w + 1) by (H - h + 1),
 // the score of the window whose top left corner is there, over every
-// channel (see `Match`). A flat window or template scores 0 under `Ncc`
-// and `Zncc`.
+// channel (see `Match`; `Zncc` takes each channel's own mean off, as
+// OpenCV). A flat window or template scores 0 under `Ncc` and `Zncc`.
 pub fun match_template<S: Sample>(img: Image<S>, t: Image<S>, method: Match = Match.Zncc) -> Result<ImageF, ImageError> {
     if t.layout != img.layout || t.width > img.width || t.height > img.height || t.width == 0 || t.height == 0 {
         return Err(ImageError.Mismatch(f"match_template: a {t.width}x{t.height} {t.layout} template in a {img.width}x{img.height} {img.layout} image"))
@@ -3069,7 +3204,6 @@ pub fun match_template<S: Sample>(img: Image<S>, t: Image<S>, method: Match = Ma
     let oh = h - th + 1
     let src = to_f64(img)
     let tf = to_f64(t)
-    let n = (tw * th * c) as float64
     var tsum = 0.0
     var tsq = 0.0
     for v in tf {
@@ -3088,6 +3222,29 @@ pub fun match_template<S: Sample>(img: Image<S>, t: Image<S>, method: Match = Ma
     }
     let ws = window_sums(ps, w, h, tw, th)
     let wq = window_sums(pq, w, h, tw, th)
+    // `Zncc` takes each channel's own mean off (as OpenCV): the window
+    // sums and the template's sum of each channel (gray's are the above)
+    let area = (tw * th) as float64
+    var wsc = [ws]
+    var tsc = [tsum]
+    if method == Match.Zncc && c > 1 {
+        wsc = []
+        tsc = list_m.filled(c, 0.0)
+        var plane = list_m.filled(w * h, 0.0)
+        for k in 0..c {
+            for i in 0..w * h {
+                plane[i] = src[i * c + k]
+            }
+            wsc.push(window_sums(plane, w, h, tw, th))
+        }
+        for i in 0..tf.len() {
+            tsc[i % c] += tf[i]
+        }
+    }
+    var tmean2 = 0.0
+    for k in 0..tsc.len() {
+        tmean2 += tsc[k] * tsc[k] / area
+    }
     var out = list_m.filled(ow * oh, 0.0f32)
     let rw = tw * c
     for y in 0..oh {
@@ -3101,7 +3258,6 @@ pub fun match_template<S: Sample>(img: Image<S>, t: Image<S>, method: Match = Ma
                 }
             }
             let o = y * ow + x
-            let is = ws[o]
             let iq = wq[o]
             let score = match method {
                 Ssd => iq - 2.0 * cross + tsq
@@ -3110,9 +3266,14 @@ pub fun match_template<S: Sample>(img: Image<S>, t: Image<S>, method: Match = Ma
                     if d > 0.0 { cross / d } else { 0.0 }
                 }
                 Zncc => {
-                    let num = cross - is * tsum / n
-                    let vi = iq - is * is / n
-                    let vt = tsq - tsum * tsum / n
+                    var num = cross
+                    var vi = iq
+                    for k in 0..wsc.len() {
+                        let sk = wsc[k][o]
+                        num -= sk * tsc[k] / area
+                        vi -= sk * sk / area
+                    }
+                    let vt = tsq - tmean2
                     if vi > 0.0 && vt > 0.0 { num / (vi * vt).sqrt() } else { 0.0 }
                 }
             }
@@ -3183,6 +3344,15 @@ fun corners_and_matching() {
         Ok(_) => assert(false)
         Err(_) => {}
     }
+    // colour: each channel's mean off (numpy, after OpenCV's
+    // TM_CCOEFF_NORMED: 0.9992026, -0.98272586, 0.7835006)
+    let ci: Image8 = Image { width: 4, height: 1, layout: Layout.Rgb, data: [10u8, 200u8, 30u8, 40u8, 50u8, 90u8, 20u8, 220u8, 60u8, 0u8, 0u8, 0u8] }
+    let ct: Image8 = Image { width: 2, height: 1, layout: Layout.Rgb, data: [10u8, 200u8, 30u8, 40u8, 60u8, 80u8] }
+    let cz = match_template(ci, ct).expect("fits")
+    let want = [0.9992026f32, -0.98272586f32, 0.7835006f32]
+    for i in 0..3 {
+        assert((cz.data[i] - want[i]).abs() < 0.000001f32)
+    }
 }
 
 // ---- regions ----
@@ -3197,6 +3367,10 @@ pub fun components(img: Image8, connectivity: int = 8) -> Components {
     }
     let w = img.width
     let h = img.height
+    if w == 0 || h == 0 {
+        let none = Region { area: 0, bbox: Rect { x: 0, y: 0, w: 0, h: 0 }, centroid: Vec2 { x: 0.0f32, y: 0.0f32 } }
+        return Components { count: 0, width: w, height: h, labels: [], stats: [none] }
+    }
     let c = img.layout.channels()
     var lab = list_m.filled(w * h, 0)
     var uf = unionfind.new(1)
@@ -3426,6 +3600,9 @@ fun dt1d(f: [float64], n: int) -> [float64] {
 pub fun distance_transform(img: Image8) -> ImageF {
     let w = img.width
     let h = img.height
+    if w == 0 || h == 0 {
+        return Image { width: w, height: h, layout: Layout.Gray, data: [] }
+    }
     let c = img.layout.channels()
     var g = list_m.filled(w * h, FAR)
     for i in 0..w * h {
@@ -3569,6 +3746,32 @@ fun empty_images() {
     assert(resize(e, 2, 2).data.len() == 12 && rotate(e, 30.0f32).width == 0)
 }
 
+// Images without pixels but with 2^31 - 1 rows or columns (which
+// `image.check_size` lets through): nothing loops over the rows or the
+// columns, and no size overflows.
+#test
+fun zero_by_huge_images() {
+    let big = 2147483647
+    let tall: Image8 = image.new(0, big, Layout.Gray, 0u8)
+    let wide: Image8 = image.new(big, 0, Layout.Rgb, 0u8)
+    for e in [tall, wide] {
+        let w = e.width
+        let h = e.height
+        assert(gaussian_blur(e, 1.0f32).data.len() == 0 && sobel(e, 1, 0).width == w)
+        assert(convolve(e, kernel(3, 3, list_m.filled(9, 1.0f32))).height == h && harris(e).width == w)
+        assert(laplacian(e).width == w && unsharp_mask(e, 1.0f32).height == h)
+        assert(adaptive_threshold(e, 3, 1.0f32).width == w && good_features(e, 3).len() == 0)
+        assert(erode(e, rect(3, 3)).height == h && morph(e, Morph.Open, ellipse(3, 3)).width == w)
+        assert(components(e).count == 0 && distance_transform(e).height == h)
+        assert(image_moments(e).m00 == 0.0 && find_contours(e).len() == 0)
+        assert(integral(e).sum(image.rect(0, 0, 5, 5)) == 0.0)
+        assert(rotate(e, 30.0f32).width == w && warp_affine(e, m32.translation2d(v32.vec2(1.0f32, 0.0f32)), w, h).height == h)
+        assert(hough_lines(e, 1.0f32, 0.1f32, 1).len() == 0 && hough_segments(e, 1.0f32, 0.1f32, 1, 1, 1).len() == 0)
+        let d = pyr_down(e)
+        assert(d.width == w / 2 + w % 2 && d.height == h / 2 + h % 2 && d.data.len() == 0)
+    }
+}
+
 // ==== tier B (MYLA-970): contours, shapes, Hough, features, estimation,
 // motion and more filters ====
 
@@ -3677,6 +3880,9 @@ pub struct Moments {
 pub fun find_contours(img: Image8, mode: RetrievalMode = RetrievalMode.Tree) -> [Contour] {
     let w = img.width
     let h = img.height
+    if w == 0 || h == 0 {
+        return []
+    }
     let c = img.layout.channels()
     let pw = w + 2
     let ph = h + 2
@@ -4200,6 +4406,9 @@ pub fun image_moments(img: Image8, binary: bool = false) -> Moments {
     let w = img.width
     let c = img.layout.channels()
     var s = list_m.filled(10, 0.0)
+    if img.data.len() == 0 {
+        return moments_of(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    }
     for y in 0..img.height {
         // the row's sums of v, v·x, v·x², v·x³ first
         var r0 = 0.0
@@ -4478,7 +4687,11 @@ pub fun hough_lines(img: Image8, rho: float32, theta: float32, threshold: int) -
     let h = img.height
     let c = img.layout.channels()
     let numangle = hough_angles(rho, theta)
-    let numrho = round_even(f32r((((w + h) * 2 + 1) as float64) / (rho as float64)))
+    if w == 0 || h == 0 {
+        return []
+    }
+    // (w + h) * 2 + 1 in float64, where it can't overflow
+    let numrho = round_even(f32r((((w as float64) + (h as float64)) * 2.0 + 1.0) / (rho as float64)))
     let (cs, sn) = hough_tables(numangle, rho, theta)
     let stride = numrho + 2
     var acc = list_m.filled((numangle + 2) * stride, 0)
@@ -4534,7 +4747,11 @@ pub fun hough_segments(img: Image8, rho: float32, theta: float32, threshold: int
     let h = img.height
     let c = img.layout.channels()
     let numangle = hough_angles(rho, theta)
-    let numrho = round_even(f32r((((w + h) * 2 + 1) as float64) / (rho as float64)))
+    if w == 0 || h == 0 {
+        return []
+    }
+    // (w + h) * 2 + 1 in float64, where it can't overflow
+    let numrho = round_even(f32r((((w as float64) + (h as float64)) * 2.0 + 1.0) / (rho as float64)))
     let (cs, sn) = hough_tables(numangle, rho, theta)
     let half = (numrho - 1) / 2
     var acc = list_m.filled(numangle * numrho, 0)
@@ -5929,6 +6146,14 @@ pub fun optical_flow(prev: Image8, next: Image8, points: [Vec2], window: int = 2
     if window < 3 || window % 2 == 0 {
         panic(f"optical_flow: a window of {window}: odd, at least 3")
     }
+    if prev.width == 0 || prev.height == 0 {
+        // no pixels to follow a point in
+        var lost: [(Vec2, bool)] = []
+        for p in points {
+            lost.push((p, false))
+        }
+        return Ok(lost)
+    }
     // the pyramids
     var pa: [Image8] = [gray(prev)]
     var pb: [Image8] = [gray(next)]
@@ -6054,6 +6279,10 @@ fun motion() {
         Ok(_) => assert(false)
         Err(_) => {}
     }
+    // no pixels: every point is lost
+    let e: Image8 = image.new(0, 0, Layout.Gray, 0u8)
+    let lost = optical_flow(e, e, [Vec2 { x: 1.0f32, y: 2.0f32 }]).expect("same size")
+    assert(lost.len() == 1 && lost[0] == (Vec2 { x: 1.0f32, y: 2.0f32 }, false))
 }
 
 // ---- more filters ----

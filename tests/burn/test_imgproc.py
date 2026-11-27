@@ -612,6 +612,9 @@ CASES = [
     ("resize_bicubic_down", "resize", ["g"], ["23", "17", "bicubic"], E),
     ("resize_bicubic_up", "resize", ["rgb"], ["97", "50", "bicubic"], E),
     ("resize_bicubic_mixed", "resize", ["g"], ["30", "80", "bicubic"], E),
+    # the height shrunk by more than twice the width: Pillow's vertical pass first
+    ("resize_bilinear_squeeze", "resize", ["g"], ["70", "9", "bilinear"], E),
+    ("resize_lanczos3_squeeze", "resize", ["rgb"], ["38", "8", "lanczos3"], E),
     ("resize_lanczos3_down", "resize", ["g"], ["23", "17", "lanczos3"], E),
     ("resize_lanczos3_up", "resize", ["rgb"], ["97", "50", "lanczos3"], E),
     ("resize_area_whole", "resize", ["even"], ["20", "12", "area"], E),
