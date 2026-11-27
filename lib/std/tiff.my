@@ -1289,7 +1289,7 @@ fun predicts(c: Compression) -> bool {
 pub fun encode(img: Image8, compression: Compression = Compression.Lzw) -> [uint8] {
     let spp = img.layout.channels()
     var d = img.data
-    if predicts(compression) {
+    if predicts(compression) && d.len() > 0 {
         let rb = img.width * spp
         for y in 0..img.height {
             var i = (y + 1) * rb - 1
@@ -1307,9 +1307,11 @@ pub fun encode(img: Image8, compression: Compression = Compression.Lzw) -> [uint
 pub fun encode16(img: Image16, compression: Compression = Compression.Lzw) -> [uint8] {
     let spp = img.layout.channels()
     let pred = predicts(compression)
-    let rb = img.width * spp
+    // an image without samples (0 by 2^31 - 1 too) has no rows to go through
+    let rows = if img.data.len() > 0 { img.height } else { 0 }
+    let rb = if rows > 0 { img.width * spp } else { 0 }
     var d: [uint8] = []
-    for y in 0..img.height {
+    for y in 0..rows {
         for i in y * rb..(y + 1) * rb {
             var v = img.data[i]
             if pred && i - y * rb >= spp {
@@ -1358,7 +1360,10 @@ impl TagList {
 // they go in: predicted already), then the IFD and its values.
 fun write_file(w: int, h: int, layout: Layout, bits: int, d: [uint8], c: Compression) -> [uint8] {
     let spp = layout.channels()
-    let rb = w * spp * bits / 8
+    // an image with a side of 0 has no strips (and `w * spp * bits` may
+    // overflow for one 2^31 - 1 wide)
+    let empty = w == 0 || h == 0
+    let rb = if empty { 0 } else { w * spp * bits / 8 }
     var rps = if rb > 0 { 8192 / rb } else { h }
     if rps > h {
         rps = h
@@ -1366,7 +1371,7 @@ fun write_file(w: int, h: int, layout: Layout, bits: int, d: [uint8], c: Compres
     if rps < 1 {
         rps = 1
     }
-    let strips = (h + rps - 1) / rps
+    let strips = if empty { 0 } else { h / rps + (if h % rps > 0 { 1 } else { 0 }) }
     var out = bytes_m.writer()
     out.put_str("II")
     out.put_u16_le(42u16)
@@ -1748,6 +1753,24 @@ fun encoding_round_trips() {
     // an empty image has no strips
     let none: Image8 = Image { width: 0, height: 0, layout: Layout.Rgb, data: [] }
     assert(tags(encode(none, Compression.Lzw), 0).expect("tags")[273] == TagValue.Ints([]))
+}
+
+// An image with a side of 0 and the other 2^31 - 1 is written at once,
+// without strips (a loop over its empty rows took 2^31 turns, and the
+// strip count overflowed).
+#test
+fun encoding_empty_images() {
+    let tall: Image8 = Image { width: 0, height: 0x7FFFFFFF, layout: Layout.Gray, data: [] }
+    let wide: Image8 = Image { width: 0x7FFFFFFF, height: 0, layout: Layout.Rgba, data: [] }
+    let tall16: Image16 = Image { width: 0, height: 0x7FFFFFFF, layout: Layout.Rgb, data: [] }
+    let wide16: Image16 = Image { width: 0x7FFFFFFF, height: 0, layout: Layout.GrayAlpha, data: [] }
+    for comp in [Compression.Uncompressed, Compression.PackBits, Compression.Lzw, Compression.Deflate] {
+        for b in [encode(tall, comp), encode(wide, comp), encode16(tall16, comp), encode16(wide16, comp)] {
+            assert(tags(b, 0).expect("tags")[273] == TagValue.Ints([]))
+        }
+    }
+    let t = tags(encode(tall, Compression.Lzw), 0).expect("tags")
+    assert(t[256] == TagValue.Ints([0i64]) && t[257] == TagValue.Ints([2147483647i64]))
 }
 
 // The bytes `encode` writes, read alike by Pillow 13 and libtiff (through

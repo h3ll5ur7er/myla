@@ -314,6 +314,10 @@ impl Reader {
             return Err(ImageError.Corrupt(f"LZW minimum code size {code_size}"))
         }
         let n = f.w * f.h
+        if n == 0 {
+            // no pixel (a frame may be 0 by 65535): nothing to fill, row by row
+            return Ok(Image { width: f.w, height: f.h, layout: Layout.Rgba, data: [] })
+        }
         var idx: [uint8] = []
         match compress.lzw_decode_gif(data, code_size, n) {
             Ok(v) => { idx = v }
@@ -533,6 +537,12 @@ pub fun composite(a: Animation) -> [Image8] {
         let y0 = max_int(f.y, 0)
         let x1 = min_int(f.x + img.width, a.width)
         let y1 = min_int(f.y + img.height, a.height)
+        if x0 >= x1 || y0 >= y1 {
+            // nothing of it on the canvas (or no pixel at all): shown as the
+            // canvas is, its disposal changes nothing
+            out.push(Image { width: a.width, height: a.height, layout: Layout.Rgba, data: c.data })
+            continue
+        }
         let saved = if f.disposal == Disposal.Previous { c.data } else { no_bytes() }
         c.draw(img, f.x, f.y, x0, y0, x1, y1)
         out.push(Image { width: a.width, height: a.height, layout: Layout.Rgba, data: c.data })
@@ -1163,6 +1173,25 @@ fun encoding_animations() {
     let q = decode_all(encode_all(p, false), image.MAX_PIXELS).expect("decoded")
     assert(q.loops == -1, "no loop extension")
     assert(composite(q) == pc, "Previous shown the same")
+}
+
+// A screen 0 pixels wide and frames of 0 by 65535 on it: they have no
+// pixel, so `max_pixels` counts none of them, and they must cost no time
+// either (a loop over each one's 65,535 empty rows, in decoding and in
+// compositing, took this case past its time limit interpreted).
+#test
+fun frames_without_pixels() {
+    var b = unhex("4749463839610000ffff000000")
+    let frame = unhex("2c000000000000ffff0002012c00")
+    for _ in 0..3000 {
+        b.extend(frame)
+    }
+    b.push(0x3Bu8)
+    let a = decode_all(b, image.MAX_PIXELS).expect("frames without pixels")
+    assert(a.width == 0 && a.height == 65535 && a.frames.len() == 3000, "the frames")
+    assert(a.frames[0].image.width == 0 && a.frames[0].image.height == 65535, "a frame's size")
+    let shown = composite(a)
+    assert(shown.len() == 3000 && shown[2999].data.len() == 0, "composited")
 }
 
 #test
