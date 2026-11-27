@@ -1720,7 +1720,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertIn("testq %rcx, %rcx", g, g)
 
     def test_narrow_integers_divide_in_32_bits(self) -> None:
-        # MYLA-544: operands of at most 32 bits divide with the 32-bit
+        # MYLA-974: operands of at most 32 bits divide with the 32-bit
         # instruction, which is the faster one; only 64-bit ones need idivq/divq
         source = (
             "fun s32(a: int, b: int) -> int { return a / b * 1000 + a % b }\n"

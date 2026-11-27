@@ -3043,7 +3043,7 @@ impl CodeGen {
 
     // %rax `/` or `%` %rcx, operands of type `lt` and a divisor that is neither
     // 0 nor, for a signed type, -1: the result in %rax, extended as `lt` is.
-    // Operands of at most 32 bits divide in 32 bits (MYLA-544): the
+    // Operands of at most 32 bits divide in 32 bits (MYLA-974): the
     // instruction is the faster one, by a factor of two or more on many
     // processors, and both are extended from fewer bits than it reads. Its
     // result fills the low half and clears the high one, which extends an

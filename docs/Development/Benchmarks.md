@@ -234,17 +234,17 @@ All thirteen programs after the standard library waves, D175 (#54) and batches 4
 
 ## Against other languages: benchLANG (2026-11-12)
 
-[benchLANG](https://github.com/GlebOlsen/benchLANG) runs six workloads in 22 runtimes (C, C++, Rust, Swift, Go, Java, Python and others) and measures the time of each, peak memory, binary size and compile time ([[MYLA-543]]). `benchmarks/benchlang/` holds Myla's part:
+[benchLANG](https://github.com/GlebOlsen/benchLANG) runs six workloads in 22 runtimes (C, C++, Rust, Swift, Go, Java, Python and others) and measures the time of each, peak memory, binary size and compile time ([[MYLA-973]]). `benchmarks/benchlang/` holds Myla's part:
 
 - [[benchmarks/benchlang/bench.my]]: the six workloads in one file, written as the language's documentation writes code and not tuned afterwards, with `#test` cases checked against benchLANG's Python version at small sizes;
 - `benchlang-runner.patch`: the entry for Myla in benchLANG's runner (`myla build bench.my -o bench && strip bench`), against its commit `fedbb12`;
-- `results-2026-11-12-before-544.txt` and `results-2026-11-12-after-544.txt`: the runner's results files of the two runs below, and `compile-2026-11-12-after-544.txt`, a `--compile-only` pass; `report_data.py` turns a results file into JSON, and with `--into report.html` writes it into the report page (`--compile FILE` takes the compile times from such a pass).
+- `results-2026-11-12-before-974.txt` and `results-2026-11-12-after-974.txt`: the runner's results files of the two runs below, and `compile-2026-11-12-after-974.txt`, a `--compile-only` pass; `report_data.py` turns a results file into JSON, and with `--into report.html` writes it into the report page (`--compile FILE` takes the compile times from such a pass).
 
 To repeat it: clone benchLANG, apply the patch, copy `bench.my` to `languages/Myla/`, put `build/myla` on the `PATH`, and run `./run_benchmarks.sh --runs 2` inside `nix develop`, which brings every toolchain. The whole suite takes 12 to 20 minutes.
 
 Both runs were on shared 4-CPU cloud VMs, two runs of each language, all checksums equal; the second host was about 1.5 times slower than the first (by C's total), so the runs compare by their ratios to C, not by seconds.
 
-**The first run** (commit `547339a`, Xeon at 2.3 GHz): Myla 16th of 23 by total time, 11.03 s against C's 3.42 s (3.23 times). Primes took 1.16 s where most runtimes tie at 0.69 s, the divider setting the pace: Myla's `int32` `%` was a 64-bit `idiv` (`cqo; idivq %rcx`), slower than the 32-bit one on these processors. [[MYLA-544]] made it `cltd; idivl %ecx`: on one machine the same program's primes went from 1.59 s to 1.00 s.
+**The first run** (commit `547339a`, Xeon at 2.3 GHz): Myla 16th of 23 by total time, 11.03 s against C's 3.42 s (3.23 times). Primes took 1.16 s where most runtimes tie at 0.69 s, the divider setting the pace: Myla's `int32` `%` was a 64-bit `idiv` (`cqo; idivq %rcx`), slower than the 32-bit one on these processors. [[MYLA-974]] made it `cltd; idivl %ecx`: on one machine the same program's primes went from 1.59 s to 1.00 s.
 
 **The second run** (commit `1e4daa0`, with that fix, Xeon at 2.1 GHz): Myla 17th of 23, 15.44 s against C's 5.53 s (2.79 times), 0.01 s behind Node (a tie) and behind Swift (13.01 s).
 

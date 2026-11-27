@@ -1,20 +1,20 @@
 ---
-id: MYLA-544
+id: MYLA-974
 title: Integers of at most 32 bits divide with the 32-bit instruction on x86-64
 type: improvement
 status: review
 priority: medium
 labels: [performance, x86-64]
 ---
-Found by [[MYLA-543]]: `/` and `%` on `int` (and every narrower type) were a 64-bit division (`cqo; idivq %rcx`), which is two or more times slower than the 32-bit one on many processors. benchLANG's primes workload, bound by the divider, took Myla 1.16 s where most compiled languages tie at 0.69 s.
+Found by [[MYLA-973]]: `/` and `%` on `int` (and every narrower type) were a 64-bit division (`cqo; idivq %rcx`), which is two or more times slower than the 32-bit one on many processors. benchLANG's primes workload, bound by the divider, took Myla 1.16 s where most compiled languages tie at 0.69 s.
 
-Done means: operands of at most 32 bits divide with `idivl`/`divl`, with the same results as before (truncation, the minimum by -1 wrapping, a zero divisor's runtime error), the bootstrap's fixed point, a new seed, and the measurement before and after.
+Done means: operands of at most 32 bits divide with `idivl`/`divl`, with the same results as before (truncation, the minimum by -1 wrapping, a zero divisor's runtime error), the bootstrap's fixed point, and the measurement before and after.
 
 - [x] Test first: `test_narrow_integers_divide_in_32_bits` (results at the edges, and the instruction per type)
 - [x] `emit_divide` in [[selfhost/codegen.my]]: `cltd; idivl %ecx` then `cltq` or `movslq %edx, %rax`; `xorl %edx, %edx; divl %ecx`; 64-bit operands as before
 - [x] The whole burn suite
 - [x] benchLANG run again ([[Development/Benchmarks]])
-- [x] New seed (`scripts/update-seed.sh`)
+- [x] No new seed: the seeds still bootstrap the sources, so D207 keeps them (the branch's seed commit was dropped when it was brought up to master, 2026-11-27)
 
 Not in this task: aarch64 (`sdiv`/`udiv` on `x` registers) and wasm (`i64.div_s`) still divide in 64 bits; the divisor's tests for 0 and -1 stay, also where a loop's divisor is plainly positive.
 
