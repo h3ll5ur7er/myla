@@ -1,0 +1,25 @@
+# benchLANG run Thu Nov 12 23:28:17 UTC 2026
+# host: Linux 6.18.44-fc-v378 x86_64
+# cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+# pinning: benchmarks on CPUs 1,2,3, runner on CPUs 0
+# compile only, no workloads run
+# LANG   name  version  native_binary_bytes  compile_s
+# RESULT name  run  workload  checksum  seconds
+# RUSAGE name  run  wall_s  user_s  sys_s  max_rss_kb
+LANG	C	gcc (GCC) 16.2.0	34832	0.884
+LANG	C++	g++ (GCC) 16.2.0	43128	3.249
+LANG	Fortran	GNU Fortran (GCC) 16.2.0	43024	1.065
+LANG	Ada	GNAT 16.2.0	595608	5.586
+LANG	Pascal	3.2.2	1224368	1.154
+LANG	D	LDC - the LLVM D compiler (1.42.0):	957728	4.052
+LANG	Rust	rustc 1.99.0 (b940084d7 2026-09-28) (built from a source tarball)	365416	6.201
+LANG	Zig	0.17.0	357400	6.784
+LANG	Go	go version go1.27.2 linux/amd64	1548448	5.297
+LANG	Nim	Nim Compiler Version 2.2.12 [Linux: amd64]	80096	3.636
+LANG	OCaml	5.5.1	1388048	0.376
+LANG	Myla	myla 1e4daa0	73072	0.275
+LANG	Swift	Swift version 6.3.3 (swift-6.3.3-RELEASE)	39728	2.009
+LANG	Haskell	The Glorious Glasgow Haskell Compilation System, version 9.14.1	1355464	1.652
+LANG	Java	openjdk 27 2026-09-15		0.808
+LANG	Dart	Dart SDK version: 3.13.0 (stable) (Sun Oct 11 04:47:24 2026 +0000) on "linux_x64"	5997464	1.390
+LANG	C#	11.0.100-rc.1.26425.128		2.433

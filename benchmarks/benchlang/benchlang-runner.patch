@@ -1,0 +1,35 @@
+diff --git a/.gitignore b/.gitignore
+index 0f492d2..d232035 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -85,3 +85,6 @@ nimcache/
+ zig-cache/
+ __pycache__/
+ out/
++
++# Myla
++!*.my
+diff --git a/clean.sh b/clean.sh
+index 0dc777b..96a2f55 100755
+--- a/clean.sh
++++ b/clean.sh
+@@ -24,6 +24,7 @@ clean_artifacts() {
+         [Zig]="bench bench.o"
+         [Dart]="bench bench.exe bench.sym"
+         [Swift]="bench"
++        [Myla]="bench"
+         [Haskell]="bench"
+     )
+     local removed=0
+diff --git a/run_benchmarks.sh b/run_benchmarks.sh
+index e25983b..4e006be 100755
+--- a/run_benchmarks.sh
++++ b/run_benchmarks.sh
+@@ -86,6 +86,7 @@ LANGS=(
+     "Go|GO|go|GOCACHE=\$PWD/.gocache GOAMD64=v3 CGO_ENABLED=0 go build -ldflags='-s -w' -trimpath -o bench bench.go|./bench|bench|go version"
+     "Nim|Nim|nim|nim c --hints:off --nimcache:nimcache -d:danger --boundChecks:on -d:lto --panics:on --passC:-march=native --passC:-funroll-loops --passC:-ffp-contract=off --passL:-s bench.nim|./bench|bench|nim --version | head -n1"
+     "OCaml|OCaml|ocamlopt|ocamlopt -inline 200 -nodynlink monotonic.c bench.ml -o bench -ccopt -s|./bench|bench|ocamlopt --version"
++    "Myla|Myla|myla|myla build bench.my -o bench && strip bench|./bench|bench|echo \"myla \$(git -C \"\$(dirname \"\$(readlink -f \"\$(type -P myla)\")\")\" describe --always --dirty 2>/dev/null)\""
+     "Swift|Swift|swiftc|swiftc -swift-version 6 -O -wmo -Xcc -march=native bench.swift -o bench -Xlinker -s|./bench|bench|swiftc --version 2>&1 | head -n1"
+     "Haskell|Haskell|ghc|ghc -O2 -msse4.2 -mbmi2 -mavx2 -fforce-recomp -outputdir build -o bench bench.hs -optl-s|./bench|bench|ghc --version"
+     "Java|Java|java|javac bench.java|java bench||java --version | head -n1"

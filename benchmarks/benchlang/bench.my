@@ -1,0 +1,173 @@
+// benchLANG in Myla: six workloads, each printed as `name checksum seconds`.
+
+import std.time as time
+
+const PRIMES_LIMIT: int = 8_000_000
+const FIBONACCI_N: int = 43
+const STRING_ITER: int = 1_200_000
+const MANDEL_SIZE: int = 2048
+const MANDEL_MAX_ITER: int = 256
+const TREE_MIN_DEPTH: int = 4
+const TREE_MAX_DEPTH: int = 17
+const SENTENCE: str = "The quick brown fox jumps over dat lazy dog that was not enough to jump over the frog again"
+const KNUC_LENGTH: int = 6_000_000
+const KNUC_SEED: int = 42
+const KNUC_IM: int = 139968
+const KNUC_IA: int = 3877
+const KNUC_IC: int = 29573
+const KNUC_QUERY: str = "GGTATTTTAATTTATAGT"
+
+fun run(name: str, bench: () -> int64) {
+    let start = time.now()
+    let checksum = bench()
+    let secs = start.elapsed().as_secs_f64()
+    print(f"{name} {checksum} {secs:.3}")
+}
+
+#test(1)[false]
+#test(3)[true]
+#test(25)[false]
+#test(7919)[true]
+fun is_prime(n: int) -> bool {
+    if n < 2 { return false }
+    if n < 4 { return true }
+    if n % 2 == 0 || n % 3 == 0 { return false }
+    var i = 5
+    while i * i <= n {
+        if n % i == 0 || n % (i + 2) == 0 { return false }
+        i += 6
+    }
+    return true
+}
+
+#test(100)[25i64]
+fun bench_primes(limit: int) -> int64 {
+    var count: int64 = 0
+    for i in 2..limit {
+        if is_prime(i) { count += 1 }
+    }
+    return count
+}
+
+#test(20)[6765i64]
+fun fib(n: int) -> int64 {
+    if n < 2 { return n as int64 }
+    return fib(n - 1) + fib(n - 2)
+}
+
+#test("level noon ab", 4)[10i64]
+fun bench_strings(sentence: str, iters: int) -> int64 {
+    let words = sentence.split(" ")
+    var cur = words
+    var total: int64 = 0
+    for it in 0..iters {
+        let i = it % cur.len()
+        cur[i] = cur[i][::-1]
+        for wi in cur {
+            for wj in words {
+                if wi == wj { total += 1 }
+            }
+        }
+    }
+    return total
+}
+
+#test(16)[13869i64]
+fun bench_mandelbrot(size: int) -> int64 {
+    var checksum: int64 = 0
+    for py in 0..size {
+        let cy = py as float / size as float * 3.0 - 1.5
+        for px in 0..size {
+            let cx = px as float / size as float * 3.0 - 2.0
+            var zx = 0.0
+            var zy = 0.0
+            var iter = 0
+            while iter < MANDEL_MAX_ITER && zx * zx + zy * zy <= 4.0 {
+                let nx = zx * zx - zy * zy + cx
+                zy = 2.0 * zx * zy + cy
+                zx = nx
+                iter += 1
+            }
+            checksum += iter as int64
+        }
+    }
+    return checksum
+}
+
+enum Tree {
+    Leaf(int64),
+    Node(Tree, Tree, int64),
+}
+
+fun make_tree(item: int64, depth: int) -> Tree {
+    if depth == 0 { return Tree.Leaf(item) }
+    return Tree.Node(make_tree(2 * item - 1, depth - 1), make_tree(2 * item, depth - 1), item)
+}
+
+#test(make_tree(1, 0))[1i64]
+#test(make_tree(1, 2))[0i64]
+fun check_tree(t: Tree) -> int64 {
+    return match t {
+        Leaf(item) => item
+        Node(left, right, item) => item + check_tree(left) - check_tree(right)
+    }
+}
+
+#test(6)[2134i64]
+fun bench_binary_trees(max_depth: int) -> int64 {
+    var checksum = check_tree(make_tree(0, max_depth + 1))
+    let long_lived = make_tree(0, max_depth)
+    var d = TREE_MIN_DEPTH
+    while d <= max_depth {
+        for i in 0..1 << (max_depth - d + TREE_MIN_DEPTH) {
+            checksum += check_tree(make_tree(i as int64 + 1, d))
+        }
+        d += 2
+    }
+    return checksum + check_tree(long_lived)
+}
+
+// `length` letters of DNA from the benchmark's linear congruential generator.
+fun dna(length: int) -> str {
+    var seq = StringBuilder(length)
+    var seed = KNUC_SEED
+    for _ in 0..length {
+        seed = (seed * KNUC_IA + KNUC_IC) % KNUC_IM
+        seq.append_char(
+            if seed < 42404 { 'A' } else if seed < 70116 { 'C' } else if seed < 97766 { 'G' } else { 'T' }
+        )
+    }
+    return seq.build()
+}
+
+#test(1000)[12318i64]
+fun bench_knucleotide(length: int) -> int64 {
+    let seq = dna(length)
+    var checksum: int64 = 0
+    for k in [1, 2, 3, 4, 6, 12, 18] {
+        var counts: [str: int] = [:]
+        for i in 0..length - k + 1 {
+            counts.update(seq[i:i + k], 0, (c) => c + 1)
+        }
+        checksum += counts.len() as int64
+        if k <= 2 {
+            var entries = counts.items()
+            entries.sort_by((a, b) => a.1 > b.1 || (a.1 == b.1 && a.0 < b.0))
+            for (r, (_, c)) in entries.enumerate() {
+                checksum += (r as int64 + 1) * c as int64
+            }
+        } else {
+            checksum += counts.get_or(KNUC_QUERY[:k], 0) as int64
+        }
+    }
+    return checksum
+}
+
+fun main() {
+    run("primes", () => bench_primes(PRIMES_LIMIT))
+    run("fib", () => fib(FIBONACCI_N))
+    run("strings", () => bench_strings(SENTENCE, STRING_ITER))
+    run("mandelbrot", () => bench_mandelbrot(MANDEL_SIZE))
+    run("binarytrees", () => bench_binary_trees(TREE_MAX_DEPTH))
+    run("knucleotide", () => bench_knucleotide(KNUC_LENGTH))
+}

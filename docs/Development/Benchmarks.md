@@ -232,6 +232,72 @@ All thirteen programs after the standard library waves, D175 (#54) and batches 4
 
 - An insert stores its slot's index in the order (4 bytes a slot more, 12.5 % of an `[int: int]` map's 32-byte slot), and a compaction walks the order: `map_remove`'s `map_by_rank` and the `zero_bytes` of its block are gone, `map_set_slot` and `map_rehash` run a little more.
 
+## Against other languages: benchLANG (2026-11-12)
+
+[benchLANG](https://github.com/GlebOlsen/benchLANG) runs six workloads in 22 runtimes (C, C++, Rust, Swift, Go, Java, Python and others) and measures the time of each, peak memory, binary size and compile time ([[MYLA-973]]). `benchmarks/benchlang/` holds Myla's part:
+
+- [[benchmarks/benchlang/bench.my]]: the six workloads in one file, written as the language's documentation writes code and not tuned afterwards, with `#test` cases checked against benchLANG's Python version at small sizes;
+- `benchlang-runner.patch`: the entry for Myla in benchLANG's runner (`myla build bench.my -o bench && strip bench`), against its commit `fedbb12`;
+- `results-2026-11-12-before-974.txt` and `results-2026-11-12-after-974.txt`: the runner's results files of the two runs below, and `compile-2026-11-12-after-974.txt`, a `--compile-only` pass; `report_data.py` turns a results file into JSON, and with `--into report.html` writes it into the report page (`--compile FILE` takes the compile times from such a pass).
+
+To repeat it: clone benchLANG, apply the patch, copy `bench.my` to `languages/Myla/`, put `build/myla` on the `PATH`, and run `./run_benchmarks.sh --runs 2` inside `nix develop`, which brings every toolchain. The whole suite takes 12 to 20 minutes.
+
+Both runs were on shared 4-CPU cloud VMs, two runs of each language, all checksums equal; the second host was about 1.5 times slower than the first (by C's total), so the runs compare by their ratios to C, not by seconds.
+
+**The first run** (commit `547339a`, Xeon at 2.3 GHz): Myla 16th of 23 by total time, 11.03 s against C's 3.42 s (3.23 times). Primes took 1.16 s where most runtimes tie at 0.69 s, the divider setting the pace: Myla's `int32` `%` was a 64-bit `idiv` (`cqo; idivq %rcx`), slower than the 32-bit one on these processors. [[MYLA-974]] made it `cltd; idivl %ecx`: on one machine the same program's primes went from 1.59 s to 1.00 s.
+
+**The second run** (commit `1e4daa0`, with that fix, Xeon at 2.1 GHz): Myla 17th of 23, 15.44 s against C's 5.53 s (2.79 times), 0.01 s behind Node (a tie) and behind Swift (13.01 s).
+
+| Workload | Myla | C | Rust | Swift | Myla's place | Myla by C, first run | second run |
+| --- | --: | --: | --: | --: | --: | --: | --: |
+| Primes | 1.06 s | 0.99 s | 1.00 s | 0.99 s | 13 | 1.67 | 1.07 |
+| Fibonacci | 4.04 s | 0.98 s | 1.72 s | 2.53 s | 18 | 4.87 | 4.13 |
+| Strings | 1.78 s | 0.72 s | 0.63 s | 2.14 s | 13 | 2.90 | 2.47 |
+| Mandelbrot | 0.90 s | 0.73 s | 0.69 s | 0.73 s | 18 | 1.25 | 1.24 |
+| Binary trees | 0.61 s | 1.21 s | 0.98 s | 2.31 s | 7 | 0.67 | 0.50 |
+| k-nucleotide | 7.05 s | 0.90 s | 1.07 s | 4.30 s | 19 | 8.32 | 7.85 |
+
+Only the primes column is the fix's doing (and a little of strings, whose loop takes `it % cur.len()`); the other ratios moved with the host.
+
+Beside the times: the fastest compile of the 15 native builds (0.28 s; OCaml 0.38 s, C 0.88 s, Rust 6.20 s), the fifth smallest binary (71 KiB stripped; C 34, Swift 39), and 54 MiB at the peak (C 24).
+
+What is left:
+
+- **Primes**: the divisor is still tested for 0 and for -1 before each division, also in a loop where it is plainly positive, and `n % 2` and `n % 3` are divisions.
+- **Fibonacci** is one call per recursion; the GCC-based compilers unroll part of it.
+- **k-nucleotide** makes a new string for each `seq[i:i + k]`, where Rust and Swift hash a view of the sequence's bytes; with fib it is 72 % of Myla's total.
+- **Binary trees** is ahead of every language that frees by hand or counts references, but Nim.
+
+## An FFT (2026-11-23)
+
+`benchmarks/fft/` holds an iterative radix-2 FFT ([[MYLA-975]]) in the two layouts a user would write, [[benchmarks/fft/fft_split.my]] (two lists of floats) and [[benchmarks/fft/fft_complex.my]] (a list of a `Complex` struct with `Add`, `Sub` and `Mul`), and the same, operation for operation, in C ([[benchmarks/fft/fft.c]], `-DCOMPLEX` for the structs), C# (`csharp/Program.cs`, the base library only) and plain Python (`fft.py`, no NumPy). The twiddle factors come from half-angle steps and multiplications, not from `sin` and `cos`, so every version's results are equal bit for bit.
+
+    python3 benchmarks/fft/run.py [--runs N] [--json FILE]     # builds, checks the answers, times
+    python3 benchmarks/fft/report.py benchmarks/fft/results-<date>.json   # fills report.html
+
+`run.py` needs gcc, dotnet and python3 on the `PATH` (benchLANG's `nix develop` brings them). It first requires the same checksum and round-trip error from all ten variants at two small configurations, then times the round trips alone at 4096 points (in the cache) and 1,048,576 points (bound by memory). Python does fewer round trips, so the measure is the time for one butterfly. `report.html` shows a results file with every source in it.
+
+The run of 2026-11-23 (`results-2026-11-23.json`: a shared 4-CPU cloud VM, gcc 16.2, .NET 11, CPython 3.15, five runs each), in nanoseconds for one butterfly, and by C's at `-O2` in the same layout:
+
+| | 4096 points | by C | 1,048,576 points | by C |
+| --- | --: | --: | --: | --: |
+| C `-O2`, two arrays | 2.10 | 1.00 | 11.6 | 1.00 |
+| C `-O2`, structs | 2.08 | 1.00 | 7.71 | 1.00 |
+| C `-O3 -march=native`, two arrays | 2.12 | 1.01 | 13.0 | 1.12 |
+| C `-O3 -march=native`, structs | 1.78 | 0.86 | 10.4 | 1.36 |
+| C#, two arrays | 3.18 | 1.52 | 6.04 | 0.52 |
+| C#, structs | 2.30 | 1.11 | 7.34 | 0.95 |
+| **Myla, two lists** | **7.95** | **3.8** | **11.0** | **0.95** |
+| **Myla, list of `Complex`** | **8.81** | **4.2** | **17.2** | **2.2** |
+| Python, two lists | 293 | 140 | 522 | 45 |
+| Python, list of `complex` | 320 | 154 | 558 | 72 |
+
+The small size is steady. The large one waits for memory in every compiled version and varied by up to 2.1 times between runs of one program, so its order is not settled.
+
+Myla's 0.95 at the large size was noise. `benchmarks/fft/sweep.py` times C and Myla at every power of two from 1,024 to 1,048,576 points; on 2026-11-24 (fastest of five runs, another and slower host) Myla was slower at every size, the two-list version by 4.8 times at 4096 points, 2.7 at 65,536 and 1.8 at 1,048,576. The difference stays at about 5 to 10 ns for one butterfly while both times grow past the 2 MB cache: cachegrind counts the same misses past it for both (about 2 for one butterfly), and 194 instructions and 76 data accesses in Myla against C's 45 and 12. `cache-boundary.html` shows it.
+
+At 4096 points Myla runs 5.1 times C's instructions (callgrind, the two-list version). In the butterfly, element accesses load the list's pointer from `self` again, compare the index with the length and compute `k * step` anew, and values live in the frame between them; in the struct version `mul`, `add`, `sub` and the conjugate are calls (a third of the instructions).
+
 ## How the first round went
 
 The first round (fib, the sieve, binary trees) checked the method and needed two additions to `run.py`: user and system time and page faults, and names for valgrind's addresses. Instruction counts alone hid both large gaps of the round: the sieve's page faults, and binary trees running C's instruction count in 5.7× C's time. The second turned out to be `rep movsq` copying the three-word `Tree` at every match: a microcoded instruction that starts slowly, and which callgrind counts as one. Copying up to 8 words with moves fixed it ([[MYLA-246]]).

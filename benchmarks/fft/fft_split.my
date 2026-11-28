@@ -1,0 +1,184 @@
+// Benchmark (MYLA-975): an iterative radix-2 FFT over two lists of floats,
+// the real and the imaginary parts. Each size is transformed forward and back
+// `rounds` times; a line is `name checksum error rounds seconds`, the checksum
+// from the first spectrum, the error the largest difference to the input
+// after the last round, in units of 1e-15, and the seconds those of the round
+// trips alone.
+//
+// Every version takes its twiddle factors by half-angle steps and at most
+// one multiplication for each bit of the index (+ - * / and the square root
+// only), so their results are bit-identical whatever a library's sin and cos
+// give, and as accurate as a table of them.
+
+import std.time as time
+from std.num import parse_int
+from std.process import args
+from std.math import abs, sqrt
+
+const SEED: int = 42
+const IM: int = 139968
+const IA: int = 3877
+const IC: int = 29573
+
+// The factors e^(-2πik/n) for k below n/2.
+struct Plan {
+    wr: [float],
+    wi: [float],
+}
+
+struct Signal {
+    re: [float],
+    im: [float],
+}
+
+fun plan(n: int) -> Plan {
+    // cos and sin of 2π/m for m = 4, 8, … n, each from the one before
+    var cs = [0.0]
+    var sn = [1.0]
+    var m = 4
+    while m < n {
+        let half = sqrt((1.0 + cs[^1]) / 2.0)
+        sn.push(sn[^1] / (2.0 * half))
+        cs.push(half)
+        m *= 2
+    }
+    // the factor for h + k is the one for k turned by h's angle, 2π/(n/h)
+    var wr = [1.0]
+    var wi = [0.0]
+    var level = cs.len() - 1
+    var h = 1
+    while h < n / 2 {
+        let c = cs[level]
+        let s = sn[level]
+        for k in 0..h {
+            wr.push(wr[k] * c + wi[k] * s)
+            wi.push(wi[k] * c - wr[k] * s)
+        }
+        h *= 2
+        level -= 1
+    }
+    return Plan { wr: wr, wi: wi }
+}
+
+fun noise(n: int) -> Signal {
+    var re: [float] = []
+    var im: [float] = []
+    var seed = SEED
+    for _ in 0..n {
+        seed = (seed * IA + IC) % IM
+        re.push(seed as float / IM as float - 0.5)
+        seed = (seed * IA + IC) % IM
+        im.push(seed as float / IM as float - 0.5)
+    }
+    return Signal { re: re, im: im }
+}
+
+impl Signal {
+    // The transform in place; `inverse` also divides by the length.
+    fun transform(var self, p: Plan, inverse: bool) {
+        let n = self.re.len()
+        var j = 0
+        for i in 1..n {
+            var bit = n >> 1
+            while j & bit != 0 {
+                j ^= bit
+                bit >>= 1
+            }
+            j ^= bit
+            if i < j {
+                self.re.swap(i, j)
+                self.im.swap(i, j)
+            }
+        }
+        let sign = if inverse { -1.0 } else { 1.0 }
+        var len = 2
+        while len <= n {
+            let half = len / 2
+            let step = n / len
+            var start = 0
+            while start < n {
+                for k in 0..half {
+                    let wr = p.wr[k * step]
+                    let wi = sign * p.wi[k * step]
+                    let a = start + k
+                    let b = a + half
+                    let vr = self.re[b] * wr - self.im[b] * wi
+                    let vi = self.re[b] * wi + self.im[b] * wr
+                    let ur = self.re[a]
+                    let ui = self.im[a]
+                    self.re[a] = ur + vr
+                    self.im[a] = ui + vi
+                    self.re[b] = ur - vr
+                    self.im[b] = ui - vi
+                }
+                start += len
+            }
+            len *= 2
+        }
+        if inverse {
+            let scale = 1.0 / n as float
+            for i in 0..n {
+                self.re[i] *= scale
+                self.im[i] *= scale
+            }
+        }
+    }
+
+    fun weight(self) -> float {
+        var sum = 0.0
+        for i in 0..self.re.len() {
+            sum += abs(self.re[i]) + abs(self.im[i])
+        }
+        return sum
+    }
+
+    fun distance(self, other: Signal) -> float {
+        var worst = 0.0
+        for i in 0..self.re.len() {
+            let d = abs(self.re[i] - other.re[i]) + abs(self.im[i] - other.im[i])
+            if d > worst { worst = d }
+        }
+        return worst
+    }
+}
+
+#test(plan(8), noise(8), 1)[(8452i64, 0i64)]   // the checksum is a naive DFT's
+#test(plan(1024), noise(1024), 3)[(14809252i64, 1i64)]   // the checksum is a naive DFT's, the error as fft.c prints
+fun round_trips(p: Plan, input: Signal, rounds: int) -> (int64, int64) {
+    var x = input
+    var checksum: int64 = 0
+    for r in 0..rounds {
+        x.transform(p, false)
+        if r == 0 { checksum = (x.weight() * 1000.0) as int64 }
+        x.transform(p, true)
+    }
+    return (checksum, (x.distance(input) * 1e15) as int64)
+}
+
+// Times `rounds` round trips of `n` points, without the table and the input.
+fun run(n: int, rounds: int) {
+    let p = plan(n)
+    let input = noise(n)
+    let start = time.now()
+    let (checksum, error) = round_trips(p, input, rounds)
+    let secs = start.elapsed().as_secs_f64()
+    print(f"fft-{n} {checksum} {error} {rounds} {secs:.6}")
+}
+
+fun number(text: str) -> int {
+    return match parse_int(text) {
+        Some(v) => v as int
+        None => { panic(f"not a number: {text}") }
+    }
+}
+
+//   fft [points rounds]
+fun main() {
+    let argv = args()
+    if argv.len() == 3 {
+        run(number(argv[1]), number(argv[2]))
+    } else {
+        run(4096, 10000)
+        run(1 << 20, 10)
+    }
+}
